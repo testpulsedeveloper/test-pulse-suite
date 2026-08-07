@@ -1,0 +1,32 @@
+modules:
+  jira:projectPage:
+    - key: test-management-project-page
+      resource: main
+      resolver:
+        function: resolver
+      title: Test Pulse
+  jira:globalPage:
+    - key: test-management-global-page
+      resource: main
+      resolver:
+        function: resolver
+      title: Test Pulse (Global)
+  function:
+    - key: resolver
+      handler: index.handler
+resources:
+  - key: main
+    path: static/hello-world/build
+permissions:
+  scopes:
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    - manage:jira-project
+    - storage:app
+app:
+  runtime:
+    name: nodejs24.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/ad7be07c-6f0f-4a18-9ceb-68355c2214b3
