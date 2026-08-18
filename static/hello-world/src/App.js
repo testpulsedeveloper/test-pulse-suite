@@ -2550,7 +2550,7 @@ function App() {
               setReportSelectedCycle('');
             }}>
               <option value="">Todos los Planes</option>
-              {plans.map(p => <option key={p.id} value={p.id}>{p.summary}</option>)}
+              {testPlans.map(p => <option key={p.id} value={p.id}>{p.summary}</option>)}
             </select>
           </div>
           
@@ -2558,7 +2558,7 @@ function App() {
             <label>Filtrar por Ciclo</label>
             <select value={reportSelectedCycle} onChange={(e) => setReportSelectedCycle(e.target.value)}>
               <option value="">Todos los Ciclos</option>
-              {cycles.filter(c => !reportSelectedPlan || c.planId === reportSelectedPlan).map(c => 
+              {testCycles.filter(c => !reportSelectedPlan || c.planId === reportSelectedPlan).map(c => 
                 <option key={c.id} value={c.id}>{c.summary}</option>
               )}
             </select>
