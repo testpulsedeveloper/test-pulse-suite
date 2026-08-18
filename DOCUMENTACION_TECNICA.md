@@ -27,6 +27,17 @@ La aplicación no posee una base de datos propia; Jira es la única fuente de la
   * `resolution.name` -> Resolución (Fallback: "Unresolved")
   * `customfield_10004` o `priority.name` -> Severidad (Si no existe el campo personalizado, recae en la prioridad del issue).
 
+### Algoritmo de Tiempo de Resolución de Defectos (Horario Laboral)
+Para obtener la métrica de tiempo de resolución, el Backend procesa el *Changelog* del defecto (`?expand=changelog`) y realiza cálculos precisos:
+* **Iteración Histórica:** Analiza los cambios en el campo de estado (Status).
+* **Calendario Laboral Mexicano:** Existe un arreglo `mxHolidays` (Feriados 2024-2027) incluido directamente en el código.
+* **Lógica `getBusinessHours`:** 
+  * Ignora fines de semana (Sábados y Domingos).
+  * Ignora días festivos del arreglo `mxHolidays`.
+  * **Lunes a Jueves:** Cuenta solo horas transcurridas de 7:00 AM a 6:00 PM (18:00 no inclusivo).
+  * **Viernes:** Cuenta solo horas de 7:00 AM a 1:00 PM (13:00 no inclusivo).
+* Estos datos se agrupan en el Backend por "estado" para devolver al Frontend un resumen optimizado y preciso de horas consumidas, evitando saturar el cliente con cálculos de fechas.
+
 ## 3. Lógica de Presentación e Interfaz (Frontend - `App.js`)
 
 El frontend está desarrollado en React y divide la operación en 5 pestañas principales: Design, Planning, Execution, Reports, y Config.
@@ -36,8 +47,10 @@ El frontend está desarrollado en React y divide la operación en 5 pestañas pr
 * **Botón Play / Run (▶️):** Para desbloquear los controles, el usuario debe hacer clic en el botón de Ejecutar. Esto lo registra internamente en `executedBy` como el dueño de la ejecución de ese caso en ese ciclo, habilitando el menú de estados.
 * **Badges de Defectos:** El icono de la mariquita (🐞) se inyecta dinámicamente justo a la derecha del título del caso (Summary) para evitar el desplazamiento visual de los botones de ejecución a la derecha.
 
-### Reglas del Tab de Reportes
-* **KPIs (Indicadores):** Muestran total de casos pasados, fallidos, bloqueados, y la tasa de cobertura.
+### Reglas del Tab de Reportes y Configuración Dinámica
+* **Métricas Personalizables:** En la pestaña **Config** (Solo para Administradores), se guardan en variables las preferencias para apagar/prender secciones del reporte visual.
+* **KPIs (Indicadores):** Muestran total de casos pasados, fallidos, bloqueados, y la tasa de cobertura de manera estática y fija.
+* **Casos por Tester y Tipo de Ejecución:** El Frontend agrupa programáticamente las ejecuciones del ciclo basándose en el parámetro `executedBy` (Tester) y en el array de `components` (Busca strings que incluyan "auto" para determinar si es Automatizado o Manual). 
 * **Interlineado de Bugs Cerrados:** Para evitar superposición de la UI ("encimado"), el contador de defectos grandes y la leyenda de cerrados se manejan en un contenedor `flex-direction: column` con `line-height: 1`.
 * **Tabla de Defectos Reportados:** Se inyecta siempre en la **parte inferior** de todo el dashboard para no obstruir las gráficas de progreso.
 
