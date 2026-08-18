@@ -2460,13 +2460,16 @@ function App() {
               const s = (bug.status || '').toLowerCase(); 
               if (['done', 'closed', 'resolved', 'cerrada', 'cerrado', 'resuelta', 'resuelto', 'terminado'].includes(s)) closedBugs++;
               
-              if (bug.timesSpent) {
+              if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
                   for (const [state, hours] of Object.entries(bug.timesSpent)) {
                       if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
                       bugTimes[state].totalHours += hours;
                       bugTimes[state].count++;
                       
-                      totalResolutionHours += hours;
+                      const s = state.toLowerCase();
+                      if (s === 'in progress' || s === 'en curso') {
+                          totalResolutionHours += hours;
+                      }
                   }
                   resolvedCount++;
               }
