@@ -1,7 +1,43 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { invoke as forgeInvoke, view, router, requestJira } from '@forge/bridge';
 import { CreateIssueModal } from '@forge/jira-bridge';
 import './index.css';
+
+const RichTextEditor = ({ value, onChange, disabled }) => {
+  const editorRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (editorRef.current && editorRef.current.innerHTML !== value) {
+      editorRef.current.innerHTML = value || '';
+    }
+  }, [value]);
+
+  const execCmd = (cmd) => {
+    document.execCommand(cmd, false, null);
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+  };
+
+  return (
+    <div style={{ border: '1px solid var(--ds-border)', borderRadius: '4px', overflow: 'hidden', background: 'var(--bg-main)' }}>
+      <div style={{ display: 'flex', gap: '0.2rem', padding: '0.3rem', background: 'var(--bg-surface)', borderBottom: '1px solid var(--ds-border)' }}>
+        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('bold'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>B</button>
+        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('italic'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontStyle: 'italic', color: 'var(--text-primary)' }}>I</button>
+        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('underline'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', textDecoration: 'underline', color: 'var(--text-primary)' }}>U</button>
+        <div style={{ width: '1px', background: 'var(--ds-border)', margin: '0 0.2rem' }}></div>
+        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', color: 'var(--text-primary)' }}>• Lista</button>
+        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('insertOrderedList'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', color: 'var(--text-primary)' }}>1. Lista</button>
+      </div>
+      <div 
+        ref={editorRef}
+        contentEditable={!disabled}
+        onBlur={() => onChange(editorRef.current.innerHTML)}
+        style={{ minHeight: '150px', padding: '0.5rem', color: 'var(--text-primary)', outline: 'none' }}
+      />
+    </div>
+  );
+};
 
 // Safe invoke that doesn't crash when running locally outside of Jira
 const invoke = async (...args) => {
@@ -119,8 +155,9 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [isGlobal, setIsGlobal] = useState(false);
-  const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '' });
+  const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '', requirementIssueTypes: [], requirementLinkType: 'ANY' });
   const [projectIssueTypes, setProjectIssueTypes] = useState([]);
+  const [linkTypes, setLinkTypes] = useState([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadError, setLoadError] = useState(null);
@@ -142,6 +179,17 @@ function App() {
   const [allowedProjects, setAllowedProjects] = useState(null);  // null = todos permitidos
   const [isProjectAllowed, setIsProjectAllowed] = useState(true);
   const bulkFileRef = useRef(null);
+
+  const folderPaths = useMemo(() => {
+    const getPath = (f) => {
+      const parent = folders.find(p => p.id === f.parentId);
+      if (parent) {
+        return getPath(parent) + ' > ' + f.name;
+      }
+      return f.name;
+    };
+    return folders.map(f => ({ id: f.id, name: f.name, path: getPath(f) })).sort((a,b) => a.path.localeCompare(b.path));
+  }, [folders]);
 
   const loadData = async (currentProjectId = selectedProjectId) => {
     setLoading(true);
@@ -649,9 +697,9 @@ function App() {
   const renderTopNav = () => (
     <nav className="top-nav glass">
       <div className="nav-brand" style={{display: 'flex', alignItems: 'center', gap: '1rem'}}>
-        <div style={{display: 'flex', alignItems: 'center', gap: '0.6rem', color: '#D81B60'}}>
+        <div style={{display: 'flex', alignItems: 'center', gap: '0.6rem', color: '#78256F'}}>
           <img
-            src="./testpulse-icon.jpg"
+            src="./testpulse-icon.png"
             alt="Test Pulse"
             style={{ width: '48px', height: '48px', borderRadius: '12px', objectFit: 'cover' }}
           />
@@ -783,26 +831,49 @@ function App() {
             </svg>
             All Tests
           </li>
-          {folders.map(folder => (
-            <li key={folder.id} className={`folder-item ${activeFolder === folder.id ? 'active' : ''}`} onClick={() => setActiveFolder(folder.id)} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-              <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--warning-color, #FFAB00)" stroke="none">
-                  <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
-                </svg>
-                {folder.name}
-              </div>
-              <div className="folder-actions" style={{display: 'flex', gap: '0.25rem'}}>
-                <button onClick={(e) => { e.stopPropagation(); handleUpdateFolder(folder.id, folder.name); }} title="Edit" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)'}}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                </button>
-                {isAdmin && (
-                  <button onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }} title="Delete" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--danger-color)'}}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                  </button>
-                )}
-              </div>
-            </li>
-          ))}
+          {(() => {
+            const renderTree = (parentId = null, depth = 0) => {
+              return folders.filter(f => (f.parentId || null) === parentId).map(folder => {
+                const hasChildren = folders.some(f => f.parentId === folder.id);
+                const isExpanded = expandedFolders[folder.id] !== false;
+                
+                return (
+                  <React.Fragment key={folder.id}>
+                    <li className={`folder-item ${activeFolder === folder.id ? 'active' : ''}`} onClick={() => setActiveFolder(folder.id)} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: `${0.5 + depth * 1.5}rem`}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: '0.25rem', flex: 1, minWidth: 0}}>
+                        <div style={{width: '20px', display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer'}} onClick={(e) => { e.stopPropagation(); setExpandedFolders(prev => ({...prev, [folder.id]: !isExpanded})); }}>
+                          {hasChildren ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color: 'var(--text-secondary)'}}>
+                              {isExpanded ? <line x1="5" y1="12" x2="19" y2="12"></line> : <><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></>}
+                            </svg>
+                          ) : null}
+                        </div>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--warning-color, #FFAB00)" stroke="none" style={{minWidth: '20px', flexShrink: 0}}>
+                          <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
+                        </svg>
+                        <span style={{overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}} title={folder.name}>{folder.name}</span>
+                      </div>
+                      <div className="folder-actions" style={{display: 'flex', gap: '0.25rem', flexShrink: 0}}>
+                        <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(folder.id); setExpandedFolders(prev => ({...prev, [folder.id]: true})); }} title="Nueva Subcarpeta" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)'}}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); handleUpdateFolder(folder.id, folder.name); }} title="Editar" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)'}}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                        </button>
+                        {isAdmin && (
+                          <button onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }} title="Eliminar" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--danger-color)'}}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                    {isExpanded && renderTree(folder.id, depth + 1)}
+                  </React.Fragment>
+                );
+              });
+            };
+            return renderTree(null, 0);
+          })()}
         </ul>
         <button className="btn-primary" style={{marginTop: 'auto', width: '100%'}} onClick={handleCreateFolder}>+ New Folder</button>
       </aside>
@@ -983,9 +1054,9 @@ function App() {
                     style={{ width: '100%', maxWidth: '300px' }}
                   >
                     <option value="">All Tests (Sin carpeta)</option>
-                    {folders.map(f => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
+                    {folderPaths.map(f => (
+                  <option key={f.id} value={f.id}>{f.path}</option>
+                ))}
                   </select>
                 </div>
 
@@ -1144,7 +1215,7 @@ function App() {
                        title="Assign to folder"
                     >
                        <option value="">No Folder (Root)</option>
-                       {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                       {folderPaths.map(f => <option key={f.id} value={f.id}>{f.path}</option>)}
                     </select>
                   </div>
                 </div>
@@ -1206,8 +1277,8 @@ function App() {
                 }}
               >
                 <option value="">No Folder (Main)</option>
-                {folders.map(f => (
-                  <option key={f.id} value={f.id}>{f.name}</option>
+                {folderPaths.map(f => (
+                  <option key={f.id} value={f.id}>{f.path}</option>
                 ))}
               </select>
             </div>
@@ -1237,11 +1308,11 @@ function App() {
     setCycleTests(execution || []);
   };
 
-  const handleCreateFolder = async () => {
+  const handleCreateFolder = async (parentId = null) => {
     const name = prompt("Enter new folder name:");
     if (!name || !selectedProjectId) return;
     setLoading(true);
-    const updatedFolders = await invoke('createFolder', { projectId: selectedProjectId, name });
+    const updatedFolders = await invoke('createFolder', { projectId: selectedProjectId, name, parentId: typeof parentId === 'string' ? parentId : null });
     setFolders(updatedFolders || []);
     setLoading(false);
   };
@@ -1292,6 +1363,49 @@ function App() {
     if (!selectedCycle) return;
     const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status });
     setCycleTests(execution || []);
+  };
+
+  const calculateIterationStatus = (iterations) => {
+    if (!iterations || iterations.length === 0) return null;
+    const hasFailed = iterations.some(it => it.status === 'Failed');
+    const hasBlocked = iterations.some(it => it.status === 'Blocked');
+    const allPassed = iterations.every(it => it.status === 'Passed');
+    if (hasFailed) return 'Failed';
+    if (hasBlocked) return 'Blocked';
+    if (allPassed) return 'Passed';
+    return 'In Progress';
+  };
+
+  const handleAddIteration = async (test) => {
+    try {
+      const newIter = { id: Date.now().toString(), expectedData: '', actualResult: '', status: 'Not Run' };
+      const newIterations = test.iterations ? [...test.iterations, newIter] : [newIter];
+      const newStatus = calculateIterationStatus(newIterations) || test.status;
+      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
+      if (updated) setCycleTests(updated);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleIterationChange = async (test, iterId, field, value) => {
+    try {
+      const newIterations = test.iterations.map(it => it.id === iterId ? { ...it, [field]: value } : it);
+      const newStatus = calculateIterationStatus(newIterations) || test.status;
+      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
+      if (updated) setCycleTests(updated);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleTakeover = async (test) => {
+    try {
+      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, takeover: true });
+      if (updated) setCycleTests(updated);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const handleUploadEvidence = async (testId, testKey, file) => {
@@ -1349,8 +1463,10 @@ function App() {
     await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
   };
 
-  const handleRunTest = async (testId, testKey) => {
+  const handleRunTest = async (testId, testKey, test) => {
     try {
+      if (test) await handleTakeover(test);
+
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         alert("Tu navegador o entorno no soporta captura de pantalla nativa. Sube la evidencia manualmente.");
         setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
@@ -1750,7 +1866,7 @@ function App() {
                           if (runningTests[test.id]) {
                             setRunningTests(prev => ({ ...prev, [test.id]: null }));
                           } else {
-                            handleRunTest(test.id, test.key); 
+                            handleRunTest(test.id, test.key, test); 
                           }
                         }}
                         disabled={runningTests[test.id] === 'capturing' || runningTests[test.id] === 'uploading'}
@@ -1800,8 +1916,57 @@ function App() {
                   
                   {expandedExecutionTest === test.id && (
                     <div style={{marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--ds-border)', display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%'}}>
-                      
-                      {/* Se eliminaron los pasos individuales a solicitud del usuario. Ahora solo se califica globalmente. */}
+
+                      {/* --- ITERACIONES --- */}
+                      <div style={{display: 'flex', flexDirection: 'column', gap: '0.8rem'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                          <h4 style={{margin: 0}}>Iteraciones (Data-Driven)</h4>
+                          <button onClick={() => handleAddIteration(test)} className="btn-secondary" style={{fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}>+ Agregar iteración</button>
+                        </div>
+                        
+                        {(!test.iterations || test.iterations.length === 0) ? (
+                          <div style={{color: 'var(--text-secondary)', fontSize: '0.9rem', fontStyle: 'italic'}}>No hay iteraciones. Haz clic en "+ Agregar iteración" para comenzar.</div>
+                        ) : (
+                          test.iterations.map((iter, idx) => (
+                            <div key={iter.id} style={{display: 'flex', gap: '0.5rem', alignItems: 'flex-start', background: 'var(--bg-surface)', padding: '0.8rem', borderRadius: '6px', border: '1px solid var(--ds-border)'}}>
+                              <div style={{fontWeight: 'bold', width: '24px', color: 'var(--text-secondary)'}}>#{idx + 1}</div>
+                              <div style={{flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
+                                <input 
+                                  type="text" 
+                                  placeholder="Datos de prueba (Ej: Usuario=admin, Pass=123)" 
+                                  defaultValue={iter.expectedData || ''}
+                                  onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
+                                  style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)'}}
+                                />
+                                <textarea 
+                                  placeholder="Resultado actual..." 
+                                  defaultValue={iter.actualResult || ''}
+                                  onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
+                                  style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', resize: 'vertical'}}
+                                />
+                              </div>
+                              <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '120px'}}>
+                                <select 
+                                  value={iter.status || 'Not Run'}
+                                  onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
+                                  className="status-badge"
+                                  style={{width: '100%', padding: '0.4rem', border: 'none', cursor: 'pointer', background: getStatusColor(iter.status || 'Not Run'), color: getStatusTextColor(iter.status || 'Not Run')}}
+                                >
+                                  <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Sin Ejecutar</option>
+                                  <option value="Passed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Exitoso</option>
+                                  <option value="Failed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Fallido</option>
+                                  <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
+                                </select>
+                                <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
+                                  <button title="Adjuntar evidencia" className="btn-secondary" style={{padding: '0.3rem'}} onClick={() => alert('Función de adjuntar próximamente')}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
+                                  <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem'}} onClick={() => alert('Función de grabar pantalla próximamente')}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg></button>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
                       {/* Bug actions section - only for Failed or Blocked */}
                       {(test.status === 'Failed' || test.status === 'Blocked') && (
                         <div style={{display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem'}}>
@@ -1989,6 +2154,9 @@ function App() {
     let blocked = 0;
     let notRun = 0;
     let totalBugs = 0;
+    let closedBugs = 0;
+    let totalResolutionHours = 0;
+    let resolvedCount = 0;
 
     filteredCycles.forEach(cycle => {
       if(cycle.execution) {
@@ -1998,7 +2166,16 @@ function App() {
           else if (ex.status === 'Failed') failed++;
           else if (ex.status === 'Blocked') blocked++;
           else notRun++;
-          if (ex.linkedBugs && ex.linkedBugs.length > 0) totalBugs += ex.linkedBugs.length;
+          if (ex.linkedBugs && ex.linkedBugs.length > 0) {
+            totalBugs += ex.linkedBugs.length;
+            ex.linkedBugs.forEach(bug => {
+              if (bug.status && ['Done', 'Closed', 'Resolved'].includes(bug.status)) closedBugs++;
+              if (bug.resolutionTimeHours) {
+                totalResolutionHours += bug.resolutionTimeHours;
+                resolvedCount++;
+              }
+            });
+          }
         });
       }
     });
@@ -2099,7 +2276,10 @@ function App() {
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#E34935" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-3.9"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17.1c2.1.1 3.8 1.9 3.8 4"/></svg>
                 DEFECTOS (BUGS)
               </div>
-              <div className="kpi-value">{totalBugs}</div>
+              <div className="kpi-value">
+                {totalBugs}
+                {totalBugs > 0 && <span style={{fontSize: '0.8rem', display: 'block', color: 'var(--success-color)'}}>Cerrados = {closedBugs}</span>}
+              </div>
             </div>
 
             <div className="kpi-card">
@@ -2108,7 +2288,7 @@ function App() {
                 RESOLUCIÓN
               </div>
               <div className="kpi-value" style={{ fontSize: '1.5rem' }}>
-                {bugResolutionTime === null ? '...' : (bugResolutionTime.averageHours > 0 ? `${bugResolutionTime.averageHours.toFixed(1)} hrs` : 'N/A')}
+                {resolvedCount > 0 ? `${(totalResolutionHours / resolvedCount).toFixed(1)} hrs` : 'N/A'}
               </div>
             </div>
 
@@ -2299,13 +2479,53 @@ function App() {
                 <select 
                   className="status-badge"
                   style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.planIssueType}
+                  value={projectConfig.planIssueType || ''}
                   onChange={(e) => setProjectConfig({...projectConfig, planIssueType: e.target.value})}
                   required
                 >
                   <option value="">Select an issue type...</option>
                   {projectIssueTypes.map(it => (
                     <option key={it.id} value={it.name}>{it.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
+              <h3 style={{ marginBottom: '1rem' }}>Requirements Traceability</h3>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                Select the issue types that represent requirements (e.g., Story, Epic) and the link type used to connect Test Cases to those requirements.
+              </p>
+
+              <div className="form-group">
+                <label>Requirement Issue Types</label>
+                <select 
+                  className="status-badge"
+                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)', height: '100px' }}
+                  multiple
+                  value={projectConfig.requirementIssueTypes || []}
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
+                    setProjectConfig({...projectConfig, requirementIssueTypes: selected});
+                  }}
+                >
+                  {projectIssueTypes.map(it => (
+                    <option key={it.id} value={it.name}>{it.name}</option>
+                  ))}
+                </select>
+                <small style={{ color: 'var(--text-secondary)' }}>Hold Ctrl/Cmd to select multiple.</small>
+              </div>
+
+              <div className="form-group">
+                <label>Test-to-Requirement Link Type</label>
+                <select 
+                  className="status-badge"
+                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
+                  value={projectConfig.requirementLinkType || 'ANY'}
+                  onChange={(e) => setProjectConfig({...projectConfig, requirementLinkType: e.target.value})}
+                >
+                  <option value="ANY">Any Link Type</option>
+                  {linkTypes.map(lt => (
+                    <option key={lt.id} value={lt.name}>{lt.name} ({lt.outward} / {lt.inward})</option>
                   ))}
                 </select>
               </div>
@@ -2356,11 +2576,11 @@ function App() {
     return (
       <div className="app-container" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100vh', backgroundColor: 'var(--bg-main)' }}>
         <img 
-          src="./testpulse-icon.jpg" 
+          src="./testpulse-icon.png" 
           alt="Test Pulse Logo" 
           style={{ width: '160px', height: '160px', borderRadius: '32px', objectFit: 'cover', marginBottom: '2rem', animation: 'pulse 1.5s infinite ease-in-out' }} 
         />
-        <h2 style={{ color: '#D81B60', margin: 0, fontSize: '2.4rem', fontWeight: 'bold' }}>Test Pulse</h2>
+        <h2 style={{ color: '#78256F', margin: 0, fontSize: '2.4rem', fontWeight: 'bold' }}>Test Pulse</h2>
         <p style={{ color: 'var(--text-secondary)', marginTop: '0.8rem', fontSize: '1.2rem' }}>Cargando entorno...</p>
       </div>
     );
@@ -2420,8 +2640,8 @@ function App() {
         <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
           <div style={{ textAlign: 'center', padding: '3rem', backgroundColor: 'var(--bg-surface)', borderRadius: '12px', border: '1px solid var(--ds-border)', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
             <div style={{display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '1rem'}}>
-              <img src="./testpulse-icon.jpg" alt="Test Pulse" style={{ width: '48px', height: '48px', borderRadius: '12px', objectFit: 'cover' }} />
-              <h1 style={{ margin: 0, fontSize: '2rem', color: '#D81B60', fontWeight: 'bold' }}>Test Pulse</h1>
+              <img src="./testpulse-icon.png" alt="Test Pulse" style={{ width: '48px', height: '48px', borderRadius: '12px', objectFit: 'cover' }} />
+              <h1 style={{ margin: 0, fontSize: '2rem', color: '#78256F', fontWeight: 'bold' }}>Test Pulse</h1>
             </div>
             <h2 style={{ margin: '0 0 1rem 0', color: 'var(--danger-color)' }}>Acceso Restringido</h2>
             <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto' }}>
