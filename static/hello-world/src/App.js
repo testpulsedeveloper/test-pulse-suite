@@ -2392,9 +2392,11 @@ function App() {
     const showTesterStats = conf.showTesterStats !== false;
     const showExecTypeStats = conf.showExecTypeStats !== false;
     const showBugTimes = conf.showBugTimes !== false;
+    const showFeatureStats = conf.showFeatureStats !== false;
 
     // Custom metrics
     const testerStats = {};
+    const featureStats = {};
     const bugTimes = {};
     const execStats = {
       manual: { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 },
@@ -2436,6 +2438,18 @@ function App() {
           else if (ex.status === 'Failed') testerStats[tester].failed++;
           else if (ex.status === 'Blocked') testerStats[tester].blocked++;
           else testerStats[tester].notRun++;
+
+          // Feature
+          const tcFeature = testCases.find(t => t.id === ex.id);
+          const fId = tcFeature ? tcFeature.folderId : null;
+          let folderPath = fId ? (folderPaths.find(f => f.id === fId)?.path || 'Raíz (Sin Carpeta)') : 'Raíz (Sin Carpeta)';
+          
+          if (!featureStats[folderPath]) featureStats[folderPath] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
+          featureStats[folderPath].total++;
+          if (ex.status === 'Passed') featureStats[folderPath].passed++;
+          else if (ex.status === 'Failed') featureStats[folderPath].failed++;
+          else if (ex.status === 'Blocked') featureStats[folderPath].blocked++;
+          else featureStats[folderPath].notRun++;
 
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             totalBugs += ex.linkedBugs.length;
@@ -2675,7 +2689,7 @@ function App() {
                 </div>
               </div>
               
-              <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap', justifyContent: 'center', fontSize: '0.95rem', color: 'var(--text-secondary)', fontWeight: '600' }}>
                 <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--success-color, #22A06B)'}}></div> Passed ({pPct.toFixed(1)}%)</div>
                 <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--danger-color, #E34935)'}}></div> Failed ({fPct.toFixed(1)}%)</div>
                 <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--warning-color, #F6C000)'}}></div> Blocked ({bPct.toFixed(1)}%)</div>
@@ -2759,6 +2773,43 @@ function App() {
               </div>
             </div>
           )}
+          
+          {showFeatureStats && (
+            <div className="chart-card">
+              <h3>Estado por Funcionalidad</h3>
+              <div className="bar-chart-container" style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                {Object.entries(featureStats).sort((a, b) => b[1].total - a[1].total).map(([folder, stats]) => {
+                  return (
+                    <div className="bar-row" key={folder}>
+                      <div className="bar-label">
+                        <span title={folder} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '200px' }}>{folder}</span>
+                        <span style={{ color: 'var(--text-secondary)' }}>{stats.total} casos</span>
+                      </div>
+                      <div className="bar-track">
+                        {stats.total > 0 ? (
+                          <>
+                            {stats.passed > 0 && <div className="bar-segment" style={{ width: `${(stats.passed/stats.total)*100}%`, background: 'var(--success-color, #22A06B)' }} title={`Passed: ${stats.passed}`}>{stats.passed > (stats.total*0.1) ? stats.passed : ''}</div>}
+                            {stats.failed > 0 && <div className="bar-segment" style={{ width: `${(stats.failed/stats.total)*100}%`, background: 'var(--danger-color, #E34935)' }} title={`Failed: ${stats.failed}`}>{stats.failed > (stats.total*0.1) ? stats.failed : ''}</div>}
+                            {stats.blocked > 0 && <div className="bar-segment" style={{ width: `${(stats.blocked/stats.total)*100}%`, background: 'var(--warning-color, #F6C000)' }} title={`Blocked: ${stats.blocked}`}>{stats.blocked > (stats.total*0.1) ? stats.blocked : ''}</div>}
+                            {stats.notRun > 0 && <div className="bar-segment" style={{ width: `${(stats.notRun/stats.total)*100}%`, background: 'var(--brand-color, #0C66E4)' }} title={`Not Run: ${stats.notRun}`}>{stats.notRun > (stats.total*0.1) ? stats.notRun : ''}</div>}
+                          </>
+                        ) : (
+                           <div style={{width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Sin casos</div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem', flexWrap: 'wrap', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--success-color, #22A06B)'}}></div> Passed</div>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--danger-color, #E34935)'}}></div> Failed</div>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--warning-color, #F6C000)'}}></div> Blocked</div>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--brand-color, #0C66E4)'}}></div> Not Run</div>
+              </div>
+            </div>
+          )}
 
           {showProgreso && (
             <div className="chart-card" style={{ gridColumn: '1 / -1' }}>
@@ -2808,7 +2859,8 @@ function App() {
           {showBugTimes && (
             <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '1rem' }}>
                <h3 style={{ marginBottom: '0.5rem' }}>Resolución de Bugs (Tiempos Promedio en Estado)</h3>
-               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+               <div style={{ maxWidth: '600px', margin: '0 auto', border: '1px solid var(--ds-border)', borderRadius: '8px', padding: '1rem', backgroundColor: 'var(--ds-background-neutral)' }}>
+                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
                  <thead>
                    <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '1px solid var(--ds-border)' }}>
                      <th style={{ padding: '0.3rem 0.5rem', textAlign: 'left' }}>Estado del Defecto</th>
@@ -2833,6 +2885,7 @@ function App() {
                    )}
                  </tbody>
                </table>
+               </div>
             </div>
           )}
 
@@ -3036,6 +3089,16 @@ function App() {
                      style={{ width: '1.2rem', height: '1.2rem' }}
                    />
                    <span style={{ fontWeight: '500' }}>Mostrar Tiempo de Resolución de Defectos (Horas Laborales)</span>
+                </label>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                   <input 
+                     type="checkbox" 
+                     checked={projectConfig.showFeatureStats !== false}
+                     onChange={e => setProjectConfig({...projectConfig, showFeatureStats: e.target.checked})}
+                     style={{ width: '1.2rem', height: '1.2rem' }}
+                   />
+                   <span style={{ fontWeight: '500' }}>Mostrar Casos por Funcionalidad (Carpetas)</span>
                 </label>
               </div>
 
