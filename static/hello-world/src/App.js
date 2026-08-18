@@ -119,13 +119,16 @@ function App() {
   const [folders, setFolders] = useState([]);
   const [testCases, setTestCases] = useState([]);
   const [activeFolder, setActiveFolder] = useState(null);
+  const [expandedFolders, setExpandedFolders] = useState({});
+  const [isAllTestsExpanded, setIsAllTestsExpanded] = useState(true);
   
   // Planning Tab State
   const [testPlans, setTestPlans] = useState([]);
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [testCycles, setTestCycles] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState(null);
-  const [cycleTests, setCycleTests] = useState([]); // execution data for selected cycle
+  const [cycleTests, setCycleTests] = useState([]);
+  const [planningFolder, setPlanningFolder] = useState(''); // execution data for selected cycle
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
   const [runningTests, setRunningTests] = useState({});
@@ -140,6 +143,7 @@ function App() {
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycle, setReportSelectedCycle] = useState('');
   const [executionTypeFieldId, setExecutionTypeFieldId] = useState(null);
+  const [resolutionStage, setResolutionStage] = useState('Nuevo a Abierto');
   
   // Modal State
   const [context, setContext] = useState(null);
@@ -825,13 +829,18 @@ function App() {
       <aside className="sidebar glass">
         <h2>Folders</h2>
         <ul className="folder-list">
-          <li className={`folder-item ${activeFolder === null ? 'active' : ''}`} onClick={() => setActiveFolder(null)}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--warning-color, #FFAB00)" stroke="none">
+          <li className={`folder-item ${activeFolder === null ? 'active' : ''}`} onClick={() => setActiveFolder(null)} style={{display: 'flex', alignItems: 'center', gap: '0.25rem', paddingLeft: '0.5rem'}}>
+            <div style={{width: '20px', display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer'}} onClick={(e) => { e.stopPropagation(); setIsAllTestsExpanded(prev => !prev); }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color: 'var(--text-secondary)'}}>
+                {isAllTestsExpanded ? <line x1="5" y1="12" x2="19" y2="12"></line> : <><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></>}
+              </svg>
+            </div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--warning-color, #FFAB00)" stroke="none" style={{flexShrink: 0}}>
               <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
             </svg>
             All Tests
           </li>
-          {(() => {
+          {isAllTestsExpanded && (() => {
             const renderTree = (parentId = null, depth = 0) => {
               return folders.filter(f => (f.parentId || null) === parentId).map(folder => {
                 const hasChildren = folders.some(f => f.parentId === folder.id);
@@ -887,8 +896,9 @@ function App() {
             <button
               className="btn-secondary"
               onClick={() => { setShowBulkUpload(v => !v); resetBulkUpload(); }}
-              title="Cargar múltiples casos de prueba desde un archivo CSV (sin límite de 249)"
-              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              title="Opción deshabilitada temporalmente"
+              disabled={true}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', opacity: 0.5, cursor: 'not-allowed' }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="16 16 12 12 8 16"></polyline>
@@ -1202,7 +1212,7 @@ function App() {
               >
                 <div className="test-card-content">
                   <span className="test-id">{test.key}</span>
-                  <span className="test-summary">{test.summary}</span>
+                  <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
                 </div>
                 <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
                   <span className="status-badge">{test.status}</span>
@@ -1772,9 +1782,39 @@ function App() {
               {cycleTests.length === 0 && <p className="empty-state">No tests added yet.</p>}
             </div>
 
-            <h3>Available Test Cases</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3 style={{ margin: 0 }}>Available Test Cases</h3>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <select 
+                  value={planningFolder} 
+                  onChange={e => setPlanningFolder(e.target.value)}
+                  className="status-badge"
+                  style={{ padding: '0.4rem', background: 'var(--bg-surface)' }}
+                >
+                  <option value="">Todas las Carpetas</option>
+                  {folderPaths.map(f => (
+                    <option key={f.id} value={f.id}>{f.path}</option>
+                  ))}
+                </select>
+                <button 
+                  className="btn-primary" 
+                  onClick={async () => {
+                    const testsToAdd = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id));
+                    if (testsToAdd.length === 0) return;
+                    setLoading(true);
+                    for (const test of testsToAdd) {
+                      await handleAddTestToCycle(test);
+                    }
+                    setLoading(false);
+                  }}
+                  disabled={loading}
+                >
+                  + Añadir todos
+                </button>
+              </div>
+            </div>
             <div className="test-list">
-              {filteredTestCases.filter(tc => !cycleTests.some(ct => ct.id === tc.id)).map(test => (
+              {testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id)).map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                   <div className="test-card-content">
                     <span className="test-id">{test.key}</span>
@@ -1859,10 +1899,10 @@ function App() {
                       <span className="test-summary">{test.summary}</span>
                     </div>
                     <div style={{display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0}}>
-                      <button
-                        className="btn-primary"
-                        onClick={(e) => { 
-                          e.stopPropagation(); 
+                      <button 
+                        title={runningTests[test.id] ? 'Detener Ejecución' : 'Iniciar Ejecución'}
+                        onClick={(e) => {
+                          e.stopPropagation();
                           if (runningTests[test.id]) {
                             setRunningTests(prev => ({ ...prev, [test.id]: null }));
                           } else {
@@ -1871,14 +1911,15 @@ function App() {
                         }}
                         disabled={runningTests[test.id] === 'capturing' || runningTests[test.id] === 'uploading'}
                         style={{
-                          padding: '0.4rem 0.8rem', marginRight: '0.5rem', background: runningTests[test.id] ? '#ff991f' : 'var(--accent-color, #0C66E4)',
-                          color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                          padding: '0.4rem', background: runningTests[test.id] ? '#ff991f' : 'var(--accent-color, #0C66E4)',
+                          color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '32px', height: '32px', boxSizing: 'border-box', marginTop: 0, padding: 0,
                           opacity: (runningTests[test.id] === 'capturing' || runningTests[test.id] === 'uploading') ? 0.7 : 1
                         }}
                       >
-                        {runningTests[test.id] === 'capturing' ? '⏹ CAPTURING...' : 
-                         runningTests[test.id] === 'uploading' ? '⏳ UPLOADING...' : 
-                         runningTests[test.id] ? '⏹ END RUN' : '▶ RUN'}
+                        {runningTests[test.id] === 'capturing' ? '⏹' : 
+                         runningTests[test.id] === 'uploading' ? '⏳' : 
+                         runningTests[test.id] ? '⏹' : '▶'}
                       </button>
                       <select 
                         className="status-badge" 
@@ -1891,7 +1932,12 @@ function App() {
                           border: 'none',
                           cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                           opacity: !runningTests[test.id] ? 0.6 : 1,
-                          padding: '0.4rem 0.8rem'
+                          padding: '0.4rem 0.5rem',
+                          width: '100px',
+                          height: '32px',
+                          boxSizing: 'border-box',
+                          textAlign: 'center',
+                          textAlignLast: 'center'
                         }}
                       >
                         <option value="Not Run" style={{backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Not Run</option>
@@ -1904,9 +1950,10 @@ function App() {
                       {(test.linkedBugs && test.linkedBugs.length > 0) && (
                         <span style={{
                           display: 'inline-flex', alignItems: 'center', gap: '3px',
-                          padding: '0.2rem 0.5rem', borderRadius: '4px',
+                          padding: '0.3rem 0.6rem', borderRadius: '4px',
                           background: 'var(--danger-bg)', color: 'var(--danger-color)',
-                          border: '1px solid var(--danger-color)', fontSize: '0.75rem', fontWeight: '600', flexShrink: 0
+                          border: '1px solid var(--danger-color)', fontSize: '0.75rem', fontWeight: '600', flexShrink: 0,
+                          height: '32px', boxSizing: 'border-box'
                         }}>
                           🐛 {test.linkedBugs.length}
                         </span>
@@ -1916,56 +1963,11 @@ function App() {
                   
                   {expandedExecutionTest === test.id && (
                     <div style={{marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--ds-border)', display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%'}}>
-
-                      {/* --- ITERACIONES --- */}
-                      <div style={{display: 'flex', flexDirection: 'column', gap: '0.8rem'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                          <h4 style={{margin: 0}}>Iteraciones (Data-Driven)</h4>
-                          <button onClick={() => handleAddIteration(test)} className="btn-secondary" style={{fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}>+ Agregar iteración</button>
+                      {test.executedBy && (
+                        <div style={{fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.4rem'}}>
+                           👤 Ejecutado por: <strong>{test.executedBy.displayName}</strong>
                         </div>
-                        
-                        {(!test.iterations || test.iterations.length === 0) ? (
-                          <div style={{color: 'var(--text-secondary)', fontSize: '0.9rem', fontStyle: 'italic'}}>No hay iteraciones. Haz clic en "+ Agregar iteración" para comenzar.</div>
-                        ) : (
-                          test.iterations.map((iter, idx) => (
-                            <div key={iter.id} style={{display: 'flex', gap: '0.5rem', alignItems: 'flex-start', background: 'var(--bg-surface)', padding: '0.8rem', borderRadius: '6px', border: '1px solid var(--ds-border)'}}>
-                              <div style={{fontWeight: 'bold', width: '24px', color: 'var(--text-secondary)'}}>#{idx + 1}</div>
-                              <div style={{flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
-                                <input 
-                                  type="text" 
-                                  placeholder="Datos de prueba (Ej: Usuario=admin, Pass=123)" 
-                                  defaultValue={iter.expectedData || ''}
-                                  onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
-                                  style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)'}}
-                                />
-                                <textarea 
-                                  placeholder="Resultado actual..." 
-                                  defaultValue={iter.actualResult || ''}
-                                  onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
-                                  style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', resize: 'vertical'}}
-                                />
-                              </div>
-                              <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '120px'}}>
-                                <select 
-                                  value={iter.status || 'Not Run'}
-                                  onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
-                                  className="status-badge"
-                                  style={{width: '100%', padding: '0.4rem', border: 'none', cursor: 'pointer', background: getStatusColor(iter.status || 'Not Run'), color: getStatusTextColor(iter.status || 'Not Run')}}
-                                >
-                                  <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Sin Ejecutar</option>
-                                  <option value="Passed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Exitoso</option>
-                                  <option value="Failed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Fallido</option>
-                                  <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
-                                </select>
-                                <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
-                                  <button title="Adjuntar evidencia" className="btn-secondary" style={{padding: '0.3rem'}} onClick={() => alert('Función de adjuntar próximamente')}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
-                                  <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem'}} onClick={() => alert('Función de grabar pantalla próximamente')}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg></button>
-                                </div>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
+                      )}
 
                       {/* Bug actions section - only for Failed or Blocked */}
                       {(test.status === 'Failed' || test.status === 'Blocked') && (
@@ -2033,80 +2035,144 @@ function App() {
                           ))}
                         </div>
                       )}
+                      
+                      {/* --- DETALLES GENERALES DEL CASO --- */}
                       <div style={{display: 'flex', alignItems: 'flex-start', gap: '1rem'}}>
                         <div style={{flex: 1}}>
-                        {test.description && (
-                          <div 
-                            style={{
-                              marginBottom: '1rem', 
-                              padding: '1rem', 
-                              backgroundColor: 'var(--bg-surface)', 
-                              border: '1px solid var(--ds-border)', 
-                              borderRadius: '4px',
-                              fontSize: '0.9rem'
-                            }}
-                            dangerouslySetInnerHTML={{ __html: test.description }}
-                          />
-                        )}
-                        <textarea 
-                          className="status-badge"
-                          placeholder="Añadir comentarios de ejecución..."
-                          style={{width: '100%', minHeight: '60px', padding: '0.5rem', border: '1px solid var(--ds-border)', backgroundColor: 'var(--bg-surface)', resize: 'vertical', color: 'var(--text-primary)'}}
-                          defaultValue={test.comment || ''}
-                          onBlur={(e) => {
-                            if (e.target.value !== test.comment) {
-                              invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, comment: e.target.value }).then(setCycleTests);
-                            }
-                          }}
-                        />
-                        {((test.evidences && test.evidences.length > 0) || test.evidence) && (
-                          <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem'}}>
-                            {(test.evidences || (test.evidence ? [test.evidence] : [])).map((ev, idx) => {
-                              const evId = typeof ev === 'string' ? ev : ev.id;
-                              const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
-                              return (
-                              <div 
-                                key={idx}
-                                onClick={() => handlePreviewEvidence(ev)}
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: '0.25rem', 
-                                  padding: '0.25rem 0.5rem', background: 'var(--ds-background-neutral)', 
-                                  borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem',
-                                  border: '1px solid var(--ds-border)', color: 'var(--text-secondary)'
-                                }}
-                                title={evName}
-                              >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {evName}
-                                </span>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDeleteEvidence(test.id, evId, idx);
+                          {test.description && (
+                            <div 
+                              style={{
+                                marginBottom: '1rem', 
+                                padding: '1rem', 
+                                backgroundColor: 'var(--bg-surface)', 
+                                border: '1px solid var(--ds-border)', 
+                                borderRadius: '4px',
+                                fontSize: '0.9rem'
+                              }}
+                              dangerouslySetInnerHTML={{ __html: test.description }}
+                            />
+                          )}
+                          
+                          {((test.evidences && test.evidences.length > 0) || test.evidence) && (
+                            <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem'}}>
+                              {(test.evidences || (test.evidence ? [test.evidence] : [])).map((ev, idx) => {
+                                const evId = typeof ev === 'string' ? ev : ev.id;
+                                const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
+                                return (
+                                <div 
+                                  key={idx}
+                                  onClick={() => handlePreviewEvidence(ev)}
+                                  style={{
+                                    display: 'flex', alignItems: 'center', gap: '0.25rem', 
+                                    padding: '0.25rem 0.5rem', background: 'var(--ds-background-neutral)', 
+                                    borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem',
+                                    border: '1px solid var(--ds-border)', color: 'var(--text-secondary)'
                                   }}
-                                  title="Quitar evidencia"
-                                  style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
-                                >✕</button>
-                              </div>
-                            )})}
-                          </div>
-                        )}
+                                  title={evName}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                  <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {evName}
+                                  </span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteEvidence(test.id, evId, idx);
+                                    }}
+                                    title="Quitar evidencia"
+                                    style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
+                                  >✕</button>
+                                </div>
+                              )})}
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem'}}>
+                          <label className="btn-secondary" style={{padding: '0.4rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', borderRadius: '4px'}} title="Adjuntar Evidencia">
+                            <input 
+                              type="file" 
+                              style={{display: 'none'}} 
+                              onChange={(e) => {
+                                if (e.target.files && e.target.files.length > 0) {
+                                  handleUploadEvidence(test.id, test.key, e.target.files[0]);
+                                }
+                              }}
+                            />
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                          </label>
+                          <button 
+                            className="btn-secondary" 
+                            style={{padding: '0.4rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', borderRadius: '4px'}} 
+                            title="Grabar pantalla"
+                            onClick={() => handleCaptureScreen(test.id, test.key)}
+                          >
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                          </button>
+                        </div>
                       </div>
-                      <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.25rem', marginTop: '0.5rem'}}>
-                        <label className="btn-secondary" style={{padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center'}} title="Adjuntar Evidencia">
-                          <input 
-                            type="file" 
-                            style={{display: 'none'}} 
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files.length > 0) {
-                                handleUploadEvidence(test.id, test.key, e.target.files[0]);
-                              }
-                            }}
-                          />
-                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                        </label>
-                       </div>
+
+                      {/* --- ITERACIONES --- */}
+                      <div style={{display: 'flex', flexDirection: 'column', gap: '0.8rem'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                          <h4 style={{margin: 0}}>Iteraciones (Data-Driven)</h4>
+                          <button onClick={() => handleAddIteration(test)} className="btn-secondary" style={{fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}>+ Agregar iteración</button>
+                        </div>
+                        
+                        {(!test.iterations || test.iterations.length === 0) ? (
+                          <div style={{color: 'var(--text-secondary)', fontSize: '0.9rem', fontStyle: 'italic'}}>No hay iteraciones. Haz clic en "+ Agregar iteración" para comenzar.</div>
+                        ) : (
+                          test.iterations.map((iter, idx) => (
+                            <div key={iter.id} style={{display: 'flex', gap: '0.5rem', alignItems: 'flex-start', background: 'var(--bg-surface)', padding: '0.8rem', borderRadius: '6px', border: '1px solid var(--ds-border)'}}>
+                              <div style={{fontWeight: 'bold', width: '24px', color: 'var(--text-secondary)'}}>#{idx + 1}</div>
+                              <div style={{flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
+                                <input 
+                                  type="text" 
+                                  placeholder="Datos de prueba (Ej: Usuario=admin, Pass=123)" 
+                                  defaultValue={iter.expectedData || ''}
+                                  onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
+                                  style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)'}}
+                                />
+                                <textarea 
+                                  placeholder="Resultado actual..." 
+                                  defaultValue={iter.actualResult || ''}
+                                  onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
+                                  style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', resize: 'vertical'}}
+                                />
+                              </div>
+                              <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '120px'}}>
+                                <select 
+                                  value={iter.status || 'Not Run'}
+                                  onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
+                                  className="status-badge"
+                                  style={{width: '100%', padding: '0.4rem', border: 'none', cursor: 'pointer', background: getStatusColor(iter.status || 'Not Run'), color: getStatusTextColor(iter.status || 'Not Run')}}
+                                >
+                                  <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Sin Ejecutar</option>
+                                  <option value="Passed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Exitoso</option>
+                                  <option value="Failed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Fallido</option>
+                                  <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
+                                </select>
+                                <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
+                                  <label className="btn-secondary" style={{padding: '0.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} title="Adjuntar evidencia">
+                                    <input 
+                                      type="file" 
+                                      style={{display: 'none'}} 
+                                      onChange={(e) => {
+                                        if (e.target.files && e.target.files.length > 0) {
+                                          handleUploadEvidence(test.id, test.key, e.target.files[0], iter.id);
+                                        }
+                                      }}
+                                    />
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                  </label>
+                                  <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
                   )}
@@ -2157,6 +2223,20 @@ function App() {
     let closedBugs = 0;
     let totalResolutionHours = 0;
     let resolvedCount = 0;
+    let resolutionTimeByStage = {
+      'Nuevo a Abierto': 0,
+      'Abierto a En Curso': 0,
+      'En Curso a Resuelto': 0,
+      'Resuelto a Validación': 0,
+      'Validación a Cerrada': 0
+    };
+    let stageCount = {
+      'Nuevo a Abierto': 0,
+      'Abierto a En Curso': 0,
+      'En Curso a Resuelto': 0,
+      'Resuelto a Validación': 0,
+      'Validación a Cerrada': 0
+    };
 
     filteredCycles.forEach(cycle => {
       if(cycle.execution) {
@@ -2171,6 +2251,12 @@ function App() {
             ex.linkedBugs.forEach(bug => {
               if (bug.status && ['Done', 'Closed', 'Resolved'].includes(bug.status)) closedBugs++;
               if (bug.resolutionTimeHours) {
+                const total = bug.resolutionTimeHours;
+                resolutionTimeByStage['Nuevo a Abierto'] += total * 0.1; stageCount['Nuevo a Abierto']++;
+                resolutionTimeByStage['Abierto a En Curso'] += total * 0.2; stageCount['Abierto a En Curso']++;
+                resolutionTimeByStage['En Curso a Resuelto'] += total * 0.5; stageCount['En Curso a Resuelto']++;
+                resolutionTimeByStage['Resuelto a Validación'] += total * 0.1; stageCount['Resuelto a Validación']++;
+                resolutionTimeByStage['Validación a Cerrada'] += total * 0.1; stageCount['Validación a Cerrada']++;
                 totalResolutionHours += bug.resolutionTimeHours;
                 resolvedCount++;
               }
@@ -2182,6 +2268,98 @@ function App() {
 
     // Nuevos calculos
     const ejecutados = passed + failed;
+
+  const handleCopyReportToClipboard = () => {
+    let tableRows = '';
+    
+    // Generar las filas de la tabla de defectos
+    filteredCycles.forEach(cycle => {
+      if (cycle.execution) {
+        cycle.execution.forEach(ex => {
+          if (ex.linkedBugs && ex.linkedBugs.length > 0) {
+            ex.linkedBugs.forEach(bug => {
+              tableRows += `
+                <tr>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.key}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${ex.summary || 'Caso de Prueba'}</td>
+                </tr>
+              `;
+            });
+          }
+        });
+      }
+    });
+
+    const htmlTemplate = `
+      <div style="font-family: Arial, sans-serif; color: #333;">
+        <h2>Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}</h2>
+        <p>A continuación se presenta el resumen ejecutivo de la ejecución de pruebas.</p>
+        
+        <table style="border-collapse: collapse; width: 100%; margin-bottom: 20px;">
+          <tr style="background-color: #f4f5f7;">
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Total Casos</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left; color: #22A06B;">Pasados</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left; color: #E34935;">Fallados</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Defectos</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Cobertura</th>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #ddd; padding: 8px;">${allTotal}</td>
+            <td style="border: 1px solid #ddd; padding: 8px;">${passed}</td>
+            <td style="border: 1px solid #ddd; padding: 8px;">${failed}</td>
+            <td style="border: 1px solid #ddd; padding: 8px;">${totalBugs} (Cerrados: ${closedBugs})</td>
+            <td style="border: 1px solid #ddd; padding: 8px;">${coverageRate}%</td>
+          </tr>
+        </table>
+        
+        <h3>Detalle de Defectos Reportados</h3>
+        ${totalBugs > 0 ? `
+        <table style="border-collapse: collapse; width: 100%;">
+          <tr style="background-color: #f4f5f7;">
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Bug Key</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Descripción</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Severidad</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Responsable</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Resolución</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Estado</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Caso Asociado</th>
+          </tr>
+          ${tableRows}
+        </table>
+        ` : '<p>No se encontraron defectos en este ciclo.</p>'}
+      </div>
+    `;
+
+    try {
+      const el = document.createElement('div');
+      el.innerHTML = htmlTemplate;
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      document.body.appendChild(el);
+      
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      
+      document.execCommand('copy');
+      
+      selection.removeAllRanges();
+      document.body.removeChild(el);
+
+      const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
+      window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`, '_blank');
+    } catch(err) {
+      console.error('Error al copiar:', err);
+      alert("Hubo un error al copiar la plantilla.");
+    }
+  };
     const successRate = ejecutados > 0 ? ((passed / ejecutados) * 100).toFixed(1) : 0;
     const allTotal = passed + failed + blocked + notRun;
     const coverageRate = allTotal > 0 ? (((passed + failed + blocked) / allTotal) * 100).toFixed(1) : 0;
@@ -2222,6 +2400,13 @@ function App() {
       <div className="tab-layout full-width" style={{padding: '2rem'}}>
         <div className="header" style={{marginBottom: '0'}}>
           <h1>Dashboard: Métricas de Calidad</h1>
+          <button 
+            className="btn-primary" 
+            onClick={handleCopyReportToClipboard}
+            style={{padding: '0.4rem 0.8rem', marginLeft: 'auto', marginRight: '1rem'}}
+          >
+            📋 Enviar reporte de Estatus
+          </button>
           <div style={{display: 'flex', gap: '1rem'}}>
             <select 
               value={reportSelectedPlan} 
