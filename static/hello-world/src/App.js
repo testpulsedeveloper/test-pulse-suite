@@ -22,7 +22,18 @@ const RichTextEditor = ({ value, onChange, disabled }) => {
   return (
     <div style={{ border: '1px solid var(--ds-border)', borderRadius: '4px', overflow: 'hidden', background: 'var(--bg-main)' }}>
       <div style={{ display: 'flex', gap: '0.2rem', padding: '0.3rem', background: 'var(--bg-surface)', borderBottom: '1px solid var(--ds-border)' }}>
-        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('bold'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>B</button>
+        <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const newName = prompt("Nuevo nombre para la evidencia:", evName);
+                                      if (newName && newName !== evName) {
+                                        handleRenameEvidence(test.id, idx, newName, undefined);
+                                      }
+                                    }}
+                                    title="Renombrar evidencia"
+                                    style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0 4px', lineHeight: 1}}
+                                  >✏️</button>
+                                  <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('bold'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>B</button>
         <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('italic'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontStyle: 'italic', color: 'var(--text-primary)' }}>I</button>
         <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('underline'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', textDecoration: 'underline', color: 'var(--text-primary)' }}>U</button>
         <div style={{ width: '1px', background: 'var(--ds-border)', margin: '0 0.2rem' }}></div>
@@ -1418,7 +1429,7 @@ function App() {
     }
   };
 
-  const handleUploadEvidence = async (testId, testKey, file) => {
+  const handleUploadEvidence = async (testId, testKey, file, iterId) => {
     if (!selectedCycle || !file) return;
     try {
       const formData = new FormData();
@@ -1448,8 +1459,18 @@ function App() {
          }
          currentEvidences.push(newEvidence);
          
-         const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
-         setCycleTests(execution || []);
+         if (iterId) {
+            const iters = [...(currentTest.iterations || [])];
+            const iterIdx = iters.findIndex(i => i.id === iterId);
+            if (iterIdx > -1) {
+               iters[iterIdx] = { ...iters[iterIdx], evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence] };
+               const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+               setCycleTests(execution || []);
+            }
+         } else {
+            const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+            setCycleTests(execution || []);
+         }
       }
     } catch (err) {
       console.error("Failed to upload evidence", err);
@@ -1457,10 +1478,24 @@ function App() {
     }
   };
 
-  const handleDeleteEvidence = async (testId, attachmentId, index) => {
+  const handleDeleteEvidence = async (testId, attachmentId, index, iterId) => {
     const currentTest = cycleTests.find(t => t.id === testId);
     if (!currentTest) return;
     
+    if (iterId) {
+       const iters = [...(currentTest.iterations || [])];
+       const iterIdx = iters.findIndex(i => i.id === iterId);
+       if (iterIdx > -1) {
+          const evs = iters[iterIdx].evidences ? [...iters[iterIdx].evidences] : [];
+          evs.splice(index, 1);
+          iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
+          setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, iterations: iters } : t));
+          await invoke('deleteAttachment', { attachmentId });
+          await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+       }
+       return;
+    }
+
     let currentEvidences = currentTest.evidences ? [...currentTest.evidences] : [];
     if (currentTest.evidence && currentEvidences.length === 0) {
       currentEvidences.push(currentTest.evidence);
@@ -1471,6 +1506,79 @@ function App() {
 
     await invoke('deleteAttachment', { attachmentId });
     await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+  };
+
+  
+  const handleRenameEvidence = async (testId, index, newName, iterId) => {
+    const currentTest = cycleTests.find(t => t.id === testId);
+    if (!currentTest) return;
+    
+    if (iterId) {
+       const iters = [...(currentTest.iterations || [])];
+       const iterIdx = iters.findIndex(i => i.id === iterId);
+       if (iterIdx > -1) {
+          const evs = iters[iterIdx].evidences ? [...iters[iterIdx].evidences] : [];
+          if (typeof evs[index] === 'object') {
+             evs[index] = { ...evs[index], filename: newName };
+          }
+          iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
+          setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, iterations: iters } : t));
+          await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+       }
+       return;
+    }
+
+    let currentEvidences = currentTest.evidences ? [...currentTest.evidences] : [];
+    if (currentTest.evidence && currentEvidences.length === 0) {
+      currentEvidences.push(currentTest.evidence);
+    }
+    
+    if (typeof currentEvidences[index] === 'object') {
+      currentEvidences[index] = { ...currentEvidences[index], filename: newName };
+    }
+    
+    setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, evidences: currentEvidences, evidence: null } : t));
+    await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+  };
+
+  const handleCaptureScreen = async (testId, testKey, iterId) => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      alert("Tu navegador no soporta captura de pantalla nativa.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.autoplay = true;
+      video.style.position = 'fixed';
+      video.style.top = '-9999px';
+      document.body.appendChild(video);
+      video.srcObject = stream;
+      
+      video.onloadedmetadata = () => {
+        setTimeout(async () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          
+          stream.getTracks().forEach(track => track.stop());
+          document.body.removeChild(video);
+          
+          canvas.toBlob(async (blob) => {
+            if (blob) {
+              const file = new File([blob], `screenshot_${Date.now()}.jpg`, { type: 'image/jpeg' });
+              await handleUploadEvidence(testId, testKey, file, iterId);
+            }
+          }, 'image/jpeg', 0.9);
+        }, 500);
+      };
+    } catch(err) {
+      console.error("Captura cancelada", err);
+    }
   };
 
   const handleRunTest = async (testId, testKey, test) => {
@@ -1763,7 +1871,7 @@ function App() {
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                   <div className="test-card-content">
                     <span className="test-id">{test.key}</span>
-                    <span className="test-summary">{test.summary}</span>
+                    <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
                   </div>
                   <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
                     <span className="status-badge" style={{
@@ -1818,7 +1926,7 @@ function App() {
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                   <div className="test-card-content">
                     <span className="test-id">{test.key}</span>
-                    <span className="test-summary">{test.summary}</span>
+                    <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
                   </div>
                   <button className="btn-secondary" onClick={() => handleAddTestToCycle(test)}>+ Add to Cycle</button>
                 </div>
@@ -1896,7 +2004,7 @@ function App() {
                       <span className="test-id">{test.key}</span>
                     </div>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                      <span className="test-summary">{test.summary}</span>
+                      <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
                     </div>
                     <div style={{display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0}}>
                       <button 
@@ -2077,7 +2185,7 @@ function App() {
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleDeleteEvidence(test.id, evId, idx);
+                                      handleDeleteEvidence(test.id, evId, idx, undefined);
                                     }}
                                     title="Quitar evidencia"
                                     style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
@@ -2107,7 +2215,7 @@ function App() {
                             title="Grabar pantalla"
                             onClick={() => handleCaptureScreen(test.id, test.key)}
                           >
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                           </button>
                         </div>
                       </div>
@@ -2153,6 +2261,51 @@ function App() {
                                   <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
                                 </select>
                                 <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
+                                  {(iter.evidences && iter.evidences.length > 0) && (
+                                    <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.2rem', marginTop: '0.5rem', width: '100%'}}>
+                                      {iter.evidences.map((ev, idx) => {
+                                        const evId = typeof ev === 'string' ? ev : ev.id;
+                                        const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
+                                        return (
+                                          <div 
+                                            key={idx}
+                                            onClick={() => handlePreviewEvidence(ev)}
+                                            style={{
+                                              display: 'flex', alignItems: 'center', gap: '0.25rem', 
+                                              padding: '0.25rem 0.5rem', background: 'var(--ds-background-neutral)', 
+                                              borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem',
+                                              border: '1px solid var(--ds-border)', color: 'var(--text-secondary)'
+                                            }}
+                                            title={evName}
+                                          >
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                            <span style={{ maxWidth: '80px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                              {evName}
+                                            </span>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                const newName = prompt("Nuevo nombre para la evidencia:", evName);
+                                                if (newName && newName !== evName) {
+                                                  handleRenameEvidence(test.id, idx, newName, iter.id);
+                                                }
+                                              }}
+                                              title="Renombrar evidencia"
+                                              style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
+                                            >✏️</button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteEvidence(test.id, evId, idx, iter.id);
+                                              }}
+                                              title="Quitar evidencia"
+                                              style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
+                                            >✕</button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
                                   <label className="btn-secondary" style={{padding: '0.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} title="Adjuntar evidencia">
                                     <input 
                                       type="file" 
@@ -2166,7 +2319,7 @@ function App() {
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
                                   </label>
                                   <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                                   </button>
                                 </div>
                               </div>
@@ -2354,7 +2507,7 @@ function App() {
       document.body.removeChild(el);
 
       const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
-      window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`, '_blank');
+      router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
     } catch(err) {
       console.error('Error al copiar:', err);
       alert("Hubo un error al copiar la plantilla.");
@@ -2459,7 +2612,7 @@ function App() {
             <div className="kpi-card">
               <div className="kpi-title" style={{ color: totalBugs > 0 ? 'var(--danger-color, #E34935)' : 'var(--text-secondary)' }}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#E34935" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-3.9"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17.1c2.1.1 3.8 1.9 3.8 4"/></svg>
-                DEFECTOS (BUGS)
+                DEFECTOS
               </div>
               <div className="kpi-value">
                 {totalBugs}
