@@ -2672,23 +2672,11 @@ function App() {
                 </div>
               </div>
               
-              <div className="legend">
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--success-color, #22A06B)' }}></div>
-                  <span>Passed (${pPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--danger-color, #E34935)' }}></div>
-                  <span>Failed (${fPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--warning-color, #F6C000)' }}></div>
-                  <span>Blocked (${bPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--brand-color, #0C66E4)' }}></div>
-                  <span>Not Run (${nPct.toFixed(1)}%)</span>
-                </div>
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--success-color, #22A06B)'}}></div> Passed ({pPct.toFixed(1)}%)</div>
+                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--danger-color, #E34935)'}}></div> Failed ({fPct.toFixed(1)}%)</div>
+                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--warning-color, #F6C000)'}}></div> Blocked ({bPct.toFixed(1)}%)</div>
+                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--brand-color, #0C66E4)'}}></div> Not Run ({nPct.toFixed(1)}%)</div>
               </div>
             </div>
           </div>
@@ -2816,27 +2804,26 @@ function App() {
           
           {showBugTimes && (
             <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '1rem' }}>
-               <h3>Resolución de Bugs (Tiempos Promedio en Estado)</h3>
-               <p style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Calculado solo en horario laboral (L-J 7am-6pm, V 7am-1pm) excluyendo feriados MX.</p>
-               <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+               <h3 style={{ marginBottom: '0.5rem' }}>Resolución de Bugs (Tiempos Promedio en Estado)</h3>
+               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
                  <thead>
-                   <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
-                     <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado del Defecto</th>
-                     <th style={{ padding: '0.5rem', textAlign: 'right' }}>Total de Horas</th>
-                     <th style={{ padding: '0.5rem', textAlign: 'right' }}>Promedio (Horas por Bug)</th>
+                   <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '1px solid var(--ds-border)' }}>
+                     <th style={{ padding: '0.3rem 0.5rem', textAlign: 'left' }}>Estado del Defecto</th>
+                     <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Total de Horas</th>
+                     <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Promedio (Horas por Bug)</th>
                    </tr>
                  </thead>
                  <tbody>
                    {Object.keys(bugTimes).length === 0 ? (
-                      <tr><td colSpan="3" style={{ padding: '1rem', textAlign: 'center', color: 'var(--text-secondary)' }}>No hay datos suficientes en el historial de los bugs.</td></tr>
+                      <tr><td colSpan="3" style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--text-secondary)' }}>No hay datos suficientes.</td></tr>
                    ) : (
                       Object.entries(bugTimes).sort((a,b) => b[1].totalHours - a[1].totalHours).map(([state, data]) => {
                         const avg = data.count > 0 ? (data.totalHours / data.count) : 0;
                         return (
                           <tr key={state} style={{ borderBottom: '1px solid var(--ds-border)' }}>
-                            <td style={{ padding: '0.5rem', textTransform: 'capitalize', fontWeight: '500' }}>{state}</td>
-                            <td style={{ padding: '0.5rem', textAlign: 'right' }}>{data.totalHours.toFixed(1)} hrs</td>
-                            <td style={{ padding: '0.5rem', textAlign: 'right' }}>{avg.toFixed(1)} hrs</td>
+                            <td style={{ padding: '0.3rem 0.5rem', textTransform: 'capitalize', fontWeight: '500' }}>{state}</td>
+                            <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>{data.totalHours.toFixed(1)} hrs</td>
+                            <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>{avg.toFixed(1)} hrs</td>
                           </tr>
                         );
                       })
