@@ -2383,22 +2383,11 @@ function App() {
     let notRun = 0;
     let totalBugs = 0;
     let closedBugs = 0;
-    let totalResolutionHours = 0;
-    let resolvedCount = 0;
-    let resolutionTimeByStage = {
-      'Nuevo a Abierto': 0,
-      'Abierto a En Curso': 0,
-      'En Curso a Resuelto': 0,
-      'Resuelto a Validación': 0,
-      'Validación a Cerrada': 0
-    };
-    let stageCount = {
-      'Nuevo a Abierto': 0,
-      'Abierto a En Curso': 0,
-      'En Curso a Resuelto': 0,
-      'Resuelto a Validación': 0,
-      'Validación a Cerrada': 0
-    };
+    
+    // For new metrics
+    const testerStats = {};
+    const execTypeStats = {};
+    const bugTimes = {};
 
     filteredCycles.forEach(cycle => {
       if(cycle.execution) {
@@ -2408,19 +2397,34 @@ function App() {
           else if (ex.status === 'Failed') failed++;
           else if (ex.status === 'Blocked') blocked++;
           else notRun++;
+          
+          // Tester stats
+          const tester = ex.executedBy || 'Sin asignar';
+          if (!testerStats[tester]) testerStats[tester] = { Passed: 0, Failed: 0, Blocked: 0, 'Not Run': 0, total: 0 };
+          testerStats[tester][ex.status]++;
+          testerStats[tester].total++;
+          
+          // Exec Type stats
+          let execType = 'Manual';
+          if (ex.rawFields && ex.rawFields.components && ex.rawFields.components.some(c => c.name.toLowerCase().includes('auto'))) {
+              execType = 'Automated';
+          }
+          if (!execTypeStats[execType]) execTypeStats[execType] = { Passed: 0, Failed: 0, Blocked: 0, 'Not Run': 0, total: 0 };
+          execTypeStats[execType][ex.status]++;
+          execTypeStats[execType].total++;
+
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             totalBugs += ex.linkedBugs.length;
             ex.linkedBugs.forEach(bug => {
-              const s = (bug.status || '').toLowerCase(); if (['done', 'closed', 'resolved', 'cerrada', 'cerrado', 'resuelta', 'resuelto', 'terminado'].includes(s)) closedBugs++;
-              if (bug.resolutionTimeHours) {
-                const total = bug.resolutionTimeHours;
-                resolutionTimeByStage['Nuevo a Abierto'] += total * 0.1; stageCount['Nuevo a Abierto']++;
-                resolutionTimeByStage['Abierto a En Curso'] += total * 0.2; stageCount['Abierto a En Curso']++;
-                resolutionTimeByStage['En Curso a Resuelto'] += total * 0.5; stageCount['En Curso a Resuelto']++;
-                resolutionTimeByStage['Resuelto a Validación'] += total * 0.1; stageCount['Resuelto a Validación']++;
-                resolutionTimeByStage['Validación a Cerrada'] += total * 0.1; stageCount['Validación a Cerrada']++;
-                totalResolutionHours += bug.resolutionTimeHours;
-                resolvedCount++;
+              const s = (bug.status || '').toLowerCase();
+              if (['done', 'closed', 'resolved', 'cerrada', 'cerrado', 'resuelta', 'resuelto', 'terminado'].includes(s)) closedBugs++;
+              
+              if (bug.timesSpent) {
+                  for (const [state, hours] of Object.entries(bug.timesSpent)) {
+                      if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
+                      bugTimes[state].totalHours += hours;
+                      bugTimes[state].count++;
+                  }
               }
             });
           }
@@ -2428,8 +2432,14 @@ function App() {
       }
     });
 
-    // Nuevos calculos
-    const ejecutados = passed + failed;
+    const coverageRate = totalCases > 0 ? Math.round(((totalCases - notRun) / totalCases) * 100) : 0;
+    
+    // Configuration toggles
+    const conf = projectConfig || {};
+    const showProgreso = conf.showProgreso !== false;
+    const showTesterStats = conf.showTesterStats !== false;
+    const showExecTypeStats = conf.showExecTypeStats !== false;
+    const showBugTimes = conf.showBugTimes !== false;
 
   const handleCopyReportToClipboard = async () => {
     const context = await view.getContext();
@@ -2473,7 +2483,7 @@ function App() {
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Cobertura</th>
           </tr>
           <tr>
-            <td style="border: 1px solid #ddd; padding: 8px;">${allTotal}</td>
+            <td style="border: 1px solid #ddd; padding: 8px;">${totalCases}</td>
             <td style="border: 1px solid #ddd; padding: 8px;">${passed}</td>
             <td style="border: 1px solid #ddd; padding: 8px;">${failed}</td>
             <td style="border: 1px solid #ddd; padding: 8px;">${totalBugs} (Cerrados: ${closedBugs})</td>
@@ -2482,8 +2492,7 @@ function App() {
         </table>
         
         <h3>Detalle de Defectos Reportados</h3>
-        ${totalBugs > 0 ? `
-        <table style="border-collapse: collapse; width: 100%;">
+        ${tableRows ? `<table style="border-collapse: collapse; width: 100%; font-size: 12px;">
           <tr style="background-color: #f4f5f7;">
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Id del bug</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Descripción</th>
@@ -2494,137 +2503,99 @@ function App() {
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Link al caso</th>
           </tr>
           ${tableRows}
-        </table>
-        ` : '<p>No se encontraron defectos en este ciclo.</p>'}
+        </table>` : '<p>No hay defectos asociados en este reporte.</p>'}
       </div>
     `;
 
-    try {
-      const el = document.createElement('div');
-      el.innerHTML = htmlTemplate;
-      el.style.position = 'absolute';
-      el.style.left = '-9999px';
-      document.body.appendChild(el);
-      
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      
-      document.execCommand('copy');
-      
-      selection.removeAllRanges();
-      document.body.removeChild(el);
+    const container = document.createElement('div');
+    container.innerHTML = htmlTemplate;
+    container.style.position = 'fixed';
+    container.style.left = '-9999px';
+    document.body.appendChild(container);
 
-      const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    try {
+      document.execCommand('copy');
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       alert(`Plantilla copiada al portapapeles. Usa ${isMac ? 'Cmd + V' : 'Ctrl + V'} en el correo para pegar la tabla. Abriendo Gmail...`);
+      
+      let subject = "Resumen de Pruebas";
+      if (reportSelectedCycle) {
+        subject += ": " + filteredCycles[0]?.summary;
+      }
       router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
-    } catch(err) {
-      console.error('Error al copiar:', err);
+    } catch (err) {
+      console.error("Hubo un error al copiar la plantilla", err);
       alert("Hubo un error al copiar la plantilla.");
+    } finally {
+      selection.removeAllRanges();
+      document.body.removeChild(container);
     }
   };
-    const successRate = ejecutados > 0 ? ((passed / ejecutados) * 100).toFixed(1) : 0;
-    const allTotal = passed + failed + blocked + notRun;
-    const coverageRate = allTotal > 0 ? (((passed + failed + blocked) / allTotal) * 100).toFixed(1) : 0;
-
-    // Calc angles for donut
-    const pPct = allTotal > 0 ? (passed / allTotal) * 100 : 0;
-    const fPct = allTotal > 0 ? (failed / allTotal) * 100 : 0;
-    const bPct = allTotal > 0 ? (blocked / allTotal) * 100 : 0;
-    const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
-    
-    const execStats = {
-      manual: { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 },
-      auto: { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 }
-    };
-
-    filteredCycles.forEach(cycle => {
-      if (cycle.execution) {
-        cycle.execution.forEach(ex => {
-           let isAuto = false;
-           const tc = testCases.find(t => t.id === ex.id);
-           if (tc && executionTypeFieldId && tc.rawFields && tc.rawFields[executionTypeFieldId]) {
-              const val = tc.rawFields[executionTypeFieldId];
-              const strVal = typeof val === 'object' ? (val.value || val.name || '') : String(val);
-              if (strVal.toLowerCase().includes('auto')) isAuto = true;
-           }
-           
-           const stats = isAuto ? execStats.auto : execStats.manual;
-           stats.total++;
-           if (ex.status === 'Passed') stats.passed++;
-           else if (ex.status === 'Failed') stats.failed++;
-           else if (ex.status === 'Blocked') stats.blocked++;
-           else stats.notRun++;
-        });
-      }
-    });
 
     return (
-      <div className="tab-layout full-width" style={{padding: '2rem'}}>
-        <div className="header" style={{marginBottom: '0'}}>
-          <h1>Dashboard: Métricas de Calidad</h1>
-          <button 
-            className="btn-primary" 
-            onClick={handleCopyReportToClipboard}
-            style={{padding: '0.4rem 0.8rem', marginLeft: 'auto', marginRight: '1rem'}}
-          >
-            📋 Enviar reporte de Estatus
-          </button>
-          <div style={{display: 'flex', gap: '1rem'}}>
-            <select 
-              value={reportSelectedPlan} 
-              onChange={e => { setReportSelectedPlan(e.target.value); setReportSelectedCycle(''); }}
-              style={{padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-surface)'}}
-            >
-              <option value="">1. PROYECTO (Todos los Planes)</option>
-              {testPlans.map(p => <option key={p.id} value={p.id}>{p.summary}</option>)}
+      <div className="tab-layout">
+        <div className="tab-sidebar">
+          <h3>Report Options</h3>
+          
+          <div className="form-group">
+            <label>Filtrar por Plan</label>
+            <select value={reportSelectedPlan} onChange={(e) => {
+              setReportSelectedPlan(e.target.value);
+              setReportSelectedCycle('');
+            }}>
+              <option value="">Todos los Planes</option>
+              {plans.map(p => <option key={p.id} value={p.id}>{p.summary}</option>)}
             </select>
-            <select 
-              value={reportSelectedCycle} 
-              onChange={e => setReportSelectedCycle(e.target.value)}
-              style={{padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-surface)'}}
-            >
-              <option value="">2. VERSIÓN (Todos los Ciclos)</option>
-              {(reportSelectedPlan ? (reportData.cycles || []).filter(c => c.planId === reportSelectedPlan) : (reportData.cycles || [])).map(c => 
+          </div>
+          
+          <div className="form-group">
+            <label>Filtrar por Ciclo</label>
+            <select value={reportSelectedCycle} onChange={(e) => setReportSelectedCycle(e.target.value)}>
+              <option value="">Todos los Ciclos</option>
+              {cycles.filter(c => !reportSelectedPlan || c.planId === reportSelectedPlan).map(c => 
                 <option key={c.id} value={c.id}>{c.summary}</option>
               )}
             </select>
           </div>
-        </div>
 
-        <div className="dashboard-grid">
-          
-          <div className="kpi-row" style={{ gridColumn: '1 / -1', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+          <div style={{ marginTop: '2rem' }}>
+            <button 
+              className="btn btn-primary" 
+              style={{ width: '100%', marginBottom: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+              onClick={handleCopyReportToClipboard}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Enviar Reporte de Estatus
+            </button>
+            <p style={{fontSize: '0.8rem', color: 'var(--text-secondary)', textAlign: 'center'}}>
+              Copia una plantilla enriquecida al portapapeles y abre Gmail.
+            </p>
+          </div>
+        </div>
+        
+        <div className="tab-content" style={{ background: 'var(--bg-main)' }}>
+          <div className="kpi-container">
             <div className="kpi-card">
-              <div className="kpi-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#E3F2FD" stroke="#1565C0" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                TOTAL CASOS
-              </div>
-              <div className="kpi-value">{allTotal}</div>
+              <div className="kpi-title" style={{ color: 'var(--text-secondary)' }}>TOTAL CASOS</div>
+              <div className="kpi-value">{totalCases}</div>
             </div>
-            
             <div className="kpi-card">
-              <div className="kpi-title" style={{ color: 'var(--success-color, #22A06B)' }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#E8F5E9" stroke="#2E7D32" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                PASADOS
-              </div>
-              <div className="kpi-value" style={{ color: 'var(--success-color, #22A06B)' }}>{passed}</div>
+              <div className="kpi-title" style={{ color: 'var(--success-color)' }}>PASADOS</div>
+              <div className="kpi-value">{passed}</div>
             </div>
-            
             <div className="kpi-card">
-              <div className="kpi-title" style={{ color: 'var(--danger-color, #E34935)' }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#FFEBEE" stroke="#C62828" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                FALLADOS
-              </div>
-              <div className="kpi-value" style={{ color: 'var(--danger-color, #E34935)' }}>{failed}</div>
+              <div className="kpi-title" style={{ color: 'var(--danger-color)' }}>FALLADOS</div>
+              <div className="kpi-value">{failed}</div>
             </div>
-            
             <div className="kpi-card">
-              <div className="kpi-title" style={{ color: totalBugs > 0 ? 'var(--danger-color, #E34935)' : 'var(--text-secondary)' }}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#E34935" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-3.9"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17.1c2.1.1 3.8 1.9 3.8 4"/></svg>
+              <div className="kpi-title" style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span role="img" aria-label="bug">🐞</span>
                 DEFECTOS
               </div>
               <div className="kpi-value" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -2632,144 +2603,147 @@ function App() {
                 {totalBugs > 0 && <span style={{fontSize: '0.9rem', display: 'block', color: 'var(--success-color)', marginTop: '0.5rem', lineHeight: '1'}}>Cerrados = {closedBugs}</span>}
               </div>
             </div>
-
             <div className="kpi-card">
-              <div className="kpi-title" style={{ color: 'var(--brand-color, #0C66E4)' }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#E3F2FD" stroke="#1565C0" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                RESOLUCIÓN
-              </div>
-              <div className="kpi-value" style={{ fontSize: '1.5rem' }}>
-                {resolvedCount > 0 ? `${(totalResolutionHours / resolvedCount).toFixed(1)} hrs` : 'N/A'}
-              </div>
-            </div>
-
-            <div className="kpi-card">
-              <div className="kpi-title" style={{ color: coverageRate > 50 ? 'var(--success-color, #22A06B)' : 'var(--warning-color, #F6C000)' }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFDE7" stroke="#FBC02D" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                COBERTURA
-              </div>
-              <div className="kpi-value" style={{ color: coverageRate > 50 ? 'var(--success-color, #22A06B)' : 'var(--warning-color, #F6C000)' }}>{coverageRate}%</div>
-            </div>
-
-          </div>
-
-          <div className="chart-card">
-            <h3>Estado de pruebas</h3>
-            <div className="donut-chart-container">
-              <div className="donut-chart" style={{ background: `conic-gradient(
-                var(--success-color, #22A06B) 0% ${pPct}%,
-                var(--danger-color, #E34935) ${pPct}% ${pPct + fPct}%,
-                var(--warning-color, #F6C000) ${pPct + fPct}% ${pPct + fPct + bPct}%,
-                var(--brand-color, #0C66E4) ${pPct + fPct + bPct}% 100%
-              )`}}>
-                <div style={{ position: 'relative', zIndex: 1, textAlign: 'center' }}>
-                  <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>{successRate}%</div>
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Éxito</div>
-                </div>
-              </div>
-              
-              <div className="legend">
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--success-color, #22A06B)' }}></div>
-                  <span>Passed ({pPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--danger-color, #E34935)' }}></div>
-                  <span>Failed ({fPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--warning-color, #F6C000)' }}></div>
-                  <span>Blocked ({bPct.toFixed(1)}%)</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ background: 'var(--brand-color, #0C66E4)' }}></div>
-                  <span>Not Run ({nPct.toFixed(1)}%)</span>
-                </div>
-              </div>
+              <div className="kpi-title" style={{ color: 'var(--brand-color, #0C66E4)' }}>COBERTURA</div>
+              <div className="kpi-value">{coverageRate}%</div>
             </div>
           </div>
 
-          <div className="chart-card">
-            <h3>Tipos de Ejecución (Manual vs Auto)</h3>
-            <div className="bar-chart-container" style={{ marginTop: '1rem' }}>
-              {['manual', 'auto'].map(type => {
-                const stats = execStats[type];
-                const label = type === 'auto' ? 'Automatizada' : 'Manual';
-                return (
-                  <div className="bar-row" key={type}>
-                    <div className="bar-label">
-                      <span>{label}</span>
-                      <span style={{ color: 'var(--text-secondary)' }}>{stats.total} casos</span>
-                    </div>
-                    <div className="bar-track">
-                      {stats.total > 0 ? (
-                        <>
-                          {stats.passed > 0 && <div className="bar-segment" style={{ width: `${(stats.passed/stats.total)*100}%`, background: 'var(--success-color, #22A06B)' }} title={`Passed: ${stats.passed}`}>{stats.passed > (stats.total*0.1) ? stats.passed : ''}</div>}
-                          {stats.failed > 0 && <div className="bar-segment" style={{ width: `${(stats.failed/stats.total)*100}%`, background: 'var(--danger-color, #E34935)' }} title={`Failed: ${stats.failed}`}>{stats.failed > (stats.total*0.1) ? stats.failed : ''}</div>}
-                          {stats.blocked > 0 && <div className="bar-segment" style={{ width: `${(stats.blocked/stats.total)*100}%`, background: 'var(--warning-color, #F6C000)' }} title={`Blocked: ${stats.blocked}`}>{stats.blocked > (stats.total*0.1) ? stats.blocked : ''}</div>}
-                          {stats.notRun > 0 && <div className="bar-segment" style={{ width: `${(stats.notRun/stats.total)*100}%`, background: 'var(--brand-color, #0C66E4)' }} title={`Not Run: ${stats.notRun}`}>{stats.notRun > (stats.total*0.1) ? stats.notRun : ''}</div>}
-                        </>
-                      ) : (
-                         <div style={{width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Sin casos</div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem', flexWrap: 'wrap', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--success-color, #22A06B)'}}></div> Passed</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--danger-color, #E34935)'}}></div> Failed</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--warning-color, #F6C000)'}}></div> Blocked</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--brand-color, #0C66E4)'}}></div> Not Run</div>
-            </div>
-          </div>
-
-          
-          <div className="chart-card" style={{ gridColumn: '1 / -1' }}>
-             <h3>Progreso por Ciclo de Pruebas</h3>
-             <div className="bar-chart-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '2rem', marginTop: '1rem' }}>
-               {filteredCycles.length === 0 ? (
-                 <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>No hay ciclos para mostrar.</div>
-               ) : (
-                 filteredCycles.map(cycle => {
-                   let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
-                   if (cycle.execution) {
-                     cycle.execution.forEach(ex => {
-                       if (ex.status === 'Passed') cPassed++;
-                       else if (ex.status === 'Failed') cFailed++;
-                       else if (ex.status === 'Blocked') cBlocked++;
-                       else cNotRun++;
-                     });
-                   }
-                   const cTotal = cPassed + cFailed + cBlocked + cNotRun;
-                   
-                   return (
-                     <div className="bar-row" key={cycle.id}>
-                       <div className="bar-label" title={cycle.summary}>
-                         <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '200px' }}>{cycle.summary}</span>
-                         <span style={{ color: 'var(--text-secondary)' }}>{cTotal} casos</span>
+          {showProgreso && (
+            <div className="chart-card" style={{ gridColumn: '1 / -1' }}>
+               <h3>Progreso por Ciclo de Pruebas</h3>
+               <div className="bar-chart-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '2rem', marginTop: '1rem' }}>
+                 {filteredCycles.length === 0 ? (
+                   <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>No hay ciclos para mostrar.</div>
+                 ) : (
+                   filteredCycles.map(cycle => {
+                     let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
+                     if (cycle.execution) {
+                       cycle.execution.forEach(ex => {
+                         if (ex.status === 'Passed') cPassed++;
+                         else if (ex.status === 'Failed') cFailed++;
+                         else if (ex.status === 'Blocked') cBlocked++;
+                         else cNotRun++;
+                       });
+                     }
+                     const cTotal = cPassed + cFailed + cBlocked + cNotRun;
+                     
+                     return (
+                       <div className="bar-row" key={cycle.id}>
+                         <div className="bar-label" title={cycle.summary}>
+                           <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '200px' }}>{cycle.summary}</span>
+                           <span style={{ color: 'var(--text-secondary)' }}>{cTotal} casos</span>
+                         </div>
+                         <div className="bar-track">
+                           {cTotal > 0 ? (
+                             <>
+                               {cPassed > 0 && <div className="bar-segment" style={{ width: `${(cPassed/cTotal)*100}%`, background: 'var(--success-color)' }} title={`Passed: ${cPassed}`}></div>}
+                               {cFailed > 0 && <div className="bar-segment" style={{ width: `${(cFailed/cTotal)*100}%`, background: 'var(--danger-color)' }} title={`Failed: ${cFailed}`}></div>}
+                               {cBlocked > 0 && <div className="bar-segment" style={{ width: `${(cBlocked/cTotal)*100}%`, background: 'var(--warning-color)' }} title={`Blocked: ${cBlocked}`}></div>}
+                               {cNotRun > 0 && <div className="bar-segment" style={{ width: `${(cNotRun/cTotal)*100}%`, background: 'var(--brand-color)' }} title={`Not Run: ${cNotRun}`}></div>}
+                             </>
+                           ) : (
+                             <div style={{width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Sin casos</div>
+                           )}
+                         </div>
                        </div>
-                       <div className="bar-track">
-                         {cTotal > 0 ? (
-                           <>
-                             {cPassed > 0 && <div className="bar-segment" style={{ width: `${(cPassed/cTotal)*100}%`, background: 'var(--success-color, #22A06B)' }} title={`Passed: ${cPassed}`}></div>}
-                             {cFailed > 0 && <div className="bar-segment" style={{ width: `${(cFailed/cTotal)*100}%`, background: 'var(--danger-color, #E34935)' }} title={`Failed: ${cFailed}`}></div>}
-                             {cBlocked > 0 && <div className="bar-segment" style={{ width: `${(cBlocked/cTotal)*100}%`, background: 'var(--warning-color, #F6C000)' }} title={`Blocked: ${cBlocked}`}></div>}
-                             {cNotRun > 0 && <div className="bar-segment" style={{ width: `${(cNotRun/cTotal)*100}%`, background: 'var(--brand-color, #0C66E4)' }} title={`Not Run: ${cNotRun}`}></div>}
-                           </>
-                         ) : (
-                           <div style={{width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Sin casos</div>
-                         )}
-                       </div>
-                     </div>
-                   );
-                 })
-               )}
-             </div>
+                     );
+                   })
+                 )}
+               </div>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+            {showTesterStats && (
+              <div className="chart-card">
+                 <h3>Casos por Tester</h3>
+                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                   <thead>
+                     <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                       <th style={{ padding: '0.5rem', textAlign: 'left' }}>Tester</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--success-color)' }}>Passed</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--danger-color)' }}>Failed</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--warning-color)' }}>Blocked</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center' }}>Total</th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {Object.entries(testerStats).map(([tester, stats]) => (
+                        <tr key={tester} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                          <td style={{ padding: '0.5rem', fontWeight: 'bold' }}>{tester}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Passed}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Failed}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Blocked}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center', fontWeight: 'bold' }}>{stats.total}</td>
+                        </tr>
+                     ))}
+                   </tbody>
+                 </table>
+              </div>
+            )}
+
+            {showExecTypeStats && (
+              <div className="chart-card">
+                 <h3>Casos por Tipo de Ejecución</h3>
+                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                   <thead>
+                     <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                       <th style={{ padding: '0.5rem', textAlign: 'left' }}>Tipo</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--success-color)' }}>Passed</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--danger-color)' }}>Failed</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center', color: 'var(--warning-color)' }}>Blocked</th>
+                       <th style={{ padding: '0.5rem', textAlign: 'center' }}>Total</th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {Object.entries(execTypeStats).map(([type, stats]) => (
+                        <tr key={type} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                          <td style={{ padding: '0.5rem', fontWeight: 'bold' }}>{type}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Passed}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Failed}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center' }}>{stats.Blocked}</td>
+                          <td style={{ padding: '0.5rem', textAlign: 'center', fontWeight: 'bold' }}>{stats.total}</td>
+                        </tr>
+                     ))}
+                   </tbody>
+                 </table>
+              </div>
+            )}
           </div>
-          
+
+          {showBugTimes && (
+            <div className="chart-card" style={{ marginTop: '1rem' }}>
+               <h3>Resolución de Bugs (Tiempos Promedio en Estado)</h3>
+               <p style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>Calculado solo en horario laboral (L-J 7am-6pm, V 7am-1pm) excluyendo feriados MX.</p>
+               <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+                 <thead>
+                   <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                     <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado del Defecto</th>
+                     <th style={{ padding: '0.5rem', textAlign: 'right' }}>Total de Horas</th>
+                     <th style={{ padding: '0.5rem', textAlign: 'right' }}>Promedio (Horas por Bug)</th>
+                   </tr>
+                 </thead>
+                 <tbody>
+                   {Object.keys(bugTimes).length === 0 ? (
+                      <tr><td colSpan="3" style={{ padding: '1rem', textAlign: 'center', color: 'var(--text-secondary)' }}>No hay datos suficientes en el historial de los bugs.</td></tr>
+                   ) : (
+                      Object.entries(bugTimes).sort((a,b) => b[1].totalHours - a[1].totalHours).map(([state, data]) => {
+                        const avg = data.count > 0 ? (data.totalHours / data.count) : 0;
+                        return (
+                          <tr key={state} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                            <td style={{ padding: '0.5rem', textTransform: 'capitalize', fontWeight: '500' }}>{state}</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'right' }}>{data.totalHours.toFixed(1)} hrs</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'right' }}>{avg.toFixed(1)} hrs</td>
+                          </tr>
+                        );
+                      })
+                   )}
+                 </tbody>
+               </table>
+            </div>
+          )}
+
           {filteredCycles.some(c => c.execution && c.execution.some(ex => ex.linkedBugs && ex.linkedBugs.length > 0)) ? (
             <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '1rem', overflowX: 'auto', marginBottom: '1rem' }}>
               <h3>Detalle de Defectos Reportados</h3>
@@ -2813,157 +2787,118 @@ function App() {
               </table>
             </div>
           ) : null}
+          
         </div>
       </div>
     );
-  };
+  };;
 
   const renderConfigTab = () => (
     <div className="tab-layout">
-      <main className="main-content" style={{ maxWidth: '800px', margin: '0 auto' }}>
-        <div className="header">
-          <h1>Project Configurations</h1>
-        </div>
+      <div className="tab-content" style={{ maxWidth: '800px', margin: '0 auto', background: 'var(--bg-main)' }}>
+        <h2 style={{ marginBottom: '1.5rem', color: 'var(--text-primary)' }}>Configuración del Proyecto</h2>
         
-        {!selectedProjectId ? (
-          <div className="empty-state">
-            <p>Please select a project from the top navigation to configure issue types.</p>
+        <div className="chart-card">
+          <h3 style={{ borderBottom: '1px solid var(--ds-border)', paddingBottom: '0.5rem' }}>Mapeo de Tipos de Issue</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
+            Alinea la aplicación con tu esquema de Jira. ¿Cómo se llaman los siguientes conceptos en tu proyecto?
+          </p>
+
+          <div className="form-group">
+            <label>Tipo de issue para <strong>Test Plan</strong></label>
+            <input 
+              type="text" 
+              className="form-control"
+              value={projectConfig.testPlanType || 'Test Plan'}
+              onChange={e => setProjectConfig({...projectConfig, testPlanType: e.target.value})}
+              placeholder="Ej: Test Plan"
+            />
           </div>
-        ) : (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px' }}>
-            <h2 style={{ marginBottom: '1rem' }}>Map Issue Types</h2>
-            <p style={{ marginBottom: '2rem', color: 'var(--ds-text-subtlest)' }}>
-              Select the custom Jira issue types used in this project to represent Test Cases, Test Cycles, and Test Sets.
-            </p>
+
+          <div className="form-group">
+            <label>Tipo de issue para <strong>Test Cycle</strong></label>
+            <input 
+              type="text" 
+              className="form-control"
+              value={projectConfig.testCycleType || 'Test Cycle'}
+              onChange={e => setProjectConfig({...projectConfig, testCycleType: e.target.value})}
+              placeholder="Ej: Test Cycle"
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Tipo de issue para <strong>Test Case</strong></label>
+            <input 
+              type="text" 
+              className="form-control"
+              value={projectConfig.testCaseType || 'Test Case'}
+              onChange={e => setProjectConfig({...projectConfig, testCaseType: e.target.value})}
+              placeholder="Ej: Test Case"
+            />
+          </div>
+        </div>
+
+        <div className="chart-card" style={{ marginTop: '1.5rem' }}>
+          <h3 style={{ borderBottom: '1px solid var(--ds-border)', paddingBottom: '0.5rem' }}>Widgets del Tablero de Reportes</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
+            Selecciona qué métricas y gráficas estarán visibles en la pestaña de Reportes. Los contadores principales y la tabla de defectos son fijos.
+          </p>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+               <input 
+                 type="checkbox" 
+                 checked={projectConfig.showProgreso !== false}
+                 onChange={e => setProjectConfig({...projectConfig, showProgreso: e.target.checked})}
+                 style={{ width: '1.2rem', height: '1.2rem' }}
+               />
+               <span style={{ fontWeight: '500' }}>Mostrar Progreso por Ciclo de Pruebas</span>
+            </label>
             
-            <form onSubmit={handleSaveConfig}>
-              <div className="form-group">
-                <label>Test Case Issue Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.testCaseType}
-                  onChange={(e) => setProjectConfig({...projectConfig, testCaseType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div className="form-group">
-                <label>Test Cycle Issue Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.testCycleType}
-                  onChange={(e) => setProjectConfig({...projectConfig, testCycleType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div className="form-group">
-                <label>Test Plan Issue Type (Test Set)</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.planIssueType || ''}
-                  onChange={(e) => setProjectConfig({...projectConfig, planIssueType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-              </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+               <input 
+                 type="checkbox" 
+                 checked={projectConfig.showTesterStats !== false}
+                 onChange={e => setProjectConfig({...projectConfig, showTesterStats: e.target.checked})}
+                 style={{ width: '1.2rem', height: '1.2rem' }}
+               />
+               <span style={{ fontWeight: '500' }}>Mostrar Casos por Tester</span>
+            </label>
 
-              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
-              <h3 style={{ marginBottom: '1rem' }}>Requirements Traceability</h3>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Select the issue types that represent requirements (e.g., Story, Epic) and the link type used to connect Test Cases to those requirements.
-              </p>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+               <input 
+                 type="checkbox" 
+                 checked={projectConfig.showExecTypeStats !== false}
+                 onChange={e => setProjectConfig({...projectConfig, showExecTypeStats: e.target.checked})}
+                 style={{ width: '1.2rem', height: '1.2rem' }}
+               />
+               <span style={{ fontWeight: '500' }}>Mostrar Casos por Tipo de Ejecución (Manual/Auto)</span>
+            </label>
 
-              <div className="form-group">
-                <label>Requirement Issue Types</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)', height: '100px' }}
-                  multiple
-                  value={projectConfig.requirementIssueTypes || []}
-                  onChange={(e) => {
-                    const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
-                    setProjectConfig({...projectConfig, requirementIssueTypes: selected});
-                  }}
-                >
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-                <small style={{ color: 'var(--text-secondary)' }}>Hold Ctrl/Cmd to select multiple.</small>
-              </div>
-
-              <div className="form-group">
-                <label>Test-to-Requirement Link Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.requirementLinkType || 'ANY'}
-                  onChange={(e) => setProjectConfig({...projectConfig, requirementLinkType: e.target.value})}
-                >
-                  <option value="ANY">Any Link Type</option>
-                  {linkTypes.map(lt => (
-                    <option key={lt.id} value={lt.name}>{lt.name} ({lt.outward} / {lt.inward})</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div style={{ marginTop: '2rem' }}>
-                <button type="submit" className="btn-primary" disabled={isSavingConfig}>
-                  {isSavingConfig ? 'Saving...' : 'Save Configuration'}
-                </button>
-              </div>
-            </form>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+               <input 
+                 type="checkbox" 
+                 checked={projectConfig.showBugTimes !== false}
+                 onChange={e => setProjectConfig({...projectConfig, showBugTimes: e.target.checked})}
+                 style={{ width: '1.2rem', height: '1.2rem' }}
+               />
+               <span style={{ fontWeight: '500' }}>Mostrar Tiempo de Resolución de Defectos (Horas Laborales)</span>
+            </label>
           </div>
-        )}
+        </div>
 
-        {/* Allowlist Section (Admin only) */}
-        {selectedProjectId && isAdmin && (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px', marginTop: '2rem' }}>
-            <h2 style={{ marginBottom: '1rem', color: 'var(--danger-color)' }}>Restricción por Proyecto</h2>
-            <p style={{ marginBottom: '1rem', color: 'var(--ds-text-subtlest)' }}>
-              Puedes habilitar o deshabilitar Test Pulse específicamente para este proyecto.
-              Si lo deshabilitas, los usuarios regulares no podrán ver ni usar la app aquí.
-            </p>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.5rem' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'bold' }}>
-                <input 
-                  type="checkbox" 
-                  checked={isProjectAllowed}
-                  onChange={async (e) => {
-                    const enabled = e.target.checked;
-                    setIsProjectAllowed(enabled);
-                    await invoke('setAllowedProjects', { projectId: selectedProjectId, enabled });
-                    alert(`Test Pulse ha sido ${enabled ? 'habilitado' : 'deshabilitado'} para este proyecto.`);
-                  }}
-                />
-                Habilitar Test Pulse en este proyecto
-              </label>
-            </div>
-          </div>
-        )}
-
-      </main>
+        <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button 
+            className="btn btn-primary" 
+            onClick={saveProjectConfig}
+            disabled={isSavingConfig}
+          >
+            {isSavingConfig ? 'Guardando...' : 'Guardar Configuración'}
+          </button>
+        </div>
+      </div>
     </div>
-  );
+  );;
 
   const renderModal = () => null;
 
