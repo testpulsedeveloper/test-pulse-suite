@@ -2441,15 +2441,18 @@ function App() {
 
           // Feature
           const tcFeature = testCases.find(t => t.id === ex.id);
-          const fId = tcFeature ? tcFeature.folderId : null;
-          let folderPath = fId ? (folderPaths.find(f => f.id === fId)?.path || 'Raíz (Sin Carpeta)') : 'Raíz (Sin Carpeta)';
-          
-          if (!featureStats[folderPath]) featureStats[folderPath] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
-          featureStats[folderPath].total++;
-          if (ex.status === 'Passed') featureStats[folderPath].passed++;
-          else if (ex.status === 'Failed') featureStats[folderPath].failed++;
-          else if (ex.status === 'Blocked') featureStats[folderPath].blocked++;
-          else featureStats[folderPath].notRun++;
+          if (tcFeature && tcFeature.folderId) {
+            const fObj = folderPaths.find(f => f.id === tcFeature.folderId);
+            if (fObj) {
+              const folderPath = fObj.path;
+              if (!featureStats[folderPath]) featureStats[folderPath] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
+              featureStats[folderPath].total++;
+              if (ex.status === 'Passed') featureStats[folderPath].passed++;
+              else if (ex.status === 'Failed') featureStats[folderPath].failed++;
+              else if (ex.status === 'Blocked') featureStats[folderPath].blocked++;
+              else featureStats[folderPath].notRun++;
+            }
+          }
 
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             totalBugs += ex.linkedBugs.length;
