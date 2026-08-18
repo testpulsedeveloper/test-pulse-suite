@@ -2820,10 +2820,10 @@ function App() {
               display: 'grid', 
               gridTemplateColumns: (showProgreso && showBugTimes) ? '2fr 1fr' : '1fr', 
               gap: '1.5rem', 
-              alignItems: 'stretch' 
+              alignItems: 'start' 
             }}>
               {showProgreso && (
-                <div className="chart-card" style={{ height: '100%', margin: 0 }}>
+                <div className="chart-card" style={{ margin: 0 }}>
                    <h3>Progreso por Ciclo de Pruebas</h3>
                    <div className="bar-chart-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '2rem', marginTop: '1rem' }}>
                      {filteredCycles.length === 0 ? (
@@ -2868,7 +2868,7 @@ function App() {
               )}
               
               {showBugTimes && (
-                <div className="chart-card" style={{ height: '100%', margin: 0 }}>
+                <div className="chart-card" style={{ margin: 0 }}>
                    <h3>Resolución de Bugs (Tiempo Promedio)</h3>
                    <div className="bar-chart-container" style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                      {Object.keys(bugTimes).length === 0 ? (
@@ -2913,7 +2913,7 @@ function App() {
           )}
 
           {filteredCycles.some(c => c.execution && c.execution.some(ex => ex.linkedBugs && ex.linkedBugs.length > 0)) ? (
-            <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '1rem', overflowX: 'auto', marginBottom: '1rem' }}>
+            <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '2.5rem', overflowX: 'auto', marginBottom: '1rem' }}>
               <h3>Detalle de Defectos Reportados</h3>
               <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
                 <thead>
