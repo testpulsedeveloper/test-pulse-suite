@@ -2411,7 +2411,7 @@ function App() {
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             totalBugs += ex.linkedBugs.length;
             ex.linkedBugs.forEach(bug => {
-              if (bug.status && ['Done', 'Closed', 'Resolved'].includes(bug.status)) closedBugs++;
+              const s = (bug.status || '').toLowerCase(); if (['done', 'closed', 'resolved', 'cerrada', 'cerrado', 'resuelta', 'resuelto', 'terminado'].includes(s)) closedBugs++;
               if (bug.resolutionTimeHours) {
                 const total = bug.resolutionTimeHours;
                 resolutionTimeByStage['Nuevo a Abierto'] += total * 0.1; stageCount['Nuevo a Abierto']++;
@@ -2431,7 +2431,9 @@ function App() {
     // Nuevos calculos
     const ejecutados = passed + failed;
 
-  const handleCopyReportToClipboard = () => {
+  const handleCopyReportToClipboard = async () => {
+    const context = await view.getContext();
+    const baseUrl = context.siteUrl;
     let tableRows = '';
     
     // Generar las filas de la tabla de defectos
@@ -2442,13 +2444,13 @@ function App() {
             ex.linkedBugs.forEach(bug => {
               tableRows += `
                 <tr>
-                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.key}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${bug.key}">${bug.key}</a></td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
-                  <td style="border: 1px solid #ddd; padding: 8px;">${ex.key}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${ex.key}">${ex.key}</a></td>
                 </tr>
               `;
             });
