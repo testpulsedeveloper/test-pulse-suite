@@ -2890,7 +2890,7 @@ function App() {
         <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'flex-end' }}>
           <button 
             className="btn btn-primary" 
-            onClick={saveProjectConfig}
+            onClick={handleSaveConfig}
             disabled={isSavingConfig}
           >
             {isSavingConfig ? 'Guardando...' : 'Guardar Configuración'}
