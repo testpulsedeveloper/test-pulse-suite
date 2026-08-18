@@ -2005,6 +2005,16 @@ function App() {
                     </div>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
                       <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
+                      {(test.linkedBugs && test.linkedBugs.length > 0) && (
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '3px',
+                          padding: '0.1rem 0.4rem', borderRadius: '4px', marginLeft: '0.5rem',
+                          background: 'var(--danger-bg)', color: 'var(--danger-color)',
+                          border: '1px solid var(--danger-color)', fontSize: '0.75rem', fontWeight: '600'
+                        }} title="Defectos asociados">
+                          🐞 {test.linkedBugs.length}
+                        </span>
+                      )}
                     </div>
                     <div style={{display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0}}>
                       <button 
@@ -2054,18 +2064,6 @@ function App() {
                         <option value="Blocked" style={{backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Blocked</option>
                       </select>
                       
-                      {/* Bug count badge - collapsed view */}
-                      {(test.linkedBugs && test.linkedBugs.length > 0) && (
-                        <span style={{
-                          display: 'inline-flex', alignItems: 'center', gap: '3px',
-                          padding: '0.3rem 0.6rem', borderRadius: '4px',
-                          background: 'var(--danger-bg)', color: 'var(--danger-color)',
-                          border: '1px solid var(--danger-color)', fontSize: '0.75rem', fontWeight: '600', flexShrink: 0,
-                          height: '32px', boxSizing: 'border-box'
-                        }}>
-                          🐛 {test.linkedBugs.length}
-                        </span>
-                      )}
                     </div>
                   </div>
                   
@@ -2078,11 +2076,11 @@ function App() {
                       )}
 
                       {/* Bug actions section - only for Failed or Blocked */}
-                      {(test.status === 'Failed' || test.status === 'Blocked') && (
+                      {true && (
                         <div style={{display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem'}}>
                           {test.status === 'Failed' && (
                             <button className="btn-secondary" style={{borderColor: 'var(--ds-icon-danger)', color: 'var(--ds-icon-danger)', fontSize: '0.85rem'}} onClick={() => handleCreateBug(test)}>
-                              🐛 Reportar Bug
+                              🐞 Reportar Bug
                             </button>
                           )}
                           <button
@@ -2129,7 +2127,7 @@ function App() {
                               background: 'var(--danger-bg)', color: 'var(--danger-color)',
                               border: '1px solid var(--danger-color)', fontSize: '0.8rem', fontWeight: '600'
                             }}>
-                              <span onClick={() => router.open(`/browse/${bug.key}`)} style={{cursor: 'pointer'}}>🐛 {bug.key}</span>
+                              <span onClick={() => router.open(`/browse/${bug.key}`)} style={{cursor: 'pointer'}}>🐞 {bug.key}</span>
                               <button
                                 onClick={async () => {
                                   const updatedBugs = test.linkedBugs.filter((_, i) => i !== idx);
@@ -2182,6 +2180,17 @@ function App() {
                                   <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                     {evName}
                                   </span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const newName = prompt("Nuevo nombre para la evidencia:", evName);
+                                      if (newName && newName !== evName) {
+                                        handleRenameEvidence(test.id, idx, newName, undefined);
+                                      }
+                                    }}
+                                    title="Renombrar evidencia"
+                                    style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0 4px', lineHeight: 1}}
+                                  >✏️</button>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -2712,6 +2721,41 @@ function App() {
                 <div style={{display: 'flex', alignItems: 'center', gap: '0.3rem'}}><div style={{width: '10px', height: '10px', borderRadius: '2px', background: 'var(--brand-color, #0C66E4)'}}></div> Not Run</div>
             </div>
           </div>
+          {filteredCycles.some(c => c.execution && c.execution.some(ex => ex.linkedBugs && ex.linkedBugs.length > 0)) ? (
+            <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '1rem', overflowX: 'auto', marginBottom: '1rem' }}>
+              <h3>Detalle de Defectos Reportados</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
+                <thead>
+                  <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Bug Key</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Severidad</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Caso Asociado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCycles.flatMap(cycle => 
+                    (cycle.execution || []).flatMap(ex => 
+                      (ex.linkedBugs || []).map(bug => (
+                        <tr key={bug.id || bug.key} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                          <td style={{ padding: '0.5rem' }}><a href={`/browse/${bug.key}`} target="_blank" rel="noreferrer">{bug.key}</a></td>
+                          <td style={{ padding: '0.5rem' }}>{bug.summary || 'N/A'}</td>
+                          <td style={{ padding: '0.5rem' }}>{bug.severity || 'N/A'}</td>
+                          <td style={{ padding: '0.5rem' }}>
+                            <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: bug.resolution ? 'var(--success-bg)' : 'var(--danger-bg)', color: bug.resolution ? 'var(--success-color)' : 'var(--danger-color)' }}>
+                              {bug.status || 'Desconocido'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '0.5rem' }}>{ex.summary || ex.key}</td>
+                        </tr>
+                      ))
+                    )
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
           
           <div className="chart-card" style={{ gridColumn: '1 / -1' }}>
              <h3>Progreso por Ciclo de Pruebas</h3>
