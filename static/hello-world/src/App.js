@@ -1725,6 +1725,47 @@ function App() {
     if (!selectedProjectId) return;
     setLoading(true);
     const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
+    
+    if (data && data.cycles) {
+      const allBugKeys = new Set();
+      data.cycles.forEach(c => {
+         c.execution?.forEach(ex => {
+            ex.linkedBugs?.forEach(b => allBugKeys.add(b.key));
+         });
+      });
+
+      if (allBugKeys.size > 0) {
+         try {
+           const jql = `issuekey IN (${Array.from(allBugKeys).join(',')})`;
+           const resp = await requestJira(`/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=summary,status,assignee,resolution,customfield_10004,priority`);
+           const result = await resp.json();
+           const bugMap = {};
+           if (result.issues) {
+             result.issues.forEach(i => {
+                bugMap[i.key] = {
+                   summary: i.fields?.summary,
+                   status: i.fields?.status?.name,
+                   assignee: i.fields?.assignee?.displayName || 'Sin asignar',
+                   resolution: i.fields?.resolution?.name || 'Unresolved',
+                   severity: i.fields?.customfield_10004 || i.fields?.priority?.name || 'N/A'
+                };
+             });
+             data.cycles.forEach(c => {
+               c.execution?.forEach(ex => {
+                  ex.linkedBugs?.forEach(b => {
+                     if (bugMap[b.key]) {
+                        Object.assign(b, bugMap[b.key]);
+                     }
+                  });
+               });
+             });
+           }
+         } catch (err) {
+           console.error('Failed to fetch live bug details:', err);
+         }
+      }
+    }
+
     setReportData(data || { cycles: [] });
     setLoading(false);
   };
@@ -2445,10 +2486,10 @@ function App() {
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.key}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
                   <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
-                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
-                  <td style="border: 1px solid #ddd; padding: 8px;">${ex.summary || 'Caso de Prueba'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${ex.key}</td>
                 </tr>
               `;
             });
@@ -2483,13 +2524,13 @@ function App() {
         ${totalBugs > 0 ? `
         <table style="border-collapse: collapse; width: 100%;">
           <tr style="background-color: #f4f5f7;">
-            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Bug Key</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Id del bug</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Descripción</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Severidad</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Estado</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Responsable</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Resolución</th>
-            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Estado</th>
-            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Caso Asociado</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Link al caso</th>
           </tr>
           ${tableRows}
         </table>
@@ -2516,6 +2557,8 @@ function App() {
       document.body.removeChild(el);
 
       const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      alert(`Plantilla copiada al portapapeles. Usa ${isMac ? 'Cmd + V' : 'Ctrl + V'} en el correo para pegar la tabla. Abriendo Gmail...`);
       router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
     } catch(err) {
       console.error('Error al copiar:', err);
@@ -2623,9 +2666,9 @@ function App() {
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#E34935" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-3.9"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17.1c2.1.1 3.8 1.9 3.8 4"/></svg>
                 DEFECTOS
               </div>
-              <div className="kpi-value">
-                {totalBugs}
-                {totalBugs > 0 && <span style={{fontSize: '0.8rem', display: 'block', color: 'var(--success-color)'}}>Cerrados = {closedBugs}</span>}
+              <div className="kpi-value" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <span style={{ lineHeight: '1' }}>{totalBugs}</span>
+                {totalBugs > 0 && <span style={{fontSize: '0.9rem', display: 'block', color: 'var(--success-color)', marginTop: '0.5rem', lineHeight: '1'}}>Cerrados = {closedBugs}</span>}
               </div>
             </div>
 
@@ -2727,27 +2770,35 @@ function App() {
               <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
                 <thead>
                   <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Bug Key</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Id del bug</th>
                     <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
                     <th style={{ padding: '0.5rem', textAlign: 'left' }}>Severidad</th>
                     <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Caso Asociado</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Responsable</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Resolución</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Link al caso</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredCycles.flatMap(cycle => 
                     (cycle.execution || []).flatMap(ex => 
-                      (ex.linkedBugs || []).map(bug => (
-                        <tr key={bug.id || bug.key} style={{ borderBottom: '1px solid var(--ds-border)' }}>
-                          <td style={{ padding: '0.5rem' }}><a href={`/browse/${bug.key}`} target="_blank" rel="noreferrer">{bug.key}</a></td>
+                      (ex.linkedBugs || []).map((bug, i) => (
+                        <tr key={bug.key + '-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                          <td style={{ padding: '0.5rem' }}>
+                             <a href="#" onClick={(e) => { e.preventDefault(); router.open(`/browse/${bug.key}`); }}>{bug.key}</a>
+                          </td>
                           <td style={{ padding: '0.5rem' }}>{bug.summary || 'N/A'}</td>
                           <td style={{ padding: '0.5rem' }}>{bug.severity || 'N/A'}</td>
                           <td style={{ padding: '0.5rem' }}>
-                            <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: bug.resolution ? 'var(--success-bg)' : 'var(--danger-bg)', color: bug.resolution ? 'var(--success-color)' : 'var(--danger-color)' }}>
+                            <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-bg)' : 'var(--danger-bg)', color: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-color)' : 'var(--danger-color)' }}>
                               {bug.status || 'Desconocido'}
                             </span>
                           </td>
-                          <td style={{ padding: '0.5rem' }}>{ex.summary || ex.key}</td>
+                          <td style={{ padding: '0.5rem' }}>{bug.assignee || 'Sin asignar'}</td>
+                          <td style={{ padding: '0.5rem' }}>{bug.resolution || 'Unresolved'}</td>
+                          <td style={{ padding: '0.5rem' }}>
+                             <a href="#" onClick={(e) => { e.preventDefault(); router.open(`/browse/${ex.key}`); }}>{ex.key}</a>
+                          </td>
                         </tr>
                       ))
                     )
