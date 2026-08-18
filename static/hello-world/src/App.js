@@ -2429,7 +2429,7 @@ function App() {
           else stats.notRun++;
 
           // Tester
-          const tester = ex.executedBy || 'Sin asignar';
+          const tester = (ex.executedBy && typeof ex.executedBy === 'object') ? (ex.executedBy.displayName || ex.executedBy.name || 'Sin asignar') : (ex.executedBy || 'Sin asignar');
           if (!testerStats[tester]) testerStats[tester] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
           testerStats[tester].total++;
           if (ex.status === 'Passed') testerStats[tester].passed++;
