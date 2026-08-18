@@ -30,9 +30,9 @@ resolver.define('getFolders', async ({ payload }) => {
 });
 
 resolver.define('createFolder', async ({ payload }) => {
-  const { projectId, name } = payload;
+  const { projectId, name, parentId } = payload;
   const folders = await getProjectFolders(projectId);
-  const newFolder = { id: `folder-${Date.now()}`, name, parentId: null };
+  const newFolder = { id: `folder-${Date.now()}`, name, parentId: parentId || null };
   folders.push(newFolder);
   await setProjectFolders(projectId, folders);
   return folders;
@@ -60,7 +60,17 @@ resolver.define('deleteFolder', async ({ payload, context }) => {
   }
 
   const folders = await getProjectFolders(projectId);
-  const updatedFolders = folders.filter(f => f.id !== folderId);
+  let toDelete = [folderId];
+  let previousSize = 0;
+  while(toDelete.length > previousSize) {
+    previousSize = toDelete.length;
+    folders.forEach(f => {
+      if (toDelete.includes(f.parentId) && !toDelete.includes(f.id)) {
+        toDelete.push(f.id);
+      }
+    });
+  }
+  const updatedFolders = folders.filter(f => !toDelete.includes(f.id));
   await setProjectFolders(projectId, updatedFolders);
   return updatedFolders;
 });
@@ -106,20 +116,37 @@ resolver.define('getProjectIssueTypes', async ({ payload }) => {
   }
 });
 
+resolver.define('getIssueLinkTypes', async () => {
+  try {
+    const response = await api.asUser().requestJira(route`/rest/api/3/issueLinkType`);
+    const data = await response.json();
+    return data.issueLinkTypes || [];
+  } catch(e) {
+    console.error("Error getIssueLinkTypes:", e);
+    return [];
+  }
+});
+
 resolver.define('getConfig', async ({ payload }) => {
   try {
     const { projectId } = payload;
     const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
     if (response.status === 404) {
       console.log("Config not found, returning defaults");
-      return { testCaseType: '', testCycleType: '', planIssueType: '' };
+      return { testCaseType: '', testCycleType: '', planIssueType: '', requirementIssueTypes: [], requirementLinkType: 'ANY' };
     }
     const data = await response.json();
     console.log("Fetched config:", data.value);
-    return data.value;
+    
+    // Ensure new array properties have defaults
+    const config = data.value;
+    if (!config.requirementIssueTypes) config.requirementIssueTypes = [];
+    if (!config.requirementLinkType) config.requirementLinkType = 'ANY';
+    
+    return config;
   } catch(e) {
     console.error("Error getConfig:", e);
-    return { testCaseType: '', testCycleType: '', planIssueType: '' };
+    return { testCaseType: '', testCycleType: '', planIssueType: '', requirementIssueTypes: [], requirementLinkType: 'ANY' };
   }
 });
 
@@ -159,7 +186,8 @@ resolver.define('getTestPlans', async ({ payload }) => {
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jql: `${projectJql}issuetype = "${planType}" ORDER BY created DESC`,
-        fields: ['summary', 'status', 'created']
+        fields: ['summary', 'status', 'created'],
+        maxResults: 200
       })
     });
     
@@ -192,7 +220,8 @@ resolver.define('getTestCycles', async ({ payload }) => {
       body: JSON.stringify({
         jql: `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`,
         fields: ['summary', 'status', 'created'],
-        properties: ['testops-plan-link']
+        properties: ['testops-plan-link'],
+        maxResults: 200
       })
     });
     
@@ -317,7 +346,8 @@ resolver.define('getTestCases', async ({ payload, context }) => {
         jql,
         fields: ['*all'],
         expand: 'renderedFields',
-        properties: ['testops-folder-link']
+        properties: ['testops-folder-link'],
+        maxResults: 200
       })
     });
     
@@ -336,7 +366,8 @@ resolver.define('getTestCases', async ({ payload, context }) => {
       status: issue.fields.status.name,
       created: issue.fields.created,
       folderId: issue.properties?.['testops-folder-link']?.folderId || null,
-      rawFields: issue.fields
+      rawFields: issue.fields,
+      renderedFields: issue.renderedFields
     }));
 
     if (folderId) {
@@ -347,6 +378,71 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   } catch (e) {
     console.error("getTestCases exception:", e);
     return { _isError: true, message: String(e) };
+  }
+});
+
+resolver.define('getRequirements', async ({ payload, context }) => {
+  try {
+    const projectId = payload?.projectId || context?.extension?.project?.id;
+    const requirementTypes = payload?.config?.requirementIssueTypes || [];
+    
+    if (!requirementTypes || requirementTypes.length === 0) {
+      return [];
+    }
+    
+    const projectJql = projectId ? `project = ${projectId} AND ` : '';
+    const typeList = requirementTypes.map(t => `"${t}"`).join(', ');
+    const jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
+    
+    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jql,
+        fields: ['summary', 'issuetype', 'parent', 'customfield_10014', 'status'],
+        maxResults: 100
+      })
+    });
+    
+    if (!response.ok) {
+      return { _isError: true, status: response.status };
+    }
+    const data = await response.json();
+    return data.issues || [];
+  } catch (e) {
+    console.error("getRequirements exception:", e);
+    return { _isError: true, message: String(e) };
+  }
+});
+
+resolver.define('linkCasesToRequirement', async ({ payload }) => {
+  try {
+    const { requirementId, testCaseIds, linkType } = payload;
+    let actualLinkType = linkType;
+    
+    if (!actualLinkType || actualLinkType === 'ANY') {
+      actualLinkType = 'Relates';
+    }
+
+    const results = [];
+    for (const testId of testCaseIds) {
+      const response = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: { name: actualLinkType },
+          inwardIssue: { id: String(testId) },
+          outwardIssue: { id: String(requirementId) }
+        })
+      });
+      const ok = response.status === 201 || response.status === 200;
+      results.push({ testId, success: ok, status: response.status });
+    }
+    
+    return { success: true, results };
+  } catch (e) {
+    console.error("linkCasesToRequirement exception:", e);
+    return { success: false, error: String(e) };
   }
 });
 
@@ -463,22 +559,75 @@ const getExecutionData = async (cycleId) => {
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
   if (response.status === 404) return [];
   const data = await response.json();
-  return data.value || [];
+  const value = data.value || [];
+  
+  if (value.length === 0) return [];
+  
+  if (typeof value[0] === 'object') {
+     // LEGACY MIGRATION: Auto-migrate objects to individual properties
+     console.log('Migrating legacy execution data to per-test storage');
+     const testIds = value.map(t => t.id);
+     
+     await Promise.all(value.map(t => 
+        api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(t)
+        })
+     ));
+     
+     await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(testIds)
+     });
+     
+     return value;
+  }
+  
+  // NEW MODE: value is an array of test IDs ["10001", "10002"]
+  const promises = value.map(async id => {
+     const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+     if (res.ok) {
+         const obj = await res.json();
+         return obj.value;
+     }
+     return null;
+  });
+  
+  const results = await Promise.all(promises);
+  return results.filter(r => r !== null);
 };
 
 const setExecutionData = async (cycleId, data) => {
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+  const testIds = data.map(t => t.id);
+  
+  await Promise.all(data.map(t => 
+     api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+       method: 'PUT',
+       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+       body: JSON.stringify(t)
+     })
+  ));
+  
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(testIds)
   });
+  
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error('Failed to set execution list:', errText);
+    throw new Error('Failed to save cycle data list: ' + errText);
+  }
 };
 
 resolver.define('getExecutionReport', async ({ payload }) => {
   const { projectId, config } = payload;
-  if (!config || !config.testCycleType) return { cycles: [] };
+  const cycleType = config?.testCycleType || 'Test Cycle';
   
-  const jql = `project = ${projectId} AND issuetype = "${config.testCycleType}" ORDER BY created DESC`;
+  const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
   const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -523,8 +672,36 @@ resolver.define('addTestToCycle', async ({ payload }) => {
       key: testCase.key,
       summary: testCase.summary,
       description: testCase.description,
-      status: 'Not Run'
+      status: 'Not Run',
+      rawFields: testCase.rawFields,
+      renderedFields: testCase.renderedFields
     });
+    await setExecutionData(cycleId, executionData);
+  }
+  return executionData;
+});
+
+resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
+  const { cycleId, testCases } = payload;
+  let executionData = await getExecutionData(cycleId);
+  
+  let changed = false;
+  for (const testCase of testCases) {
+    if (!executionData.some(t => t.id === testCase.id)) {
+      executionData.push({
+        id: testCase.id,
+        key: testCase.key,
+        summary: testCase.summary,
+        description: testCase.description,
+        status: 'Not Run',
+        rawFields: testCase.rawFields,
+        renderedFields: testCase.renderedFields
+      });
+      changed = true;
+    }
+  }
+
+  if (changed) {
     await setExecutionData(cycleId, executionData);
   }
   return executionData;
@@ -535,31 +712,96 @@ resolver.define('removeTestFromCycle', async ({ payload }) => {
   let executionData = await getExecutionData(cycleId);
   
   const updatedData = executionData.filter(t => t.id !== testId);
+  const testIds = updatedData.map(t => t.id);
   
-  await setExecutionData(cycleId, updatedData);
+  // Overwrite the execution array
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(testIds)
+  });
+  
+  // Delete the individual property
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
+     method: 'DELETE'
+  });
+  
   return updatedData;
 });
 
 resolver.define('updateTestStatus', async ({ payload }) => {
-  const { cycleId, testId, status, comment, evidence, evidences, linkedBugs, steps } = payload;
+  const { cycleId, testId, status, comment, evidence, evidences, linkedBugs, steps, iterations, projectId, takeover } = payload;
+  
+  let userData = null;
+  try {
+    const response = await api.asUser().requestJira(route`/rest/api/3/myself`);
+    if (response.ok) {
+      userData = await response.json();
+    }
+  } catch (e) {
+    console.error('Error fetching myself data', e);
+  }
+
+  let isAdmin = false;
+  if (projectId) {
+    try {
+      const permRes = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
+      if (permRes.ok) {
+        const permData = await permRes.json();
+        isAdmin = permData.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+      }
+    } catch (e) {
+      console.error('Error checking admin permissions', e);
+    }
+  }
+
+  let executorInfo = undefined;
+  if ((status && status !== 'Not Run' && status !== 'To Do' && userData) || (takeover && userData)) {
+    executorInfo = {
+      accountId: userData.accountId,
+      displayName: userData.displayName
+    };
+  }
+
   const executionData = await getExecutionData(cycleId);
   
+  let updatedTest = null;
   const updatedData = executionData.map(t => {
     if (t.id === testId) {
-      return { 
+      // Security check
+      if (!takeover && t.executedBy && userData && t.executedBy.accountId !== userData.accountId && !isAdmin) {
+        throw new Error('Solo el usuario que ejecutó la prueba original o un administrador puede modificarla.');
+      }
+
+      updatedTest = { 
         ...t, 
-        status: status || t.status, 
+        status: status !== undefined ? status : t.status, 
         comment: comment !== undefined ? comment : t.comment,
         evidence: evidence !== undefined ? evidence : t.evidence,
         evidences: evidences !== undefined ? evidences : t.evidences,
         linkedBugs: linkedBugs !== undefined ? linkedBugs : t.linkedBugs,
-        steps: steps !== undefined ? steps : t.steps
+        steps: steps !== undefined ? steps : t.steps,
+        iterations: iterations !== undefined ? iterations : t.iterations,
+        executedBy: executorInfo !== undefined ? executorInfo : t.executedBy
       };
+      return updatedTest;
     }
     return t;
   });
   
-  await setExecutionData(cycleId, updatedData);
+  if (updatedTest) {
+    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedTest)
+    });
+    
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error('Failed to save test data: ' + errText);
+    }
+  }
+  
   return updatedData;
 });
 
@@ -576,7 +818,7 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
     const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jql, fields: ['description', 'summary'], expand: 'renderedFields' })
+      body: JSON.stringify({ jql, fields: ['*all'], expand: 'renderedFields' })
     });
 
     const data = await response.json();
@@ -584,13 +826,17 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
 
     // Build a map: issueId -> renderedDescription
     const descMap = {};
+    const rawFieldsMap = {};
+    const renderedFieldsMap = {};
     for (const issue of issues) {
       descMap[issue.id] = issue.renderedFields?.description || issue.fields?.description || '';
+      rawFieldsMap[issue.id] = issue.fields || {};
+      renderedFieldsMap[issue.id] = issue.renderedFields || {};
     }
 
-    // Patch execution data with the fetched descriptions
+    // Patch execution data with the fetched descriptions and fields
     executionData = executionData.map(t =>
-      descMap[t.id] !== undefined ? { ...t, description: descMap[t.id] } : t
+      descMap[t.id] !== undefined ? { ...t, description: descMap[t.id], rawFields: rawFieldsMap[t.id], renderedFields: renderedFieldsMap[t.id] } : t
     );
 
     await setExecutionData(cycleId, executionData);
@@ -782,14 +1028,133 @@ resolver.define('getAttachmentContent', async ({ payload }) => {
   }
 });
 
+// === SLA & Business Hours Helpers ===
+function getEaster(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month, day);
+}
+
+function getNthDayOfMonth(year, month, dayOfWeek, n) {
+  let d = new Date(year, month, 1);
+  let count = 0;
+  while (d.getMonth() === month) {
+    if (d.getDay() === dayOfWeek) {
+      count++;
+      if (count === n) return d.getDate();
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return null;
+}
+
+function isHoliday(date) {
+  const year = date.getFullYear();
+  const month = date.getMonth(); // 0-11
+  const day = date.getDate();
+  
+  // Fijos Oficiales + Navidad/Fin de año
+  if (month === 0 && day === 1) return true; // 1 Ene
+  if (month === 4 && day === 1) return true; // 1 May
+  if (month === 8 && day === 16) return true; // 16 Sep
+  if (month === 11 && day === 24) return true; // 24 Dic
+  if (month === 11 && day === 25) return true; // 25 Dic
+  if (month === 11 && day === 31) return true; // 31 Dic
+  
+  // Móviles
+  if (month === 1 && day === getNthDayOfMonth(year, 1, 1, 1)) return true; // 1er Lunes Feb (5 Feb)
+  if (month === 2 && day === getNthDayOfMonth(year, 2, 1, 3)) return true; // 3er Lunes Mar (21 Mar)
+  if (month === 10 && day === getNthDayOfMonth(year, 10, 1, 3)) return true; // 3er Lunes Nov (20 Nov)
+  
+  // Jueves y Viernes Santo (Liverpool)
+  const easter = getEaster(year);
+  const juevesSanto = new Date(easter); juevesSanto.setDate(juevesSanto.getDate() - 3);
+  const viernesSanto = new Date(easter); viernesSanto.setDate(viernesSanto.getDate() - 2);
+  
+  if (month === juevesSanto.getMonth() && day === juevesSanto.getDate()) return true;
+  if (month === viernesSanto.getMonth() && day === viernesSanto.getDate()) return true;
+  
+  return false;
+}
+
+function getBusinessMilliseconds(startMs, endMs) {
+  if (!startMs || !endMs || startMs >= endMs) return 0;
+  
+  // Assume server time / issue time is mostly UTC or close to it,
+  // we adjust by treating the epoch as Mexico City time (UTC-6)
+  const tzOffsetMs = 6 * 60 * 60 * 1000; 
+  
+  const start = new Date(startMs - tzOffsetMs);
+  const end = new Date(endMs - tzOffsetMs);
+  
+  let current = new Date(start.getTime());
+  let totalMs = 0;
+  
+  while (current < end) {
+    const year = current.getUTCFullYear();
+    const month = current.getUTCMonth();
+    const date = current.getUTCDate();
+    const dayOfWeek = current.getUTCDay(); // 0=Sun, 1=Mon...
+    
+    let nextDay = new Date(Date.UTC(year, month, date + 1, 0, 0, 0));
+    let stepEnd = end < nextDay ? end : nextDay;
+    
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Not weekend
+      const localSimDate = new Date(year, month, date);
+      if (!isHoliday(localSimDate)) {
+        const startHour = 7;
+        const endHour = dayOfWeek === 5 ? 13 : 18; // Vie = 13:00, L-J = 18:00
+        
+        const workStart = new Date(Date.UTC(year, month, date, startHour, 0, 0));
+        const workEnd = new Date(Date.UTC(year, month, date, endHour, 0, 0));
+        
+        const overlapStart = current > workStart ? current : workStart;
+        const overlapEnd = stepEnd < workEnd ? stepEnd : workEnd;
+        
+        if (overlapStart < overlapEnd) {
+          totalMs += (overlapEnd - overlapStart);
+        }
+      }
+    }
+    current = nextDay;
+  }
+  
+  return totalMs;
+}
+
 // === Bug Resolution Time ===
 resolver.define('getBugsResolutionTime', async ({ payload }) => {
   const { bugKeys } = payload;
-  if (!bugKeys || !Array.isArray(bugKeys) || bugKeys.length === 0) return { averageHours: 0, bugDetails: [] };
+  if (!bugKeys || !Array.isArray(bugKeys) || bugKeys.length === 0) {
+    return {
+      nuevoAnalisis: 0,
+      analisisCurso: 0,
+      cursoResuelta: 0,
+      resueltaCerrada: 0,
+      averageHours: 0
+    };
+  }
+  
+  let sumNuevoAnalisis = 0, cntNuevoAnalisis = 0;
+  let sumAnalisisCurso = 0, cntAnalisisCurso = 0;
+  let sumCursoResuelta = 0, cntCursoResuelta = 0;
+  let sumResueltaCerrada = 0, cntResueltaCerrada = 0;
   
   let totalHours = 0;
-  let count = 0;
-  const bugDetails = [];
+  let countTotal = 0;
+  let bugsReopened = 0;
 
   for (const key of bugKeys) {
     try {
@@ -797,36 +1162,61 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
       if (response.status === 200) {
         const issue = await response.json();
         const changelog = issue.changelog?.histories || [];
+        const createdTime = new Date(issue.fields?.created || Date.now()).getTime();
         
-        let inAnalysisTime = null;
-        let inValidationTime = null;
+        let times = { atencion: null, resuelta: null, cerrada: null };
+        let isReopened = false;
         
-        // Find the earliest "En analisis" and the latest "En validacion"
         for (const history of changelog) {
           const statusItem = history.items.find(item => item.field === 'status');
           if (statusItem) {
             const toString = (statusItem.toString || '').toLowerCase();
-            const created = new Date(history.created).getTime();
+            const fromString = (statusItem.fromString || '').toLowerCase();
+            const time = new Date(history.created).getTime();
             
-            if (toString.includes('analisis') || toString.includes('análisis') || toString === 'in progress') {
-              if (!inAnalysisTime || created < inAnalysisTime) {
-                inAnalysisTime = created;
-              }
+            const isTerminal = (str) => str.includes('cerrada') || str.includes('closed') || str.includes('resuelta') || str.includes('resolved') || str.includes('done');
+            if (isTerminal(fromString) && !isTerminal(toString)) {
+              isReopened = true;
             }
-            if (toString.includes('validacion') || toString.includes('validación') || toString === 'done' || toString === 'resolved') {
-              if (!inValidationTime || created > inValidationTime) {
-                inValidationTime = created;
-              }
+            
+            if (toString.includes('analisis') || toString.includes('análisis') || toString.includes('curso') || toString === 'in progress' || toString.includes('revis') || toString.includes('review')) {
+              if (!times.atencion || time < times.atencion) times.atencion = time;
+            } else if (toString.includes('resuelta') || toString === 'resolved' || toString === 'done' || toString.includes('listo')) {
+              if (!times.resuelta || time < times.resuelta) times.resuelta = time;
+            } else if (toString.includes('cerrada') || toString === 'closed' || toString.includes('aceptado')) {
+              if (!times.cerrada || time < times.cerrada) times.cerrada = time;
             }
           }
         }
         
-        if (inAnalysisTime && inValidationTime && inValidationTime > inAnalysisTime) {
-          const diffMs = inValidationTime - inAnalysisTime;
-          const diffHours = diffMs / (1000 * 60 * 60);
-          totalHours += diffHours;
-          count++;
-          bugDetails.push({ key, hours: diffHours });
+        // Diffs in ms using Business Hours
+        if (times.atencion) {
+          sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.atencion);
+          cntNuevoAnalisis++;
+        } else if (times.resuelta) {
+          sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.resuelta);
+          cntNuevoAnalisis++;
+        }
+        
+        if (times.atencion && times.resuelta && times.resuelta > times.atencion) {
+          sumAnalisisCurso += getBusinessMilliseconds(times.atencion, times.resuelta);
+          cntAnalisisCurso++;
+        }
+        
+        if (times.resuelta && times.cerrada && times.cerrada > times.resuelta) {
+          sumCursoResuelta += getBusinessMilliseconds(times.resuelta, times.cerrada);
+          cntCursoResuelta++;
+        }
+        
+        // Total (legacy or simple overall: Nuevo -> Resuelta/Cerrada)
+        if (isReopened) {
+          bugsReopened++;
+        }
+
+        const finalTime = times.cerrada || times.resuelta;
+        if (finalTime && finalTime > createdTime) {
+          totalHours += getBusinessMilliseconds(createdTime, finalTime) / (1000 * 60 * 60);
+          countTotal++;
         }
       }
     } catch (e) {
@@ -834,10 +1224,51 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
     }
   }
   
+  const toHours = (sum, cnt) => cnt > 0 ? (sum / cnt) / (1000 * 60 * 60) : 0;
+
   return {
-    averageHours: count > 0 ? (totalHours / count) : 0,
-    bugDetails
+    nuevoAnalisis: toHours(sumNuevoAnalisis, cntNuevoAnalisis),
+    analisisCurso: toHours(sumAnalisisCurso, cntAnalisisCurso),
+    cursoResuelta: toHours(sumCursoResuelta, cntCursoResuelta),
+    resueltaCerrada: toHours(sumResueltaCerrada, cntResueltaCerrada),
+    averageHours: countTotal > 0 ? (totalHours / countTotal) : 0,
+    reopenedCount: bugsReopened
   };
+});
+
+resolver.define('getBugDetailsBatch', async ({ payload }) => {
+  const { bugKeys } = payload;
+  if (!bugKeys || bugKeys.length === 0) return [];
+  
+  try {
+    const jql = `key in (${bugKeys.join(',')})`;
+    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jql,
+        fields: ['summary', 'priority', 'status', 'assignee', 'resolution']
+      })
+    });
+    
+    if (!response.ok) {
+       console.error("Error fetching bugs", await response.text());
+       return [];
+    }
+    
+    const data = await response.json();
+    return (data.issues || []).map(issue => ({
+      key: issue.key,
+      summary: issue.fields.summary,
+      priority: issue.fields.priority?.name || 'N/A',
+      status: issue.fields.status?.name || 'N/A',
+      assignee: issue.fields.assignee?.displayName || 'Unassigned',
+      resolution: issue.fields.resolution?.name || 'Unresolved'
+    }));
+  } catch (e) {
+    console.error("Exception fetching bugs", e);
+    return [];
+  }
 });
 
 export const handler = resolver.getDefinitions();

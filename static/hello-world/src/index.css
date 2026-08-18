@@ -553,6 +553,8 @@ body {
   border-radius: 12px;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  text-align: center;
   gap: 0.5rem;
   transition: transform 0.2s, box-shadow 0.2s;
   box-shadow: 0 4px 6px rgba(0,0,0,0.05);
@@ -562,7 +564,7 @@ body {
 
 .kpi-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 12px rgba(0,0,0,0.1);
+  box-shadow: 0 8px 12px rgba(0,0,0,0.1);
 }
 
 .kpi-card .kpi-title {
@@ -572,6 +574,7 @@ body {
   text-transform: uppercase;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
 }
 
@@ -588,7 +591,9 @@ body {
   flex-direction: column;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
 }
 
 .chart-card h3 {
@@ -695,3 +700,53 @@ body {
   color: white;
   font-weight: bold;
 }
+
+@media print {
+  body {
+    background: white;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  .nav-tabs, .header button, .header select {
+    display: none !important;
+  }
+  .tab-layout {
+    padding: 0 !important;
+  }
+  .chart-card {
+    box-shadow: none !important;
+    border: 1px solid #ddd !important;
+    break-inside: avoid;
+  }
+  .kpi-row {
+    break-inside: avoid;
+  }
+}
+
+/* PDF Generation overrides */
+.html2pdf-active, .html2pdf-active body, .html2pdf-active #root, .html2pdf-active .tab-layout, .html2pdf-active .main-content {
+  display: block !important;
+  overflow: visible !important;
+  height: auto !important;
+  position: static !important;
+}
+.html2pdf-active .chart-card {
+  display: block !important;
+  page-break-inside: avoid !important;
+  break-inside: avoid !important;
+}
+.html2pdf-active .kpi-row {
+  display: block !important;
+  page-break-inside: avoid !important;
+  break-inside: avoid !important;
+}
+.html2pdf-active .kpi-card {
+  display: inline-block !important;
+  width: 48% !important;
+  margin: 1% !important;
+  box-sizing: border-box !important;
+}
+.html2pdf-active .no-print {
+  display: none !important;
+}
+

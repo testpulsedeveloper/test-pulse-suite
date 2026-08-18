@@ -25,6 +25,7 @@ export default function LoginScreen() {
 
   const redirectUri = AuthSession.makeRedirectUri({
     scheme: 'testpulse',
+    path: 'oauthredirect',
     useProxy: false
   });
 
