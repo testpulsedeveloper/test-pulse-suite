@@ -2580,7 +2580,7 @@ function App() {
         </div>
         
         <div className="tab-content" style={{ background: 'var(--bg-main)' }}>
-          <div className="kpi-container">
+          <div className="kpi-row">
             <div className="kpi-card">
               <div className="kpi-title" style={{ color: 'var(--text-secondary)' }}>TOTAL CASOS</div>
               <div className="kpi-value">{totalCases}</div>
