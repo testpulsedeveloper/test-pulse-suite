@@ -1150,19 +1150,9 @@ function App() {
                   </table>
                 </div>
                 <div style={{ marginTop: '0.8rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <button onClick={handleSaveBulkConfig} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
-                    Guardar Configuración por Defecto
-                  </button>
                   <button onClick={() => setBulkFieldMapping({})} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', color: 'var(--danger-color)' }}>
                     Limpiar Mapeo
                   </button>
-                  <button onClick={handleExportMapping} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
-                    Exportar Mapeo
-                  </button>
-                  <label className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', cursor: 'pointer', margin: 0, display: 'inline-flex', alignItems: 'center' }}>
-                    Importar Mapeo
-                    <input type="file" accept=".json,.txt" onChange={handleImportMapping} style={{ display: 'none' }} />
-                  </label>
                 </div>
               </div>
             )}
