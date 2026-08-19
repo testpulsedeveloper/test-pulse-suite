@@ -692,7 +692,7 @@ Test Steps:
           if (fieldId !== 'summary' && fieldId !== 'description' && fieldId !== 'IGNORE' && r.all[header] && r.all[header].trim() !== '') {
             const schema = bulkFieldSchema[fieldId];
             const val = r.all[header].trim();
-            if (schema && (schema.schema || schema.allowedValues)) {
+            if (schema) {
               const isArray = schema.schema ? schema.schema.type === 'array' : false;
               
               let valuesToProcess = isArray ? val.split(',').map(s => s.trim()).filter(Boolean) : [val];
@@ -710,13 +710,16 @@ Test Steps:
                 }
                 
                 if (Object.keys(optObj).length === 0) {
-                  // Fallback: If we didn't match anything or allowedValues is missing
+                  // Fallback: Si el campo es custom y no tiene metadata, asumimos que es un select.
                   if (schema.schema && (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component')) {
                     optObj = { name: singleVal };
                   } else if (schema.schema && schema.schema.custom && schema.schema.custom.includes('select')) {
                     optObj = { value: singleVal };
+                  } else if (!schema.schema && fieldId.startsWith('customfield_')) {
+                    // Xray fields often lack schema in fallback, so force { value: val }
+                    optObj = { value: singleVal };
                   } else {
-                    optObj = { id: singleVal, name: singleVal };
+                    optObj = singleVal; // If all else fails, use the raw string
                   }
                 }
                 fieldObjects.push(optObj);
