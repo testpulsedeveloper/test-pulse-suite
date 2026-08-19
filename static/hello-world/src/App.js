@@ -688,8 +688,8 @@ Test Steps:
           if (fieldId !== 'summary' && fieldId !== 'description' && fieldId !== 'IGNORE' && r.all[header] && r.all[header].trim() !== '') {
             const schema = bulkFieldSchema[fieldId];
             const val = r.all[header].trim();
-            if (schema && schema.schema && schema.schema.type) {
-              const isArray = schema.schema.type === 'array';
+            if (schema && (schema.schema || schema.allowedValues)) {
+              const isArray = schema.schema ? schema.schema.type === 'array' : false;
               
               let valuesToProcess = isArray ? val.split(',').map(s => s.trim()).filter(Boolean) : [val];
               let fieldObjects = [];
@@ -699,17 +699,17 @@ Test Steps:
                 if (schema.allowedValues && Array.isArray(schema.allowedValues)) {
                   const matchedOption = schema.allowedValues.find(v => (v.value || v.name || '').toLowerCase() === singleVal.toLowerCase());
                   if (matchedOption) {
-                    if (matchedOption.id !== undefined) optObj.id = matchedOption.id;
-                    if (matchedOption.name !== undefined) optObj.name = matchedOption.name;
-                    if (matchedOption.value !== undefined) optObj.value = matchedOption.value;
+                    if (matchedOption.id !== undefined) optObj.id = String(matchedOption.id);
+                    if (matchedOption.name !== undefined) optObj.name = String(matchedOption.name);
+                    if (matchedOption.value !== undefined) optObj.value = String(matchedOption.value);
                   }
                 }
                 
                 if (Object.keys(optObj).length === 0) {
                   // Fallback: If we didn't match anything or allowedValues is missing
-                  if (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component') {
+                  if (schema.schema && (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component')) {
                     optObj = { name: singleVal };
-                  } else if (schema.schema.custom && schema.schema.custom.includes('select')) {
+                  } else if (schema.schema && schema.schema.custom && schema.schema.custom.includes('select')) {
                     optObj = { value: singleVal };
                   } else {
                     optObj = { id: singleVal, name: singleVal };
