@@ -1000,8 +1000,8 @@ resolver.define('bulkCreateTestCases', async ({ payload }) => {
       }
     );
     const data = await response.json();
-    if (data.successful) {
-      results.push(...data.successful.map(item => ({ key: item.key, id: item.id, success: true })));
+    if (data.issues) {
+      results.push(...data.issues.map(item => ({ key: item.key, id: item.id, success: true })));
     }
     if (data.errors) {
       results.push(...data.errors.map(err => ({ ...err, success: false })));
