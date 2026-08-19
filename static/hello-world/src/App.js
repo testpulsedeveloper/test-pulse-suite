@@ -573,13 +573,13 @@ function App() {
       const schema = bulkFieldSchema[fieldId];
       if (schema && schema.allowedValues && Array.isArray(schema.allowedValues)) {
         // Build a lowercase map of valid options for case-insensitive comparison
-        const allowed = schema.allowedValues.map(v => (v.value || '').toLowerCase());
+        const allowed = schema.allowedValues.map(v => (v.value || v.name || '').toLowerCase());
         bulkPreview.forEach((row) => {
           const val = row.all[header];
           if (val && val.trim() !== '') {
             if (!allowed.includes(val.trim().toLowerCase())) {
               validationErrors.push({
-                message: `Fila ${row.row}: El valor "${val}" no es válido para el campo "${schema.name || fieldId}". Valores permitidos: ${schema.allowedValues.map(v => v.value).join(', ')}`
+                message: `Fila ${row.row}: El valor "${val}" no es válido para el campo "${schema.name || fieldId}". Valores permitidos: ${schema.allowedValues.map(v => v.value || v.name).join(', ')}`
               });
             }
           }
@@ -640,8 +640,14 @@ function App() {
             const val = r.all[header].trim();
             if (schema && schema.allowedValues && Array.isArray(schema.allowedValues)) {
               // Find the exact original value by matching lowercase (since validation passed)
-              const matchedOption = schema.allowedValues.find(v => (v.value || '').toLowerCase() === val.toLowerCase());
-              fields[fieldId] = matchedOption ? { value: matchedOption.value } : { value: val };
+              const matchedOption = schema.allowedValues.find(v => (v.value || v.name || '').toLowerCase() === val.toLowerCase());
+              if (matchedOption) {
+                if (matchedOption.id) fields[fieldId] = { id: matchedOption.id };
+                else if (matchedOption.name) fields[fieldId] = { name: matchedOption.name };
+                else fields[fieldId] = { value: matchedOption.value };
+              } else {
+                fields[fieldId] = { value: val };
+              }
             } else {
               fields[fieldId] = val;
             }
