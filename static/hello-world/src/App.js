@@ -642,9 +642,15 @@ function App() {
               // Find the exact original value by matching lowercase (since validation passed)
               const matchedOption = schema.allowedValues.find(v => (v.value || v.name || '').toLowerCase() === val.toLowerCase());
               if (matchedOption) {
-                if (matchedOption.id) fields[fieldId] = { id: matchedOption.id };
-                else if (matchedOption.name) fields[fieldId] = { name: matchedOption.name };
-                else fields[fieldId] = { value: matchedOption.value };
+                const optObj = matchedOption.id ? { id: String(matchedOption.id) } : 
+                               (matchedOption.name ? { name: String(matchedOption.name) } : 
+                               { value: String(matchedOption.value) });
+                // If it's a multi-select or checkbox (array type), wrap the object in an array
+                if (schema.schema && schema.schema.type === 'array') {
+                  fields[fieldId] = [optObj];
+                } else {
+                  fields[fieldId] = optObj;
+                }
               } else {
                 fields[fieldId] = { value: val };
               }
