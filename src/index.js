@@ -1403,26 +1403,30 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     const data = await response.json();
     const history = [];
     
-    // For each cycle, read its execution data
-    await Promise.all((data.issues || []).map(async (cycle) => {
-      const execRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycle.id}/properties/execution`);
-      if (execRes.status === 200) {
-        const execData = await execRes.json();
-        const value = execData.value || [];
-        const testExec = value.find(t => String(t.id) === String(testId));
-        if (testExec) {
-          history.push({
-            cycleId: cycle.id,
-            cycleKey: cycle.key,
-            cycleSummary: cycle.fields.summary,
-            status: testExec.status || 'Not Run',
-            executedBy: testExec.executedBy,
-            iterations: testExec.iterations || [],
-            comment: testExec.comment
-          });
+    // For each cycle, read its execution data sequentially to avoid rate limits
+    for (const cycle of (data.issues || [])) {
+      try {
+        const execRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycle.id}/properties/execution`);
+        if (execRes.status === 200) {
+          const execData = await execRes.json();
+          const value = execData.value || [];
+          const testExec = value.find(t => String(t.id) === String(testId));
+          if (testExec) {
+            history.push({
+              cycleId: cycle.id,
+              cycleKey: cycle.key,
+              cycleSummary: cycle.fields.summary,
+              status: testExec.status || 'Not Run',
+              executedBy: testExec.executedBy,
+              iterations: testExec.iterations || [],
+              comment: testExec.comment
+            });
+          }
         }
+      } catch (err) {
+        console.error("Error fetching execution for cycle " + cycle.key, err);
       }
-    }));
+    }
     
     return history;
   } catch (e) {
