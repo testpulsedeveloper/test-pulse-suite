@@ -638,21 +638,40 @@ function App() {
           if (fieldId !== 'summary' && fieldId !== 'description' && fieldId !== 'IGNORE' && r.all[header] && r.all[header].trim() !== '') {
             const schema = bulkFieldSchema[fieldId];
             const val = r.all[header].trim();
-            if (schema && schema.allowedValues && Array.isArray(schema.allowedValues)) {
-              // Find the exact original value by matching lowercase (since validation passed)
-              const matchedOption = schema.allowedValues.find(v => (v.value || v.name || '').toLowerCase() === val.toLowerCase());
-              if (matchedOption) {
-                const optObj = matchedOption.id ? { id: String(matchedOption.id) } : 
-                               (matchedOption.name ? { name: String(matchedOption.name) } : 
-                               { value: String(matchedOption.value) });
-                // If it's a multi-select or checkbox (array type), wrap the object in an array
-                if (schema.schema && schema.schema.type === 'array') {
-                  fields[fieldId] = [optObj];
-                } else {
-                  fields[fieldId] = optObj;
+            if (schema && schema.schema && schema.schema.type) {
+              const isArray = schema.schema.type === 'array';
+              
+              let valuesToProcess = isArray ? val.split(',').map(s => s.trim()).filter(Boolean) : [val];
+              let fieldObjects = [];
+
+              valuesToProcess.forEach(singleVal => {
+                let optObj = {};
+                if (schema.allowedValues && Array.isArray(schema.allowedValues)) {
+                  const matchedOption = schema.allowedValues.find(v => (v.value || v.name || '').toLowerCase() === singleVal.toLowerCase());
+                  if (matchedOption) {
+                    if (matchedOption.id !== undefined) optObj.id = matchedOption.id;
+                    if (matchedOption.name !== undefined) optObj.name = matchedOption.name;
+                    if (matchedOption.value !== undefined) optObj.value = matchedOption.value;
+                  }
                 }
+                
+                if (Object.keys(optObj).length === 0) {
+                  // Fallback: If we didn't match anything or allowedValues is missing
+                  if (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component') {
+                    optObj = { name: singleVal };
+                  } else if (schema.schema.custom && schema.schema.custom.includes('select')) {
+                    optObj = { value: singleVal };
+                  } else {
+                    optObj = { id: singleVal, name: singleVal };
+                  }
+                }
+                fieldObjects.push(optObj);
+              });
+
+              if (isArray) {
+                fields[fieldId] = fieldObjects;
               } else {
-                fields[fieldId] = { value: val };
+                fields[fieldId] = fieldObjects[0] || val;
               }
             } else {
               fields[fieldId] = val;
