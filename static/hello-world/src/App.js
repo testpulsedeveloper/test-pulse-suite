@@ -281,10 +281,13 @@ function App() {
           } else {
             const excluded = ['id', 'key', 'project', 'issuetype', 'summary', 'description', 'status', 'resolution', 'created', 'updated'];
             const filtered = fields.filter(f => !excluded.includes(f.id));
-            if (filtered.length === 0) {
+                        if (filtered.length === 0) {
               setJiraFields([{ id: 'debug-filtered', name: `Error: Todos los ${fields.length} campos fueron filtrados` }]);
             } else {
               setJiraFields(filtered);
+              const schemaDict = {};
+              filtered.forEach(f => { schemaDict[f.id] = f; });
+              setBulkFieldSchema(schemaDict);
             }
           }
           const typeField = (fields.length ? fields : []).find(f => f.name === 'Tipo de ejecución');
@@ -292,7 +295,7 @@ function App() {
         } else {
           setJiraFields([{ id: 'debug-error', name: `Error: ${JSON.stringify(fields)}` }]);
         }
-        setBulkMappingLoaded(true);
+        // Removed setBulkMappingLoaded(true) here so handleOpenBulkPanel can fetch true createmeta schema
       }
     } catch (err) {
       console.error("loadData exception:", err);
