@@ -537,6 +537,26 @@ function App() {
     return { headers, rows };
   };
 
+  const handleDownloadTemplate = () => {
+    // Generate a basic template with Summary, Description, and the most common custom fields
+    const templateHeaders = ['Resumen (Obligatorio)', 'Descripción', 'Tipo de Prueba', 'Nivel de Prueba', 'Tipo de Ejecución'];
+    const templateRow = ['Ejemplo de caso de prueba', 'Pasos para probar el sistema...', 'Regresión', 'Sistema', 'Manual'];
+    
+    const csvContent = [
+      templateHeaders.join(','),
+      templateRow.map(v => '"' + v + '"').join(',')
+    ].join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'TestPulse_Plantilla_Carga_Masiva.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleBulkFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1021,6 +1041,22 @@ function App() {
                 onChange={handleBulkFileChange}
                 style={{ display: 'none' }}
               />
+              <button
+                className="btn-secondary"
+                onClick={handleDownloadTemplate}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                  padding: '0.45rem 1rem', borderRadius: '6px', cursor: 'pointer',
+                  fontSize: '0.9rem'
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                Descargar Plantilla CSV
+              </button>
               {bulkFile && bulkStatus !== 'uploading' && (
                 <button
                   onClick={resetBulkUpload}
