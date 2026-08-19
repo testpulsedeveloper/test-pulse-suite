@@ -3,6 +3,71 @@ import { invoke as forgeInvoke, view, router, requestJira } from '@forge/bridge'
 import { CreateIssueModal } from '@forge/jira-bridge';
 import './index.css';
 
+
+
+function textToAdf(text) {
+  if (!text) return { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: ' ' }] }] };
+  const lines = text.split('\n');
+  const content = [];
+  
+  let currentTable = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      if (currentTable) { content.push(currentTable); currentTable = null; }
+      continue;
+    }
+
+    if (line.startsWith('||') && line.endsWith('||')) {
+      if (!currentTable) {
+        currentTable = { type: 'table', attrs: { isNumberColumnEnabled: false, layout: "default" }, content: [] };
+      }
+      const cells = line.split('||').filter(Boolean).map(cell => ({
+        type: 'tableHeader',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: cell.trim() }] }]
+      }));
+      currentTable.content.push({ type: 'tableRow', content: cells });
+    } else if (line.startsWith('|') && line.endsWith('|')) {
+      if (!currentTable) {
+        currentTable = { type: 'table', attrs: { isNumberColumnEnabled: false, layout: "default" }, content: [] };
+      }
+      const cells = line.split('|').filter(Boolean).map(cell => ({
+        type: 'tableCell',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: cell.trim() }] }]
+      }));
+      currentTable.content.push({ type: 'tableRow', content: cells });
+    } else {
+      if (currentTable) { content.push(currentTable); currentTable = null; }
+      
+      const match = line.match(/^([^:]+):(.*)$/);
+      if (match) {
+        const strongText = match[1] + ':';
+        const restText = match[2];
+        const paraContent = [
+          { type: 'text', text: strongText, marks: [{ type: 'strong' }] }
+        ];
+        if (restText) {
+          paraContent.push({ type: 'text', text: restText });
+        }
+        content.push({ type: 'paragraph', content: paraContent });
+      } else {
+        content.push({
+          type: 'paragraph',
+          content: [{ type: 'text', text: line }]
+        });
+      }
+    }
+  }
+  if (currentTable) content.push(currentTable);
+
+  if (content.length === 0) {
+    content.push({ type: 'paragraph', content: [{ type: 'text', text: ' ' }] });
+  }
+
+  return { type: 'doc', version: 1, content };
+}
+
 const RichTextEditor = ({ value, onChange, disabled }) => {
   const editorRef = React.useRef(null);
 
@@ -684,10 +749,7 @@ Test Steps:
         // Add mapped description (or fallback)
         const descText = descCol ? r.all[descCol] : r.description;
         if (descText) {
-          fields.description = {
-            type: 'doc', version: 1,
-            content: [{ type: 'paragraph', content: [{ type: 'text', text: descText }] }]
-          };
+          fields.description = textToAdf(descText);
         }
 
         // Add other mapped fields, considering their schema types (e.g. options need {value: "x"})
