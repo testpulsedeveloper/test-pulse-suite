@@ -3546,7 +3546,7 @@ Test Steps:
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v0.1.77-next.8 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v0.1.77-next.9 © El Puerto de Liverpool
       </div>
     </div>
   );
