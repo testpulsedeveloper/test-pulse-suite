@@ -1428,10 +1428,20 @@ Test Steps:
     const loadTestCaseDetails = async (caseId) => {
     setTestCaseDetailsLoading(true);
     setTestCaseHistory([]);
-    const [details, history] = await Promise.all([
-      invoke('getTestCaseDetails', { caseId }),
-      invoke('getTestCaseHistory', { testId: caseId, projectId: selectedProjectId, config: projectConfig })
-    ]);
+    let details = { type: 'traditional', content: [] };
+    let history = [];
+    try {
+      details = await invoke('getTestCaseDetails', { caseId });
+    } catch(e) {
+      console.error('Error loading details:', e);
+    }
+    
+    try {
+      history = await invoke('getTestCaseHistory', { testId: caseId, projectId: selectedProjectId, config: projectConfig });
+    } catch(e) {
+      console.error('Error loading history:', e);
+    }
+    
     setTestCaseDetails(details || { type: 'traditional', content: [] });
     setTestCaseHistory(history || []);
     setTestCaseDetailsLoading(false);
@@ -2372,8 +2382,8 @@ Test Steps:
                       )}
                       
                       {/* --- DETALLES GENERALES DEL CASO --- */}
-                      <div style={{display: 'flex', alignItems: 'flex-start', gap: '1rem'}}>
-                        <div style={{flex: 1}}>
+                      <div style={{display: 'flex', flexDirection: 'column', gap: '1rem', paddingBottom: '1rem', borderBottom: '1px solid var(--ds-border)', marginBottom: '1rem'}}>
+                        <div style={{width: '100%'}}>
                           {test.description && (
                             <div 
                               style={{
@@ -2433,9 +2443,9 @@ Test Steps:
                             </div>
                           )}
                         </div>
-                        
-                        <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem'}}>
-                          <label className="btn-secondary" style={{padding: '0.4rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', borderRadius: '4px'}} title="Adjuntar Evidencia">
+                        <div style={{display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '0.8rem', marginTop: '0.5rem'}}>
+                          <span style={{fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-secondary)'}}>Evidencias Generales:</span>
+                          <label className="btn-secondary" style={{padding: '0.4rem 0.8rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', fontSize: '0.85rem'}} title="Adjuntar Evidencia (Archivo)">
                             <input 
                               type="file" 
                               style={{display: 'none'}} 
@@ -2445,15 +2455,15 @@ Test Steps:
                                 }
                               }}
                             />
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg> Archivo
                           </label>
                           <button 
                             className="btn-secondary" 
-                            style={{padding: '0.4rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', borderRadius: '4px'}} 
+                            style={{padding: '0.4rem 0.8rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', fontSize: '0.85rem'}} 
                             title="Grabar pantalla"
                             onClick={() => handleCaptureScreen(test.id, test.key)}
                           >
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg> Grabar
                           </button>
                         </div>
                       </div>
@@ -2469,7 +2479,7 @@ Test Steps:
                           <div style={{color: 'var(--text-secondary)', fontSize: '0.9rem', fontStyle: 'italic'}}>No hay iteraciones. Haz clic en "+ Agregar iteración" para comenzar.</div>
                         ) : (
                           test.iterations.map((iter, idx) => (
-                            <div key={iter.id} style={{display: 'flex', gap: '0.5rem', alignItems: 'flex-start', background: 'var(--bg-surface)', padding: '0.8rem', borderRadius: '6px', border: '1px solid var(--ds-border)'}}>
+                            <div key={iter.id} style={{display: 'flex', gap: '0.5rem', alignItems: 'flex-start', background: 'var(--bg-surface-hover)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--ds-border)'}}>
                               <div style={{fontWeight: 'bold', width: '24px', color: 'var(--text-secondary)'}}>#{idx + 1}</div>
                               <div style={{flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
                                 <input 
@@ -2486,7 +2496,7 @@ Test Steps:
                                   style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', resize: 'vertical'}}
                                 />
                               </div>
-                              <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '120px'}}>
+                              <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '160px', alignItems: 'flex-end'}}>
                                 <select 
                                   value={iter.status || 'Not Run'}
                                   onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}

@@ -1380,4 +1380,55 @@ resolver.define('getBugDetailsBatch', async ({ payload }) => {
   }
 });
 
+
+resolver.define('getTestCaseHistory', async ({ payload }) => {
+  try {
+    const { testId, projectId, config } = payload;
+    const cycleType = config?.testCycleType || 'Test Cycle';
+    const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+    
+    // Fetch all test cycles
+    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jql: `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`,
+        fields: ['summary', 'created'],
+        maxResults: 200
+      })
+    });
+    
+    if (!response.ok) return [];
+    
+    const data = await response.json();
+    const history = [];
+    
+    // For each cycle, read its execution data
+    await Promise.all((data.issues || []).map(async (cycle) => {
+      const execRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycle.id}/properties/execution`);
+      if (execRes.status === 200) {
+        const execData = await execRes.json();
+        const value = execData.value || [];
+        const testExec = value.find(t => String(t.id) === String(testId));
+        if (testExec) {
+          history.push({
+            cycleId: cycle.id,
+            cycleKey: cycle.key,
+            cycleSummary: cycle.fields.summary,
+            status: testExec.status || 'Not Run',
+            executedBy: testExec.executedBy,
+            iterations: testExec.iterations || [],
+            comment: testExec.comment
+          });
+        }
+      }
+    }));
+    
+    return history;
+  } catch (e) {
+    console.error("getTestCaseHistory error:", e);
+    return [];
+  }
+});
+
 export const handler = resolver.getDefinitions();
