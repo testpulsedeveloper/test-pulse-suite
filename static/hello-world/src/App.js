@@ -226,6 +226,7 @@ function App() {
   const [selectedTestCase, setSelectedTestCase] = useState(null);
   const [testCaseDetails, setTestCaseDetails] = useState({ type: 'traditional', content: [] });
   const [testCaseDetailsLoading, setTestCaseDetailsLoading] = useState(false);
+  const [testCaseHistory, setTestCaseHistory] = useState([]);
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
@@ -1424,10 +1425,15 @@ Test Steps:
     </div>
   );
 
-  const loadTestCaseDetails = async (caseId) => {
+    const loadTestCaseDetails = async (caseId) => {
     setTestCaseDetailsLoading(true);
-    const details = await invoke('getTestCaseDetails', { caseId });
+    setTestCaseHistory([]);
+    const [details, history] = await Promise.all([
+      invoke('getTestCaseDetails', { caseId }),
+      invoke('getTestCaseHistory', { testId: caseId, projectId: selectedProjectId, config: projectConfig })
+    ]);
     setTestCaseDetails(details || { type: 'traditional', content: [] });
+    setTestCaseHistory(history || []);
     setTestCaseDetailsLoading(false);
   };
 
@@ -1443,7 +1449,7 @@ Test Steps:
     if (!selectedTestCase) return null;
 
     return (
-      <div className="slide-panel-overlay" onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); }}>
+      <div className="slide-panel-overlay" onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}>
         <div className="slide-panel" onClick={e => e.stopPropagation()}>
           <div className="slide-panel-header">
             <div>
@@ -1451,7 +1457,7 @@ Test Steps:
               <h2>{selectedTestCase.summary}</h2>
               <span className="status-badge">{selectedTestCase.status}</span>
             </div>
-            <button className="close-btn" onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); }}>&times;</button>
+            <button className="close-btn" onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}>&times;</button>
           </div>
           <div className="slide-panel-body">
             <div style={{marginBottom: '1rem'}}>
@@ -1486,6 +1492,58 @@ Test Steps:
             ) : (
               <div className="empty-state" style={{padding: '2rem'}}>
                 <p>No issue description available.</p>
+              </div>
+            )}
+            
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2rem', marginBottom: '1rem' }}>
+              <h3>Execution History</h3>
+            </div>
+            {testCaseDetailsLoading ? (
+              <div className="empty-state" style={{padding: '1rem'}}>
+                <p>Loading history...</p>
+              </div>
+            ) : testCaseHistory.length > 0 ? (
+              <div className="table-container" style={{marginBottom: '2rem'}}>
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Cycle</th>
+                      <th>Status</th>
+                      <th>Executed By</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {testCaseHistory.map(h => (
+                      <tr key={h.cycleId}>
+                        <td>
+                          <strong>{h.cycleKey}</strong>
+                          <div style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{h.cycleSummary}</div>
+                        </td>
+                        <td>
+                          <span className={`status-badge status-${h.status.replace(/\s+/g, '-').toLowerCase()}`}>
+                            {h.status}
+                          </span>
+                        </td>
+                        <td>
+                          {h.executedBy ? (
+                            <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}>
+                              <div style={{width: '24px', height: '24px', borderRadius: '50%', backgroundColor: 'var(--accent-color)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold'}}>
+                                {h.executedBy.displayName.charAt(0)}
+                              </div>
+                              <span style={{fontSize: '0.85rem'}}>{h.executedBy.displayName}</span>
+                            </div>
+                          ) : (
+                            <span style={{color: 'var(--text-secondary)', fontSize: '0.85rem'}}>Unassigned</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="empty-state" style={{padding: '1rem'}}>
+                <p>This test case has not been executed in any cycle yet.</p>
               </div>
             )}
           </div>
