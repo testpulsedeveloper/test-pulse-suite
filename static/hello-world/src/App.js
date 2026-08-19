@@ -1122,6 +1122,9 @@ function App() {
                   <button onClick={handleSaveBulkConfig} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
                     Guardar Configuración por Defecto
                   </button>
+                  <button onClick={() => setBulkFieldMapping({})} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', color: 'var(--danger-color)' }}>
+                    Limpiar Mapeo
+                  </button>
                   <button onClick={handleExportMapping} className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
                     Exportar Mapeo
                   </button>
