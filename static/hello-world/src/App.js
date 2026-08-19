@@ -338,7 +338,7 @@ function App() {
             .map(key => ({ id: key, name: schemaFields[key].name }));
             
           setJiraFields(fieldsArray);
-        } else {
+                } else {
           // Fallback if createmeta fails
           const fields = await invoke('getFields');
           if (fields && Array.isArray(fields)) {
@@ -351,6 +351,10 @@ function App() {
                 setJiraFields([{ id: 'debug-filtered', name: `Error: Todos los ${fields.length} campos fueron filtrados` }]);
               } else {
                 setJiraFields(filtered);
+                // BUILD bulkFieldSchema from getFields!
+                const schemaDict = {};
+                filtered.forEach(f => { schemaDict[f.id] = f; });
+                setBulkFieldSchema(schemaDict);
               }
             }
           } else {
