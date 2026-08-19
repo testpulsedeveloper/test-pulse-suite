@@ -907,9 +907,8 @@ function App() {
             <button
               className="btn-secondary"
               onClick={() => { setShowBulkUpload(v => !v); resetBulkUpload(); }}
-              title="Opción deshabilitada temporalmente"
-              disabled={true}
-              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', opacity: 0.5, cursor: 'not-allowed' }}
+              title="Importar desde archivo CSV"
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="16 16 12 12 8 16"></polyline>
@@ -3305,6 +3304,10 @@ function App() {
           </div>
         </div>
       )}
+
+      <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
+        <strong>Test Pulse</strong> v0.1.77-next.8 © El Puerto de Liverpool
+      </div>
     </div>
   );
 }
