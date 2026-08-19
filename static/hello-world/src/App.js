@@ -769,8 +769,14 @@ Test Steps:
         break; // stop loop
       }
       
-      if (allErrors.length > 0 && issues && issues.length > 0) {
-        allErrors.push({ message: "DEBUG (Envia foto de esto a Gustavo): " + JSON.stringify(issues[0].fields) });
+            if (allErrors.length > 0 && issues && issues.length > 0) {
+        const debugInfo = {
+          payload: issues[0].fields,
+          schemaKeysLen: Object.keys(bulkFieldSchema).length,
+          schema10534: bulkFieldSchema['customfield_10534'] ? "EXISTS" : "MISSING",
+          raw_schema: bulkFieldSchema['customfield_10534']
+        };
+        allErrors.push({ message: "DEBUG (Envia foto de esto a Gustavo): " + JSON.stringify(debugInfo) });
       }
     }
 
