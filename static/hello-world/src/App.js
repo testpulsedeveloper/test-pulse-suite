@@ -2487,13 +2487,13 @@ Test Steps:
                                   placeholder="Datos de prueba (Ej: Usuario=admin, Pass=123)" 
                                   defaultValue={iter.expectedData || ''}
                                   onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
-                                  style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)'}}
+                                  style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', fontFamily: 'inherit'}}
                                 />
                                 <textarea 
                                   placeholder="Resultado actual..." 
                                   defaultValue={iter.actualResult || ''}
                                   onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
-                                  style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', resize: 'vertical'}}
+                                  style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', fontFamily: 'inherit', resize: 'vertical'}}
                                 />
                                   {(iter.evidences && iter.evidences.length > 0) && (
                                     <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.5rem', width: '100%'}}>

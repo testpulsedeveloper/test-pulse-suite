@@ -1410,7 +1410,24 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
         if (execRes.status === 200) {
           const execData = await execRes.json();
           const value = execData.value || [];
-          const testExec = value.find(t => String(t.id) === String(testId));
+          
+          let testExec = null;
+          if (value.length > 0) {
+            if (typeof value[0] === 'object') {
+              // Legacy array of objects
+              testExec = value.find(t => String(t.id) === String(testId));
+            } else {
+              // New array of IDs, check if testId is in the array
+              if (value.some(id => String(id) === String(testId))) {
+                const itemRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycle.id}/properties/exec_${testId}`);
+                if (itemRes.status === 200) {
+                  const itemData = await itemRes.json();
+                  testExec = itemData.value;
+                }
+              }
+            }
+          }
+          
           if (testExec) {
             history.push({
               cycleId: cycle.id,
