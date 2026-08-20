@@ -1797,6 +1797,7 @@ Test Steps:
       video.srcObject = stream;
       
       video.onloadedmetadata = () => {
+        video.play().then(() => {}).catch(e => console.error(e));
         setTimeout(async () => {
           const canvas = document.createElement('canvas');
           canvas.width = video.videoWidth;
@@ -1813,7 +1814,7 @@ Test Steps:
               await handleUploadEvidence(testId, testKey, file, iterId);
             }
           }, 'image/jpeg', 0.9);
-        }, 500);
+        }, 1500);
       };
     } catch(err) {
       console.error("Captura cancelada", err);
