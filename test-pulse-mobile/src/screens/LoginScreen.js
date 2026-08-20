@@ -106,7 +106,11 @@ export default function LoginScreen() {
       if (!targetSite) {
         targetSite = resourcesData[0];
       }
-      const cloudId = targetSite ? targetSite.id : resourcesData[0].id;
+      let cloudId = targetSite ? targetSite.id : resourcesData[0].id;
+      if (!targetSite || !JSON.stringify(targetSite).includes("liverpooldigital")) {
+        console.warn("Atlassian no devolvió liverpooldigital en accessible-resources. Forzando Cloud ID de producción...");
+        cloudId = "fff286b5-74d1-4f96-9f7c-173b914b2776";
+      }
 
       // 3. Save into context
       await login(`Bearer ${accessToken}`, cloudId);
