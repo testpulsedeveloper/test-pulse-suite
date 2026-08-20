@@ -97,8 +97,12 @@ export default function LoginScreen() {
 
       // Find the Liverpool Digital site specifically, otherwise fallback to the first one
       console.log('Available sites:', resourcesData.map(r => r.name || r.url));
-      // Buscar explícitamente "liverpooldeveloper" o la primera instancia disponible
-      let targetSite = resourcesData.find(r => (r.name && r.name.toLowerCase().includes('liverpool')) || (r.url && r.url.toLowerCase().includes('liverpool')));
+      // Buscar explícitamente "liverpooldigital" primero
+      let targetSite = resourcesData.find(r => (r.name && r.name.toLowerCase().includes('liverpooldigital')) || (r.url && r.url.toLowerCase().includes('liverpooldigital')));
+      // Si no existe, buscar cualquier otra de liverpool
+      if (!targetSite) {
+        targetSite = resourcesData.find(r => (r.name && r.name.toLowerCase().includes('liverpool')) || (r.url && r.url.toLowerCase().includes('liverpool')));
+      }
       if (!targetSite) {
         targetSite = resourcesData[0];
       }
