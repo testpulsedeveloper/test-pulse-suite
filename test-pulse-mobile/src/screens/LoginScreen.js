@@ -97,9 +97,10 @@ export default function LoginScreen() {
 
       // Find the Liverpool Digital site specifically, otherwise fallback to the first one
       console.log('Available sites:', resourcesData.map(r => r.name || r.url));
-      let targetSite = resourcesData.find(r => r.url === 'https://liverpooldigital.atlassian.net');
+      // Buscar explícitamente "liverpooldeveloper" o la primera instancia disponible
+      let targetSite = resourcesData.find(r => (r.name && r.name.toLowerCase().includes('liverpool')) || (r.url && r.url.toLowerCase().includes('liverpool')));
       if (!targetSite) {
-        targetSite = resourcesData.find(r => r.url && r.url.toLowerCase().includes('liverpool'));
+        targetSite = resourcesData[0];
       }
       const cloudId = targetSite ? targetSite.id : resourcesData[0].id;
 
