@@ -96,6 +96,7 @@ const RichTextEditor = ({ value, onChange, disabled }) => {
                                       }
                                     }}
                                     title="Renombrar evidencia"
+                                    disabled={!runningTests[test.id]}
                                     style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0 4px', lineHeight: 1}}
                                   >✏️</button>
                                   <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('bold'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>B</button>
@@ -2437,6 +2438,7 @@ Test Steps:
                                       handleDeleteEvidence(test.id, evId, idx, undefined);
                                     }}
                                     title="Quitar evidencia"
+                                    disabled={!runningTests[test.id]}
                                     style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
                                   >✕</button>
                                 </div>
@@ -2446,8 +2448,8 @@ Test Steps:
                         </div>
                         <div style={{display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '0.8rem', marginTop: '0.5rem'}}>
                           <span style={{fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-secondary)'}}>Evidencias Generales:</span>
-                          <label className="btn-secondary" style={{padding: '0.4rem 0.8rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', fontSize: '0.85rem'}} title="Adjuntar Evidencia (Archivo)">
-                            <input 
+                          <label className="btn-secondary" style={{padding: '0.4rem 0.8rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', fontSize: '0.85rem'}} title="Adjuntar Evidencia (Archivo)" style={!runningTests[test.id] ? {opacity: 0.5, pointerEvents: 'none'} : {}}>
+                            <input disabled={!runningTests[test.id]} 
                               type="file" 
                               style={{display: 'none'}} 
                               onChange={(e) => {
@@ -2463,6 +2465,8 @@ Test Steps:
                             style={{padding: '0.4rem 0.8rem', border: '1px solid var(--ds-border)', background: 'var(--bg-surface)', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', fontSize: '0.85rem'}} 
                             title="Grabar pantalla"
                             onClick={() => handleCaptureScreen(test.id, test.key)}
+                            disabled={!runningTests[test.id]}
+                            style={!runningTests[test.id] ? {opacity: 0.5, pointerEvents: 'none'} : {}}
                           >
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg> Grabar
                           </button>
@@ -2473,7 +2477,7 @@ Test Steps:
                       <div style={{display: 'flex', flexDirection: 'column', gap: '0.8rem'}}>
                         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                           <h4 style={{margin: 0}}>Iteraciones (Data-Driven)</h4>
-                          <button onClick={() => handleAddIteration(test)} className="btn-secondary" style={{fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}>+ Agregar iteración</button>
+                          <button onClick={() => handleAddIteration(test)} disabled={!runningTests[test.id]} className="btn-secondary" style={{fontSize: '0.8rem', padding: '0.3rem 0.6rem', opacity: !runningTests[test.id] ? 0.5 : 1}}>+ Agregar iteración</button>
                         </div>
                         
                         {(!test.iterations || test.iterations.length === 0) ? (
@@ -2487,12 +2491,14 @@ Test Steps:
                                   type="text" 
                                   placeholder="Datos de prueba (Ej: Usuario=admin, Pass=123)" 
                                   defaultValue={iter.expectedData || ''}
+                                  disabled={!runningTests[test.id]}
                                   onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
                                   style={{width: '100%', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', fontFamily: 'inherit'}}
                                 />
                                 <textarea 
                                   placeholder="Resultado actual..." 
                                   defaultValue={iter.actualResult || ''}
+                                  disabled={!runningTests[test.id]}
                                   onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
                                   style={{width: '100%', minHeight: '50px', padding: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', color: 'var(--text-primary)', fontFamily: 'inherit', resize: 'vertical'}}
                                 />
@@ -2526,6 +2532,7 @@ Test Steps:
                                                 }
                                               }}
                                               title="Renombrar evidencia"
+                                              disabled={!runningTests[test.id]}
                                               style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
                                             >✏️</button>
                                             <button
@@ -2534,6 +2541,7 @@ Test Steps:
                                                 handleDeleteEvidence(test.id, evId, idx, iter.id);
                                               }}
                                               title="Quitar evidencia"
+                                              disabled={!runningTests[test.id]}
                                               style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
                                             >✕</button>
                                           </div>
@@ -2547,6 +2555,7 @@ Test Steps:
                                   value={iter.status || 'Not Run'}
                                   onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
                                   className="status-badge"
+                                  disabled={!runningTests[test.id]}
                                   style={{width: '100%', padding: '0.4rem', border: 'none', cursor: 'pointer', background: getStatusColor(iter.status || 'Not Run'), color: getStatusTextColor(iter.status || 'Not Run')}}
                                 >
                                   <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Sin Ejecutar</option>
@@ -2555,8 +2564,9 @@ Test Steps:
                                   <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
                                 </select>
                                 <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
-                                  <label className="btn-secondary" style={{padding: '0.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} title="Adjuntar evidencia">
+                                  <label className="btn-secondary" style={{padding: '0.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} title="Adjuntar evidencia" style={!runningTests[test.id] ? {opacity: 0.5, pointerEvents: 'none'} : {}}>
                                     <input 
+                                      disabled={!runningTests[test.id]}
                                       type="file" 
                                       style={{display: 'none'}} 
                                       onChange={(e) => {
@@ -2567,7 +2577,7 @@ Test Steps:
                                     />
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
                                   </label>
-                                  <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}>
+                                  <button title="Grabar pantalla" className="btn-secondary" style={{padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)} disabled={!runningTests[test.id]} style={!runningTests[test.id] ? {opacity: 0.5, pointerEvents: 'none'} : {}}>
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                                   </button>
                                 </div>
