@@ -95,8 +95,10 @@ export default function LoginScreen() {
         throw new Error('No Jira sites accessible for this user.');
       }
 
-      // Normally we'd let the user select a site, but we assume the first one (Liverpool Digital)
-      const cloudId = resourcesData[0].id;
+      // Find the Liverpool Digital site specifically, otherwise fallback to the first one
+      console.log('Available sites:', resourcesData.map(r => r.name || r.url));
+      const targetSite = resourcesData.find(r => r.url && r.url.toLowerCase().includes('liverpool'));
+      const cloudId = targetSite ? targetSite.id : resourcesData[0].id;
 
       // 3. Save into context
       await login(`Bearer ${accessToken}`, cloudId);
