@@ -2409,7 +2409,7 @@ Test Steps:
                                   onClick={() => handlePreviewEvidence(ev)}
                                   style={{
                                     display: 'flex', alignItems: 'center', gap: '0.25rem', 
-                                    padding: '0.25rem 0.5rem', background: 'var(--ds-background-neutral)', 
+                                    padding: '0.25rem 0.5rem', background: 'var(--bg-surface-hover)', 
                                     borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem',
                                     border: '1px solid var(--ds-border)', color: 'var(--text-secondary)'
                                   }}
@@ -2506,7 +2506,7 @@ Test Steps:
                                             onClick={() => handlePreviewEvidence(ev)}
                                             style={{
                                               display: 'flex', alignItems: 'center', gap: '0.25rem', 
-                                              padding: '0.25rem 0.5rem', background: 'var(--ds-background-neutral)', 
+                                              padding: '0.25rem 0.5rem', background: 'var(--bg-surface-hover)', 
                                               borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem',
                                               border: '1px solid var(--ds-border)', color: 'var(--text-secondary)'
                                             }}
