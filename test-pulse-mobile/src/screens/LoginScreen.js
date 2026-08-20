@@ -9,7 +9,7 @@ WebBrowser.maybeCompleteAuthSession();
 
 // Credentials provided by the user
 const CLIENT_ID = 'JqrGfXYHkN9sKWV0g2HB40Zhau2UHyz5';
-const CLIENT_SECRET = 'YOUR_CLIENT_SECRET_HERE';
+const CLIENT_SECRET = 'ATOAF6tlaulAs8BVO3tY-qEIVxMFilb2GD1Kk7sd4AEdPcam1qZBme2FT8CLIsaKXLbsB187A47D';
 
 // Endpoints
 const discovery = {
@@ -97,7 +97,10 @@ export default function LoginScreen() {
 
       // Find the Liverpool Digital site specifically, otherwise fallback to the first one
       console.log('Available sites:', resourcesData.map(r => r.name || r.url));
-      const targetSite = resourcesData.find(r => r.url && r.url.toLowerCase().includes('liverpool'));
+      let targetSite = resourcesData.find(r => r.url === 'https://liverpooldigital.atlassian.net');
+      if (!targetSite) {
+        targetSite = resourcesData.find(r => r.url && r.url.toLowerCase().includes('liverpool'));
+      }
       const cloudId = targetSite ? targetSite.id : resourcesData[0].id;
 
       // 3. Save into context
