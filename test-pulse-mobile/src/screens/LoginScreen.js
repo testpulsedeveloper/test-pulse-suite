@@ -37,7 +37,7 @@ export default function LoginScreen() {
       responseType: AuthSession.ResponseType.Code,
       extraParams: {
         audience: 'api.atlassian.com',
-        prompt: 'consent',
+        prompt: 'login consent',
       },
     },
     discovery
