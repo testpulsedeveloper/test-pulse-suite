@@ -1885,9 +1885,15 @@ Test Steps:
 
   const handlePreviewEvidence = async (ev) => {
     const id = typeof ev === 'string' ? ev : ev.id;
-    const filename = typeof ev === 'string' ? `evidence_${id}.jpg` : (ev.filename || `evidence_${id}.jpg`);
+    let filename = typeof ev === 'string' ? `evidence_${id}.jpg` : (ev.filename || `evidence_${id}.jpg`);
+    
+    // Si no tiene extensión (ej. porque el usuario lo renombró "Evidencia 1"), asumimos que es imagen/video
+    const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
+    const isMedia = filename.match(/\.(png|jpg|jpeg|gif|pdf|mp4|mov|webm)$/i);
 
-    if (filename.match(/\.(png|jpg|jpeg|gif|pdf|mp4|mov|webm)$/i)) {
+    if (isMedia || !hasExtension) {
+      if (!hasExtension) filename += '.png'; // Para que el modal sepa renderizarlo
+      
       setPreviewModalData({ id, filename, loading: true });
       const data = await invoke('getAttachmentContent', { attachmentId: id });
       if (data && !data.error) {
