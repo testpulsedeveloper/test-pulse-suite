@@ -251,20 +251,6 @@ function App() {
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-
-  useEffect(() => {
-    const handleFocus = () => {
-      if (document.visibilityState === 'visible') {
-        setRefreshTrigger(prev => prev + 1);
-      }
-    };
-    document.addEventListener('visibilitychange', handleFocus);
-    window.addEventListener('focus', handleFocus);
-    return () => {
-      document.removeEventListener('visibilitychange', handleFocus);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, []);
   const [loading, setLoading] = useState(true);
   
   // Project Context & Config State
@@ -2034,30 +2020,23 @@ Test Steps:
   useEffect(() => {
     if (activeTab === 'execution' && selectedCycle) {
       // No usar setLoading(true) global para no parpadear el logo en cada auto-refresh
-      const fetchExec = () => {
-        invoke('getCycleExecution', { cycleId: selectedCycle.id })
-          .then(async (execution) => {
-            if (!execution || execution.length === 0) {
-              setCycleTests([]);
-              return;
-            }
-            const needsBackfill = execution.filter(t => !t.description);
-            if (needsBackfill.length > 0) {
-              const updated = await invoke('backfillDescriptions', {
-                cycleId: selectedCycle.id,
-                testIds: needsBackfill.map(t => t.id)
-              });
-              setCycleTests(updated || execution);
-            } else {
-              setCycleTests(execution);
-            }
-          });
-      };
-      
-      fetchExec();
-      const interval = setInterval(fetchExec, 10000); // 10-second polling
-      
-      return () => clearInterval(interval);
+      invoke('getCycleExecution', { cycleId: selectedCycle.id })
+        .then(async (execution) => {
+          if (!execution || execution.length === 0) {
+            setCycleTests([]);
+            return;
+          }
+          const needsBackfill = execution.filter(t => !t.description);
+          if (needsBackfill.length > 0) {
+            const updated = await invoke('backfillDescriptions', {
+              cycleId: selectedCycle.id,
+              testIds: needsBackfill.map(t => t.id)
+            });
+            setCycleTests(updated || execution);
+          } else {
+            setCycleTests(execution);
+          }
+        });
     } else if (activeTab === 'reports') {
       loadReportData();
     }
