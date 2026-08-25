@@ -1729,6 +1729,11 @@ Test Steps:
       });
       
       const attachments = await response.json();
+      if (!response.ok) {
+          console.error("Jira upload error:", attachments);
+          alert("Jira rechazó el archivo: " + (attachments.errorMessages ? attachments.errorMessages.join(", ") : "Error desconocido"));
+          return;
+      }
       if (attachments && attachments.length > 0) {
          const newEvidence = {
            id: attachments[0].id,
