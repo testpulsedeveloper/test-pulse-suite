@@ -617,11 +617,17 @@ const getExecutionData = async (cycleId) => {
       for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
           const chunk = missingIds.slice(i, i + CHUNK_SIZE);
           const chunkPromises = chunk.map(async (id) => {
-              const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+              let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+              if (res.status === 429) {
+                  console.log(`Hit 429 on exec_${id}, retrying once after 2 seconds...`);
+                  await new Promise(r => setTimeout(r, 2000));
+                  res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+              }
               if (res.ok) {
                   const data = await res.json();
                   return { key: `exec_${id}`, value: data.value };
               }
+              console.error(`Failed to fetch exec_${id} with status ${res.status}`);
               return null;
           });
           const resolvedChunk = await Promise.all(chunkPromises);
@@ -857,13 +863,17 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   }
   
   if (newTests.length > 0) {
-    // Escribir los nuevos uno por uno (o de forma segura) para no tronar por 429
-    for (const t of newTests) {
-       await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-         method: 'PUT',
-         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-         body: JSON.stringify(t)
-       });
+    // Procesar los nuevos concurrentemente en bloques de 10 para mayor velocidad sin timeout
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
+        const chunk = newTests.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(t => 
+           api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+             method: 'PUT',
+             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+             body: JSON.stringify(t)
+           })
+        ));
     }
     
     // Y luego actualizamos el array principal de IDs
@@ -943,12 +953,16 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   }
 
   if (changed) {
-    for (const nt of newTests) {
-      await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
-        method: 'PUT',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(nt)
-      });
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
+        const chunk = newTests.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(nt => 
+           api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
+             method: 'PUT',
+             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+             body: JSON.stringify(nt)
+           })
+        ));
     }
     
     await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
@@ -1060,7 +1074,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
     }
   }
   
-  return updatedData;
+  return { success: true };
 });
 
 // Backfills missing description snapshots for tests already in a cycle
