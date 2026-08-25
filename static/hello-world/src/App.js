@@ -250,6 +250,7 @@ function App() {
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [loading, setLoading] = useState(true);
   
   // Project Context & Config State
@@ -2032,7 +2033,7 @@ Test Steps:
     } else if (activeTab === 'reports') {
       loadReportData();
     }
-  }, [activeTab, selectedCycle]);
+  }, [activeTab, selectedCycle, refreshTrigger]);
 
 
   const handleCreateBug = (test) => {
