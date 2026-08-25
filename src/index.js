@@ -869,7 +869,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
   let executionData = await getExecutionData(cycleId);
   
   if (!executionData.some(t => t.id === testCase.id)) {
-    executionData.push({
+    const newTest = {
       id: testCase.id,
       key: testCase.key,
       summary: testCase.summary,
@@ -877,8 +877,23 @@ resolver.define('addTestToCycle', async ({ payload }) => {
       status: 'Not Run',
       rawFields: testCase.rawFields,
       renderedFields: testCase.renderedFields
+    };
+    executionData.push(newTest);
+    
+    // Escribir SOLO la propiedad del caso nuevo (no rescribir todos, evita rate limits)
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${newTest.id}`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(newTest)
     });
-    await setExecutionData(cycleId, executionData);
+    
+    // Actualizar el índice general
+    const testIds = executionData.map(t => t.id);
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(testIds)
+    });
   }
   return executionData;
 });
@@ -904,7 +919,23 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   }
 
   if (changed) {
-    await setExecutionData(cycleId, executionData);
+    // Escribir los nuevos uno por uno (o de forma segura) para no tronar por 429
+    const newTests = executionData.filter(t => testCases.some(tc => tc.id === t.id));
+    for (const nt of newTests) {
+      await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(nt)
+      });
+    }
+    
+    // Actualizar índice general
+    const testIds = executionData.map(t => t.id);
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(testIds)
+    });
   }
   return executionData;
 });
