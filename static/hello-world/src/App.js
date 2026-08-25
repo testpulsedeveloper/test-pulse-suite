@@ -1706,6 +1706,7 @@ Test Steps:
       if (updated) setCycleTests(updated);
     } catch (e) {
       console.error(e);
+      alert("Error guardando cambios de texto: " + (e.message || e));
     }
   };
 
