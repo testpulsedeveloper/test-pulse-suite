@@ -1664,10 +1664,15 @@ Test Steps:
     setLoading(false);
   };
 
-  const handleUpdateTestStatus = async (testId, status) => {
+  const handleUpdateTestStatus = async (testId, status, comment) => {
     if (!selectedCycle) return;
-    const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status });
-    setCycleTests(execution || []);
+    try {
+      const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
+      setCycleTests(execution || []);
+    } catch (e) {
+      console.error(e);
+      alert("Error actualizando prueba: " + (e.message || e));
+    }
   };
 
   const calculateIterationStatus = (iterations) => {
