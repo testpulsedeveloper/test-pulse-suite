@@ -634,7 +634,7 @@ function App() {
   };
 
     const handleDownloadTemplate = () => {
-    const csvContent = "\uFEFF" + `Resumen,Descripción,Link (is tested by),Nivel de Prueba,Tipo de Prueba,Tipo de Ejecución,Prioridad
+    const csvContent = "\uFEFF" + `Resumen,Description,Link (is tested by),Nivel de Prueba,Tipo de Prueba,Tipo de Ejecución,Prioridad
 LOGINING | Acceso exitoso al sistema con credenciales válidas.,"Pre-conditions:
 Usuario activo en base de datos.
 
@@ -654,38 +654,6 @@ Then el sistema valida la identidad.
     document.body.removeChild(link);
   };
 
-  const handleDownloadJiraConfig = () => {
-    const configContent = `{
-  "config.version" : "2.0",
-  "config.project.from.csv" : "false",
-  "config.encoding" : "UTF-8",
-  "config.file.id" : "a9683bcb-2e6d-4eea-b8c1-0a2d91005991",
-  "config.email.suffix" : "@",
-  "config.file.name" : "Plantilla_Test_Cases.csv",
-  "config.field.mappings" : {
-    "Resumen" : { "jira.field" : "summary", "userChanged" : "true", "manualMapping" : "false" },
-    "Descripción" : { "jira.field" : "description", "userChanged" : "true", "manualMapping" : "false" },
-    "Prioridad" : { "jira.field" : "priority", "userChanged" : "true", "manualMapping" : "false" },
-    "Nivel de Prueba" : { "userChanged" : "true", "manualMapping" : "false", "existing.custom.field" : "10530" },
-    "Tipo de Prueba" : { "userChanged" : "true", "manualMapping" : "false", "existing.custom.field" : "10535" },
-    "Tipo de Ejecución" : { "userChanged" : "true", "manualMapping" : "false", "existing.custom.field" : "10534" },
-    "Link (is tested by)" : { "jira.field" : "issuelink", "userChanged" : "true", "manualMapping" : "false" }
-  },
-  "config.csv.file.id" : null,
-  "config.value.mappings" : { },
-  "config.delimiter" : ",",
-  "config.date.format" : "dd/MMM/yy h:mm a"
-}`;
-
-    const blob = new Blob([configContent], { type: 'text/plain;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', 'Configuracion_Jira_TestPulse.txt');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
   const handleBulkFileChange = (e) => {
     const file = e.target.files?.[0];
@@ -1225,21 +1193,6 @@ Then el sistema valida la identidad.
                   <line x1="12" y1="15" x2="12" y2="3"></line>
                 </svg>
                 CSV
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={handleDownloadJiraConfig}
-                title="Descargar Mapeo Nativo de Jira (Config TXT)"
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
-                  padding: '0.45rem 1rem', borderRadius: '6px', cursor: 'pointer',
-                  fontSize: '0.9rem'
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
-                </svg>
-                Mapeo TXT
               </button>
               {bulkFile && bulkStatus !== 'uploading' && (
                 <button
