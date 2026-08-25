@@ -764,11 +764,14 @@ body {
   }
   .nav-brand {
     margin-right: 0 !important;
+    order: 1;
   }
   .nav-actions {
     margin-left: 0 !important;
+    order: 2;
   }
   .top-nav .nav-tabs {
+    order: 3;
     width: 100% !important;
     flex: none !important;
     flex-wrap: nowrap !important;
