@@ -1608,6 +1608,7 @@ Test Steps:
   };
 
   const handleCycleSelect = async (cycle) => {
+    setCycleTests([]); // clear old tests immediately
     setSelectedCycle(cycle);
     const execution = await invoke('getCycleExecution', { cycleId: cycle.id });
     setCycleTests(execution || []);
@@ -2032,14 +2033,12 @@ Test Steps:
 
   useEffect(() => {
     if (activeTab === 'execution' && selectedCycle) {
-      setLoading(true);
-      
+      // No usar setLoading(true) global para no parpadear el logo en cada auto-refresh
       const fetchExec = () => {
         invoke('getCycleExecution', { cycleId: selectedCycle.id })
           .then(async (execution) => {
             if (!execution || execution.length === 0) {
               setCycleTests([]);
-              setLoading(false);
               return;
             }
             const needsBackfill = execution.filter(t => !t.description);
@@ -2052,7 +2051,6 @@ Test Steps:
             } else {
               setCycleTests(execution);
             }
-            setLoading(false);
           });
       };
       
