@@ -390,6 +390,7 @@ function App() {
       setLoadError(safeMessage);
       setProjects([{ id: 'error', name: `Invoke Error: ${safeMessage}`, key: 'ERR' }]);
     } finally {
+      setRefreshTrigger(prev => prev + 1);
       setLoading(false);
     }
   };
