@@ -95,12 +95,7 @@ body {
 }
 
 
-  .top-nav {
-    flex-wrap: wrap !important;
-    height: auto !important;
-    padding: 1rem !important;
-    gap: 1rem;
-  }
+
   .nav-tabs {
   display: flex;
   gap: 1.5rem;
@@ -760,6 +755,23 @@ body {
 
 /* Mobile Responsive Styles */
 @media (max-width: 768px) {
+  .top-nav {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    padding: 1rem !important;
+    gap: 0.5rem;
+  }
+  .top-nav .nav-tabs {
+    width: 100% !important;
+    flex: none !important;
+    margin-left: 0 !important;
+    overflow-x: auto !important;
+    white-space: nowrap !important;
+    padding-bottom: 0.5rem;
+  }
+  .top-nav .nav-tab {
+    height: 40px !important;
+  }
   .tab-layout {
     flex-direction: column !important;
   }
