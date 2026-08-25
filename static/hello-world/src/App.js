@@ -703,6 +703,24 @@ Then el sistema valida la identidad.
       setBulkHeaders(headers);
       setBulkPreview(rows);
       setBulkStatus(rows.length === 0 ? 'error' : 'idle');
+      
+      // Auto-mapeo inteligente por nombre exacto
+      const autoMap = {};
+      headers.forEach(h => {
+          const lower = h.toLowerCase().trim();
+          if (lower.includes('resumen') || lower === 'summary') autoMap[h] = 'summary';
+          else if (lower.includes('descripci') || lower === 'description') autoMap[h] = 'description';
+          else if (lower.includes('prioridad') || lower === 'priority') autoMap[h] = 'priority';
+          else {
+              // Buscar en jiraFields por nombre exacto (ignorando mayusculas)
+              const match = jiraFields.find(jf => jf.name.toLowerCase() === lower);
+              if (match) {
+                 autoMap[h] = match.id;
+              }
+          }
+      });
+      // Mezclar autoMap con el estado actual (priorizando lo que ya existía, pero llenando los vacíos)
+      setBulkFieldMapping(prev => ({ ...autoMap, ...prev }));
     };
     reader.onerror = () => setBulkStatus('error');
     reader.readAsText(file, 'UTF-8');  // explicit UTF-8
