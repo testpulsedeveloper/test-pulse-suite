@@ -1633,7 +1633,8 @@ Then el sistema valida la identidad.
 
   const handleAddTestToCycle = async (testCase) => {
     if (!selectedCycle) return;
-    const execution = await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
+    await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
+    const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
     setCycleTests(execution || []);
   };
 
@@ -2251,10 +2252,11 @@ Then el sistema valida la identidad.
                       // Enviar en bloques de 20 para evitar el timeout de 25 segundos de Forge
                       for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                           const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
-                          lastExecutionData = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
+                          await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
                       }
                       
-                      setCycleTests(lastExecutionData || []);
+                      const finalExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+                      setCycleTests(finalExecution || []);
                       setSelectedTestsForCycle([]); // clear selection after adding
                     } catch(err) {
                       console.error(err);
