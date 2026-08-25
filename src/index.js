@@ -587,7 +587,7 @@ const getExecutionData = async (cycleId) => {
   
   // NEW MODE: value is an array of test IDs ["10001", "10002"]
   // To avoid HTTP 429 Rate Limits, we fetch ALL exec_* properties in ONE single request!
-  const bulkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=exec_*`);
+  const bulkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=*all`);
   if (!bulkRes.ok) {
      console.error("Bulk property fetch failed with status: " + bulkRes.status);
      return [];
