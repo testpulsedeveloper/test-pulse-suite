@@ -1640,8 +1640,8 @@ Then el sistema valida la identidad.
 
   const handleRemoveTestFromCycle = async (testId) => {
     if (!selectedCycle) return;
-    // Optimistic UI update could go here, but let's just wait for invoke
-    const execution = await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId });
+    await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId });
+    const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
     setCycleTests(execution || []);
   };
 
