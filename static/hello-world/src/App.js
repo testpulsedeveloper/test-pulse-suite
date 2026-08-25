@@ -228,6 +228,7 @@ function App() {
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
   const [runningTests, setRunningTests] = useState({});
+  const [isAddingAll, setIsAddingAll] = useState(false);
   const [previewImages, setPreviewImages] = useState({});
   const [previewModalData, setPreviewModalData] = useState(null);
   const [linkingBugTestId, setLinkingBugTestId] = useState(null); // id of test for which we show the bug-link input
@@ -2215,15 +2216,19 @@ Test Steps:
                   onClick={async () => {
                     const testsToAdd = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id));
                     if (testsToAdd.length === 0) return;
-                    setLoading(true);
-                    for (const test of testsToAdd) {
-                      await handleAddTestToCycle(test);
+                    setIsAddingAll(true);
+                    try {
+                      const execution = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: testsToAdd });
+                      setCycleTests(execution || []);
+                    } catch(err) {
+                      console.error(err);
+                      alert("Error al añadir casos: " + err.message);
                     }
-                    setLoading(false);
+                    setIsAddingAll(false);
                   }}
-                  disabled={loading}
+                  disabled={loading || isAddingAll}
                 >
-                  + Añadir todos
+                  {isAddingAll ? 'Añadiendo casos...' : '+ Añadir todos'}
                 </button>
               </div>
             </div>
