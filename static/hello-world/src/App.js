@@ -3645,8 +3645,8 @@ Test Steps:
         <div className="modal-overlay" style={{zIndex: 9999}}>
           <div className="modal-content glass" style={{width: '90%', height: '90%', maxWidth: '1200px', display: 'flex', flexDirection: 'column'}}>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem'}}>
-              <h2 style={{margin: 0, fontSize: '1.2rem', color: 'var(--text-primary)'}}>{previewModalData.filename}</h2>
-              <button className="btn-secondary" onClick={() => setPreviewModalData(null)}>✕ Cerrar</button>
+              <h2 style={{margin: 0, fontSize: '1.2rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1}}>{previewModalData.filename}</h2>
+              <button className="btn-secondary" onClick={() => setPreviewModalData(null)} style={{flexShrink: 0, marginLeft: '1rem', padding: '0.4rem 0.8rem', background: 'var(--danger-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', zIndex: 10000}}>✕ Cerrar</button>
             </div>
             <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'var(--bg-main)', borderRadius: '4px'}}>
               {previewModalData.loading ? (
