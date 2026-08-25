@@ -94,7 +94,14 @@ body {
   color: var(--accent-color);
 }
 
-.nav-tabs {
+
+  .top-nav {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    padding: 1rem !important;
+    gap: 1rem;
+  }
+  .nav-tabs {
   display: flex;
   gap: 1.5rem;
   height: 100%;
