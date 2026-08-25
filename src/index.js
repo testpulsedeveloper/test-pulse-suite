@@ -603,34 +603,32 @@ const getExecutionData = async (cycleId) => {
   }
   
   const bulkData = await bulkRes.json();
-  if (!bulkData.issues || bulkData.issues.length === 0) return [];
   
-  const properties = bulkData.issues[0].properties || {};
+  const properties = (bulkData.issues && bulkData.issues.length > 0) ? (bulkData.issues[0].properties || {}) : {};
   
-  // The 'properties' object will have keys like 'exec_10001', 'exec_10002', etc.
-  // Note: JQL search indexing can be delayed. If a test was just added, it might be in 'value' (fetched directly)
-  // but missing from the JQL search results.
   let mergedProps = { ...properties };
   
-  // If JQL search entirely failed to return properties (Jira bug with *all) OR if some properties are missing due to indexing delay:
   const missingIds = value.filter(id => !mergedProps[`exec_${id}`]);
   
   if (missingIds.length > 0) {
       console.log(`Fetching ${missingIds.length} missing properties directly to bypass JQL index delay...`);
-      // Fetch each missing property directly (this hits the DB directly, bypassing JQL cache)
-      const missingPropsPromises = missingIds.map(async (id) => {
-          const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
-          if (res.ok) {
-              const data = await res.json();
-              return { key: `exec_${id}`, value: data.value };
-          }
-          return null;
-      });
       
-      const resolvedMissing = await Promise.all(missingPropsPromises);
-      resolvedMissing.forEach(prop => {
-          if (prop) mergedProps[prop.key] = prop.value;
-      });
+      const CHUNK_SIZE = 15;
+      for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
+          const chunk = missingIds.slice(i, i + CHUNK_SIZE);
+          const chunkPromises = chunk.map(async (id) => {
+              const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+              if (res.ok) {
+                  const data = await res.json();
+                  return { key: `exec_${id}`, value: data.value };
+              }
+              return null;
+          });
+          const resolvedChunk = await Promise.all(chunkPromises);
+          resolvedChunk.forEach(prop => {
+              if (prop) mergedProps[prop.key] = prop.value;
+          });
+      }
   }
   
   const results = value.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
@@ -641,13 +639,18 @@ const getExecutionData = async (cycleId) => {
 const setExecutionData = async (cycleId, data) => {
   const testIds = data.map(t => t.id);
   
-  await Promise.all(data.map(t => 
-     api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-       method: 'PUT',
-       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-       body: JSON.stringify(t)
-     })
-  ));
+  // Procesar en chunks de 15 para evitar HTTP 429
+  const CHUNK_SIZE = 15;
+  for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+      const chunk = data.slice(i, i + CHUNK_SIZE);
+      await Promise.all(chunk.map(t => 
+         api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+           method: 'PUT',
+           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+           body: JSON.stringify(t)
+         })
+      ));
+  }
   
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
@@ -845,14 +848,14 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   }
   
   if (newTests.length > 0) {
-    // Solo hacemos PUT para los NUEVOS tests
-    await Promise.all(newTests.map(t => 
-       api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+    // Escribir los nuevos uno por uno (o de forma segura) para no tronar por 429
+    for (const t of newTests) {
+       await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
          method: 'PUT',
          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
          body: JSON.stringify(t)
-       })
-    ));
+       });
+    }
     
     // Y luego actualizamos el array principal de IDs
     await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {

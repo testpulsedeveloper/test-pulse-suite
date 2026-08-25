@@ -2045,7 +2045,7 @@ Then el sistema valida la identidad.
           const activeIds = testCases.map(t => t.id);
           const execution = rawExecution.filter(ex => activeIds.includes(ex.id));
           
-          const needsBackfill = execution.filter(t => !t.description);
+          const needsBackfill = execution.filter(t => t.description === undefined || t.description === null);
           if (needsBackfill.length > 0) {
             const updated = await invoke('backfillDescriptions', {
               cycleId: selectedCycle.id,
