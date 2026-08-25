@@ -1685,6 +1685,19 @@ Test Steps:
     }
   };
 
+  const handleDeleteIteration = async (test, iterId) => {
+    if (!window.confirm("¿Estás seguro de eliminar esta iteración?")) return;
+    try {
+      const newIterations = (test.iterations || []).filter(it => it.id !== iterId);
+      const newStatus = calculateIterationStatus(newIterations) || test.status;
+      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
+      if (updated) setCycleTests(updated);
+    } catch (e) {
+      console.error(e);
+      alert("Error eliminando iteración: " + (e.message || e));
+    }
+  };
+
   const handleIterationChange = async (test, iterId, field, value) => {
     try {
       const newIterations = test.iterations.map(it => it.id === iterId ? { ...it, [field]: value } : it);
@@ -2613,6 +2626,20 @@ Test Steps:
                                   )}
                               </div>
                               <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '160px', alignItems: 'flex-end'}}>
+                                {isAdmin && (
+                                  <button
+                                    onClick={() => handleDeleteIteration(test, iter.id)}
+                                    title="Eliminar Iteración"
+                                    disabled={!runningTests[test.id]}
+                                    style={{
+                                      background: 'none', border: 'none', cursor: 'pointer', 
+                                      color: 'var(--danger-color)', fontSize: '0.85rem', 
+                                      alignSelf: 'flex-end', padding: 0
+                                    }}
+                                  >
+                                    ✕ Eliminar Iteración
+                                  </button>
+                                )}
                                 <select 
                                   value={iter.status || 'Not Run'}
                                   onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
