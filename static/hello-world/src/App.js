@@ -251,6 +251,20 @@ function App() {
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        setRefreshTrigger(prev => prev + 1);
+      }
+    };
+    document.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
   const [loading, setLoading] = useState(true);
   
   // Project Context & Config State
