@@ -225,6 +225,7 @@ function App() {
   const [selectedCycle, setSelectedCycle] = useState(null);
   const [cycleTests, setCycleTests] = useState([]);
   const [planningFolder, setPlanningFolder] = useState('');
+  const [planningPriority, setPlanningPriority] = useState('');
   const [selectedTestsForCycle, setSelectedTestsForCycle] = useState([]); // execution data for selected cycle
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
@@ -2218,10 +2219,24 @@ Then el sistema valida la identidad.
                     <option key={f.id} value={f.id}>{f.path}</option>
                   ))}
                 </select>
+                <select
+                  value={planningPriority}
+                  onChange={e => {
+                      setPlanningPriority(e.target.value);
+                      setSelectedTestsForCycle([]); // reset selection on priority change
+                  }}
+                  className="status-badge"
+                  style={{ padding: '0.4rem', background: 'var(--bg-surface)' }}
+                >
+                  <option value="">Todas las Prioridades</option>
+                  {Array.from(new Set(testCases.map(tc => tc.rawFields?.priority?.name).filter(Boolean))).map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
                 <button 
                   className="btn-primary" 
                   onClick={async () => {
-                    const allAvailable = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id));
+                    const allAvailable = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) && !cycleTests.some(ct => ct.id === tc.id));
                     // Si hay tests seleccionados manualmente, usar esos. Si no, añadir todos los disponibles
                     const testsToAdd = selectedTestsForCycle.length > 0 
                       ? testCases.filter(tc => selectedTestsForCycle.includes(tc.id))
@@ -2230,8 +2245,16 @@ Then el sistema valida la identidad.
                     if (testsToAdd.length === 0) return;
                     setIsAddingAll(true);
                     try {
-                      const execution = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: testsToAdd });
-                      setCycleTests(execution || []);
+                      const CHUNK_SIZE = 20;
+                      let lastExecutionData = null;
+                      
+                      // Enviar en bloques de 20 para evitar el timeout de 25 segundos de Forge
+                      for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
+                          const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
+                          lastExecutionData = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
+                      }
+                      
+                      setCycleTests(lastExecutionData || []);
                       setSelectedTestsForCycle([]); // clear selection after adding
                     } catch(err) {
                       console.error(err);
@@ -2246,7 +2269,7 @@ Then el sistema valida la identidad.
               </div>
             </div>
             <div className="test-list">
-              {testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id)).map(test => (
+              {testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) && !cycleTests.some(ct => ct.id === tc.id)).map(test => (
                 <div 
                    key={test.id} 
                    className="test-card glass" 
