@@ -732,7 +732,7 @@ Then el sistema valida la identidad.
 
     setBulkStatus('uploading');
 
-    const CHUNK = 50; // enviamos de 50 en 50 para no saturar la API
+    const CHUNK = 20; // enviamos de 50 en 50 para no saturar la API
     let done = 0;
     let errorCount = 0;
     const allErrors = [];
