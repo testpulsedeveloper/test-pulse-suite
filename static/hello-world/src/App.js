@@ -2043,11 +2043,16 @@ Test Steps:
     if (activeTab === 'execution' && selectedCycle) {
       // No usar setLoading(true) global para no parpadear el logo en cada auto-refresh
       invoke('getCycleExecution', { cycleId: selectedCycle.id })
-        .then(async (execution) => {
-          if (!execution || execution.length === 0) {
+        .then(async (rawExecution) => {
+          if (!rawExecution || rawExecution.length === 0) {
             setCycleTests([]);
             return;
           }
+          
+          // Eliminar fantasmas: si el caso fue borrado físicamente de Jira, ya no existirá en testCases
+          const activeIds = testCases.map(t => t.id);
+          const execution = rawExecution.filter(ex => activeIds.includes(ex.id));
+          
           const needsBackfill = execution.filter(t => !t.description);
           if (needsBackfill.length > 0) {
             const updated = await invoke('backfillDescriptions', {

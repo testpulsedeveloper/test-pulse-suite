@@ -910,7 +910,7 @@ resolver.define('removeTestFromCycle', async ({ payload }) => {
   const { cycleId, testId } = payload;
   let executionData = await getExecutionData(cycleId);
   
-  const updatedData = executionData.filter(t => t.id !== testId);
+  const updatedData = executionData.filter(t => String(t.id) !== String(testId));
   const testIds = updatedData.map(t => t.id);
   
   // Overwrite the execution array
