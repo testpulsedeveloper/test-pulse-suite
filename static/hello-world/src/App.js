@@ -794,9 +794,8 @@ Then el sistema valida la identidad.
 
         // Add mapped description (or fallback)
         const descText = descCol ? r.all[descCol] : r.description;
-        if (descText) {
-          fields.description = textToAdf(descText);
-        }
+        // Si el campo esta vacio pero Jira lo exige, mandamos un espacio en blanco para que no falle.
+        fields.description = textToAdf(descText || " ");
 
         // Add other mapped fields, considering their schema types (e.g. options need {value: "x"})
         Object.entries(bulkFieldMapping).forEach(([header, fieldId]) => {
@@ -822,13 +821,15 @@ Then el sistema valida la identidad.
                 
                                 if (Object.keys(optObj).length === 0) {
                   // Fallback: Si el campo es custom y no tiene metadata, asumimos que es un select.
-                  if (schema.schema && (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component')) {
+                  if (schema.schema && (schema.schema.type === 'version' || schema.schema.type === 'component' || schema.schema.items === 'version' || schema.schema.items === 'component' || schema.schema.type === 'priority')) {
                     optObj = { name: singleVal };
                   } else if (schema.schema && (schema.schema.type === 'string' || schema.schema.type === 'number' || schema.schema.type === 'datetime' || schema.schema.type === 'date')) {
                     optObj = schema.schema.type === 'number' ? Number(singleVal) : singleVal;
                   } else if (fieldId.startsWith('customfield_')) {
                     // It's a custom field, but not a basic string/number. It's likely a radio button, select list, or Xray type.
                     optObj = { value: singleVal };
+                  } else if (fieldId === 'priority') {
+                    optObj = { name: singleVal };
                   } else {
                     optObj = singleVal; // If all else fails, use the raw string
                   }
