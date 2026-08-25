@@ -1838,7 +1838,7 @@ Test Steps:
 
   const handleCaptureScreen = async (testId, testKey, iterId) => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      alert("Tu navegador no soporta captura de pantalla nativa.");
+      alert("Tu dispositivo móvil no soporta grabar pantalla. Usa el botón 'Archivo' para subir o tomar una foto de la evidencia.");
       return;
     }
     try {
@@ -1882,7 +1882,7 @@ Test Steps:
       if (test) await handleTakeover(test);
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        alert("Tu navegador o entorno no soporta captura de pantalla nativa. Sube la evidencia manualmente.");
+        // En móviles, simplemente habilitamos la prueba sin intentar grabar pantalla ni lanzar alertas molestas
         setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
         return;
       }
