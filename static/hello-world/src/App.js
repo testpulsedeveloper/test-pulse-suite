@@ -224,7 +224,8 @@ function App() {
   const [testCycles, setTestCycles] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState(null);
   const [cycleTests, setCycleTests] = useState([]);
-  const [planningFolder, setPlanningFolder] = useState(''); // execution data for selected cycle
+  const [planningFolder, setPlanningFolder] = useState('');
+  const [selectedTestsForCycle, setSelectedTestsForCycle] = useState([]); // execution data for selected cycle
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
   const [runningTests, setRunningTests] = useState({});
@@ -2117,7 +2118,7 @@ Then el sistema valida la identidad.
         <h2>Test Plans</h2>
         <select 
           value={selectedPlanId} 
-          onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); }}
+          onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); setSelectedTestsForCycle([]); }}
           className="status-badge"
           style={{width: '100%', marginBottom: '1rem', padding: '0.5rem'}}
         >
@@ -2205,7 +2206,10 @@ Then el sistema valida la identidad.
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <select 
                   value={planningFolder} 
-                  onChange={e => setPlanningFolder(e.target.value)}
+                  onChange={e => {
+                      setPlanningFolder(e.target.value);
+                      setSelectedTestsForCycle([]); // reset selection on folder change
+                  }}
                   className="status-badge"
                   style={{ padding: '0.4rem', background: 'var(--bg-surface)' }}
                 >
@@ -2217,12 +2221,18 @@ Then el sistema valida la identidad.
                 <button 
                   className="btn-primary" 
                   onClick={async () => {
-                    const testsToAdd = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id));
+                    const allAvailable = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id));
+                    // Si hay tests seleccionados manualmente, usar esos. Si no, añadir todos los disponibles
+                    const testsToAdd = selectedTestsForCycle.length > 0 
+                      ? testCases.filter(tc => selectedTestsForCycle.includes(tc.id))
+                      : allAvailable;
+                      
                     if (testsToAdd.length === 0) return;
                     setIsAddingAll(true);
                     try {
                       const execution = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: testsToAdd });
                       setCycleTests(execution || []);
+                      setSelectedTestsForCycle([]); // clear selection after adding
                     } catch(err) {
                       console.error(err);
                       alert("Error al añadir casos: " + err.message);
@@ -2231,18 +2241,49 @@ Then el sistema valida la identidad.
                   }}
                   disabled={loading || isAddingAll}
                 >
-                  {isAddingAll ? 'Añadiendo casos...' : '+ Añadir todos'}
+                  {isAddingAll ? 'Añadiendo casos...' : (selectedTestsForCycle.length > 0 ? `+ Añadir (${selectedTestsForCycle.length})` : '+ Añadir todos')}
                 </button>
               </div>
             </div>
             <div className="test-list">
               {testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && !cycleTests.some(ct => ct.id === tc.id)).map(test => (
-                <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                  <div className="test-card-content">
-                    <span className="test-id">{test.key}</span>
-                    <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
+                <div 
+                   key={test.id} 
+                   className="test-card glass" 
+                   style={{
+                      display: 'flex', 
+                      justifyContent: 'space-between', 
+                      alignItems: 'center', 
+                      cursor: 'pointer',
+                      border: selectedTestsForCycle.includes(test.id) ? '1px solid var(--accent-color)' : ''
+                   }}
+                   onClick={() => {
+                      setSelectedTestsForCycle(prev => 
+                         prev.includes(test.id) ? prev.filter(id => id !== test.id) : [...prev, test.id]
+                      );
+                   }}
+                >
+                  <div className="test-card-content" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <input 
+                      type="checkbox" 
+                      checked={selectedTestsForCycle.includes(test.id)} 
+                      readOnly
+                      style={{ transform: 'scale(1.2)' }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                       <span className="test-id">{test.key}</span>
+                       <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
+                    </div>
                   </div>
-                  <button className="btn-secondary" onClick={() => handleAddTestToCycle(test)}>+ Add to Cycle</button>
+                  <button 
+                     className="btn-secondary" 
+                     onClick={(e) => {
+                        e.stopPropagation();
+                        handleAddTestToCycle(test);
+                     }}
+                  >
+                     + Add
+                  </button>
                 </div>
               ))}
             </div>
