@@ -1656,7 +1656,8 @@ Then el sistema valida la identidad.
   const handleUpdateTestStatus = async (testId, status, comment) => {
     if (!selectedCycle) return;
     try {
-      const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
+      await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
+      const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
       setCycleTests(execution || []);
     } catch (e) {
       console.error(e);
