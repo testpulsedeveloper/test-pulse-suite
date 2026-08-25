@@ -1736,7 +1736,8 @@ Test Steps:
            url: attachments[0].content
          };
          
-         const currentTest = cycleTests.find(t => t.id === testId);
+         const freshExec = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+         const currentTest = freshExec.find(t => t.id === testId);
          const currentEvidences = currentTest?.evidences ? [...currentTest.evidences] : [];
          if (currentTest?.evidence && currentEvidences.length === 0) {
              currentEvidences.push(currentTest.evidence);
@@ -1763,19 +1764,20 @@ Test Steps:
   };
 
   const handleDeleteEvidence = async (testId, attachmentId, index, iterId) => {
-    const currentTest = cycleTests.find(t => t.id === testId);
+    await invoke('deleteAttachment', { attachmentId });
+    
+    const freshExec = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+    const currentTest = freshExec.find(t => t.id === testId);
     if (!currentTest) return;
     
     if (iterId) {
        const iters = [...(currentTest.iterations || [])];
        const iterIdx = iters.findIndex(i => i.id === iterId);
        if (iterIdx > -1) {
-          const evs = iters[iterIdx].evidences ? [...iters[iterIdx].evidences] : [];
-          evs.splice(index, 1);
+          const evs = (iters[iterIdx].evidences || []).filter(e => e.id !== attachmentId && e !== attachmentId);
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
-          setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, iterations: iters } : t));
-          await invoke('deleteAttachment', { attachmentId });
-          await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+          const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+          setCycleTests(updated);
        }
        return;
     }
@@ -1784,12 +1786,9 @@ Test Steps:
     if (currentTest.evidence && currentEvidences.length === 0) {
       currentEvidences.push(currentTest.evidence);
     }
-    
-    currentEvidences.splice(index, 1);
-    setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, evidences: currentEvidences, evidence: null } : t));
-
-    await invoke('deleteAttachment', { attachmentId });
-    await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+    currentEvidences = currentEvidences.filter(e => e.id !== attachmentId && e !== attachmentId);
+    const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+    setCycleTests(updated);
   };
 
   
@@ -2023,28 +2022,33 @@ Test Steps:
   useEffect(() => {
     if (activeTab === 'execution' && selectedCycle) {
       setLoading(true);
-      invoke('getCycleExecution', { cycleId: selectedCycle.id })
-        .then(async (execution) => {
-          if (!execution || execution.length === 0) {
-            setCycleTests([]);
+      
+      const fetchExec = () => {
+        invoke('getCycleExecution', { cycleId: selectedCycle.id })
+          .then(async (execution) => {
+            if (!execution || execution.length === 0) {
+              setCycleTests([]);
+              setLoading(false);
+              return;
+            }
+            const needsBackfill = execution.filter(t => !t.description);
+            if (needsBackfill.length > 0) {
+              const updated = await invoke('backfillDescriptions', {
+                cycleId: selectedCycle.id,
+                testIds: needsBackfill.map(t => t.id)
+              });
+              setCycleTests(updated || execution);
+            } else {
+              setCycleTests(execution);
+            }
             setLoading(false);
-            return;
-          }
-
-          // Backfill: if any test in the cycle is missing its description snapshot,
-          // fetch it now from Jira and save it so the snapshot is created.
-          const needsBackfill = execution.filter(t => !t.description);
-          if (needsBackfill.length > 0) {
-            const updated = await invoke('backfillDescriptions', {
-              cycleId: selectedCycle.id,
-              testIds: needsBackfill.map(t => t.id)
-            });
-            setCycleTests(updated || execution);
-          } else {
-            setCycleTests(execution);
-          }
-          setLoading(false);
-        });
+          });
+      };
+      
+      fetchExec();
+      const interval = setInterval(fetchExec, 10000); // 10-second polling
+      
+      return () => clearInterval(interval);
     } else if (activeTab === 'reports') {
       loadReportData();
     }
