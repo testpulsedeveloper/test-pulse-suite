@@ -962,10 +962,15 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
 
 resolver.define('removeTestFromCycle', async ({ payload }) => {
   const { cycleId, testId } = payload;
-  let executionData = await getExecutionData(cycleId);
   
-  const updatedData = executionData.filter(t => String(t.id) !== String(testId));
-  const testIds = updatedData.map(t => t.id);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  let testIds = [];
+  if (response.status !== 404) {
+      const data = await response.json();
+      testIds = (typeof data.value[0] !== 'object') ? data.value || [] : data.value.map(t => t.id);
+  }
+  
+  testIds = testIds.filter(id => String(id) !== String(testId));
   
   // Overwrite the execution array
   await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
@@ -979,7 +984,7 @@ resolver.define('removeTestFromCycle', async ({ payload }) => {
      method: 'DELETE'
   });
   
-  return updatedData;
+  return { success: true };
 });
 
 resolver.define('updateTestStatus', async ({ payload }) => {
@@ -1087,12 +1092,25 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
       renderedFieldsMap[issue.id] = issue.renderedFields || {};
     }
 
-    // Patch execution data with the fetched descriptions and fields
-    executionData = executionData.map(t =>
-      descMap[t.id] !== undefined ? { ...t, description: descMap[t.id], rawFields: rawFieldsMap[t.id], renderedFields: renderedFieldsMap[t.id] } : t
-    );
+    // Patch solo los test que cambiaron (directamente en la DB) para evitar sobrescribir todo el array de execution
+    const updatedTests = [];
+    executionData = executionData.map(t => {
+       if (descMap[t.id] !== undefined) {
+           const updated = { ...t, description: descMap[t.id], rawFields: rawFieldsMap[t.id], renderedFields: renderedFieldsMap[t.id] };
+           updatedTests.push(updated);
+           return updated;
+       }
+       return t;
+    });
 
-    await setExecutionData(cycleId, executionData);
+    for (const t of updatedTests) {
+        await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+           method: 'PUT',
+           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+           body: JSON.stringify(t)
+        });
+    }
+
   } catch (e) {
     console.error('backfillDescriptions error:', e);
   }
