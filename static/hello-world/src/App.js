@@ -1644,12 +1644,10 @@ Then el sistema valida la identidad.
 
   const handleLinkTestToFolder = async (testId, folderId) => {
     if (!selectedProjectId) return;
-    setLoading(true);
+    // Update local state instantly (Optimistic UI) to avoid logo flashing
+    setTestCases(prev => prev.map(t => t.id === testId ? { ...t, folderId: folderId === '' ? null : folderId } : t));
+    
     await invoke('linkTestToFolder', { testId, folderId: folderId === '' ? null : folderId });
-    const config = await invoke('getConfig', { projectId: selectedProjectId });
-    const fetchedTests = await invoke('getTestCases', { projectId: selectedProjectId, config });
-    setTestCases(fetchedTests || []);
-    setLoading(false);
   };
 
   const handleUpdateTestStatus = async (testId, status, comment) => {
