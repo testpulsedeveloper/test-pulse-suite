@@ -637,15 +637,26 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     body: JSON.stringify({
       jql,
       fields: ['summary', 'issuetype'],
-      properties: ['testops-plan-link']
+      properties: ['*all'],
+      maxResults: 100
     })
   });
   const data = await response.json();
   
-  // Load execution data from storage for each cycle (this is where linkedBugs live)
-  const cycles = await Promise.all((data.issues || []).map(async issue => {
-    const planId = issue.properties?.['testops-plan-link']?.planId || null;
-    const execution = await getExecutionData(issue.id);
+  // Load execution data from memory directly using the *all properties fetched in O(1)
+  const cycles = (data.issues || []).map(issue => {
+    const properties = issue.properties || {};
+    const planId = properties['testops-plan-link']?.planId || null;
+    
+    // Parse execution data locally instead of making N network requests
+    const executionIds = properties['execution'] || [];
+    let execution = [];
+    if (Array.isArray(executionIds)) {
+       execution = executionIds.map(id => properties[`exec_${id}`]).filter(Boolean);
+    } else {
+       // Fallback para datos muy antiguos que puedan no estar migrados
+       execution = Array.isArray(properties['execution']) ? properties['execution'] : [];
+    }
     
     return {
       id: issue.id,
@@ -654,7 +665,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       planId,
       execution: execution || []
     };
-  }));
+  });
   
   // Fetch live bug details
   const allBugKeys = new Set();
