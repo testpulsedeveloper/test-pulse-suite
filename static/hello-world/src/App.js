@@ -1497,7 +1497,15 @@ Test Steps:
             <div>
               <span className="test-id" style={{display: 'block', marginBottom: '0.25rem'}}>{selectedTestCase.key}</span>
               <h2>{selectedTestCase.summary}</h2>
-              <span className="status-badge">{selectedTestCase.status}</span>
+              <div style={{display: 'flex', gap: '0.5rem', marginTop: '0.5rem'}}>
+                <span className="status-badge">{selectedTestCase.status}</span>
+                {selectedTestCase.rawFields?.priority && (
+                  <span className="status-badge" style={{ background: 'var(--bg-surface)', border: '1px solid var(--ds-border)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    {selectedTestCase.rawFields.priority.iconUrl && <img src={selectedTestCase.rawFields.priority.iconUrl} alt="" width="16" height="16" />}
+                    {selectedTestCase.rawFields.priority.name}
+                  </span>
+                )}
+              </div>
             </div>
             <button className="close-btn" onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}>&times;</button>
           </div>
