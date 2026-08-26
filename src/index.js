@@ -1169,28 +1169,43 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
   let executionData = await getExecutionData(cycleId);
 
   try {
-    // Use the same JQL search pattern as getTestCases – it reliably returns renderedFields
-    const jql = `id in (${testIds.join(',')})`;
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jql, fields: ['*all'], expand: ['renderedFields'] })
-    });
-
-    const data = await response.json();
-    const issues = data.issues || [];
-
-    // Build a map: issueId -> renderedDescription
+    const CHUNK_SIZE = 50;
     const descMap = {};
     const rawFieldsMap = {};
     const renderedFieldsMap = {};
-    for (const issue of issues) {
-      descMap[issue.id] = issue.renderedFields?.description || issue.fields?.description || '';
-      rawFieldsMap[issue.id] = issue.fields || {};
-      renderedFieldsMap[issue.id] = issue.renderedFields || {};
+    
+    for (let i = 0; i < testIds.length; i += CHUNK_SIZE) {
+        const chunk = testIds.slice(i, i + CHUNK_SIZE);
+        const jql = `id in (${chunk.join(',')})`;
+        
+        let response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jql, fields: ['summary', 'description', 'environment'], expand: ['renderedFields'], maxResults: 100 })
+        });
+        
+        if (response.status === 429) {
+            await new Promise(r => setTimeout(r, 2000));
+            response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+              method: 'POST',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ jql, fields: ['summary', 'description', 'environment'], expand: ['renderedFields'], maxResults: 100 })
+            });
+        }
+
+        if (response.ok) {
+            const data = await response.json();
+            const issues = data.issues || [];
+            for (const issue of issues) {
+              descMap[issue.id] = issue.renderedFields?.description || issue.fields?.description || '';
+              rawFieldsMap[issue.id] = issue.fields || {};
+              renderedFieldsMap[issue.id] = issue.renderedFields || {};
+            }
+        } else {
+            console.error("backfill chunk search failed:", response.status, await response.text());
+        }
     }
 
-    // Patch solo los test que cambiaron (directamente en la DB) para evitar sobrescribir todo el array de execution
     const updatedTests = [];
     executionData = executionData.map(t => {
        if (descMap[t.id] !== undefined) {
@@ -1205,12 +1220,24 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
        return t;
     });
 
-    for (const t of updatedTests) {
-        await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-           method: 'PUT',
-           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-           body: JSON.stringify(t)
-        });
+    const PUT_CHUNK = 10;
+    for (let i = 0; i < updatedTests.length; i += PUT_CHUNK) {
+        const chunk = updatedTests.slice(i, i + PUT_CHUNK);
+        await Promise.all(chunk.map(async (t) => {
+            let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+               method: 'PUT',
+               headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+               body: JSON.stringify(t)
+            });
+            if (res.status === 429) {
+                await new Promise(r => setTimeout(r, 1500));
+                res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+                   method: 'PUT',
+                   headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                   body: JSON.stringify(t)
+                });
+            }
+        }));
     }
 
   } catch (e) {
