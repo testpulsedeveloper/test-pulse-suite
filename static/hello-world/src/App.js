@@ -223,7 +223,37 @@ function App() {
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [testCycles, setTestCycles] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState(null);
+  
   const [cycleTests, setCycleTests] = useState([]);
+  const deletedIdsRef = useRef(new Set()); // Track local deletions to prevent them coming back from stale backend
+
+  const safeSetCycleTests = useCallback((newExecutionData) => {
+      setCycleTests(prev => {
+          if (!newExecutionData) return prev;
+          
+          const backendMap = {};
+          newExecutionData.forEach(item => backendMap[item.id] = item);
+          
+          // 1. Keep items we have locally (avoids them disappearing due to backend read-replica delay)
+          const newArray = prev.map(pItem => {
+              if (backendMap[pItem.id]) {
+                  // Merge backend data (like real status) into local item
+                  return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
+              }
+              return pItem;
+          });
+          
+          // 2. Add any items from backend that we DON'T have locally, UNLESS we just deleted them
+          newExecutionData.forEach(item => {
+              if (!prev.some(pItem => pItem.id === item.id) && !deletedIdsRef.current.has(item.id)) {
+                  newArray.push(item);
+              }
+          });
+          
+          return newArray;
+      });
+  }, []);
+
   const [planningFolder, setPlanningFolder] = useState('');
   const [planningPriority, setPlanningPriority] = useState('');
   const [selectedTestsForCycle, setSelectedTestsForCycle] = useState([]); // execution data for selected cycle
@@ -1600,7 +1630,7 @@ Then el sistema valida la identidad.
     setCycleTests([]); // clear old tests immediately
     setSelectedCycle(cycle);
     const execution = await invoke('getCycleExecution', { cycleId: cycle.id });
-    setCycleTests(execution || []);
+    safeSetCycleTests(execution || []);
   };
 
   const handleCreateFolder = async (parentId = null) => {
@@ -1669,7 +1699,7 @@ Then el sistema valida la identidad.
         alert("Error al añadir caso: " + err.message);
         // revert optimistic on error by reloading
         const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-        setCycleTests(execution || []);
+        safeSetCycleTests(execution || []);
     }
   };
 
@@ -1677,7 +1707,7 @@ Then el sistema valida la identidad.
     if (!selectedCycle) return;
     await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId });
     const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-    setCycleTests(execution || []);
+    safeSetCycleTests(execution || []);
   };
 
   const handleLinkTestToFolder = async (testId, folderId) => {
@@ -1693,7 +1723,7 @@ Then el sistema valida la identidad.
     try {
       await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
       const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-      setCycleTests(execution || []);
+      safeSetCycleTests(execution || []);
     } catch (e) {
       console.error(e);
       alert("Error actualizando prueba: " + (e.message || e));
@@ -1717,7 +1747,7 @@ Then el sistema valida la identidad.
       const newIterations = test.iterations ? [...test.iterations, newIter] : [newIter];
       const newStatus = calculateIterationStatus(newIterations) || test.status;
       const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) setCycleTests(updated);
+      if (updated) safeSetCycleTests(updated);
     } catch (e) {
       console.error(e);
     }
@@ -1729,7 +1759,7 @@ Then el sistema valida la identidad.
       const newIterations = (test.iterations || []).filter(it => it.id !== iterId);
       const newStatus = calculateIterationStatus(newIterations) || test.status;
       const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) setCycleTests(updated);
+      if (updated) safeSetCycleTests(updated);
     } catch (e) {
       console.error(e);
       alert("Error eliminando iteración: " + (e.message || e));
@@ -1741,7 +1771,7 @@ Then el sistema valida la identidad.
       const newIterations = test.iterations.map(it => it.id === iterId ? { ...it, [field]: value } : it);
       const newStatus = calculateIterationStatus(newIterations) || test.status;
       const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) setCycleTests(updated);
+      if (updated) safeSetCycleTests(updated);
     } catch (e) {
       console.error(e);
       alert("Error guardando cambios de texto: " + (e.message || e));
@@ -1751,7 +1781,7 @@ Then el sistema valida la identidad.
   const handleTakeover = async (test) => {
     try {
       const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, takeover: true });
-      if (updated) setCycleTests(updated);
+      if (updated) safeSetCycleTests(updated);
     } catch (e) {
       console.error(e);
     }
@@ -1799,11 +1829,11 @@ Then el sistema valida la identidad.
             if (iterIdx > -1) {
                iters[iterIdx] = { ...iters[iterIdx], evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence] };
                const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
-               setCycleTests(execution || []);
+               safeSetCycleTests(execution || []);
             }
          } else {
             const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
-            setCycleTests(execution || []);
+            safeSetCycleTests(execution || []);
          }
       }
     } catch (err) {
@@ -2088,9 +2118,9 @@ Then el sistema valida la identidad.
               cycleId: selectedCycle.id,
               testIds: needsBackfill.map(t => t.id)
             });
-            setCycleTests(updated || execution);
+            safeSetCycleTests(updated || execution);
           } else {
-            setCycleTests(execution);
+            safeSetCycleTests(execution);
           }
         });
     } else if (activeTab === 'reports') {
@@ -2123,7 +2153,7 @@ Then el sistema valida la identidad.
       testId: test.id,
       linkedBugs: updatedBugs
     });
-    if (updated) setCycleTests(updated);
+    if (updated) safeSetCycleTests(updated);
   };
 
 
@@ -2591,7 +2621,7 @@ Then el sistema valida la identidad.
                                 onClick={async () => {
                                   const updatedBugs = test.linkedBugs.filter((_, i) => i !== idx);
                                   const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, linkedBugs: updatedBugs });
-                                  if (updated) setCycleTests(updated);
+                                  if (updated) safeSetCycleTests(updated);
                                 }}
                                 title="Quitar vínculo"
                                 style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
@@ -3815,7 +3845,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.4 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.5 © El Puerto de Liverpool
       </div>
     </div>
   );
