@@ -3747,7 +3747,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v0.1.77-next.9 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.0 © El Puerto de Liverpool
       </div>
     </div>
   );
@@ -3790,7 +3790,7 @@ function WrappedApp() {
   return (
     <ErrorBoundary>
       <App />
-      <div style={{ textAlign: "center", padding: "10px", fontSize: "0.8em", color: "var(--text-subtle)" }}>Test Pulse v1.4.0</div>
+      
     </ErrorBoundary>
   );
 }
