@@ -568,8 +568,7 @@ const getExecutionData = async (cycleId) => {
   
   if (testIds.length === 0) return [];
   
-  // Overwrite missingIds check to use testIds instead of value
-  const missingIds = testIds.filter(id => !mergedProps[`exec_${id}`]);
+
   
   // NEW MODE: value is an array of test IDs ["10001", "10002"]
   // To avoid HTTP 429 Rate Limits, we fetch ALL properties in ONE single JQL request!
@@ -594,7 +593,7 @@ const getExecutionData = async (cycleId) => {
   
   let mergedProps = { ...properties };
   
-  const missingIds = value.filter(id => !mergedProps[`exec_${id}`]);
+  const missingIds = testIds.filter(id => !mergedProps[`exec_${id}`]);
   
   if (missingIds.length > 0) {
       console.log(`Fetching ${missingIds.length} missing properties directly to bypass JQL index delay...`);
