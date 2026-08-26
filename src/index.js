@@ -628,11 +628,11 @@ const getExecutionData = async (cycleId) => {
       for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
           const chunk = missingIds.slice(i, i + CHUNK_SIZE);
           const chunkPromises = chunk.map(async (id) => {
-              let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+              let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
               if (res.status === 429) {
                   console.log(`Hit 429 on exec_${id}, retrying once after 2 seconds...`);
                   await new Promise(r => setTimeout(r, 2000));
-                  res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`);
+                  res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
               }
               if (res.ok) {
                   const data = await res.json();
@@ -882,10 +882,10 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         const chunk = newTests.slice(i, i + CHUNK_SIZE);
         await Promise.all(chunk.map(async (t) => {
            // Solo escribir si NO existe para no sobreescribir el estatus de pruebas ya ejecutadas
-           let checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`);
+           let checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}?t=${Date.now()}`);
            if (checkRes.status === 429) {
                await new Promise(r => setTimeout(r, 1000));
-               checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`);
+               checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}?t=${Date.now()}`);
            }
            let res;
            if (checkRes.status === 404) {
@@ -953,7 +953,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
     status: 'Not Run'
   };
   
-  let checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${newTest.id}`);
+  let checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${newTest.id}?t=${Date.now()}`);
   let res;
   if (checkRes.status === 404) {
       res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${newTest.id}`, {
