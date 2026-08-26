@@ -563,38 +563,13 @@ const getExecutionData = async (cycleId) => {
   
   if (value.length === 0) return [];
   
-  if (typeof value[0] === 'object') {
-     console.log('Migrating legacy execution data to per-test storage');
-     const testIds = value.map(t => t.id);
-     
-     const CHUNK_SIZE = 10;
-     for (let i = 0; i < value.length; i += CHUNK_SIZE) {
-         const chunk = value.slice(i, i + CHUNK_SIZE);
-         await Promise.all(chunk.map(async (t) => {
-             let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-               method: 'PUT',
-               headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-               body: JSON.stringify(t)
-             });
-             if (res.status === 429) {
-                 await new Promise(r => setTimeout(r, 2000));
-                 res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-                   method: 'PUT',
-                   headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                   body: JSON.stringify(t)
-                 });
-             }
-         }));
-     }
-     
-     await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-          method: 'PUT',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(testIds)
-     });
-     
-     return value;
-  }
+  // value is now a lightweight array [{id, status}] OR an array of strings ["10001"]
+  const testIds = (typeof value[0] === 'object') ? value.map(t => t.id) : value;
+  
+  if (testIds.length === 0) return [];
+  
+  // Overwrite missingIds check to use testIds instead of value
+  const missingIds = testIds.filter(id => !mergedProps[`exec_${id}`]);
   
   // NEW MODE: value is an array of test IDs ["10001", "10002"]
   // To avoid HTTP 429 Rate Limits, we fetch ALL properties in ONE single JQL request!
@@ -648,7 +623,7 @@ const getExecutionData = async (cycleId) => {
       }
   }
   
-  const results = value.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
+  const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
   
   return results;
 };
