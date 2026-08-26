@@ -229,7 +229,7 @@ function App() {
 
   const safeSetCycleTests = useCallback((newExecutionData) => {
       setCycleTests(prev => {
-          if (!newExecutionData) return prev;
+          if (!newExecutionData || !Array.isArray(newExecutionData)) { console.error('safeSetCycleTests got non-array:', newExecutionData); return prev; }
           
           const backendMap = {};
           newExecutionData.forEach(item => backendMap[item.id] = item);
@@ -2932,7 +2932,7 @@ Then el sistema valida la identidad.
     };
 
     filteredCycles.forEach(cycle => {
-      if(cycle.execution) {
+      if(cycle.execution && Array.isArray(cycle.execution)) {
         cycle.execution.forEach(ex => {
           totalCases++;
           if (ex.status === 'Passed') passed++;
@@ -3025,7 +3025,7 @@ Then el sistema valida la identidad.
     
     // Generar las filas de la tabla de defectos
     filteredCycles.forEach(cycle => {
-      if (cycle.execution) {
+      if (cycle.execution && Array.isArray(cycle.execution)) {
         cycle.execution.forEach(ex => {
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             ex.linkedBugs.forEach(bug => {
@@ -3391,7 +3391,7 @@ Then el sistema valida la identidad.
                      ) : (
                        filteredCycles.map(cycle => {
                          let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
-                         if (cycle.execution) {
+                         if (cycle.execution && Array.isArray(cycle.execution)) {
                            cycle.execution.forEach(ex => {
                              if (ex.status === 'Passed') cPassed++;
                              else if (ex.status === 'Failed') cFailed++;

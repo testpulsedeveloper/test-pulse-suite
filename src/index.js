@@ -566,7 +566,7 @@ const getExecutionData = async (cycleId) => {
   // value is now a lightweight array [{id, status}] OR an array of strings ["10001"]
   const testIds = (typeof value[0] === 'object') ? value.map(t => t.id) : value;
   
-  if (testIds.length === 0) return [];
+  if (!Array.isArray(testIds) || testIds.length === 0) return [];
   
 
   
@@ -797,7 +797,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
      }));
 
      cycles.forEach(c => {
-       c.execution?.forEach(ex => {
+       if (Array.isArray(c.execution)) c.execution.forEach(ex => {
           ex.linkedBugs?.forEach(b => {
              if (bugMap[b.key]) {
                 Object.assign(b, bugMap[b.key]);
