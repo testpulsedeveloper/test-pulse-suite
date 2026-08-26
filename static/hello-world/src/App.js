@@ -2319,9 +2319,13 @@ Then el sistema valida la identidad.
                       let lastExecutionData = null;
                       
                       // Enviar en bloques de 20 para evitar el timeout de 25 segundos de Forge
+                      let allAddedTests = [];
                       for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                           const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
-                          await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
+                          const bRes = await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
+                          if (bRes && bRes.addedTests) {
+                              allAddedTests = allAddedTests.concat(bRes.addedTests);
+                          }
                       }
                       
                       // Optimistic UI update
@@ -3857,7 +3861,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.8 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.9 © El Puerto de Liverpool
       </div>
     </div>
   );
