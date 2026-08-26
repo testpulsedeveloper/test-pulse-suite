@@ -708,10 +708,11 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     const executionIds = properties['execution'] || [];
     let execution = [];
     if (Array.isArray(executionIds)) {
-       execution = executionIds.map(id => properties[`exec_${id}`]).filter(Boolean);
-    } else {
-       // Fallback para datos muy antiguos que puedan no estar migrados
-       execution = Array.isArray(properties['execution']) ? properties['execution'] : [];
+       if (executionIds.length > 0 && typeof executionIds[0] === 'object') {
+           execution = executionIds;
+       } else {
+           execution = executionIds.map(id => properties[`exec_${id}`]).filter(Boolean);
+       }
     }
     
     return {
