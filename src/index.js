@@ -869,9 +869,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         key: tc.key,
         summary: tc.summary,
         description: tc.description,
-        status: 'Not Run',
-        rawFields: tc.rawFields,
-        renderedFields: tc.renderedFields
+        status: 'Not Run'
       };
       newTests.push(newTest);
       if (!testIds.includes(tc.id)) {
@@ -930,9 +928,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
     key: testCase.key,
     summary: testCase.summary,
     description: testCase.description,
-    status: 'Not Run',
-    rawFields: testCase.rawFields,
-    renderedFields: testCase.renderedFields
+    status: 'Not Run'
   };
   
   let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${newTest.id}`, {
@@ -985,9 +981,7 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
         key: testCase.key,
         summary: testCase.summary,
         description: testCase.description,
-        status: 'Not Run',
-        rawFields: testCase.rawFields,
-        renderedFields: testCase.renderedFields
+        status: 'Not Run'
       });
       if (!testIds.includes(testCase.id)) {
           testIds.push(testCase.id);
@@ -1165,7 +1159,7 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
     const updatedTests = [];
     executionData = executionData.map(t => {
        if (descMap[t.id] !== undefined) {
-           const updated = { ...t, description: descMap[t.id], rawFields: rawFieldsMap[t.id], renderedFields: renderedFieldsMap[t.id] };
+           const updated = { ...t, description: descMap[t.id] };
            updatedTests.push(updated);
            return updated;
        }
