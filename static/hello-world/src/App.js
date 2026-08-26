@@ -1652,7 +1652,17 @@ Then el sistema valida la identidad.
         await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
         setTimeout(async () => {
             const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-            if (execution) setCycleTests(execution);
+            if (execution) {
+                setCycleTests(prev => {
+                    const merged = [...execution];
+                    prev.forEach(pItem => {
+                        if (!merged.some(mItem => mItem.id === pItem.id)) {
+                            merged.push(pItem);
+                        }
+                    });
+                    return merged;
+                });
+            }
         }, 3000);
     } catch(err) {
         console.error(err);
@@ -2304,7 +2314,17 @@ Then el sistema valida la identidad.
                       // Fetch background after a delay to ensure replication
                       setTimeout(async () => {
                           const finalExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-                          if (finalExecution) setCycleTests(finalExecution);
+                          if (finalExecution) {
+                              setCycleTests(prev => {
+                                  const merged = [...finalExecution];
+                                  prev.forEach(pItem => {
+                                      if (!merged.some(mItem => mItem.id === pItem.id)) {
+                                          merged.push(pItem);
+                                      }
+                                  });
+                                  return merged;
+                              });
+                          }
                       }, 3000);
                       
                     } catch(err) {
@@ -3795,7 +3815,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.3 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.4 © El Puerto de Liverpool
       </div>
     </div>
   );
