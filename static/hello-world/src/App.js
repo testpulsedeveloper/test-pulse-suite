@@ -1679,7 +1679,10 @@ Then el sistema valida la identidad.
     });
     
     try {
-        await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
+        const addRes = await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
+        if (addRes && addRes.addedTest && addRes.addedTest._historicalData) {
+            setCycleTests(prev => prev.map(t => t.id === testCase.id ? { ...t, ...addRes.addedTest._historicalData } : t));
+        }
         setTimeout(async () => {
             const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
             if (execution) {
@@ -2104,7 +2107,7 @@ Then el sistema valida la identidad.
       invoke('getCycleExecution', { cycleId: selectedCycle.id })
         .then(async (rawExecution) => {
           if (!rawExecution || rawExecution.length === 0) {
-            setCycleTests([]);
+            safeSetCycleTests([]);
             return;
           }
           
@@ -2332,8 +2335,17 @@ Then el sistema valida la identidad.
                       setCycleTests(prev => {
                          const newArr = [...prev];
                          locallyAdded.forEach(lt => {
+                             let finalItem = lt;
+                             // Use historical data if backend returned it!
+                             if (bulkRes && bulkRes.addedTests) {
+                                 const matched = bulkRes.addedTests.find(t => t.id === lt.id);
+                                 if (matched && matched._historicalData) {
+                                     finalItem = { ...lt, ...matched._historicalData };
+                                 }
+                             }
+                             
                              if (!newArr.some(existing => existing.id === lt.id)) {
-                                 newArr.push(lt);
+                                 newArr.push(finalItem);
                              }
                          });
                          return newArr;
@@ -3845,7 +3857,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.6 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.7 © El Puerto de Liverpool
       </div>
     </div>
   );

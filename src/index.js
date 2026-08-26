@@ -895,7 +895,11 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
                  body: JSON.stringify(t)
                });
            } else {
-               // Ya existe, simular respuesta ok
+               // Ya existe, extraer status histórico para el frontend
+               const existingData = await checkRes.json();
+               if (existingData && existingData.value) {
+                   t._historicalData = existingData.value;
+               }
                res = { ok: true, status: 200, text: async () => "" };
            }
            if (res.status === 429) {
@@ -933,7 +937,8 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
     }
   }
   
-  return { success: true };
+  // Return the newly added items with their historical data
+  return { success: true, addedTests: newTests };
 });
 
 resolver.define('addTestToCycle', async ({ payload }) => {
@@ -962,6 +967,10 @@ resolver.define('addTestToCycle', async ({ payload }) => {
         body: JSON.stringify(newTest)
       });
   } else {
+      const existingData = await checkRes.json();
+      if (existingData && existingData.value) {
+          newTest._historicalData = existingData.value;
+      }
       res = { ok: true, status: 200, text: async () => "" };
   }
   
@@ -982,13 +991,25 @@ resolver.define('addTestToCycle', async ({ payload }) => {
   if (!testIds.includes(testCase.id)) {
       testIds.push(testCase.id);
   }
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+  let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(testIds)
   });
+  if (exRes.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(testIds)
+      });
+  }
+  if (!exRes.ok) {
+      const errText = await exRes.text();
+      throw new Error(`Jira PUT execution failed with ${exRes.status}: ${errText}`);
+  }
   
-  return { success: true };
+  return { success: true, addedTest: newTest };
 });
 
 resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
