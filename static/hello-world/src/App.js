@@ -3048,7 +3048,7 @@ Then el sistema valida la identidad.
 
     const htmlTemplate = `
       <div style="font-family: Arial, sans-serif; color: #333;">
-        <h2>Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}</h2>
+        <h2>Resumen de Pruebas: ${reportSelectedCycles.length === 1 ? filteredCycles[0]?.summary : 'Todos los ciclos'}</h2>
         <p>A continuación se presenta el resumen ejecutivo de la ejecución de pruebas:</p>
         
         <ul style="list-style-type: none; padding-left: 0; line-height: 1.8;">
@@ -3110,7 +3110,7 @@ Then el sistema valida la identidad.
          console.warn("execCommand returned false, possible permission issue.");
       }
 
-      const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
+      const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycles.length === 1 ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       alert(`Plantilla copiada al portapapeles. Usa ${isMac ? 'Cmd + V' : 'Ctrl + V'} en el correo para pegar la tabla. Abriendo Gmail...`);
       router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
