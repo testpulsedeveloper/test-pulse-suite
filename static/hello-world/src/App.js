@@ -3790,6 +3790,7 @@ function WrappedApp() {
   return (
     <ErrorBoundary>
       <App />
+      <div style={{ textAlign: "center", padding: "10px", fontSize: "0.8em", color: "var(--text-subtle)" }}>Test Pulse v1.4.0</div>
     </ErrorBoundary>
   );
 }

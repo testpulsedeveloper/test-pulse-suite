@@ -868,7 +868,6 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         id: tc.id,
         key: tc.key,
         summary: tc.summary,
-        description: tc.description,
         status: 'Not Run'
       };
       newTests.push(newTest);
@@ -927,7 +926,6 @@ resolver.define('addTestToCycle', async ({ payload }) => {
     id: testCase.id,
     key: testCase.key,
     summary: testCase.summary,
-    description: testCase.description,
     status: 'Not Run'
   };
   
@@ -980,7 +978,6 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
         id: testCase.id,
         key: testCase.key,
         summary: testCase.summary,
-        description: testCase.description,
         status: 'Not Run'
       });
       if (!testIds.includes(testCase.id)) {
@@ -1159,7 +1156,7 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
     const updatedTests = [];
     executionData = executionData.map(t => {
        if (descMap[t.id] !== undefined) {
-           const updated = { ...t, description: descMap[t.id] };
+           const updated = { ...t };
            updatedTests.push(updated);
            return updated;
        }
