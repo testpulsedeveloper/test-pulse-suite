@@ -2498,7 +2498,28 @@ Then el sistema valida la identidad.
         {selectedCycle ? (
           <div>
             <div className="header">
-              <h1>Execution: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos)</span></h1>
+              <div style={{display: 'flex', alignItems: 'center'}}>
+  <h1>Execution: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos)</span></h1>
+  {selectedCycle && (
+    <button 
+      className="btn-secondary" 
+      onClick={async () => {
+        setLoading(true);
+        const updated = await invoke('backfillDescriptions', {
+          cycleId: selectedCycle.id,
+          testIds: cycleTests.map(t => t.id),
+          force: true
+        });
+        if (updated) safeSetCycleTests(updated);
+        setLoading(false);
+      }}
+      style={{marginLeft: '1rem', fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}
+      title="Sincronizar información desde Jira"
+    >
+      🔄 Sincronizar Info
+    </button>
+  )}
+</div>
             </div>
             
             <div className="test-list">
@@ -3908,7 +3929,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.9 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.2.0 © El Puerto de Liverpool
       </div>
     </div>
   );
