@@ -1,22 +1,11 @@
 const fs = require('fs');
+const path = 'src/index.js';
+let content = fs.readFileSync(path, 'utf8');
 
-const replacement = `      if (allErrors.length > 0 && issues && issues.length > 0) {
-        const debugInfo = {
-          payload: issues[0].fields,
-          schemaKeysLen: Object.keys(bulkFieldSchema).length,
-          schema10534: bulkFieldSchema['customfield_10534'] ? "EXISTS" : "MISSING",
-          raw_schema: bulkFieldSchema['customfield_10534']
-        };
-        allErrors.push({ message: "DEBUG (Envia foto de esto a Gustavo): " + JSON.stringify(debugInfo) });
-      }`;
+content = content.replace(
+  /return \[\{ id: '999999', key: 'ERR-1', fields: \{ summary: \`JQL Search failed: \$\{response\.status\} \$\{response\.statusText\} \$\{await response\.text\(\)\}\`, status: \{ name: 'Error' \}, created: new Date\(\)\.toISOString\(\) \} \}\];/g,
+  `return [{ id: '999999', key: 'ERR-1', fields: { summary: \`Payload: \${JSON.stringify(body)} | JQL Search failed: \${response.status} \${response.statusText} \${await response.text()}\`, status: { name: 'Error' }, created: new Date().toISOString() } }];`
+);
 
-let appContent = fs.readFileSync('static/hello-world/src/App.js', 'utf8');
-const regex = /if \(allErrors\.length > 0 && issues && issues\.length > 0\) \{\s*allErrors\.push\(\{ message: "DEBUG \(Envia foto de esto a Gustavo\): " \+ JSON\.stringify\(issues\[0\]\.fields\) \}\);\s*\}/m;
-
-if (appContent.match(regex)) {
-  appContent = appContent.replace(regex, replacement);
-  fs.writeFileSync('static/hello-world/src/App.js', appContent);
-  console.log('App.js debug2 patched successfully!');
-} else {
-  console.log('Regex did not match.');
-}
+fs.writeFileSync(path, content);
+console.log("Patched fetchAllIssues for debugging payload");

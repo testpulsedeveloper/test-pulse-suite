@@ -1163,7 +1163,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
 
 // Backfills missing description snapshots for tests already in a cycle
 resolver.define('backfillDescriptions', async ({ payload }) => {
-  const { cycleId, testIds } = payload;
+  const { cycleId, testIds, force } = payload;
   if (!testIds || testIds.length === 0) return await getExecutionData(cycleId);
 
   let executionData = await getExecutionData(cycleId);
@@ -1208,11 +1208,11 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
 
     const updatedTests = [];
     executionData = executionData.map(t => {
-       if (descMap[t.id] !== undefined) {
+       if (descMap[t.id] !== undefined || force) {
            const updated = { 
                ...t, 
-               description: descMap[t.id], 
-               expectedResult: renderedFieldsMap[t.id]?.environment || rawFieldsMap[t.id]?.environment || ''
+               description: descMap[t.id] !== undefined ? descMap[t.id] : t.description, 
+               expectedResult: renderedFieldsMap[t.id]?.environment || rawFieldsMap[t.id]?.environment || t.expectedResult || ''
            };
            updatedTests.push(updated);
            return updated;

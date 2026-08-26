@@ -3,6 +3,28 @@ const path = 'src/index.js';
 let content = fs.readFileSync(path, 'utf8');
 
 const target = `  if (typeof value[0] === 'object') {
+     // LEGACY MIGRATION: Auto-migrate objects to individual properties
+     console.log('Migrating legacy execution data to per-test storage');
+     const testIds = value.map(t => t.id);
+     
+     await Promise.all(value.map(t => 
+        api.asUser().requestJira(route\`/rest/api/3/issue/\${cycleId}/properties/exec_\${t.id}\`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(t)
+        })
+     ));
+     
+     await api.asUser().requestJira(route\`/rest/api/3/issue/\${cycleId}/properties/execution\`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(testIds)
+     });
+     
+     return value;
+  }`;
+
+const replacement = `  if (typeof value[0] === 'object') {
      console.log('Migrating legacy execution data to per-test storage');
      const testIds = value.map(t => t.id);
      
@@ -35,20 +57,10 @@ const target = `  if (typeof value[0] === 'object') {
      return value;
   }`;
 
-const replace = `  // value is now a lightweight array [{id, status}] OR an array of strings ["10001"]
-  const testIds = (typeof value[0] === 'object') ? value.map(t => t.id) : value;
-  
-  if (testIds.length === 0) return [];
-  
-  // Overwrite missingIds check to use testIds instead of value
-  const missingIds = testIds.filter(id => !mergedProps[\`exec_\${id}\`]);`;
-
-content = content.replace(target, replace);
-// Fix the map at the bottom to use testIds
-content = content.replace(
-  `const results = value.map(id => mergedProps[\`exec_\${id}\`]).filter(Boolean);`,
-  `const results = testIds.map(id => mergedProps[\`exec_\${id}\`]).filter(Boolean);`
-);
-
-fs.writeFileSync(path, content);
-console.log("Patched getExecutionData to not destroy the lightweight array");
+if (content.includes(target)) {
+    content = content.replace(target, replacement);
+    fs.writeFileSync(path, content);
+    console.log("Patched legacy migration to avoid data loss");
+} else {
+    console.error("Could not find target in legacy migration");
+}
