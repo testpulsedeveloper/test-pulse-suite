@@ -1,6 +1,73 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
+async function fetchAllIssues(jql, fields, expand, properties, maxPages = 20) {
+  try {
+    let allIssues = [];
+    let maxResults = 100;
+    let page = 0;
+    let nextPageToken = null;
+    let isLast = false;
+    
+    // Transform *all to specific fields
+    let safeFields = fields;
+    if (Array.isArray(fields) && fields.includes('*all')) {
+        safeFields = ['summary', 'description', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution'];
+    } else if (fields === '*all') {
+        safeFields = ['summary', 'description', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution'];
+    }
+    
+    while (page < maxPages && !isLast) {
+      const body = {
+        jql,
+        maxResults,
+        fields: Array.isArray(safeFields) ? safeFields : [safeFields]
+      };
+      
+      if (nextPageToken) {
+         body.nextPageToken = nextPageToken;
+      }
+      
+      if (expand) {
+         body.expand = Array.isArray(expand) ? expand.join(',') : expand;
+      }
+      if (properties) {
+         body.properties = Array.isArray(properties) ? properties : [properties];
+      }
+      
+      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      
+      if (!response.ok) {
+         return [{ id: '999999', key: 'ERR-1', fields: { summary: `JQL Search failed: ${response.status} ${await response.text()}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
+      }
+      
+      const data = await response.json();
+      const issues = data.issues || [];
+      allIssues = allIssues.concat(issues);
+      
+      // Update pagination cursor for the next iteration
+      nextPageToken = data.nextPageToken;
+      
+      // Stop if there are no more pages
+      if (data.nextPageToken == null || data.isLast === true || issues.length === 0) {
+          isLast = true;
+          break;
+      }
+      
+      page++;
+    }
+    
+    return allIssues;
+  } catch(err) {
+    return [{ id: '999999', key: 'ERR-2', fields: { summary: `Exception: ${err.message}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
+  }
+}
+
+
 const resolver = new Resolver();
 
 // === Folder Management (Jira Entity Properties) ===
@@ -181,22 +248,9 @@ resolver.define('getTestPlans', async ({ payload }) => {
     const planType = config?.planIssueType || 'Test Set';
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql: `${projectJql}issuetype = "${planType}" ORDER BY created DESC`,
-        fields: ['summary', 'status', 'created'],
-        maxResults: 200
-      })
-    });
-    
-    if (!response.ok) {
-      console.error(`getTestPlans failed: ${response.status} ${response.statusText}`);
-      return { _isError: true, status: response.status, message: await response.text() };
-    }
-    const data = await response.json();
-    return (data.issues || []).map(issue => ({
+    const jql = `${projectJql}issuetype = "${planType}" ORDER BY created DESC`;
+    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, null);
+    return allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
@@ -214,23 +268,9 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const cycleType = config?.testCycleType || 'Test Cycle';
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql: `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`,
-        fields: ['summary', 'status', 'created'],
-        properties: ['testops-plan-link'],
-        maxResults: 200
-      })
-    });
-    
-    if (!response.ok) {
-      console.error(`getTestCycles failed: ${response.status} ${response.statusText}`);
-      return { _isError: true, status: response.status, message: await response.text() };
-    }
-    const data = await response.json();
-    return (data.issues || []).map(issue => ({
+    const jql = `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`;
+    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, ['testops-plan-link']);
+    return allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
@@ -339,26 +379,8 @@ resolver.define('getTestCases', async ({ payload, context }) => {
     const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
     console.log("getTestCases JQL:", jql);
     
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql,
-        fields: ['*all'],
-        expand: 'renderedFields',
-        properties: ['testops-folder-link'],
-        maxResults: 200
-      })
-    });
-    
-    if (!response.ok) {
-      console.error(`getTestCases failed: ${response.status} ${response.statusText}`);
-      return { _isError: true, status: response.status, message: await response.text() };
-    }
-    const data = await response.json();
-    console.log("getTestCases response data:", JSON.stringify(data));
-    
-    let cases = (data.issues || []).map(issue => ({
+    const allIssues = await fetchAllIssues(jql, ['*all'], 'renderedFields', ['testops-folder-link']);
+    let cases = allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
@@ -665,42 +687,38 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const cycleType = config?.testCycleType || 'Test Cycle';
   
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
-  const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-    method: 'POST',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jql,
-      fields: ['summary', 'issuetype'],
-      properties: ['*all'],
-      maxResults: 100
-    })
-  });
-  const data = await response.json();
-  
-  // Load execution data from memory directly using the *all properties fetched in O(1)
-  const cycles = (data.issues || []).map(issue => {
+  const allIssues = await fetchAllIssues(jql, ['summary', 'issuetype'], null, ['testops-plan-link', 'execution']);
+  // Load execution data and auto-heal old formats
+  const cycles = [];
+  for (const issue of allIssues) {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
     
-    // Parse execution data locally instead of making N network requests
     const executionIds = properties['execution'] || [];
     let execution = [];
     if (Array.isArray(executionIds)) {
        if (executionIds.length > 0 && typeof executionIds[0] === 'object') {
            execution = executionIds;
-       } else {
-           execution = executionIds.map(id => properties[`exec_${id}`]).filter(Boolean);
+       } else if (executionIds.length > 0 && typeof executionIds[0] !== 'object') {
+           console.log(`Auto-healing lightweight index for cycle ${issue.key}`);
+           const fullData = await getExecutionData(issue.id);
+           execution = fullData.map(ex => ({ id: String(ex.id), status: ex.status, linkedBugs: ex.linkedBugs || [] }));
+           await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
+              method: 'PUT',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify(execution)
+           });
        }
     }
     
-    return {
+    cycles.push({
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
       planId,
       execution: execution || []
-    };
-  });
+    });
+  }
   
   // Fetch live bug details
   const allBugKeys = new Set();
@@ -1156,7 +1174,7 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
     const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jql, fields: ['*all'], expand: 'renderedFields' })
+      body: JSON.stringify({ jql, fields: ['*all'], expand: ['renderedFields'] })
     });
 
     const data = await response.json();
@@ -1176,7 +1194,11 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
     const updatedTests = [];
     executionData = executionData.map(t => {
        if (descMap[t.id] !== undefined) {
-           const updated = { ...t };
+           const updated = { 
+               ...t, 
+               description: descMap[t.id], 
+               expectedResult: renderedFieldsMap[t.id]?.environment || rawFieldsMap[t.id]?.environment || ''
+           };
            updatedTests.push(updated);
            return updated;
        }

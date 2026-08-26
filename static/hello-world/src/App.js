@@ -1059,7 +1059,7 @@ Then el sistema valida la identidad.
             <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--warning-color, #FFAB00)" stroke="none" style={{flexShrink: 0}}>
               <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
             </svg>
-            All Tests
+            All Tests <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.25rem'}}>({testCases.length})</span>
           </li>
           {isAllTestsExpanded && (() => {
             const renderTree = (parentId = null, depth = 0) => {
@@ -1082,6 +1082,7 @@ Then el sistema valida la identidad.
                           <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
                         </svg>
                         <span style={{overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}} title={folder.name}>{folder.name}</span>
+                        <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>({testCases.filter(t => t.folderId === folder.id).length})</span>
                       </div>
                       <div className="folder-actions" style={{display: 'flex', gap: '0.25rem', flexShrink: 0}}>
                         <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(folder.id); setExpandedFolders(prev => ({...prev, [folder.id]: true})); }} title="Nueva Subcarpeta" style={{background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)'}}>
@@ -1120,7 +1121,7 @@ Then el sistema valida la identidad.
       />
       <main className="main-content">
         <div className="header">
-          <h1>Design: Folders &amp; Test Cases</h1>
+          <h1>Design: Folders &amp; Test Cases <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({testCases.length} casos)</span></h1>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             <button className="btn-primary" onClick={handleCreateIssue}>+ Create Test Case</button>
             <button
@@ -1725,8 +1726,11 @@ Then el sistema valida la identidad.
     if (!selectedCycle) return;
     try {
       await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
-      const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-      safeSetCycleTests(execution || []);
+      setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { 
+        ...t, 
+        status: status !== undefined ? status : t.status, 
+        comment: comment !== undefined ? comment : t.comment 
+      } : t));
     } catch (e) {
       console.error(e);
       alert("Error actualizando prueba: " + (e.message || e));
@@ -1749,8 +1753,8 @@ Then el sistema valida la identidad.
       const newIter = { id: Date.now().toString(), expectedData: '', actualResult: '', status: 'Not Run' };
       const newIterations = test.iterations ? [...test.iterations, newIter] : [newIter];
       const newStatus = calculateIterationStatus(newIterations) || test.status;
-      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) safeSetCycleTests(updated);
+      await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
+      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
     } catch (e) {
       console.error(e);
     }
@@ -1761,8 +1765,8 @@ Then el sistema valida la identidad.
     try {
       const newIterations = (test.iterations || []).filter(it => it.id !== iterId);
       const newStatus = calculateIterationStatus(newIterations) || test.status;
-      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) safeSetCycleTests(updated);
+      await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
+      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
     } catch (e) {
       console.error(e);
       alert("Error eliminando iteración: " + (e.message || e));
@@ -1773,8 +1777,8 @@ Then el sistema valida la identidad.
     try {
       const newIterations = test.iterations.map(it => it.id === iterId ? { ...it, [field]: value } : it);
       const newStatus = calculateIterationStatus(newIterations) || test.status;
-      const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
-      if (updated) safeSetCycleTests(updated);
+      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
+      await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
     } catch (e) {
       console.error(e);
       alert("Error guardando cambios de texto: " + (e.message || e));
@@ -1831,12 +1835,12 @@ Then el sistema valida la identidad.
             const iterIdx = iters.findIndex(i => i.id === iterId);
             if (iterIdx > -1) {
                iters[iterIdx] = { ...iters[iterIdx], evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence] };
-               const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
-               safeSetCycleTests(execution || []);
+               await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+               setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
             }
          } else {
-            const execution = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
-            safeSetCycleTests(execution || []);
+            await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+            setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences } : t));
          }
       }
     } catch (err) {
@@ -1858,8 +1862,8 @@ Then el sistema valida la identidad.
        if (iterIdx > -1) {
           const evs = (iters[iterIdx].evidences || []).filter(e => e.id !== attachmentId && e !== attachmentId);
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
-          const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
-          setCycleTests(updated);
+          await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
+          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
        }
        return;
     }
@@ -1869,8 +1873,8 @@ Then el sistema valida la identidad.
       currentEvidences.push(currentTest.evidence);
     }
     currentEvidences = currentEvidences.filter(e => e.id !== attachmentId && e !== attachmentId);
-    const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
-    setCycleTests(updated);
+    await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
+    setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences } : t));
   };
 
   
@@ -1887,7 +1891,7 @@ Then el sistema valida la identidad.
              evs[index] = { ...evs[index], filename: newName };
           }
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
-          setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, iterations: iters } : t));
+          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
           await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, iterations: iters });
        }
        return;
@@ -1902,7 +1906,7 @@ Then el sistema valida la identidad.
       currentEvidences[index] = { ...currentEvidences[index], filename: newName };
     }
     
-    setCycleTests(cycleTests.map(t => t.id === testId ? { ...t, evidences: currentEvidences, evidence: null } : t));
+    setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, evidence: null } : t));
     await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, evidences: currentEvidences });
   };
 
@@ -2245,9 +2249,9 @@ Then el sistema valida la identidad.
         {selectedCycle ? (
           <div>
             <div className="header">
-              <h1>Planning: {selectedCycle.summary}</h1>
+              <h1>Planning: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos en ciclo)</span></h1>
             </div>
-            <h3>Tests in this Cycle</h3>
+            <h3>Tests in this Cycle ({cycleTests.length})</h3>
             <div className="test-list" style={{marginBottom: '2rem'}}>
               {cycleTests.map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
@@ -2495,7 +2499,7 @@ Then el sistema valida la identidad.
         {selectedCycle ? (
           <div>
             <div className="header">
-              <h1>Execution: {selectedCycle.summary}</h1>
+              <h1>Execution: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos)</span></h1>
             </div>
             
             <div className="test-list">
@@ -2822,11 +2826,12 @@ Then el sistema valida la identidad.
                                     disabled={!runningTests[test.id]}
                                     style={{
                                       background: 'none', border: 'none', cursor: 'pointer', 
-                                      color: 'var(--danger-color)', fontSize: '0.85rem', 
-                                      alignSelf: 'flex-end', padding: 0
+                                      color: 'var(--danger-color)', fontSize: '0.9rem', 
+                                      alignSelf: 'flex-end', padding: 0,
+                                      display: 'flex', alignItems: 'center', justifyContent: 'center'
                                     }}
                                   >
-                                    ✕ Eliminar Iteración
+                                    ✕
                                   </button>
                                 )}
                                 <select 
@@ -2836,10 +2841,10 @@ Then el sistema valida la identidad.
                                   disabled={!runningTests[test.id]}
                                   style={{width: '100%', padding: '0.4rem', border: 'none', cursor: 'pointer', background: getStatusColor(iter.status || 'Not Run'), color: getStatusTextColor(iter.status || 'Not Run')}}
                                 >
-                                  <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Sin Ejecutar</option>
-                                  <option value="Passed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Exitoso</option>
-                                  <option value="Failed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Fallido</option>
-                                  <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Bloqueado</option>
+                                  <option value="Not Run" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Not Run</option>
+                                  <option value="Passed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Passed</option>
+                                  <option value="Failed" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Failed</option>
+                                  <option value="Blocked" style={{background: 'var(--bg-surface)', color: 'var(--text-primary)'}}>Blocked</option>
                                 </select>
                                 <div style={{display: 'flex', gap: '0.3rem', justifyContent: 'center'}}>
                                   <label className="btn-secondary" style={{padding: '0.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid var(--ds-border)'}} title="Adjuntar evidencia" style={!runningTests[test.id] ? {opacity: 0.5, pointerEvents: 'none'} : {}}>
