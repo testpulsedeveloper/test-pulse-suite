@@ -918,11 +918,16 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         }));
     }
     
-    // Y luego actualizamos el array principal de IDs
+    // Y luego actualizamos el array principal de IDs con formato ligero
+    const fullData = await getExecutionData(cycleId);
+    newTests.forEach(nt => {
+        if (!fullData.find(t => t.id === nt.id)) fullData.push(nt);
+    });
+    const lightWeight = fullData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
     let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(testIds)
+      body: JSON.stringify(lightWeight)
     });
     if (exRes.status === 429) {
         await new Promise(r => setTimeout(r, 2000));
@@ -989,13 +994,14 @@ resolver.define('addTestToCycle', async ({ payload }) => {
       throw new Error(`Jira PUT exec_${newTest.id} failed with ${res.status}: ${errText}`);
   }
   
-  if (!testIds.includes(testCase.id)) {
-      testIds.push(testCase.id);
-  }
+  // Get current full data to reconstruct lightweight index
+  const fullData = await getExecutionData(cycleId);
+  if (!fullData.find(t => t.id === newTest.id)) fullData.push(newTest);
+  const lightWeight = fullData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
   let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(testIds)
+    body: JSON.stringify(lightWeight)
   });
   if (exRes.status === 429) {
       await new Promise(r => setTimeout(r, 2000));
@@ -1182,6 +1188,14 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       const errText = await response.text();
       throw new Error('Failed to save test data: ' + errText);
     }
+    
+    // Update the lightweight index
+    const lightWeight = updatedData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(lightWeight)
+    });
   }
   
   return { success: true };
