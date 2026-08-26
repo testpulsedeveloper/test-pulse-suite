@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { invoke as forgeInvoke, view, router, requestJira } from '@forge/bridge';
 import { CreateIssueModal } from '@forge/jira-bridge';
 import './index.css';
@@ -3845,7 +3845,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.5 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.6 © El Puerto de Liverpool
       </div>
     </div>
   );
