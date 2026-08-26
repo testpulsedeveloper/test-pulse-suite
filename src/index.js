@@ -939,16 +939,20 @@ resolver.define('addTestToCycle', async ({ payload }) => {
       });
   }
   
-  if (res.ok) {
-      if (!testIds.includes(testCase.id)) {
-          testIds.push(testCase.id);
-      }
-      await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-        method: 'PUT',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(testIds)
-      });
+  if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Jira PUT exec_${newTest.id} failed with ${res.status}: ${errText}`);
   }
+  
+  if (!testIds.includes(testCase.id)) {
+      testIds.push(testCase.id);
+  }
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(testIds)
+  });
+  
   return { success: true };
 });
 
