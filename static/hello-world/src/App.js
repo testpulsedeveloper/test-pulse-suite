@@ -2337,8 +2337,8 @@ Then el sistema valida la identidad.
                          locallyAdded.forEach(lt => {
                              let finalItem = lt;
                              // Use historical data if backend returned it!
-                             if (bulkRes && bulkRes.addedTests) {
-                                 const matched = bulkRes.addedTests.find(t => t.id === lt.id);
+                             if (allAddedTests && allAddedTests.length > 0) {
+                                 const matched = allAddedTests.find(t => t.id === lt.id);
                                  if (matched && matched._historicalData) {
                                      finalItem = { ...lt, ...matched._historicalData };
                                  }
@@ -3857,7 +3857,7 @@ Then el sistema valida la identidad.
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse</strong> v1.4.7 © El Puerto de Liverpool
+        <strong>Test Pulse</strong> v1.4.8 © El Puerto de Liverpool
       </div>
     </div>
   );
