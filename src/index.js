@@ -880,17 +880,28 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   }
   
   if (newTests.length > 0) {
-    // Procesar los nuevos concurrentemente en bloques de 10 para mayor velocidad sin timeout
     const CHUNK_SIZE = 10;
     for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
         const chunk = newTests.slice(i, i + CHUNK_SIZE);
-        await Promise.all(chunk.map(t => 
-           api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+        await Promise.all(chunk.map(async (t) => {
+           let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
              method: 'PUT',
              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
              body: JSON.stringify(t)
-           })
-        ));
+           });
+           if (res.status === 429) {
+               await new Promise(r => setTimeout(r, 2000));
+               res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+                 method: 'PUT',
+                 headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                 body: JSON.stringify(t)
+               });
+           }
+           if (!res.ok) {
+               const errText = await res.text();
+               throw new Error(`Jira PUT exec_${t.id} failed with ${res.status}: ${errText}`);
+           }
+        }));
     }
     
     // Y luego actualizamos el array principal de IDs
@@ -988,13 +999,25 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
     const CHUNK_SIZE = 10;
     for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
         const chunk = newTests.slice(i, i + CHUNK_SIZE);
-        await Promise.all(chunk.map(nt => 
-           api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
+        await Promise.all(chunk.map(async (nt) => {
+           let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
              method: 'PUT',
              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
              body: JSON.stringify(nt)
-           })
-        ));
+           });
+           if (res.status === 429) {
+               await new Promise(r => setTimeout(r, 2000));
+               res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${nt.id}`, {
+                 method: 'PUT',
+                 headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                 body: JSON.stringify(nt)
+               });
+           }
+           if (!res.ok) {
+               const errText = await res.text();
+               throw new Error(`Jira PUT exec_${nt.id} failed with ${res.status}: ${errText}`);
+           }
+        }));
     }
     
     await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
