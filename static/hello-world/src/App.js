@@ -1633,9 +1633,34 @@ Then el sistema valida la identidad.
 
   const handleAddTestToCycle = async (testCase) => {
     if (!selectedCycle) return;
-    await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
-    const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-    setCycleTests(execution || []);
+    
+    // Optimistic UI
+    const locallyAdded = {
+        id: testCase.id,
+        key: testCase.key,
+        summary: testCase.summary,
+        status: 'Not Run'
+    };
+    setCycleTests(prev => {
+        if (!prev.some(existing => existing.id === locallyAdded.id)) {
+            return [...prev, locallyAdded];
+        }
+        return prev;
+    });
+    
+    try {
+        await invoke('addTestToCycle', { cycleId: selectedCycle.id, testCase });
+        setTimeout(async () => {
+            const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+            if (execution) setCycleTests(execution);
+        }, 3000);
+    } catch(err) {
+        console.error(err);
+        alert("Error al añadir caso: " + err.message);
+        // revert optimistic on error by reloading
+        const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+        setCycleTests(execution || []);
+    }
   };
 
   const handleRemoveTestFromCycle = async (testId) => {
@@ -2256,9 +2281,32 @@ Then el sistema valida la identidad.
                           await invoke('addBulkTestsToCycle', { cycleId: selectedCycle.id, testCases: chunk });
                       }
                       
-                      const finalExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-                      setCycleTests(finalExecution || []);
+                      // Optimistic UI update
+                      const locallyAdded = testsToAdd.map(tc => ({
+                         id: tc.id,
+                         key: tc.key,
+                         summary: tc.summary,
+                         status: 'Not Run'
+                      }));
+                      
+                      setCycleTests(prev => {
+                         const newArr = [...prev];
+                         locallyAdded.forEach(lt => {
+                             if (!newArr.some(existing => existing.id === lt.id)) {
+                                 newArr.push(lt);
+                             }
+                         });
+                         return newArr;
+                      });
+                      
                       setSelectedTestsForCycle([]); // clear selection after adding
+                      
+                      // Fetch background after a delay to ensure replication
+                      setTimeout(async () => {
+                          const finalExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+                          if (finalExecution) setCycleTests(finalExecution);
+                      }, 3000);
+                      
                     } catch(err) {
                       console.error(err);
                       alert("Error al añadir casos: " + err.message);
