@@ -3018,10 +3018,10 @@ Then el sistema valida la identidad.
     const bPct = allTotal > 0 ? (blocked / allTotal) * 100 : 0;
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
-  const handleCopyReportToClipboard = async () => {
-    const context = await view.getContext();
-    const baseUrl = context.siteUrl;
-    let tableRows = '';
+  const handleCopyReportToClipboard = () => {
+    try {
+      const baseUrl = context?.siteUrl || '';
+      let tableRows = '';
     
     // Generar las filas de la tabla de defectos
     filteredCycles.forEach(cycle => {
@@ -3089,7 +3089,6 @@ Then el sistema valida la identidad.
       </div>
     `;
 
-    try {
       const el = document.createElement('div');
       el.innerHTML = htmlTemplate;
       el.style.position = 'absolute';
@@ -3102,10 +3101,14 @@ Then el sistema valida la identidad.
       selection.removeAllRanges();
       selection.addRange(range);
       
-      document.execCommand('copy');
+      const success = document.execCommand('copy');
       
       selection.removeAllRanges();
       document.body.removeChild(el);
+      
+      if (!success) {
+         console.warn("execCommand returned false, possible permission issue.");
+      }
 
       const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycle ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
@@ -3113,7 +3116,7 @@ Then el sistema valida la identidad.
       router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
     } catch(err) {
       console.error('Error al copiar:', err);
-      alert("Hubo un error al copiar la plantilla.");
+      alert("Error crítico al exportar reporte: " + err.message);
     }
   };
 
