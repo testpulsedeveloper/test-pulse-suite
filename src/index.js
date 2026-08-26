@@ -563,68 +563,72 @@ const getExecutionData = async (cycleId) => {
   
   if (value.length === 0) return [];
   
-  // value is now a lightweight array [{id, status}] OR an array of strings ["10001"]
-  const testIds = (typeof value[0] === 'object') ? value.map(t => t.id) : value;
-  
+  const testIds = (typeof value[0] === 'object') ? value.map(t => String(t.id)) : value.map(String);
   if (!Array.isArray(testIds) || testIds.length === 0) return [];
   
-
-  
-  // NEW MODE: value is an array of test IDs ["10001", "10002"]
-  // To avoid HTTP 429 Rate Limits, we fetch ALL properties in ONE single JQL request!
-  const bulkRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-    method: 'POST',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jql: `id = ${cycleId}`,
-      fields: ['id'],
-      properties: ['*all']
-    })
-  });
-  
-  if (!bulkRes.ok) {
-     console.error("Bulk property fetch failed with status: " + bulkRes.status);
-     return [];
-  }
-  
-  const bulkData = await bulkRes.json();
-  
-  const properties = (bulkData.issues && bulkData.issues.length > 0) ? (bulkData.issues[0].properties || {}) : {};
-  
-  let mergedProps = { ...properties };
-  
-  const missingIds = testIds.filter(id => !mergedProps[`exec_${id}`]);
-  
-  if (missingIds.length > 0) {
-      console.log(`Fetching ${missingIds.length} missing properties directly to bypass JQL index delay...`);
-      
-      const CHUNK_SIZE = 15;
-      for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
-          const chunk = missingIds.slice(i, i + CHUNK_SIZE);
-          const chunkPromises = chunk.map(async (id) => {
-              let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
-              if (res.status === 429) {
-                  console.log(`Hit 429 on exec_${id}, retrying once after 2 seconds...`);
-                  await new Promise(r => setTimeout(r, 2000));
-                  res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
-              }
-              if (res.ok) {
-                  const data = await res.json();
-                  return { key: `exec_${id}`, value: data.value };
-              }
-              console.error(`Failed to fetch exec_${id} with status ${res.status}`);
-              return null;
-          });
-          const resolvedChunk = await Promise.all(chunkPromises);
-          resolvedChunk.forEach(prop => {
-              if (prop) mergedProps[prop.key] = prop.value;
-          });
-      }
+  let mergedProps = {};
+  const CHUNK_SIZE = 25;
+  for (let i = 0; i < testIds.length; i += CHUNK_SIZE) {
+      const chunk = testIds.slice(i, i + CHUNK_SIZE);
+      const chunkPromises = chunk.map(async (id) => {
+          let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+          if (res.status === 429) {
+              await new Promise(r => setTimeout(r, 2000));
+              res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+          }
+          if (res.ok) {
+              const data = await res.json();
+              return { key: `exec_${id}`, value: data.value };
+          }
+          return null;
+      });
+      const resolvedChunk = await Promise.all(chunkPromises);
+      resolvedChunk.forEach(prop => {
+          if (prop) mergedProps[prop.key] = prop.value;
+      });
   }
   
   const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
   
+  if (results.length === 0 && testIds.length > 0) {
+      throw new Error("CRITICAL: getExecutionData failed to fetch properties for testIds. Preventing empty array return to avoid data loss.");
+  }
+  
   return results;
+};
+
+const updateLightweightIndex = async (cycleId, updateFn) => {
+    let lightWeight = [];
+    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
+    if (response.status !== 404) {
+        const data = await response.json();
+        const value = data.value || [];
+        if (value.length > 0 && typeof value[0] === 'object') {
+            lightWeight = value;
+        } else if (value.length > 0) {
+            lightWeight = value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
+        }
+    }
+    
+    lightWeight = updateFn(lightWeight);
+    
+    let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(lightWeight)
+    });
+    if (exRes.status === 429) {
+        await new Promise(r => setTimeout(r, 2000));
+        exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+            method: 'PUT',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify(lightWeight)
+        });
+    }
+    if (!exRes.ok) {
+        const errText = await exRes.text();
+        console.error("Failed to update lightweight index:", errText);
+    }
 };
 
 const setExecutionData = async (cycleId, data) => {
@@ -892,29 +896,14 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         }));
     }
     
-    // Y luego actualizamos el array principal de IDs con formato ligero
-    const fullData = await getExecutionData(cycleId);
-    newTests.forEach(nt => {
-        if (!fullData.find(t => t.id === nt.id)) fullData.push(nt);
-    });
-    const lightWeight = fullData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
-    let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-      method: 'PUT',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(lightWeight)
-    });
-    if (exRes.status === 429) {
-        await new Promise(r => setTimeout(r, 2000));
-        exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(testIds)
+    await updateLightweightIndex(cycleId, (lw) => {
+        newTests.forEach(nt => {
+            if (!lw.find(t => String(t.id) === String(nt.id))) {
+                lw.push({ id: String(nt.id), status: nt.status, linkedBugs: nt.linkedBugs || [] });
+            }
         });
-    }
-    if (!exRes.ok) {
-        const errText = await exRes.text();
-        throw new Error(`Jira PUT execution failed with ${exRes.status}: ${errText}`);
-    }
+        return lw;
+    });
   }
   
   // Return the newly added items with their historical data
@@ -968,27 +957,12 @@ resolver.define('addTestToCycle', async ({ payload }) => {
       throw new Error(`Jira PUT exec_${newTest.id} failed with ${res.status}: ${errText}`);
   }
   
-  // Get current full data to reconstruct lightweight index
-  const fullData = await getExecutionData(cycleId);
-  if (!fullData.find(t => t.id === newTest.id)) fullData.push(newTest);
-  const lightWeight = fullData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
-  let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-    method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(lightWeight)
+  await updateLightweightIndex(cycleId, (lw) => {
+      if (!lw.find(t => String(t.id) === String(newTest.id))) {
+          lw.push({ id: String(newTest.id), status: newTest.status, linkedBugs: newTest.linkedBugs || [] });
+      }
+      return lw;
   });
-  if (exRes.status === 429) {
-      await new Promise(r => setTimeout(r, 2000));
-      exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-          method: 'PUT',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(testIds)
-      });
-  }
-  if (!exRes.ok) {
-      const errText = await exRes.text();
-      throw new Error(`Jira PUT execution failed with ${exRes.status}: ${errText}`);
-  }
   
   return { success: true, addedTest: newTest };
 });
@@ -1074,14 +1048,7 @@ resolver.define('removeTestFromCycle', async ({ payload }) => {
       testIds = (typeof data.value[0] !== 'object') ? data.value || [] : data.value.map(t => t.id);
   }
   
-  testIds = testIds.filter(id => String(id) !== String(testId));
-  
-  // Overwrite the execution array
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-    method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(testIds)
-  });
+  await updateLightweightIndex(cycleId, (lw) => lw.filter(t => String(t.id) !== String(testId)));
   
   // Delete the individual property
   await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
@@ -1125,31 +1092,29 @@ resolver.define('updateTestStatus', async ({ payload }) => {
     };
   }
 
-  const executionData = await getExecutionData(cycleId);
+  let resTest = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`);
+  let t = null;
+  if (resTest.ok) {
+      t = (await resTest.json()).value;
+  }
   
   let updatedTest = null;
-  const updatedData = executionData.map(t => {
-    if (t.id === testId) {
-      // Security check
+  if (t) {
       if (!takeover && t.executedBy && userData && t.executedBy.accountId !== userData.accountId && !isAdmin) {
-        throw new Error('Solo el usuario que ejecutó la prueba original o un administrador puede modificarla.');
+          throw new Error('Solo el usuario que ejecutó la prueba original o un administrador puede modificarla.');
       }
-
       updatedTest = { 
-        ...t, 
-        status: status !== undefined ? status : t.status, 
-        comment: comment !== undefined ? comment : t.comment,
-        evidence: evidence !== undefined ? evidence : t.evidence,
-        evidences: evidences !== undefined ? evidences : t.evidences,
-        linkedBugs: linkedBugs !== undefined ? linkedBugs : t.linkedBugs,
-        steps: steps !== undefined ? steps : t.steps,
-        iterations: iterations !== undefined ? iterations : t.iterations,
-        executedBy: executorInfo !== undefined ? executorInfo : t.executedBy
+          ...t, 
+          status: status !== undefined ? status : t.status, 
+          comment: comment !== undefined ? comment : t.comment,
+          evidence: evidence !== undefined ? evidence : t.evidence,
+          evidences: evidences !== undefined ? evidences : t.evidences,
+          linkedBugs: linkedBugs !== undefined ? linkedBugs : t.linkedBugs,
+          steps: steps !== undefined ? steps : t.steps,
+          iterations: iterations !== undefined ? iterations : t.iterations,
+          executedBy: executorInfo !== undefined ? executorInfo : t.executedBy
       };
-      return updatedTest;
-    }
-    return t;
-  });
+  }
   
   if (updatedTest) {
     const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
@@ -1163,12 +1128,15 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       throw new Error('Failed to save test data: ' + errText);
     }
     
-    // Update the lightweight index
-    const lightWeight = updatedData.map(t => ({ id: t.id, status: t.status, linkedBugs: t.linkedBugs || [] }));
-    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-      method: 'PUT',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(lightWeight)
+    await updateLightweightIndex(cycleId, (lw) => {
+        const item = lw.find(l => String(l.id) === String(testId));
+        if (item) {
+            item.status = updatedTest.status;
+            item.linkedBugs = updatedTest.linkedBugs || [];
+        } else {
+            lw.push({ id: String(testId), status: updatedTest.status, linkedBugs: updatedTest.linkedBugs || [] });
+        }
+        return lw;
     });
   }
   
