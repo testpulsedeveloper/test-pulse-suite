@@ -556,7 +556,7 @@ resolver.define('createTestCycle', async (req) => {
 
 // === Execution Management (Jira Entity Properties) ===
 const getExecutionData = async (cycleId) => {
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   if (response.status === 404) return [];
   const data = await response.json();
   const value = data.value || [];
@@ -845,7 +845,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
   
   // LEER SOLO LOS IDs, sin descargar todos los objetos para evitar tronar por rate limits y perder datos (Data Loss)
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   let testIds = [];
   if (response.status !== 404) {
       const data = await response.json();
@@ -939,7 +939,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
 resolver.define('addTestToCycle', async ({ payload }) => {
   const { cycleId, testCase } = payload;
   
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   let testIds = [];
   if (response.status !== 404) {
       const data = await response.json();
@@ -994,7 +994,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
 resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
   
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   let testIds = [];
   if (response.status !== 404) {
       const data = await response.json();
@@ -1065,7 +1065,7 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
 resolver.define('removeTestFromCycle', async ({ payload }) => {
   const { cycleId, testId } = payload;
   
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   let testIds = [];
   if (response.status !== 404) {
       const data = await response.json();
