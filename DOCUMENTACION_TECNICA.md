@@ -63,3 +63,24 @@ Existen ciertos comportamientos extraños de Forge que se resolvieron mediante "
 2. **Acceso al Portapapeles (`navigator.clipboard`):** Forge bloquea la API moderna del portapapeles desde iframes por seguridad.
    * *Solución:* Cuando el usuario da clic en "Copiar Plantilla", la app genera una tabla HTML oculta, la inyecta al DOM, la selecciona programáticamente, ejecuta el comando antiguo `document.execCommand('copy')`, y luego elimina la tabla.
    * *UX:* Dado que no podemos lanzar el correo automáticamente de manera silenciosa junto con el texto formateado en HTML, se detiene el flujo con una **Alerta Adaptable OS** (`Cmd+V` para Mac o `Ctrl+V` para Windows) instruyendo al usuario qué hacer al llegar a Gmail.
+
+
+## Actualización 26 de Agosto 2026: Correcciones en Campos Personalizados y Reportes
+
+### 1. Hardcodeo de Campos Personalizados en Backend (src/index.js)
+Se detectó que el backend de Jira Forge transformaba la solicitud de '*all' (todos los campos) a una lista restringida de 'safeFields' por motivos de rendimiento y permisos, lo que causaba que los campos personalizados mapeados vía CSV fueran omitidos en la carga de la aplicación.
+Se actualizaron los 'safeFields' para forzar la carga en la API de los siguientes campos clave para Test Pulse:
+- customfield_10534 (Tipo de Ejecución)
+- customfield_10530 (Nivel de Prueba)
+- customfield_10535 (Tipo de Prueba)
+- customfield_10568 (Precondición)
+- customfield_10569 (Pasos)
+- customfield_10570 (Resultados Esperados)
+
+### 2. Filtro de Ejecución y Reportes (static/hello-world/src/App.js)
+- **Tipo de Ejecución (getExecVal):** El sistema fue configurado para leer explícitamente customfield_10534 y determinar si una prueba es Manual o Automatizada basándose en la base de datos nativa de Jira.
+- Se reincorporó la etiqueta de texto en cursiva a la par del ID (ej. *CEL-938 (Automatizado)*) para facilitar la rápida identificación visual en todas las listas.
+- **Portapapeles de Bugs:** Se corrigió un error en handleCopyReportToClipboard donde se agrupaban mal los conteos. Se cambió la llave interna a ex.id garantizando que los reportes copiados calculen la suma exacta de 'Casos Impactados' por cada defecto agrupado de acuerdo a lo que se ve en la tabla de la interfaz.
+
+### 3. Respaldos
+La información de 'Tipo de Ejecución' y los demás Custom Fields reside **nativamente en la base de datos de Jira**, por lo cual están permanentemente respaldados por la plataforma Atlassian. La función interna de 'Backup & Restore' dentro de Configuración almacena correctamente las propiedades y jerarquías (Ciclos, Planes, Folders) de la aplicación.

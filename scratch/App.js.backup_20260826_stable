@@ -563,7 +563,10 @@ function App() {
     return matchesSearch && matchesFolder;
   });
   
-  const filteredTestCycles = testCycles;
+  const filteredTestCycles = testCycles.filter(c => 
+    c.key?.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    c.summary?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   const handleCreateIssue = () => {
     const projectId = selectedProjectId || context?.extension?.project?.id;
@@ -2299,7 +2302,7 @@ const renderPlanningTab = () => (
             </div>
             <h3>Tests in this Cycle ({cycleTests.length})</h3>
             <div className="test-list" style={{marginBottom: '2rem'}}>
-              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
+              {cycleTests.map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                   <div className="test-card-content">
                     <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
@@ -2571,7 +2574,7 @@ const renderPlanningTab = () => (
             </div>
             
             <div className="test-list">
-              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
+              {cycleTests.map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', flexDirection: 'column'}}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'auto 100px 1fr auto', gap: '1rem', alignItems: 'center', width: '100%' }}>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', display: 'flex', alignItems: 'center'}}>

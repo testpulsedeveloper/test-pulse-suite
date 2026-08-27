@@ -411,17 +411,7 @@ function App() {
               setBulkFieldSchema(schemaDict);
             }
           }
-          const typeField = (fields.length ? fields : []).find(f => {
-  if (f.name) {
-    const nameLower = f.name.toLowerCase();
-    if (nameLower.includes('tipo de ejecuci') || nameLower.includes('execution type') || nameLower === '"tipo de ejecución"') return true;
-  }
-  if (f.allowedValues && f.allowedValues.length > 0) {
-    const opts = f.allowedValues.map(v => v.value ? v.value.toLowerCase() : '').join(' ');
-    if (opts.includes('manual') && opts.includes('auto')) return true;
-  }
-  return false;
-});
+          const typeField = (fields.length ? fields : []).find(f => f.name && (f.name.trim().toLowerCase() === 'tipo de ejecución' || f.name.trim().toLowerCase() === 'tipo de ejecucion' || f.name.trim().toLowerCase() === 'execution type'));
           if (typeField) setExecutionTypeFieldId(typeField.id);
         } else {
           setJiraFields([{ id: 'debug-error', name: `Error: ${JSON.stringify(fields)}` }]);
@@ -563,7 +553,10 @@ function App() {
     return matchesSearch && matchesFolder;
   });
   
-  const filteredTestCycles = testCycles;
+  const filteredTestCycles = testCycles.filter(c => 
+    c.key?.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    c.summary?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   const handleCreateIssue = () => {
     const projectId = selectedProjectId || context?.extension?.project?.id;
@@ -1459,9 +1452,8 @@ Then el sistema valida la identidad.
                 style={{ cursor: 'pointer' }}
               >
                 <div className="test-card-content">
-                  <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
+                  <span className="test-id">{test.key}</span>
                   <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
-
                 </div>
                 <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
                   <span className="status-badge">{test.status}</span>
@@ -2194,15 +2186,7 @@ Then el sistema valida la identidad.
     }
   };
 
-  const getExecVal = (t) => {
-  if (t && t.rawFields && t.rawFields['customfield_10534']) {
-     const v = t.rawFields['customfield_10534'];
-     let str = '';
-     if (Array.isArray(v) && v.length > 0) str = v[0].value || v[0].name || String(v[0]);
-     else if (typeof v === 'object' && v !== null) str = v.value || v.name || '';
-     else str = String(v);
-     if (str) return str.toString().replace(/['"]/g, '').trim().toLowerCase();
-  } 
+  const getExecVal = (t) => { 
   let str = '';
   if (executionTypeFieldId && t.rawFields && t.rawFields[executionTypeFieldId]) { 
      const v = t.rawFields[executionTypeFieldId]; 
@@ -2220,7 +2204,7 @@ Then el sistema valida la identidad.
            else testStr = String(v);
            
            if (testStr) {
-              const testLower = testStr.toString().replace(/["']/g, '').trim().toLowerCase();
+              const testLower = testStr.toString().trim().toLowerCase();
               if (testLower === 'manual' || testLower.includes('automatizado') || testLower.includes('automático') || testLower === 'auto') {
                   str = testStr;
                   break;
@@ -2229,7 +2213,7 @@ Then el sistema valida la identidad.
         }
      }
   }
-  const finalStr = (str || '').toString().replace(/["']/g, '').trim().toLowerCase(); return finalStr === '' ? 'manual' : finalStr;
+  return (str || '').toString().trim().toLowerCase();
 };
 
 const renderPlanningTab = () => (
@@ -2299,12 +2283,11 @@ const renderPlanningTab = () => (
             </div>
             <h3>Tests in this Cycle ({cycleTests.length})</h3>
             <div className="test-list" style={{marginBottom: '2rem'}}>
-              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
+              {cycleTests.map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                   <div className="test-card-content">
-                    <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
+                    <span className="test-id">{test.key}</span>
                     <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
-
                   </div>
                   <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
                     <span className="status-badge" style={{
@@ -2461,9 +2444,8 @@ const renderPlanningTab = () => (
                       style={{ transform: 'scale(1.2)' }}
                     />
                     <div style={{ display: 'flex', flexDirection: 'column' }}>
-                       <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
+                       <span className="test-id">{test.key}</span>
                        <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
-
                     </div>
                   </div>
                   <button 
@@ -2571,18 +2553,17 @@ const renderPlanningTab = () => (
             </div>
             
             <div className="test-list">
-              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
+              {cycleTests.map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', flexDirection: 'column'}}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'auto 100px 1fr auto', gap: '1rem', alignItems: 'center', width: '100%' }}>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', display: 'flex', alignItems: 'center'}}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{transform: expandedExecutionTest === test.id ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s'}}><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </div>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer'}}>
-                      <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
+                      <span className="test-id">{test.key}</span>
                     </div>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
                       <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
-
                       {(test.linkedBugs && test.linkedBugs.length > 0) && (
                         <span style={{
                           display: 'inline-flex', alignItems: 'center', gap: '3px',
@@ -3061,7 +3042,7 @@ const renderPlanningTab = () => (
              isAuto = true;
           }
           const tc = testCases.find(t => t.id === ex.id);
-          if (tc && getExecVal(tc).includes('auto')) {
+          if (tc && executionTypeFieldId && getExecVal(tc).includes('auto')) {
              isAuto = true;
           }
           const stats = isAuto ? execStats.auto : execStats.manual;
@@ -3140,36 +3121,27 @@ const renderPlanningTab = () => (
       const baseUrl = context?.siteUrl || '';
       let tableRows = '';
     
-    const bugGroups = {};
+    // Generar las filas de la tabla de defectos
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         cycle.execution.forEach(ex => {
           if (ex.linkedBugs && ex.linkedBugs.length > 0) {
             ex.linkedBugs.forEach(bug => {
-              if (!bugGroups[bug.key]) {
-                bugGroups[bug.key] = { ...bug, linkedCases: [] };
-              }
-              if (!bugGroups[bug.key].linkedCases.includes(ex.id)) {
-                bugGroups[bug.key].linkedCases.push(ex.id);
-              }
+              tableRows += `
+                <tr>
+                  <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${bug.key}">${bug.key}</a></td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
+                  <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${ex.key}">${ex.key}</a></td>
+                </tr>
+              `;
             });
           }
         });
       }
-    });
-
-    Object.values(bugGroups).forEach(bug => {
-      tableRows += `
-        <tr>
-          <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${bug.key}">${bug.key}</a></td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
-          <td style="border: 1px solid #ddd; padding: 8px;">${bug.linkedCases.length} caso${bug.linkedCases.length !== 1 ? 's' : ''} impactado${bug.linkedCases.length !== 1 ? 's' : ''}</td>
-        </tr>
-      `;
     });
 
     const htmlTemplate = `
@@ -3197,7 +3169,7 @@ const renderPlanningTab = () => (
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Estado</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Responsable</th>
             <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Resolución</th>
-            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Casos impactados</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Link al caso</th>
           </tr>
           ${tableRows}
         </table>
