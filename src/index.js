@@ -381,22 +381,22 @@ resolver.define('getTestCases', async ({ payload, context }) => {
     const typeJql = testCaseType ? `issuetype = "${testCaseType}"` : `issuetype IN ("Test Case", "Test")`;
     const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
     
-    let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534', '*navigable'];
+    let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534'];
     if (payload?.executionTypeFieldId) {
        fieldsToFetch.push(payload.executionTypeFieldId);
     }
     
-    const allIssues = await fetchAllIssues(jql, fieldsToFetch, 'renderedFields', ['testops-folder-link']);
+    const allIssues = await fetchAllIssues(jql, fieldsToFetch, null, ['testops-folder-link']);
     let cases = allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
-      description: issue.renderedFields?.description || issue.fields.description,
+      
       status: issue.fields.status.name,
       created: issue.fields.created,
       folderId: issue.properties?.['testops-folder-link']?.folderId || null,
-      rawFields: issue.fields,
-      renderedFields: issue.renderedFields
+      rawFields: issue.fields
+      
     }));
 
     if (folderId) {
