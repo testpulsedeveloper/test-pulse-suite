@@ -2,11 +2,11 @@ import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
 async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
+   return [];
+}
+
+async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100) {
   try {
-    let allIssues = [];
-    let maxResults = 100;
-    
-    // Transform *all to specific fields
     let safeFields = fields;
     if (Array.isArray(fields) && fields.includes('*all')) {
         safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
@@ -20,63 +20,30 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
     const body = {
       jql,
       maxResults,
-      startAt: 0,
       fields: Array.isArray(safeFields) ? safeFields : [safeFields]
     };
+    if (nextPageToken) body.nextPageToken = nextPageToken;
     if (expand) body.expand = Array.isArray(expand) ? expand.join(',') : expand;
     if (properties) body.properties = Array.isArray(properties) ? properties : [properties];
 
-    // 1. Fetch first page to get total
-    const firstRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
 
-    if (!firstRes.ok) {
-       return [{ id: '999999', key: 'ERR-1', fields: { summary: `JQL Search failed: ${firstRes.status} ${await firstRes.text()}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
+    if (!response.ok) {
+       return { error: `JQL Search failed: ${response.status} ${await response.text()}` };
     }
 
-    const firstData = await firstRes.json();
-    let issues = firstData.issues || firstData.values || [];
-    allIssues = allIssues.concat(issues);
-    const total = firstData.total || 0;
-    
-    // If we have more issues, fetch them in chunks IN PARALLEL!
-    if (total > maxResults) {
-        const pagesToFetch = Math.min(Math.ceil(total / maxResults) - 1, maxPages - 1);
-        const offsets = [];
-        for (let i = 1; i <= pagesToFetch; i++) {
-            offsets.push(i * maxResults);
-        }
-
-        // Fetch in batches of 5 to avoid rate limits
-        const BATCH_SIZE = 5;
-        for (let i = 0; i < offsets.length; i += BATCH_SIZE) {
-            const batch = offsets.slice(i, i + BATCH_SIZE);
-            const promises = batch.map(async (offset) => {
-                const reqBody = { ...body, startAt: offset };
-                const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-                  method: 'POST',
-                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                  body: JSON.stringify(reqBody)
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    return data.issues || data.values || [];
-                }
-                return [];
-            });
-            const results = await Promise.all(promises);
-            results.forEach(resIssues => {
-                allIssues = allIssues.concat(resIssues);
-            });
-        }
-    }
-
-    return allIssues;
+    const data = await response.json();
+    return {
+       issues: data.issues || data.values || [],
+       nextPageToken: data.nextPageToken || null,
+       isLast: data.isLast !== undefined ? data.isLast : (data.nextPageToken == null)
+    };
   } catch(err) {
-    return [{ id: '999999', key: 'ERR-2', fields: { summary: `Exception: ${err.message}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
+    return { error: err.message };
   }
 }
 
@@ -396,42 +363,38 @@ resolver.define('getProjectIssueTypeFields', async ({ payload }) => {
 
 // === Test Case Management (Jira REST API) ===
 resolver.define('getTestCases', async ({ payload, context }) => {
-  try {
-    const projectId = payload?.projectId || context?.extension?.project?.id;
-    const testCaseType = payload?.config?.testCaseType;
-    const folderId = payload?.folderId;
-    
-    const projectJql = projectId ? `project = ${projectId} AND ` : '';
-    const typeJql = testCaseType ? `issuetype = "${testCaseType}"` : `issuetype IN ("Test Case", "Test")`;
-    const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
-    
-    let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534'];
-    if (payload?.executionTypeFieldId) {
-       fieldsToFetch.push(payload.executionTypeFieldId);
-    }
-    
-    const allIssues = await fetchAllIssues(jql, fieldsToFetch, null, ['testops-folder-link']);
-    let cases = allIssues.map(issue => ({
+  const { folderId, projectId, config, nextPageToken } = payload;
+  const testCaseType = config?.testCaseType || 'Test Case';
+  
+  const projectJql = projectId ? `project = ${projectId} AND ` : '';
+  const typeJql = testCaseType ? `issuetype = "${testCaseType}"` : `issuetype IN ("Test Case", "Test")`;
+  const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
+  
+  let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534'];
+  if (payload?.executionTypeFieldId) {
+     fieldsToFetch.push(payload.executionTypeFieldId);
+  }
+  
+  const pageData = await fetchJqlPage(jql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+  if (pageData.error) {
+     return [{ id: '999999', key: 'ERR-1', rawFields: { summary: pageData.error } }];
+  }
+  
+  const mapped = pageData.issues.map(issue => ({
       id: issue.id,
       key: issue.key,
-      summary: issue.fields.summary,
-      
-      status: issue.fields.status.name,
-      created: issue.fields.created,
+      summary: issue.fields?.summary || '',
+      status: issue.fields?.status?.name || '',
+      created: issue.fields?.created || '',
       folderId: issue.properties?.['testops-folder-link']?.folderId || null,
-      rawFields: issue.fields
-      
-    }));
-
-    if (folderId) {
-      cases = cases.filter(c => c.folderId === folderId);
-    }
-
-    return cases;
-  } catch (e) {
-    console.error("getTestCases exception:", e);
-    return { _isError: true, message: String(e) };
-  }
+      rawFields: issue.fields || {}
+  }));
+  
+  return {
+     issues: mapped,
+     nextPageToken: pageData.nextPageToken,
+     isLast: pageData.isLast
+  };
 });
 
 resolver.define('getRequirements', async ({ payload, context }) => {
@@ -718,7 +681,17 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const cycleType = config?.testCycleType || 'Test Cycle';
   
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
-  const allIssues = await fetchAllIssues(jql, ['summary', 'issuetype'], null, ['testops-plan-link', 'execution']);
+  let allIssues = [];
+  let token = null;
+  let isLast = false;
+  while (!isLast) {
+      const page = await fetchJqlPage(jql, ['summary', 'issuetype'], null, ['testops-plan-link', 'execution'], token, 100);
+      if (page.error) break;
+      allIssues = allIssues.concat(page.issues);
+      token = page.nextPageToken;
+      isLast = page.isLast;
+      if (!token) break;
+  }
   // Load execution data and auto-heal old formats
   const cycles = [];
   for (const issue of allIssues) {
