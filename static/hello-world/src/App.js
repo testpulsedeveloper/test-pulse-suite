@@ -306,8 +306,11 @@ function App() {
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 50;
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [localLoading, setLocalLoading] = useState(false);
   
   // Project Context & Config State
   const [projects, setProjects] = useState([]);
@@ -350,7 +353,7 @@ function App() {
   }, [folders]);
 
   const loadData = async (currentProjectId = selectedProjectId) => {
-    setLoading(true);
+    if (!testCases.length) setLoading(true);
     try {
       const ctx = await view.getContext();
       setContext(ctx);
@@ -579,7 +582,7 @@ function App() {
   }, []);
   
   // Filtered Data
-  const filteredTestCases = testCases.filter(tc => {
+  const filteredTestCasesAll = testCases.filter(tc => {
     const matchesSearch = tc.key.toLowerCase().includes(searchQuery.toLowerCase()) || tc.summary.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesFolder = activeFolder === null || tc.folderId === activeFolder;
     return matchesSearch && matchesFolder;
@@ -1472,7 +1475,8 @@ Then el sistema valida la identidad.
         {loading ? (
           <p>Loading...</p>
         ) : (
-          <div className="test-list">
+          <div className="test-list-container" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div className="test-list" style={{ flex: 1, overflowY: 'auto' }}>
             {filteredTestCases.map(test => (
               <div 
                 key={test.id} 
@@ -1507,6 +1511,28 @@ Then el sistema valida la identidad.
                 <p>No Test Cases found in this project.</p>
               </div>
             )}
+          </div>
+          {totalPages > 1 && (
+            <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '15px', padding: '15px 0', borderTop: '1px solid var(--border-color)', marginTop: 'auto' }}>
+              <button 
+                 className="btn-secondary" 
+                 disabled={currentPage === 1} 
+                 onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+              >
+                Previous
+              </button>
+              <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                Page {currentPage} of {totalPages} ({filteredTestCasesAll.length} items)
+              </span>
+              <button 
+                 className="btn-secondary" 
+                 disabled={currentPage === totalPages} 
+                 onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+              >
+                Next
+              </button>
+            </div>
+          )}
           </div>
         )}
       </main>
@@ -2108,7 +2134,7 @@ Then el sistema valida la identidad.
 
   const loadProjectData = async () => {
     if (!selectedProjectId) return;
-    setLoading(true);
+    if (!testCases.length) setLoading(true);
     
     // Check permissions
     const admin = await invoke('checkAdminPermission', { projectId: selectedProjectId });
@@ -2136,7 +2162,7 @@ Then el sistema valida la identidad.
 
   const loadReportData = async () => {
     if (!selectedProjectId) return;
-    setLoading(true);
+    if (!testCases.length) setLoading(true);
     const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
     setReportData(data || { cycles: [] });
     setLoading(false);
