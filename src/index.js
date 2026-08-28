@@ -643,18 +643,19 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
     }
     
     lightWeight = updateFn(lightWeight);
+    const testIdsToSave = lightWeight.map(t => String(t.id));
     
     let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
         method: 'PUT',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(lightWeight)
+        body: JSON.stringify(testIdsToSave)
     });
     if (exRes.status === 429) {
         await new Promise(r => setTimeout(r, 2000));
         exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(lightWeight)
+            body: JSON.stringify(testIdsToSave)
         });
     }
     if (!exRes.ok) {
