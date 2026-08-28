@@ -2178,7 +2178,7 @@ Then el sistema valida la identidad.
       const [fetchedPlans, fetchedCycles, fetchedCases, fetchedFolders] = await Promise.all([
         invoke('getTestPlans', { projectId: selectedProjectId, config }),
         invoke('getTestCycles', { projectId: selectedProjectId, config }),
-        invoke('getTestCases', { projectId: selectedProjectId, config }),
+        fetchAllTestCases({ projectId: selectedProjectId, config }),
         invoke('getFolders', { projectId: selectedProjectId })
       ]);
       setTestPlans(fetchedPlans || []);
