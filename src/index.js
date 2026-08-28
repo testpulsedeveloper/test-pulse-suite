@@ -2,7 +2,23 @@ import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
 async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
-   return [];
+  let allIssues = [];
+  let token = null;
+  let isLast = false;
+  let pages = 0;
+  while (!isLast && pages < maxPages) {
+      const page = await fetchJqlPage(jql, fields, expand, properties, token, 100);
+      if (page.error) {
+          console.error("fetchAllIssues error:", page.error);
+          break;
+      }
+      allIssues = allIssues.concat(page.issues);
+      token = page.nextPageToken;
+      isLast = page.isLast;
+      if (!token) break;
+      pages++;
+  }
+  return allIssues;
 }
 
 async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100) {
