@@ -588,6 +588,9 @@ function App() {
     return matchesSearch && matchesFolder;
   });
   
+  const totalPages = Math.ceil(filteredTestCasesAll.length / itemsPerPage);
+  const filteredTestCases = filteredTestCasesAll.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+  
   const filteredTestCycles = testCycles;
 
   const handleCreateIssue = () => {
