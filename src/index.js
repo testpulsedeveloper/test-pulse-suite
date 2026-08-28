@@ -1,7 +1,7 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
-async function fetchAllIssues(jql, fields, expand, properties, maxPages = 20) {
+async function fetchAllIssues(jql, fields, expand, properties, maxPages = 5) {
   try {
     let allIssues = [];
     let maxResults = 100;
@@ -381,7 +381,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
     const typeJql = testCaseType ? `issuetype = "${testCaseType}"` : `issuetype IN ("Test Case", "Test")`;
     const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
     
-    let fieldsToFetch = ['*all'];
+    let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534', '*navigable'];
     if (payload?.executionTypeFieldId) {
        fieldsToFetch.push(payload.executionTypeFieldId);
     }
@@ -1757,6 +1757,20 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
   } catch (e) {
     console.error("getTestCaseHistory error:", e);
     return [];
+  }
+});
+
+
+resolver.define('getIssueDescription', async ({ payload }) => {
+  try {
+    const { issueId } = payload;
+    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?expand=renderedFields&fields=description`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.renderedFields?.description || data.fields?.description || null;
+  } catch (e) {
+    console.error("Error fetching description:", e);
+    return null;
   }
 });
 

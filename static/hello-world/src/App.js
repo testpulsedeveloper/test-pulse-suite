@@ -278,6 +278,28 @@ function App() {
   // Modal State
   const [context, setContext] = useState(null);
   const [selectedTestCase, setSelectedTestCase] = useState(null);
+  const [selectedTestCaseDescription, setSelectedTestCaseDescription] = useState(null);
+  const [loadingDescription, setLoadingDescription] = useState(false);
+
+  useEffect(() => {
+    if (selectedTestCase) {
+      if (selectedTestCase.description) {
+         setSelectedTestCaseDescription(selectedTestCase.description);
+      } else {
+         setLoadingDescription(true);
+         setSelectedTestCaseDescription(null);
+         invoke('getIssueDescription', { issueId: selectedTestCase.id }).then(desc => {
+            setSelectedTestCaseDescription(desc);
+            setLoadingDescription(false);
+         }).catch(() => {
+            setLoadingDescription(false);
+         });
+      }
+    } else {
+      setSelectedTestCaseDescription(null);
+    }
+  }, [selectedTestCase]);
+
   const [testCaseDetails, setTestCaseDetails] = useState({ type: 'traditional', content: [] });
   const [testCaseDetailsLoading, setTestCaseDetailsLoading] = useState(false);
   const [testCaseHistory, setTestCaseHistory] = useState([]);
@@ -1568,10 +1590,16 @@ Then el sistema valida la identidad.
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.5rem', marginBottom: '1rem' }}>
               <h3>Description (Issue)</h3>
             </div>
-            {selectedTestCase.description ? (
+            {loadingDescription ? (
+              <div style={{padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)'}}>
+                 <div className="spinner" style={{margin: '0 auto 1rem auto', width: '24px', height: '24px', border: '3px solid var(--ds-border)', borderTop: '3px solid var(--brand-color)', borderRadius: '50%', animation: 'spin 1s linear infinite'}}></div>
+                 <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+                 Cargando descripción...
+              </div>
+            ) : selectedTestCaseDescription ? (
               <div 
                 className="description-content"
-                dangerouslySetInnerHTML={{ __html: selectedTestCase.description }} 
+                dangerouslySetInnerHTML={{ __html: selectedTestCaseDescription }} 
               />
             ) : (
               <div className="empty-state" style={{padding: '2rem'}}>
@@ -3057,7 +3085,7 @@ const renderPlanningTab = () => (
           
           // Exec Type
           let isAuto = false;
-          if (ex.rawFields && ex.rawFields.components && ex.rawFields.components.some(c => c.name.toLowerCase().includes('auto'))) {
+          if (getExecVal && typeof getExecVal === 'function' && getExecVal({ rawFields: ex.rawFields }).includes('auto')) {
              isAuto = true;
           }
           const tc = testCases.find(t => t.id === ex.id);
