@@ -5,9 +5,6 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
   try {
     let allIssues = [];
     let maxResults = 100;
-    let page = 0;
-    let nextPageToken = null;
-    let isLast = false;
     
     // Transform *all to specific fields
     let safeFields = fields;
@@ -20,50 +17,63 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
         safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
     }
     
-    while (page < maxPages && !isLast) {
-      const body = {
-        jql,
-        maxResults,
-        fields: Array.isArray(safeFields) ? safeFields : [safeFields]
-      };
-      
-      if (nextPageToken) {
-         body.nextPageToken = nextPageToken;
-      }
-      
-      if (expand) {
-         body.expand = Array.isArray(expand) ? expand.join(',') : expand;
-      }
-      if (properties) {
-         body.properties = Array.isArray(properties) ? properties : [properties];
-      }
-      
-      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      
-      if (!response.ok) {
-         return [{ id: '999999', key: 'ERR-1', fields: { summary: `JQL Search failed: ${response.status} ${await response.text()}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
-      }
-      
-      const data = await response.json();
-      const issues = data.issues || data.values || [];
-      allIssues = allIssues.concat(issues);
-      
-      // Update pagination cursor for the next iteration
-      nextPageToken = data.nextPageToken;
-      
-      // Stop if there are no more pages
-      if (data.nextPageToken == null || data.isLast === true || issues.length === 0) {
-          isLast = true;
-          break;
-      }
-      
-      page++;
+    const body = {
+      jql,
+      maxResults,
+      startAt: 0,
+      fields: Array.isArray(safeFields) ? safeFields : [safeFields]
+    };
+    if (expand) body.expand = Array.isArray(expand) ? expand.join(',') : expand;
+    if (properties) body.properties = Array.isArray(properties) ? properties : [properties];
+
+    // 1. Fetch first page to get total
+    const firstRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!firstRes.ok) {
+       return [{ id: '999999', key: 'ERR-1', fields: { summary: `JQL Search failed: ${firstRes.status} ${await firstRes.text()}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
     }
+
+    const firstData = await firstRes.json();
+    let issues = firstData.issues || firstData.values || [];
+    allIssues = allIssues.concat(issues);
+    const total = firstData.total || 0;
     
+    // If we have more issues, fetch them in chunks IN PARALLEL!
+    if (total > maxResults) {
+        const pagesToFetch = Math.min(Math.ceil(total / maxResults) - 1, maxPages - 1);
+        const offsets = [];
+        for (let i = 1; i <= pagesToFetch; i++) {
+            offsets.push(i * maxResults);
+        }
+
+        // Fetch in batches of 5 to avoid rate limits
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < offsets.length; i += BATCH_SIZE) {
+            const batch = offsets.slice(i, i + BATCH_SIZE);
+            const promises = batch.map(async (offset) => {
+                const reqBody = { ...body, startAt: offset };
+                const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+                  method: 'POST',
+                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                  body: JSON.stringify(reqBody)
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    return data.issues || data.values || [];
+                }
+                return [];
+            });
+            const results = await Promise.all(promises);
+            results.forEach(resIssues => {
+                allIssues = allIssues.concat(resIssues);
+            });
+        }
+    }
+
     return allIssues;
   } catch(err) {
     return [{ id: '999999', key: 'ERR-2', fields: { summary: `Exception: ${err.message}`, status: { name: 'Error' }, created: new Date().toISOString() } }];
@@ -71,6 +81,21 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
 }
 
 const resolver = new Resolver();
+
+resolver.define('probeAPI', async () => {
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jql: "project IS NOT EMPTY", maxResults: 1 })
+      });
+      const data = await response.json();
+      return { keys: Object.keys(data), hasIssues: !!data.issues, hasValues: !!data.values, issueKeys: data.issues ? Object.keys(data.issues[0] || {}) : null, valueKeys: data.values ? Object.keys(data.values[0] || {}) : null };
+    } catch(err) {
+      return { error: err.message };
+    }
+});
+
 
 // === Folder Management (Jira Entity Properties) ===
 const getProjectFolders = async (projectId) => {

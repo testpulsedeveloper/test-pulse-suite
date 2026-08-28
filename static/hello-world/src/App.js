@@ -2253,7 +2253,7 @@ Then el sistema valida la identidad.
 
   const getExecVal = (t) => {
   if (t && !t.rawFields) {
-     const tc = testCases.find(x => x.id === t.id);
+     const tc = testCases.find(x => String(x.id) === String(t.id));
      if (tc) t = tc;
   }
   if (t && t.rawFields && t.rawFields['customfield_10534']) {
