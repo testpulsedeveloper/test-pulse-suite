@@ -1,7 +1,7 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
-async function fetchAllIssues(jql, fields, expand, properties, maxPages = 5) {
+async function fetchAllIssues(jql, fields, expand, properties, maxPages = 12) {
   try {
     let allIssues = [];
     let maxResults = 100;
