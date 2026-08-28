@@ -352,6 +352,36 @@ function App() {
     return folders.map(f => ({ id: f.id, name: f.name, path: getPath(f) })).sort((a,b) => a.path.localeCompare(b.path));
   }, [folders]);
 
+
+  const fetchAllTestCases = async (args) => {
+      let allIssues = [];
+      let token = null;
+      let isLast = false;
+      let pagesFetched = 0;
+      const MAX_PAGES = 35;
+      
+      while (!isLast && pagesFetched < MAX_PAGES) {
+          const res = await invoke('getTestCases', { ...args, nextPageToken: token });
+          if (Array.isArray(res)) {
+             if (res.length > 0 && res[0].id === '999999') {
+                 checkError(res, 'getTestCases');
+             } else {
+                 allIssues = allIssues.concat(res);
+             }
+             break;
+          }
+          if (res && res.issues) {
+              allIssues = allIssues.concat(res.issues);
+              token = res.nextPageToken;
+              isLast = res.isLast;
+              if (!token) break;
+          } else {
+              break;
+          }
+          pagesFetched++;
+      }
+      return allIssues;
+  };
   const loadData = async (currentProjectId = selectedProjectId) => {
     if (!testCases.length) setLoading(true);
     try {
@@ -408,7 +438,7 @@ function App() {
         const fetchedFolders = await invoke('getFolders', { projectId: targetProjectId });
         setFolders(fetchedFolders || []);
         
-        const fetchedTests = checkError(await invoke('getTestCases', { folderId: null, projectId: targetProjectId, config }), 'getTestCases');
+        const fetchedTests = await fetchAllTestCases({ folderId: null, projectId: targetProjectId, config });
         setTestCases(fetchedTests || []);
         
         const fetchedPlans = checkError(await invoke('getTestPlans', { projectId: targetProjectId, config }), 'getTestPlans');
@@ -606,7 +636,7 @@ function App() {
         setTestPlans(fetchedPlans || []);
         const fetchedCycles = await invoke('getTestCycles', { projectId, config: projectConfig });
         setTestCycles(fetchedCycles || []);
-        const fetchedTests = await invoke('getTestCases', { folderId: null, projectId, config: projectConfig });
+        const fetchedTests = await fetchAllTestCases({ folderId: null, projectId, config: projectConfig });
         setTestCases(fetchedTests || []);
       }
     });
@@ -937,11 +967,7 @@ Then el sistema valida la identidad.
     setBulkStatus(errorCount === 0 ? 'done' : 'error');
     
     // Refresh the test case list
-    const fetchedTests = await invoke('getTestCases', {
-      folderId: activeFolder,
-      projectId,
-      config: projectConfig
-    });
+    const fetchedTests = await fetchAllTestCases({ folderId: activeFolder, projectId, config: projectConfig });
     setTestCases(fetchedTests || []);
   };
 
@@ -1605,7 +1631,7 @@ Then el sistema valida la identidad.
                   const newFolderId = e.target.value || null;
                   setSelectedTestCase({...selectedTestCase, folderId: newFolderId});
                   await invoke('linkCaseToFolder', { caseId: selectedTestCase.id, folderId: newFolderId });
-                  const fetchedTests = await invoke('getTestCases', { folderId: null, projectId: selectedProjectId, config: projectConfig });
+                  const fetchedTests = await fetchAllTestCases({ folderId: null, projectId: selectedProjectId, config: projectConfig });
                   setTestCases(fetchedTests || []);
                 }}
               >
