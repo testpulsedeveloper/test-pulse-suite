@@ -723,45 +723,31 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       if (!token) break;
   }
   // Load execution data and auto-heal old formats
-  const cycles = [];
-  for (const issue of allIssues) {
+  // Load execution data in PARALLEL — read only the lightweight index (same source as getCycleExecutionSummary)
+  // No auto-healing here: avoids N+1 requests and orphaned exec_ properties inflating the count
+  const cycles = await Promise.all(allIssues.map(async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
-    const executionIds = properties['execution'] || [];
+    const executionRaw = properties['execution'] || [];
     let execution = [];
-    if (Array.isArray(executionIds)) {
-       if (executionIds.length > 0 && typeof executionIds[0] === 'object') {
-           execution = executionIds;
-           if (execution.some(ex => ex.status && ex.status.toUpperCase() !== 'NOT RUN' && ex.executedBy === undefined)) {
-               console.log(`Auto-healing missing executedBy in lightweight index for cycle ${issue.key}`);
-               const fullData = await getExecutionData(issue.id);
-               execution = fullData.map(ex => ({ id: String(ex.id), status: ex.status, linkedBugs: ex.linkedBugs || [], executedBy: ex.executedBy }));
-               await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
-                  method: 'PUT',
-                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                  body: JSON.stringify(execution)
-               });
-           }
-       } else if (executionIds.length > 0 && typeof executionIds[0] !== 'object') {
-           console.log(`Auto-healing lightweight index for cycle ${issue.key}`);
-           const fullData = await getExecutionData(issue.id);
-           execution = fullData.map(ex => ({ id: String(ex.id), status: ex.status, linkedBugs: ex.linkedBugs || [], executedBy: ex.executedBy }));
-           await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
-              method: 'PUT',
-              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-              body: JSON.stringify(execution)
-           });
-       }
+    if (Array.isArray(executionRaw) && executionRaw.length > 0) {
+      if (typeof executionRaw[0] === 'object') {
+        // Modern format: array of { id, status, linkedBugs, executedBy } — use directly
+        execution = executionRaw;
+      } else {
+        // Legacy format: array of ID strings — map to minimal objects, no extra requests
+        execution = executionRaw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
+      }
     }
-    
-    cycles.push({
+    return {
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
       planId,
-      execution: execution || []
-    });
-  }
+      execution
+    };
+  }));
+
   
   // Fetch live bug details
   const allBugKeys = new Set();

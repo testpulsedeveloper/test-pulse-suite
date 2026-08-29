@@ -269,6 +269,7 @@ function App() {
   
   // Reports State
   const [reportData, setReportData] = useState({ cycles: [] });
+  const [reportLoading, setReportLoading] = useState(false);
   const [reportSelectedPlans, setReportSelectedPlans] = useState([]);
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycles, setReportSelectedCycles] = useState([]);
@@ -2217,7 +2218,7 @@ Then el sistema valida la identidad.
 
   const loadReportData = async () => {
     if (!selectedProjectId) return;
-    if (!testCases.length) setLoading(true);
+    setReportLoading(true);
     try {
         const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
         setReportData(data || { cycles: [] });
@@ -2225,7 +2226,7 @@ Then el sistema valida la identidad.
         console.error("loadReportData error:", err);
         alert("Error cargando reportes (timeout). Intenta de nuevo.");
     } finally {
-        setLoading(false);
+        setReportLoading(false);
     }
   };
 
@@ -2258,7 +2259,10 @@ Then el sistema valida la identidad.
           setCycleTests(executionSummary); // direct set instead of safeSetCycleTests to prevent ghosts
         });
     } else if (activeTab === 'reports') {
-      loadReportData();
+      // Only reload reports if we don't have data yet, or refreshTrigger changed
+      if (reportData.cycles.length === 0 || prevRefreshRef.current !== refreshTrigger) {
+        loadReportData();
+      }
     }
   }, [activeTab, selectedCycle, refreshTrigger]);
 
@@ -3178,6 +3182,17 @@ const renderPlanningTab = () => (
   };
 
   const renderReportsTab = () => {
+    // Show spinner while loading — no ghost data visible
+    if (reportLoading) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '4rem', gap: '1rem', color: 'var(--text-secondary)' }}>
+          <div style={{ fontSize: '2rem' }}>⏳</div>
+          <div style={{ fontWeight: 500 }}>Cargando reporte...</div>
+          <div style={{ fontSize: '0.85rem' }}>Esto puede tomar unos segundos la primera vez</div>
+        </div>
+      );
+    }
+
     let filteredCycles = reportData.cycles || [];
     if (reportSelectedPlans && reportSelectedPlans.length > 0) {
       filteredCycles = filteredCycles.filter(c => reportSelectedPlans.includes(c.planId));
@@ -3185,6 +3200,7 @@ const renderPlanningTab = () => (
     if (reportSelectedCycles && reportSelectedCycles.length > 0) {
       filteredCycles = filteredCycles.filter(c => reportSelectedCycles.includes(c.id));
     }
+
 
     let totalCases = 0;
     let passed = 0;
@@ -3418,10 +3434,18 @@ const renderPlanningTab = () => (
       <div className="tab-layout full-width" style={{padding: '2rem'}}>
         <div className="header" style={{marginBottom: '0'}}>
           <h1>Dashboard: Métricas de Calidad</h1>
+          <button
+            onClick={loadReportData}
+            disabled={reportLoading}
+            style={{ padding: '0.4rem 0.8rem', marginLeft: 'auto', marginRight: '0.5rem', background: 'var(--bg-surface)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: reportLoading ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+            title="Recargar datos del reporte"
+          >
+            🔄 Actualizar
+          </button>
           <button 
             className="btn-primary" 
             onClick={handleCopyReportToClipboard}
-            style={{padding: '0.4rem 0.8rem', marginLeft: 'auto', marginRight: '1rem'}}
+            style={{padding: '0.4rem 0.8rem', marginRight: '1rem'}}
           >
             📋 Enviar reporte de Estatus
           </button>
