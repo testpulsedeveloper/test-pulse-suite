@@ -588,17 +588,13 @@ resolver.define('createTestCycle', async (req) => {
 
 // === Execution Management (Jira Entity Properties) ===
 const getExecutionData = async (cycleId) => {
-  // --- RECOVERY BLOCK FOR V2 CORRUPTION ---
-  // If the cycle has execution_v2, it contains the full objects because of the failed performance refactor.
   const v2Res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution_v2?t=${Date.now()}`);
-  let v2Map = {};
   if (v2Res.status === 200) {
       const v2Data = await v2Res.json();
       if (v2Data.value && Array.isArray(v2Data.value)) {
-          v2Data.value.forEach(t => { v2Map[t.id] = t; });
+          return v2Data.value;
       }
   }
-  // -----------------------------------------
 
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   if (response.status === 404) return [];
@@ -611,6 +607,40 @@ const getExecutionData = async (cycleId) => {
   if (!Array.isArray(testIds) || testIds.length === 0) return [];
   
   let mergedProps = {};
+  const CHUNK_SIZE = 15;
+  for (let i = 0; i < testIds.length; i += CHUNK_SIZE) {
+      const chunk = testIds.slice(i, i + CHUNK_SIZE);
+      const chunkPromises = chunk.map(async (id) => {
+          let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+          if (res.status === 429) {
+              await new Promise(r => setTimeout(r, 2000));
+              res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+          }
+          if (res.ok) {
+              const data = await res.json();
+              return { key: `exec_${id}`, value: data.value };
+          }
+          return { key: `exec_${id}`, value: { id: String(id), status: 'Not Run', linkedBugs: [] } };
+      });
+      const resolvedChunk = await Promise.all(chunkPromises);
+      resolvedChunk.forEach(prop => {
+          if (prop) mergedProps[prop.key] = prop.value;
+      });
+      await new Promise(r => setTimeout(r, 500));
+  }
+  
+  const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
+  
+  if (results.length > 0) {
+      await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution_v2`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(results)
+      });
+  }
+  
+  return results;
+};
   const CHUNK_SIZE = 25;
   for (let i = 0; i < testIds.length; i += CHUNK_SIZE) {
       const chunk = testIds.slice(i, i + CHUNK_SIZE);
@@ -624,17 +654,7 @@ const getExecutionData = async (cycleId) => {
               const data = await res.json();
               return { key: `exec_${id}`, value: data.value };
           }
-          // If individual property is missing, recover from v2 or create mock
-          if (v2Map[id]) {
-              // Self-heal: Create the missing individual property so it isn't lost again!
-              await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`, {
-                  method: 'PUT',
-                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                  body: JSON.stringify(v2Map[id])
-              });
-              return { key: `exec_${id}`, value: v2Map[id] };
-          }
-          return { key: `exec_${id}`, value: { id: String(id), status: 'Not Run', linkedBugs: [] } };
+          return null;
       });
       const resolvedChunk = await Promise.all(chunkPromises);
       resolvedChunk.forEach(prop => {
@@ -644,69 +664,40 @@ const getExecutionData = async (cycleId) => {
   
   const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
   
+  if (results.length === 0 && testIds.length > 0) {
+      throw new Error("CRITICAL: getExecutionData failed to fetch properties for testIds. Preventing empty array return to avoid data loss.");
+  }
+  
   return results;
 };
 
 const updateLightweightIndex = async (cycleId, updateFn) => {
-    let lightWeight = [];
-    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
-    if (response.status !== 404) {
-        const data = await response.json();
-        const value = data.value || [];
-        if (value.length > 0 && typeof value[0] === 'object') {
-            lightWeight = value;
-        } else if (value.length > 0) {
-            lightWeight = value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
-        }
-    }
-    
+    let lightWeight = await getExecutionData(cycleId);
     lightWeight = updateFn(lightWeight);
-    
-    let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-        method: 'PUT',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(lightWeight)
-    });
-    if (exRes.status === 429) {
-        await new Promise(r => setTimeout(r, 2000));
-        exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(lightWeight)
-        });
-    }
-    if (!exRes.ok) {
-        const errText = await exRes.text();
-        console.error("Failed to update lightweight index:", errText);
-    }
+    await setExecutionData(cycleId, lightWeight);
 };
 
 const setExecutionData = async (cycleId, data) => {
-  const testIds = data.map(t => t.id);
+  const testIds = data.map(t => String(t.id));
   
-  // Procesar en chunks de 15 para evitar HTTP 429
-  const CHUNK_SIZE = 15;
-  for (let i = 0; i < data.length; i += CHUNK_SIZE) {
-      const chunk = data.slice(i, i + CHUNK_SIZE);
-      await Promise.all(chunk.map(t => 
-         api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-           method: 'PUT',
-           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-           body: JSON.stringify(t)
-         })
-      ));
-  }
+  // Save as v2 (All objects in one property)
+  const responseV2 = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution_v2`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
   
+  // Save backward-compatible execution array
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(testIds)
   });
   
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error('Failed to set execution list:', errText);
-    throw new Error('Failed to save cycle data list: ' + errText);
+  if (!responseV2.ok) {
+    const errText = await responseV2.text();
+    console.error('Failed to set execution_v2:', errText);
+    throw new Error('Failed to save cycle data list v2: ' + errText);
   }
 };
 
