@@ -1089,12 +1089,41 @@ Then el sistema valida la identidad.
         </div>
         <button 
           className="btn-secondary" 
-          onClick={() => loadData(selectedProjectId)} 
-          disabled={loading} 
-          title="Refresh Data"
+          onClick={async () => {
+            if (selectedCycle && (activeTab === 'execution' || activeTab === 'planning')) {
+              // Lightweight: just reload the current cycle's tests
+              setLocalLoading(true);
+              try {
+                const rawExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+                safeSetCycleTests(rawExecution || []);
+              } catch(e) {
+                console.error('Refresh cycle error:', e);
+              } finally {
+                setLocalLoading(false);
+              }
+            } else {
+              // Lightweight: reload cycles and plans list only (no view.getContext() call)
+              setLocalLoading(true);
+              try {
+                const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
+                const [fetchedCycles, fetchedPlans] = await Promise.all([
+                  invoke('getTestCycles', { projectId: selectedProjectId, config }),
+                  invoke('getTestPlans', { projectId: selectedProjectId, config })
+                ]);
+                if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
+                if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
+              } catch(e) {
+                console.error('Refresh lists error:', e);
+              } finally {
+                setLocalLoading(false);
+              }
+            }
+          }} 
+          disabled={loading || localLoading} 
+          title="Refrescar ciclo actual"
           style={{ padding: '0.4rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: 'none', background: 'transparent' }}
         >
-          {loading ? (
+          {(loading || localLoading) ? (
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C853" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{animation: 'spin 1s linear infinite'}}><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>
           ) : (
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C853" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
@@ -2808,8 +2837,15 @@ const renderPlanningTab = () => (
                               <button
                                 onClick={async () => {
                                   const updatedBugs = test.linkedBugs.filter((_, i) => i !== idx);
-                                  const updated = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, linkedBugs: updatedBugs });
-                                  if (updated) safeSetCycleTests(updated);
+                                  // Optimistic UI: update immediately without waiting for backend
+                                  setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
+                                  // Fire save in background
+                                  invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, linkedBugs: updatedBugs }).catch(err => {
+                                    console.error('Error unlinking bug:', err);
+                                    // Rollback on error
+                                    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: test.linkedBugs } : t));
+                                    alert('Error al desvincular el bug: ' + (err.message || err));
+                                  });
                                 }}
                                 title="Quitar vínculo"
                                 style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', fontSize: '0.75rem', padding: '0 2px', lineHeight: 1}}
