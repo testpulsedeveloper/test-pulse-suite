@@ -2273,20 +2273,28 @@ Then el sistema valida la identidad.
   };
 
   const doLinkBug = async (test, bugKey) => {
-    // 1. Create Jira Issue Link via backend (uses key directly)
+    // 1. Create Jira Issue Link via backend (fire and forget)
     invoke('linkBugToTest', { testCaseId: test.id, bugKey });
 
-    // 2. Save bug key in execution data so we display the badge
+    // 2. Avoid duplicates
     const currentBugs = test.linkedBugs || [];
-    // Avoid duplicates
     if (currentBugs.some(b => b.key === bugKey)) return;
     const updatedBugs = [...currentBugs, { key: bugKey }];
-    const updated = await invoke('updateTestStatus', {
+
+    // 3. Optimistic UI: show badge immediately
+    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
+
+    // 4. Save in background
+    invoke('updateTestStatus', {
       cycleId: selectedCycle.id,
       testId: test.id,
       linkedBugs: updatedBugs
+    }).catch(err => {
+      console.error('Error linking bug:', err);
+      // Rollback on error
+      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: currentBugs } : t));
+      alert('Error al vincular el bug: ' + (err.message || err));
     });
-    if (updated) safeSetCycleTests(updated);
   };
 
 
