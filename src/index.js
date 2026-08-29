@@ -722,23 +722,54 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       isLast = page.isLast;
       if (!token) break;
   }
-  // Load execution data and auto-heal old formats
-  // Load execution data in PARALLEL — read only the lightweight index (same source as getCycleExecutionSummary)
-  // No auto-healing here: avoids N+1 requests and orphaned exec_ properties inflating the count
+  // Load execution data in PARALLEL — heals stale/legacy cycles simultaneously
   const cycles = await Promise.all(allIssues.map(async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
     const executionRaw = properties['execution'] || [];
     let execution = [];
+
     if (Array.isArray(executionRaw) && executionRaw.length > 0) {
       if (typeof executionRaw[0] === 'object') {
-        // Modern format: array of { id, status, linkedBugs, executedBy } — use directly
         execution = executionRaw;
+
+        // Heal if any executed test is missing executedBy (stale lightweight index)
+        const needsHeal = execution.some(
+          ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
+        );
+        if (needsHeal) {
+          const fullData = await getExecutionData(issue.id);
+          execution = fullData.map(ex => ({
+            id: String(ex.id),
+            status: ex.status,
+            linkedBugs: ex.linkedBugs || [],
+            executedBy: ex.executedBy
+          }));
+          // Write back healed index (don't block response on write)
+          api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
+            method: 'PUT',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify(execution)
+          });
+        }
       } else {
-        // Legacy format: array of ID strings — map to minimal objects, no extra requests
-        execution = executionRaw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
+        // Legacy format (array of ID strings) — heal to objects with real statuses
+        const fullData = await getExecutionData(issue.id);
+        execution = fullData.map(ex => ({
+          id: String(ex.id),
+          status: ex.status,
+          linkedBugs: ex.linkedBugs || [],
+          executedBy: ex.executedBy
+        }));
+        // Write back healed index
+        api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(execution)
+        });
       }
     }
+
     return {
       id: issue.id,
       key: issue.key,
@@ -747,6 +778,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       execution
     };
   }));
+
 
   
   // Fetch live bug details
