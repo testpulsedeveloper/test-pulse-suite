@@ -4,7 +4,11 @@
   "private": true,
   "homepage": ".",
   "dependencies": {
+    "@atlaskit/badge": "^21.1.0",
+    "@atlaskit/button": "^25.2.1",
     "@atlaskit/css-reset": "^6.6.2",
+    "@atlaskit/spinner": "^20.3.1",
+    "@atlaskit/tokens": "^16.9.0",
     "@forge/bridge": "6.1.1-next.8",
     "@forge/jira-bridge": "^1.0.0",
     "react": "^18.2.0",
