@@ -588,18 +588,6 @@ resolver.define('createTestCycle', async (req) => {
 
 // === Execution Management (Jira Entity Properties) ===
 const getExecutionData = async (cycleId) => {
-  // --- RECOVERY BLOCK FOR V2 CORRUPTION ---
-  // If the cycle has execution_v2, it contains the full objects because of the failed performance refactor.
-  const v2Res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution_v2?t=${Date.now()}`);
-  let v2Map = {};
-  if (v2Res.status === 200) {
-      const v2Data = await v2Res.json();
-      if (v2Data.value && Array.isArray(v2Data.value)) {
-          v2Data.value.forEach(t => { v2Map[t.id] = t; });
-      }
-  }
-  // -----------------------------------------
-
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   if (response.status === 404) return [];
   const data = await response.json();
@@ -624,16 +612,6 @@ const getExecutionData = async (cycleId) => {
               const data = await res.json();
               return { key: `exec_${id}`, value: data.value };
           }
-          // If individual property is missing, recover from v2 or create mock
-          if (v2Map[id]) {
-              // Self-heal: Create the missing individual property so it isn't lost again!
-              await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}`, {
-                  method: 'PUT',
-                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                  body: JSON.stringify(v2Map[id])
-              });
-              return { key: `exec_${id}`, value: v2Map[id] };
-          }
           return { key: `exec_${id}`, value: { id: String(id), status: 'Not Run', linkedBugs: [] } };
       });
       const resolvedChunk = await Promise.all(chunkPromises);
@@ -645,6 +623,24 @@ const getExecutionData = async (cycleId) => {
   const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
   
   return results;
+};
+
+// NEW endpoint for fast initial load (Causa 1)
+const getCycleExecutionSummary = async (cycleId) => {
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
+  if (response.status === 404) return [];
+  const data = await response.json();
+  const value = data.value || [];
+  
+  if (value.length === 0) return [];
+  
+  // If it's already an array of objects (lightweight index format), just return it
+  if (typeof value[0] === 'object') {
+      return value;
+  }
+  
+  // If it's legacy (array of strings), just map it to default summary objects
+  return value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
 };
 
 const updateLightweightIndex = async (cycleId, updateFn) => {
@@ -888,6 +884,21 @@ resolver.define('getCycleExecution', async ({ payload }) => {
   return await getExecutionData(cycleId);
 });
 
+resolver.define('getCycleExecutionSummary', async ({ payload }) => {
+  const { cycleId } = payload;
+  return await getCycleExecutionSummary(cycleId);
+});
+
+resolver.define('getTestExecution', async ({ payload }) => {
+  const { cycleId, testId } = payload;
+  const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}?t=${Date.now()}`);
+  if (res.ok) {
+    const data = await res.json();
+    return data.value;
+  }
+  return null;
+});
+
 resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
   
@@ -1085,23 +1096,14 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
         }));
     }
     
-    let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-      method: 'PUT',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(testIds)
-    });
-    if (exRes.status === 429) {
-        await new Promise(r => setTimeout(r, 2000));
-        exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(testIds)
+    await updateLightweightIndex(cycleId, (lw) => {
+        newTests.forEach(nt => {
+            if (!lw.find(t => String(t.id) === String(nt.id))) {
+                lw.push({ id: String(nt.id), status: nt.status, linkedBugs: nt.linkedBugs || [] });
+            }
         });
-    }
-    if (!exRes.ok) {
-        const errText = await exRes.text();
-        throw new Error(`Jira PUT execution failed with ${exRes.status}: ${errText}`);
-    }
+        return lw;
+    });
   }
   return { success: true };
 });

@@ -1094,7 +1094,7 @@ Then el sistema valida la identidad.
               // Lightweight: just reload the current cycle's tests
               setLocalLoading(true);
               try {
-                const rawExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+                const rawExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                 safeSetCycleTests(rawExecution || []);
               } catch(e) {
                 console.error('Refresh cycle error:', e);
@@ -1750,9 +1750,10 @@ Then el sistema valida la identidad.
 
   const handleCycleSelect = async (cycle) => {
     setCycleTests([]); // clear old tests immediately
+    deletedIdsRef.current.clear(); // prevent ghosts from previous cycle
     setSelectedCycle(cycle);
-    const execution = await invoke('getCycleExecution', { cycleId: cycle.id });
-    safeSetCycleTests(execution || []);
+    const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
+    setCycleTests(executionSummary || []); // direct set, no merge, prevents ghosts
   };
 
   const handleCreateFolder = async (parentId = null) => {
@@ -1806,24 +1807,16 @@ Then el sistema valida la identidad.
             setCycleTests(prev => prev.map(t => t.id === testCase.id ? { ...t, ...addRes.addedTest._historicalData } : t));
         }
         setTimeout(async () => {
-            const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+            const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
             if (execution) {
-                setCycleTests(prev => {
-                    const merged = [...execution];
-                    prev.forEach(pItem => {
-                        if (!merged.some(mItem => mItem.id === pItem.id)) {
-                            merged.push(pItem);
-                        }
-                    });
-                    return merged;
-                });
+                safeSetCycleTests(execution);
             }
         }, 3000);
     } catch(err) {
         console.error(err);
         alert("Error al añadir caso: " + err.message);
         // revert optimistic on error by reloading
-        const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+        const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
         safeSetCycleTests(execution || []);
     }
   };
@@ -1831,7 +1824,7 @@ Then el sistema valida la identidad.
   const handleRemoveTestFromCycle = async (testId) => {
     if (!selectedCycle) return;
     await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId });
-    const execution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+    const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
     safeSetCycleTests(execution || []);
   };
 
@@ -1943,8 +1936,10 @@ Then el sistema valida la identidad.
            url: attachments[0].content
          };
          
-         const freshExec = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-         const currentTest = freshExec.find(t => t.id === testId);
+         let currentTest = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
+         if (!currentTest) {
+             currentTest = cycleTests.find(t => t.id === testId);
+         }
          const currentEvidences = currentTest?.evidences ? [...currentTest.evidences] : [];
          if (currentTest?.evidence && currentEvidences.length === 0) {
              currentEvidences.push(currentTest.evidence);
@@ -1973,8 +1968,10 @@ Then el sistema valida la identidad.
   const handleDeleteEvidence = async (testId, attachmentId, index, iterId) => {
     await invoke('deleteAttachment', { attachmentId });
     
-    const freshExec = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
-    const currentTest = freshExec.find(t => t.id === testId);
+    let currentTest = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
+    if (!currentTest) {
+        currentTest = cycleTests.find(t => t.id === testId);
+    }
     if (!currentTest) return;
     
     if (iterId) {
@@ -2232,29 +2229,33 @@ Then el sistema valida la identidad.
     }
   };
 
+  const prevCycleIdRef = useRef(null);
+  const prevRefreshRef = useRef(null);
+
   useEffect(() => {
     if ((activeTab === 'execution' || activeTab === 'planning') && selectedCycle) {
-      // No usar setLoading(true) global para no parpadear el logo en cada auto-refresh
-      invoke('getCycleExecution', { cycleId: selectedCycle.id })
-        .then(async (rawExecution) => {
-          if (!rawExecution || rawExecution.length === 0) {
-            safeSetCycleTests([]);
+      // Avoid double fetching if handleCycleSelect just loaded this cycle
+      // Only fetch if refreshTrigger changed or tab changed without data
+      if (
+        prevCycleIdRef.current === selectedCycle.id &&
+        prevRefreshRef.current === refreshTrigger &&
+        cycleTests.length > 0
+      ) {
+        return;
+      }
+      
+      prevCycleIdRef.current = selectedCycle.id;
+      prevRefreshRef.current = refreshTrigger;
+
+      // Use getCycleExecutionSummary instead of full getCycleExecution
+      invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id })
+        .then(async (executionSummary) => {
+          if (!executionSummary || executionSummary.length === 0) {
+            setCycleTests([]); // direct set
             return;
           }
           
-          // Removed ghost filtering: execution is just rawExecution
-          const execution = rawExecution;
-          
-          const needsBackfill = execution.filter(t => t.description === undefined || t.description === null);
-          if (needsBackfill.length > 0) {
-            const updated = await invoke('backfillDescriptions', {
-              cycleId: selectedCycle.id,
-              testIds: needsBackfill.map(t => t.id)
-            });
-            safeSetCycleTests(updated || execution);
-          } else {
-            safeSetCycleTests(execution);
-          }
+          setCycleTests(executionSummary); // direct set instead of safeSetCycleTests to prevent ghosts
         });
     } else if (activeTab === 'reports') {
       loadReportData();
@@ -2623,9 +2624,33 @@ const renderPlanningTab = () => (
       setExpandedExecutionTest(null);
     } else {
       setExpandedExecutionTest(testId);
+      
+      // Load BDD/Traditional details
       if (!executionTestDetails[testId]) {
         const details = await invoke('getTestCaseDetails', { caseId: testId });
         setExecutionTestDetails(prev => ({ ...prev, [testId]: details || { type: 'traditional', content: [] } }));
+      }
+
+      // Load full execution details (iterations, description)
+      const test = cycleTests.find(t => t.id === testId);
+      if (test && !test.description) {
+        const fullExec = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
+        if (fullExec) {
+          // Merge full execution details into cycleTests
+          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, ...fullExec } : t));
+        } else {
+          // Fallback if exec property doesn't have description, trigger backfill for this single test
+          const updated = await invoke('backfillDescriptions', {
+              cycleId: selectedCycle.id,
+              testIds: [testId]
+          });
+          if (updated) {
+              const backfilled = updated.find(t => String(t.id) === String(testId));
+              if (backfilled) {
+                 setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, ...backfilled } : t));
+              }
+          }
+        }
       }
     }
   };
