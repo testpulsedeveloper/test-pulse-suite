@@ -332,17 +332,19 @@ function App() {
           newExecutionData.forEach(item => backendMap[item.id] = item);
           
           // 1. Keep items we have locally (avoids them disappearing due to backend read-replica delay)
-          const newArray = prev.map(pItem => {
-              if (backendMap[pItem.id]) {
-                  // Merge backend data (like real status) into local item
-                  return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
-              }
-              return pItem;
-          });
+          //    BUT exclude any IDs that were explicitly deleted
+          const newArray = prev
+            .filter(pItem => !deletedIdsRef.current.has(String(pItem.id)))
+            .map(pItem => {
+                if (backendMap[pItem.id]) {
+                    return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
+                }
+                return pItem;
+            });
           
           // 2. Add any items from backend that we DON'T have locally, UNLESS we just deleted them
           newExecutionData.forEach(item => {
-              if (!prev.some(pItem => pItem.id === item.id) && !deletedIdsRef.current.has(item.id)) {
+              if (!prev.some(pItem => pItem.id === item.id) && !deletedIdsRef.current.has(String(item.id))) {
                   newArray.push(item);
               }
           });
@@ -354,6 +356,7 @@ function App() {
   const [planningFolder, setPlanningFolder] = useState('');
   const [planningPriority, setPlanningPriority] = useState('');
   const [planningExecutionType, setPlanningExecutionType] = useState('');
+  const [planningChecked, setPlanningChecked] = useState(new Set()); // multi-select for bulk delete
   const [selectedTestsForCycle, setSelectedTestsForCycle] = useState([]); // execution data for selected cycle
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
@@ -1926,6 +1929,7 @@ Then el sistema valida la identidad.
   const handleCycleSelect = async (cycle) => {
     setCycleTests([]); // clear old tests immediately
     deletedIdsRef.current.clear(); // prevent ghosts from previous cycle
+    setPlanningChecked(new Set()); // clear multi-select
     setSelectedCycle(cycle);
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
@@ -2029,9 +2033,39 @@ Then el sistema valida la identidad.
 
   const handleRemoveTestFromCycle = async (testId) => {
     if (!selectedCycle) return;
-    await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId });
-    const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-    safeSetCycleTests(execution || []);
+    const id = String(testId);
+    // Optimistic: remove from UI immediately, track to prevent ghost reappear
+    deletedIdsRef.current.add(id);
+    setPlanningChecked(prev => { const s = new Set(prev); s.delete(id); return s; });
+    setCycleTests(prev => prev.filter(t => String(t.id) !== id));
+    try {
+      await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId: id });
+    } catch (err) {
+      // Rollback on error
+      deletedIdsRef.current.delete(id);
+      addNotification({ type: 'error', title: 'Error al eliminar caso', description: err.message });
+      const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id }).catch(() => null);
+      if (execution) setCycleTests(execution);
+    }
+  };
+
+  const handleRemoveManyFromCycle = async (testIds) => {
+    if (!selectedCycle || !testIds || testIds.length === 0) return;
+    const ids = testIds.map(String);
+    // Optimistic: remove all from UI and clear selection
+    ids.forEach(id => deletedIdsRef.current.add(id));
+    setPlanningChecked(new Set());
+    setCycleTests(prev => prev.filter(t => !ids.includes(String(t.id))));
+    try {
+      await invoke('removeManyTestsFromCycle', { cycleId: selectedCycle.id, testIds: ids });
+      addNotification({ type: 'success', title: `${ids.length} caso${ids.length !== 1 ? 's' : ''} eliminado${ids.length !== 1 ? 's' : ''} del ciclo` });
+    } catch (err) {
+      // Rollback on error
+      ids.forEach(id => deletedIdsRef.current.delete(id));
+      addNotification({ type: 'error', title: 'Error al eliminar casos', description: err.message });
+      const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id }).catch(() => null);
+      if (execution) setCycleTests(execution);
+    }
   };
 
   const handleLinkTestToFolder = async (testId, folderId) => {
@@ -2715,23 +2749,71 @@ const renderPlanningTab = () => (
               <h1>Planning: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos en ciclo)</span></h1>
             </div>
             <h3>Tests in this Cycle ({cycleTests.length})</h3>
+
+            {/* ── Bulk-action toolbar ── */}
+            {cycleTests.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem', padding: '0.4rem 0.6rem', background: 'var(--ds-background-neutral)', borderRadius: '6px', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer', fontSize: '0.85rem', userSelect: 'none' }}>
+                  <input
+                    type="checkbox"
+                    checked={planningChecked.size > 0 && planningChecked.size === cycleTests.length}
+                    ref={el => { if (el) el.indeterminate = planningChecked.size > 0 && planningChecked.size < cycleTests.length; }}
+                    onChange={e => {
+                      if (e.target.checked) setPlanningChecked(new Set(cycleTests.map(t => String(t.id))));
+                      else setPlanningChecked(new Set());
+                    }}
+                  />
+                  {planningChecked.size > 0 ? `${planningChecked.size} seleccionado${planningChecked.size !== 1 ? 's' : ''}` : 'Seleccionar todos'}
+                </label>
+                {planningChecked.size > 0 && (
+                  <button className="btn-secondary" style={{ color: 'var(--danger-color)', padding: '0.2rem 0.7rem', fontSize: '0.8rem' }}
+                    onClick={() => showConfirm(
+                      'Eliminar casos seleccionados',
+                      `¿Eliminar ${planningChecked.size} caso${planningChecked.size !== 1 ? 's' : ''} del ciclo? Esta acción no se puede deshacer.`,
+                      () => handleRemoveManyFromCycle([...planningChecked]),
+                      { danger: true, confirmLabel: 'Eliminar' }
+                    )}>
+                    🗑 Eliminar seleccionados ({planningChecked.size})
+                  </button>
+                )}
+                <button className="btn-secondary" style={{ color: 'var(--danger-color)', padding: '0.2rem 0.7rem', fontSize: '0.8rem', marginLeft: 'auto' }}
+                  onClick={() => showConfirm(
+                    'Eliminar todos los casos',
+                    `¿Eliminar TODOS los ${cycleTests.length} casos del ciclo? Esta acción no se puede deshacer.`,
+                    () => handleRemoveManyFromCycle(cycleTests.map(t => t.id)),
+                    { danger: true, confirmLabel: 'Eliminar todos' }
+                  )}>
+                  🗑 Eliminar todos
+                </button>
+              </div>
+            )}
+
             <div className="test-list" style={{marginBottom: '2rem'}}>
               {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                  <div className="test-card-content">
+                  {/* Checkbox */}
+                  <input type="checkbox"
+                    checked={planningChecked.has(String(test.id))}
+                    onChange={e => setPlanningChecked(prev => {
+                      const s = new Set(prev);
+                      if (e.target.checked) s.add(String(test.id)); else s.delete(String(test.id));
+                      return s;
+                    })}
+                    style={{ marginRight: '0.5rem', flexShrink: 0, cursor: 'pointer' }}
+                  />
+                  <div className="test-card-content" style={{ flex: 1 }}>
                     <span className="test-id">{test.key} <i style={{color:'var(--ds-text-subtle)', fontSize:'0.85em'}}>({getExecVal(test) ? getExecVal(test).charAt(0).toUpperCase() + getExecVal(test).slice(1) : 'Vacío'})</i></span>
                     <span className="test-summary">{test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}</span>
-
                   </div>
                   <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
                     <span className="status-badge" style={{
                       backgroundColor: getStatusColor(test.status),
                       color: getStatusTextColor(test.status)
                     }}>{test.status}</span>
-                    <button className="btn-secondary" 
-                      style={{color: 'var(--danger-color)', borderColor: 'var(--border-color)', padding: '0.2rem 0.5rem', fontSize: '0.8rem'}} 
+                    <button className="btn-secondary"
+                      style={{color: 'var(--danger-color)', borderColor: 'var(--border-color)', padding: '0.2rem 0.5rem', fontSize: '0.8rem'}}
                       onClick={() => handleRemoveTestFromCycle(test.id)}
-                      title="Remove from cycle">
+                      title="Eliminar del ciclo">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                     </button>
                   </div>

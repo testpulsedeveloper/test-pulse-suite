@@ -1170,15 +1170,37 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
 
 resolver.define('removeTestFromCycle', async ({ payload }) => {
   const { cycleId, testId } = payload;
-  
   await updateLightweightIndex(cycleId, (lw) => lw.filter(t => String(t.id) !== String(testId)));
-  
-  // Delete the individual property
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
-     method: 'DELETE'
-  });
-  
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, { method: 'DELETE' });
   return { success: true };
+});
+
+// Bulk remove — single index write + batched exec_ deletes (much faster than N × removeTestFromCycle)
+resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
+  const { cycleId, testIds } = payload;
+  if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
+  const ids = testIds.map(String);
+
+  // Single atomic index update
+  await updateLightweightIndex(cycleId, (lw) => lw.filter(t => !ids.includes(String(t.id))));
+
+  // Delete exec_ properties in parallel batches (10 at a time, 200ms gap)
+  await processInBatches(ids, 10, 200, async (testId) => {
+    const r = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
+      { method: 'DELETE' }
+    );
+    if (r.status === 429) {
+      await new Promise(x => setTimeout(x, 2000));
+      await api.asUser().requestJira(
+        route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
+        { method: 'DELETE' }
+      );
+    }
+    return true;
+  });
+
+  return { success: true, removed: ids.length };
 });
 
 resolver.define('updateTestStatus', async ({ payload }) => {
