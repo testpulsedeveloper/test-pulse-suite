@@ -813,24 +813,25 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
 
-    // Read execution index from Forge Storage (no 32KB limit; falls back to Jira property + auto-migrates)
+    // Read execution index (Forge Storage → Jira property fallback). NO healing here —
+    // healing reads all exec_ properties per cycle and causes Forge timeout for large projects.
     let execution = await readCycleIndex(issue.id);
 
-    // Heal stubs if needed
-    const hasStubs = execution.some(ex => ex._stub === true);
-    const needsHeal = hasStubs || execution.some(
-      ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
-    );
-    if (needsHeal && execution.length > 0) {
-      const fullData = await getExecutionData(issue.id);
-      execution = fullData.map(ex => ({
-        id: String(ex.id),
-        status: ex.status,
-        linkedBugs: trimBugsForIndex(ex.linkedBugs),
-        executedBy: ex.executedBy
-      }));
-      writeCycleIndex(issue.id, execution).catch(console.warn);
+    // If index is completely empty, list exec_ property KEYS (fast — no content reads)
+    // to at least show the cycle has tests and get bug keys.
+    if (execution.length === 0) {
+      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties`);
+      if (keysRes.ok) {
+        const keysData = await keysRes.json();
+        const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
+        if (execKeys.length > 0) {
+          execution = execKeys.map(key => ({ id: key.replace('exec_', ''), status: 'Not Run', linkedBugs: [] }));
+        }
+      }
     }
+
+    // Strip internal flags before returning
+    execution = execution.map(({ _stub, ...rest }) => rest);
 
     return {
       id: issue.id,
