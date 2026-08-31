@@ -3155,22 +3155,39 @@ const renderPlanningTab = () => (
                 <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
                   <p style={{ marginBottom: '1rem' }}>No hay casos en este ciclo.</p>
                   <p style={{ fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-                    ¿El ciclo debería tener casos? Puede ser que el índice esté desincronizado. Usa el botón para reconstruirlo automáticamente.
+                    ¿El ciclo debería tener casos? Puede ser que el índice esté desincronizado.<br/>
+                    Usa el botón para reconstruirlo desde los datos guardados en Jira (sin perder estatus).
                   </p>
                   <button
                     className="btn-secondary"
                     style={{ padding: '0.5rem 1.2rem' }}
+                    disabled={localLoading}
                     onClick={async () => {
                       if (!selectedCycle?.id) return;
                       setLocalLoading(true);
                       try {
-                        const result = await invoke('rebuildCycleIndex', { cycleId: selectedCycle.id });
-                        if (result.rebuilt > 0) {
+                        let offset = 0;
+                        let done = false;
+                        let total = 1;
+                        let rebuilt = 0;
+                        while (!done) {
+                          const result = await invoke('rebuildCycleIndex', {
+                            cycleId: selectedCycle.id,
+                            offset,
+                            limit: 50
+                          });
+                          done = result.done;
+                          total = result.total || total;
+                          rebuilt = result.rebuilt || 0;
+                          offset = result.nextOffset ?? (offset + 50);
+                          if (!done) await new Promise(r => setTimeout(r, 300));
+                        }
+                        if (rebuilt > 0) {
                           const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                           if (summary) setCycleTests(summary);
-                          alert(`✅ Índice reconstruido: ${result.rebuilt} casos recuperados.`);
+                          alert(`✅ Índice reconstruido: ${rebuilt} casos recuperados.`);
                         } else {
-                          alert('No se encontraron casos con datos guardados en este ciclo.');
+                          alert('No se encontraron datos guardados en este ciclo. Los casos pueden haberse perdido antes de guardarse.');
                         }
                       } catch(err) {
                         alert('Error al reconstruir: ' + err.message);
@@ -3179,9 +3196,10 @@ const renderPlanningTab = () => (
                       }
                     }}
                   >
-                    🔧 Reconstruir índice del ciclo
+                    {localLoading ? '⏳ Reconstruyendo...' : '🔧 Reconstruir índice del ciclo'}
                   </button>
                 </div>
+
               )}
 
             </div>

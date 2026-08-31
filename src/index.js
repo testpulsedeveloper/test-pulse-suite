@@ -641,9 +641,12 @@ const getCycleExecutionSummary = async (cycleId) => {
 
   if (value.length === 0) return [];
 
-  // Modern format: lightweight index has objects with real statuses — use directly
+  // Modern format: lightweight index has objects with real statuses
   if (typeof value[0] === 'object') {
-      return value;
+      // If any entry has _stub:true it was written by fast-migration and needs real statuses
+      const hasStubs = value.some(ex => ex._stub === true);
+      if (!hasStubs) return value;
+      // Fall through to heal stubs below
   }
 
   // Legacy format (array of ID strings): heal by reading real exec_ properties
@@ -677,8 +680,8 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
     if (response.status !== 404) {
         const data = await response.json();
         const value = data.value || [];
-        if (value.length > 0 && typeof value[0] === 'object') {
-            // Modern format: use directly
+        if (value.length > 0 && typeof value[0] === 'object' && !value.some(ex => ex._stub === true)) {
+            // Modern format, fully healed: use directly
             lightWeight = value;
         } else if (value.length > 0) {
             // Legacy format (just IDs): MUST read real statuses from exec_ properties first
@@ -1878,36 +1881,35 @@ resolver.define('getIssueDescription', async ({ payload }) => {
   }
 });
 
-// Recovery endpoint: rebuilds the execution lightweight index from exec_ properties that exist on the cycle.
-// Uses GET /properties to list ALL property keys on the issue, finds exec_* ones, reads their values,
-// and writes back a corrected index. DOES NOT touch individual exec_ data — preserves all statuses/comments.
+// Recovery endpoint: rebuilds the execution index from exec_ properties.
+// Paginated: processes 50 exec_ keys per call to stay within Forge 25s limit.
+// Frontend loops calling with increasing offset until done=true.
 resolver.define('rebuildCycleIndex', async ({ payload }) => {
-  const { cycleId } = payload;
+  const { cycleId, offset = 0, limit = 50 } = payload;
 
-  // Step 1: List ALL property keys on the cycle issue
+  // Step 1: List ALL property keys on the cycle (1 request, always fast)
   const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
-  if (!keysRes.ok) {
-    throw new Error(`Failed to list properties: ${keysRes.status}`);
-  }
+  if (!keysRes.ok) throw new Error(`Failed to list properties: ${keysRes.status}`);
   const keysData = await keysRes.json();
-  const allKeys = (keysData.keys || []).map(k => k.key);
+  const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
 
-  // Step 2: Filter for exec_* keys (the individual test execution data)
-  const execKeys = allKeys.filter(k => k.startsWith('exec_'));
   if (execKeys.length === 0) {
-    return { success: true, rebuilt: 0, message: 'No exec_ properties found on this cycle' };
+    return { success: true, rebuilt: 0, total: 0, done: true, message: 'No exec_ properties on this cycle' };
   }
 
-  // Step 3: Read each exec_ property to get real status (rate-limited batches of 10)
-  const testData = await processInBatches(execKeys, 10, 200, async (key) => {
+  const total = execKeys.length;
+  const pageKeys = execKeys.slice(offset, offset + limit);
+
+  // Step 2: Read this page of exec_ properties (batches of 15, 100ms delay)
+  const pageData = await processInBatches(pageKeys, 15, 100, async (key) => {
     const testId = key.replace('exec_', '');
-    let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}?t=${Date.now()}`);
-    if (res.status === 429) {
-      await new Promise(r => setTimeout(r, 2000));
-      res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}?t=${Date.now()}`);
+    let r = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}`);
+    if (r.status === 429) {
+      await new Promise(x => setTimeout(x, 2000));
+      r = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}`);
     }
-    if (!res.ok) return null;
-    const d = await res.json();
+    if (!r.ok) return null;
+    const d = await r.json();
     const val = d.value || {};
     return {
       id: String(val.id || testId),
@@ -1917,38 +1919,59 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
     };
   });
 
-  // Step 4: Build the corrected lightweight index
-  const healed = testData.filter(Boolean);
+  // Step 3: Read the current execution index (accumulator from previous calls)
+  let currentIndex = [];
+  if (offset > 0) {
+    const idxRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`);
+    if (idxRes.ok) {
+      const idxData = await idxRes.json();
+      currentIndex = idxData.value || [];
+      if (!Array.isArray(currentIndex) || (currentIndex.length > 0 && typeof currentIndex[0] !== 'object')) {
+        currentIndex = []; // reset if legacy
+      }
+    }
+  }
 
-  // Step 5: Write back the rebuilt index
+  // Step 4: Merge page results with accumulated index
+  const newEntries = pageData.filter(Boolean);
+  const merged = [...currentIndex, ...newEntries];
+
+  // Step 5: Write back accumulated index
   let putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(healed)
+    body: JSON.stringify(merged)
   });
   if (putRes.status === 429) {
     await new Promise(r => setTimeout(r, 2000));
     putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(healed)
+      body: JSON.stringify(merged)
     });
   }
-  if (!putRes.ok) {
-    throw new Error(`Failed to write rebuilt index: ${putRes.status}`);
-  }
+  if (!putRes.ok) throw new Error(`Failed to write index: ${putRes.status}`);
 
-  return { success: true, rebuilt: healed.length };
+  const done = (offset + limit) >= total;
+  return {
+    success: true,
+    rebuilt: merged.length,
+    total,
+    done,
+    nextOffset: done ? null : offset + limit
+  };
 });
 
 
-// Frontend loops calling this with increasing offset until done=true.
+// Fast migration — converts legacy format IDs to stub objects WITHOUT reading exec_ properties.
+// Stubs have _stub:true so getCycleExecutionSummary/updateLightweightIndex know to heal on next open.
+// Time per cycle: ~1 PUT only → no timeout possible, handles 1000+ test cycles.
 resolver.define('migrateAllCycles', async ({ payload }) => {
   const { projectId, config, offset = 0, limit = 1 } = payload;
   const cycleType = config?.testCycleType || 'Test Cycle';
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
 
-  // Fetch all cycle stubs — just IDs + execution snapshot for quick modern-check
+  // Fetch all cycle stubs — IDs + execution snapshot (no exec_ reads)
   let allIssues = [];
   let token = null;
   let isLast = false;
@@ -1968,82 +1991,50 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
   for (const issue of batch) {
     results.processed++;
     try {
-      const properties = issue.properties || {};
-      const executionRaw = properties['execution'] || [];
+      const executionRaw = (issue.properties || {})['execution'] || [];
 
-      // Quick check: already fully modern → skip without any extra requests
-      if (Array.isArray(executionRaw) && executionRaw.length > 0 && typeof executionRaw[0] === 'object') {
-        const needsHeal = executionRaw.some(
-          ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
-        );
-        if (!needsHeal) {
+      if (!Array.isArray(executionRaw) || executionRaw.length === 0) {
+        results.skipped++;
+        continue;
+      }
+
+      if (typeof executionRaw[0] === 'object') {
+        // Already modern format — skip only if no stubs present
+        if (!executionRaw.some(ex => ex._stub === true)) {
           results.alreadyModern++;
           continue;
         }
-      }
-
-      // --- Fast rebuild via property-key listing (avoids getExecutionData delays) ---
-      // Step 1: List ALL property keys on this issue (1 request)
-      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties`);
-      if (!keysRes.ok) {
-        results.errors.push(`${issue.key}: keys ${keysRes.status}`);
-        continue;
-      }
-      const keysData = await keysRes.json();
-      const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
-
-      if (execKeys.length === 0) {
-        results.skipped++;
+        // Has stubs but no exec_ reads needed — already converted, skip
+        results.alreadyModern++;
         continue;
       }
 
-      // Step 2: Read exec_ properties in batches of 15 with 100ms delay
-      // (faster than getExecutionData's 10/200ms since calls are spaced by frontend)
-      const testData = await processInBatches(execKeys, 15, 100, async (key) => {
-        const testId = key.replace('exec_', '');
-        let r = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/${key}`);
-        if (r.status === 429) {
-          await new Promise(x => setTimeout(x, 2000));
-          r = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/${key}`);
-        }
-        if (!r.ok) return null;
-        const d = await r.json();
-        const val = d.value || {};
-        return {
-          id: String(val.id || testId),
-          status: val.status || 'Not Run',
-          linkedBugs: val.linkedBugs || [],
-          executedBy: val.executedBy
-        };
-      });
+      // Legacy format (string IDs) — convert to stub objects (fast, no exec_ reads)
+      const stubIndex = executionRaw.map(id => ({
+        id: String(id),
+        status: 'Not Run',
+        linkedBugs: [],
+        _stub: true   // signals getCycleExecutionSummary to heal on next open
+      }));
 
-      const healed = testData.filter(Boolean);
-      if (healed.length === 0) {
-        results.skipped++;
-        continue;
-      }
-
-      // Step 3: Write back the rebuilt index
       let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
         method: 'PUT',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(healed)
+        body: JSON.stringify(stubIndex)
       });
       if (res.status === 429) {
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000));
         res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(healed)
+          body: JSON.stringify(stubIndex)
         });
       }
-
       if (res.ok) {
         results.migrated++;
       } else {
-        results.errors.push(`${issue.key}: write ${res.status}`);
+        results.errors.push(`${issue.key}: ${res.status}`);
       }
-
     } catch (err) {
       results.errors.push(`${issue.key}: ${err.message}`);
     }
