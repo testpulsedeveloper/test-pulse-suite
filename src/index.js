@@ -625,23 +625,44 @@ const getExecutionData = async (cycleId) => {
   return results;
 };
 
-// NEW endpoint for fast initial load (Causa 1)
+// Fast initial load endpoint — heals legacy format on the fly
 const getCycleExecutionSummary = async (cycleId) => {
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   if (response.status === 404) return [];
   const data = await response.json();
   const value = data.value || [];
-  
+
   if (value.length === 0) return [];
-  
-  // If it's already an array of objects (lightweight index format), just return it
+
+  // Modern format: lightweight index has objects with real statuses — use directly
   if (typeof value[0] === 'object') {
       return value;
   }
-  
-  // If it's legacy (array of strings), just map it to default summary objects
+
+  // Legacy format (array of ID strings): heal by reading real exec_ properties
+  // and write back the corrected index so future loads are fast
+  console.log(`[getCycleExecutionSummary] Legacy format for ${cycleId} — healing index`);
+  const realData = await getExecutionData(cycleId);
+  if (realData && realData.length > 0) {
+      const healed = realData.map(ex => ({
+          id: String(ex.id),
+          status: ex.status || 'Not Run',
+          linkedBugs: ex.linkedBugs || [],
+          executedBy: ex.executedBy
+      }));
+      // Write back healed index asynchronously (don't block the response)
+      api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(healed)
+      });
+      return healed;
+  }
+
+  // Absolute fallback: return stubs so the UI at least shows the test cases
   return value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
 };
+
 
 const updateLightweightIndex = async (cycleId, updateFn) => {
     let lightWeight = [];
@@ -650,14 +671,29 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
         const data = await response.json();
         const value = data.value || [];
         if (value.length > 0 && typeof value[0] === 'object') {
+            // Modern format: use directly
             lightWeight = value;
         } else if (value.length > 0) {
-            lightWeight = value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
+            // Legacy format (just IDs): MUST read real statuses from exec_ properties first
+            // to avoid corrupting all statuses to "Not Run" on write-back
+            console.log(`[updateLightweightIndex] Legacy format detected for ${cycleId} — healing before update`);
+            const realData = await getExecutionData(cycleId);
+            if (realData && realData.length > 0) {
+                lightWeight = realData.map(ex => ({
+                    id: String(ex.id),
+                    status: ex.status || 'Not Run',
+                    linkedBugs: ex.linkedBugs || [],
+                    executedBy: ex.executedBy
+                }));
+            } else {
+                // Fallback: no real data available, at least keep the IDs
+                lightWeight = value.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }));
+            }
         }
     }
-    
+
     lightWeight = updateFn(lightWeight);
-    
+
     let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
         method: 'PUT',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -676,6 +712,7 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
         console.error("Failed to update lightweight index:", errText);
     }
 };
+
 
 const setExecutionData = async (cycleId, data) => {
   const testIds = data.map(t => t.id);
