@@ -1262,6 +1262,22 @@ resolver.define('updateTestStatus', async ({ payload }) => {
           iterations: iterations !== undefined ? iterations : t.iterations,
           executedBy: executorInfo !== undefined ? executorInfo : t.executedBy
       };
+  } else {
+      // exec_ doesn't exist yet — first time executing this test.
+      // Create it from scratch so the status is actually persisted
+      // (previously this branch silently did nothing, causing "Not Run" on re-open).
+      updatedTest = {
+          id: String(testId),
+          status: status !== undefined ? status : 'Not Run',
+          comment: comment !== undefined ? comment : '',
+          evidence: evidence !== undefined ? evidence : null,
+          evidences: evidences !== undefined ? evidences : [],
+          steps: steps !== undefined ? steps : [],
+          iterations: iterations !== undefined ? iterations : [],
+          linkedBugs: linkedBugs !== undefined ? linkedBugs : [],
+          executedBy: executorInfo || null,
+          description: null
+      };
   }
   
   if (updatedTest) {

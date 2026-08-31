@@ -2918,12 +2918,26 @@ const renderPlanningTab = () => (
       if (test && !test._detailLoaded) {
         const fullExec = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
 
+        const applyFullExec = (fe) => {
+          // If the status in the lightweight index differs from exec_ — heal in background
+          if (fe && fe.status && fe.status !== test.status) {
+            invoke('updateTestStatus', {
+              cycleId: selectedCycle.id,
+              testId,
+              status: fe.status,
+              linkedBugs: fe.linkedBugs || test.linkedBugs || []
+            }).catch(console.warn);
+          }
+        };
+
         if (fullExec && fullExec.description) {
           // exec_ has description — use directly
+          applyFullExec(fullExec);
           setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
             ? { ...t, ...fullExec, _detailLoaded: true } : t));
         } else if (fullExec) {
           // exec_ exists but no description — load description from the test case Jira issue
+          applyFullExec(fullExec);
           const desc = await invoke('getIssueDescription', { issueId: testId }).catch(() => null);
           setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
             ? { ...t, ...fullExec, description: desc || null, _detailLoaded: true } : t));
@@ -4153,77 +4167,145 @@ const renderPlanningTab = () => (
             </div>
           )}
 
-          {filteredCycles.some(c => c.execution && c.execution.some(ex => ex.linkedBugs && ex.linkedBugs.length > 0)) ? (
-            <div className="chart-card" style={{ gridColumn: '1 / -1', marginTop: '2.5rem', overflowX: 'auto', marginBottom: '1rem' }}>
-              <h3>Detalle de Defectos Reportados</h3>
-              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
-                <thead>
-                  <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Id del bug</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>*Severity</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Responsable</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Resolución</th>
-                    <th style={{ padding: '0.5rem', textAlign: 'left' }}>Link al caso</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(() => {
-                    const bugMap = {};
-                    filteredCycles.forEach(cycle => {
-                      (cycle.execution || []).forEach(ex => {
-                        (ex.linkedBugs || []).forEach(bug => {
-                          const tc = testCases.find(t => String(t.id) === String(ex.id));
-                          const tcKey = tc ? tc.key : (ex.key || ex.id);
-                          
-                          if (!bugMap[bug.key]) {
-                            let finalSeverity = bug.severity;
-                            const severityField = { id: 'customfield_10238', name: '*Severity' };
-                            if (severityField && bug.rawFields && bug.rawFields[severityField.id]) {
-                               const sf = bug.rawFields[severityField.id];
-                               finalSeverity = typeof sf === 'object' ? (sf.value || sf.name || String(sf)) : String(sf);
-                            }
-                            bugMap[bug.key] = {
-                              ...bug,
-                              finalSeverity,
-                              linkedCases: [tcKey]
-                            };
-                          } else {
-                            if (!bugMap[bug.key].linkedCases.includes(tcKey)) {
-                              bugMap[bug.key].linkedCases.push(tcKey);
-                            }
-                          }
-                        });
-                      });
-                    });
+          {(() => {
+            // Collect ALL tests from filtered cycles — split into with/without bugs
+            const withBugsMap = {}; // bugKey → { ...bugInfo, linkedCases: [] }
+            const withBugsCases = []; // { id, key, summary, status, cycleName, bugs[] }
+            const withoutBugsCases = []; // { id, key, summary, status, cycleName }
+            const seenTestIds = new Set();
 
-                    return Object.values(bugMap).map((bug, i) => (
-                        <tr key={bug.key + '-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
-                          <td style={{ padding: '0.5rem' }}>
-                             <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}>{bug.key}</a>
-                          </td>
-                          <td style={{ padding: '0.5rem' }}>{bug.summary || 'N/A'}</td>
-                          <td style={{ padding: '0.5rem' }}>{bug.finalSeverity || 'N/A'}</td>
-                          <td style={{ padding: '0.5rem' }}>
-                            <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-bg)' : 'var(--danger-bg)', color: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-color)' : 'var(--danger-color)' }}>
-                              {bug.status || 'Desconocido'}
-                            </span>
-                          </td>
-                          <td style={{ padding: '0.5rem' }}>{bug.assignee || 'Sin asignar'}</td>
-                          <td style={{ padding: '0.5rem' }}>{bug.resolution || 'Unresolved'}</td>
-                          <td style={{ padding: '0.5rem' }}>
-                             <span className="status-badge" style={{ background: 'var(--bg-surface)', padding: '0.2rem 0.5rem', fontWeight: 'bold' }}>
-                               {bug.linkedCases.length} caso{bug.linkedCases.length !== 1 ? 's' : ''} impactado{bug.linkedCases.length !== 1 ? 's' : ''}
-                             </span>
-                          </td>
+            filteredCycles.forEach(cycle => {
+              (cycle.execution || []).forEach(ex => {
+                if (seenTestIds.has(ex.id)) return;
+                seenTestIds.add(ex.id);
+                const tc = testCases.find(t => String(t.id) === String(ex.id));
+                const tcKey = tc ? tc.key : (ex.key || ex.id);
+                const tcSummary = tc ? tc.summary : (ex.summary || 'Sin título');
+                const tcStatus = ex.status || 'Not Run';
+
+                if (ex.linkedBugs && ex.linkedBugs.length > 0) {
+                  withBugsCases.push({ id: ex.id, key: tcKey, summary: tcSummary, status: tcStatus, cycleName: cycle.name, bugs: ex.linkedBugs });
+                  ex.linkedBugs.forEach(bug => {
+                    let finalSeverity = bug.severity;
+                    if (bug.rawFields && bug.rawFields['customfield_10238']) {
+                      const sf = bug.rawFields['customfield_10238'];
+                      finalSeverity = typeof sf === 'object' ? (sf.value || sf.name || String(sf)) : String(sf);
+                    }
+                    if (!withBugsMap[bug.key]) {
+                      withBugsMap[bug.key] = { ...bug, finalSeverity, linkedCases: [tcKey] };
+                    } else if (!withBugsMap[bug.key].linkedCases.includes(tcKey)) {
+                      withBugsMap[bug.key].linkedCases.push(tcKey);
+                    }
+                  });
+                } else {
+                  withoutBugsCases.push({ id: ex.id, key: tcKey, summary: tcSummary, status: tcStatus, cycleName: cycle.name });
+                }
+              });
+            });
+
+            const bugsArr = Object.values(withBugsMap);
+            const hasBugs = bugsArr.length > 0;
+
+            return (
+              <div style={{ gridColumn: '1 / -1', marginTop: '2.5rem', marginBottom: '1rem' }}>
+                {/* ─── Sección A: Tests CON bugs ─── */}
+                <div className="chart-card" style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
+                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    🐞 Tests con Defectos
+                    <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                      ({withBugsCases.length} caso{withBugsCases.length !== 1 ? 's' : ''} · {bugsArr.length} bug{bugsArr.length !== 1 ? 's' : ''} único{bugsArr.length !== 1 ? 's' : ''})
+                    </span>
+                  </h3>
+                  {hasBugs ? (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Id del bug</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción del bug</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>*Severity</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Responsable</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Resolución</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Casos impactados</th>
                         </tr>
-                    ));
-                  })()}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
+                      </thead>
+                      <tbody>
+                        {bugsArr.map((bug, i) => (
+                          <tr key={bug.key + '-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                            <td style={{ padding: '0.5rem' }}>
+                              <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}>{bug.key}</a>
+                            </td>
+                            <td style={{ padding: '0.5rem' }}>{bug.summary || 'N/A'}</td>
+                            <td style={{ padding: '0.5rem' }}>{bug.finalSeverity || 'N/A'}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-bg)' : 'var(--danger-bg)', color: (bug.resolution && bug.resolution !== 'Unresolved') ? 'var(--success-color)' : 'var(--danger-color)' }}>
+                                {bug.status || 'Desconocido'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '0.5rem' }}>{bug.assignee || 'Sin asignar'}</td>
+                            <td style={{ padding: '0.5rem' }}>{bug.resolution || 'Unresolved'}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span style={{ fontSize: '0.8rem' }}>
+                                {bug.linkedCases.map((k, idx) => (
+                                  <span key={k}>
+                                    <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + k); }}>{k}</a>
+                                    {idx < bug.linkedCases.length - 1 ? ', ' : ''}
+                                  </span>
+                                ))}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>✅ No se encontraron defectos en los ciclos seleccionados.</p>
+                  )}
+                </div>
+
+                {/* ─── Sección B: Tests SIN bugs ─── */}
+                <div className="chart-card" style={{ overflowX: 'auto' }}>
+                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    ✅ Tests sin Defectos
+                    <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                      ({withoutBugsCases.length} caso{withoutBugsCases.length !== 1 ? 's' : ''})
+                    </span>
+                  </h3>
+                  {withoutBugsCases.length > 0 ? (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Caso</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Ciclo</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estatus</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {withoutBugsCases.map((tc, i) => (
+                          <tr key={tc.id + '-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                            <td style={{ padding: '0.5rem' }}>
+                              <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + tc.key); }}>{tc.key}</a>
+                            </td>
+                            <td style={{ padding: '0.5rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tc.summary}</td>
+                            <td style={{ padding: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{tc.cycleName}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: getStatusColor(tc.status), color: getStatusTextColor(tc.status) }}>
+                                {tc.status || 'Not Run'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>Todos los casos ejecutados tienen al menos un defecto registrado.</p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
         </div>
       </div>
     );
