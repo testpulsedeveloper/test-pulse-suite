@@ -1,5 +1,6 @@
 import Resolver from '@forge/resolver';
-import api, { route, storage } from '@forge/api';
+import api, { route } from '@forge/api';
+
 
 // Rate-limiting utility: processes items in batches with delay between batches
 // Prevents burst requests that trigger Jira's 429 rate limiting
@@ -642,59 +643,72 @@ const trimBugsForIndex = (bugs) => {
 };
 
 
-// ── Forge Storage helpers — replaces Jira entity property 'execution' ──
-// Jira entity properties have a 32KB limit; Forge Storage supports up to 10MB per key.
-// Key format: cidx_{cycleId}
-// Backward compat: if Storage has no entry, reads from Jira property and auto-migrates.
-const CIDX = (id) => `cidx_${id}`;
+// === Cycle Index — Jira Entity Property sharding (no 32KB limit per shard) ===
+// Instead of one large property (which hits the 32KB limit at ~200 tests),
+// we shard the index into multiple properties of SHARD_SIZE entries each.
+// Shard 0: /properties/execution  (backward compat with existing data)
+// Shard N: /properties/execution_N  (N = 1, 2, 3…)
+// 200 entries × ~150 bytes ≈ 30KB — safely under the 32KB per-property limit.
+const SHARD_SIZE = 200;
+const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 
 const readCycleIndex = async (cycleId) => {
-  try {
-    const stored = await storage.get(CIDX(cycleId));
-    // IMPORTANT: treat [] same as null — empty array in Storage is not valid data
-    // (would prevent Jira fallback from working and hide real tests)
-    if (stored !== null && stored !== undefined && Array.isArray(stored) && stored.length > 0) {
-      return stored;
-    }
-  } catch (e) {
-    console.warn('[readCycleIndex] Storage read failed, falling back to Jira:', e.message);
-  }
-
-  // Fallback: read from Jira entity property (backward compat for pre-migration cycles)
-  const res = await api.asUser().requestJira(
-    route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`
-  );
-  if (res.status === 404 || !res.ok) return [];
-  const data = await res.json();
-  const raw = data.value || [];
-  if (raw.length === 0) return [];
-
-  // Normalize: legacy (array of IDs) → array of objects
-  const normalized = (typeof raw[0] === 'string')
-    ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
-    : raw;
-
-  // Migrate to Forge Storage asynchronously (first access upgrades the cycle)
-  if (normalized.length > 0) {
-    storage.set(CIDX(cycleId), normalized).catch(e =>
-      console.warn('[readCycleIndex] Migration to Storage failed:', e.message)
+  const allEntries = [];
+  for (let shard = 0; shard <= 10; shard++) {          // max 10 shards = 2000 tests
+    const propName = _shardProp(shard);
+    const res = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${cycleId}/properties/${propName}?t=${Date.now()}`
     );
+    if (res.status === 404 || !res.ok) break;            // no more shards
+    const data = await res.json();
+    const raw = data.value || [];
+    if (raw.length === 0) break;
+    const normalized = (typeof raw[0] === 'string')
+      ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
+      : raw;
+    allEntries.push(...normalized);
+    if (normalized.length < SHARD_SIZE) break;          // last (partial) shard → done
   }
-  return normalized;
+  return allEntries;
 };
 
 const writeCycleIndex = async (cycleId, entries) => {
-  if (!entries || entries.length === 0) {
-    // Never write empty array — would permanently block the Jira property fallback
-    console.warn(`[writeCycleIndex] Refusing to write empty index for ${cycleId}`);
-    return;
+  if (!entries || entries.length === 0) return;
+  const shardCount = Math.ceil(entries.length / SHARD_SIZE);
+  for (let shard = 0; shard < shardCount; shard++) {
+    const propName = _shardProp(shard);
+    const shardEntries = entries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE);
+    let res = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(shardEntries)
+      }
+    );
+    if (res.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      res = await api.asUser().requestJira(
+        route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(shardEntries)
+        }
+      );
+    }
+    if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
   }
-  await storage.set(CIDX(cycleId), entries);
 };
 
 const deleteCycleIndex = async (cycleId) => {
-  await storage.delete(CIDX(cycleId)).catch(() => {});
+  for (let shard = 0; shard <= 10; shard++) {
+    const res = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`,
+      { method: 'DELETE' }
+    );
+    if (res.status === 404) break;                      // no more shards
+  }
 };
+
 
 const getCycleExecutionSummary = async (cycleId) => {
   try {
