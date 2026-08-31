@@ -2220,13 +2220,16 @@ Then el sistema valida la identidad.
 
   const loadReportData = async () => {
     if (!selectedProjectId) return;
+    if (isMigrating) return; // don't compete with migration for Jira API quota
     setReportLoading(true);
     try {
         const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
         setReportData(data || { cycles: [] });
     } catch(err) {
         console.error("loadReportData error:", err);
-        alert("Error cargando reportes (timeout). Intenta de nuevo.");
+        // Don't alert() — it freezes JS and interrupts background operations.
+        // User can click the 🔄 Actualizar button to retry.
+        setReportData(prev => ({ ...prev, _loadError: true }));
     } finally {
         setReportLoading(false);
     }
@@ -3183,6 +3186,19 @@ const renderPlanningTab = () => (
           <div style={{ fontSize: '2rem' }}>⏳</div>
           <div style={{ fontWeight: 500 }}>Cargando reporte...</div>
           <div style={{ fontSize: '0.85rem' }}>Esto puede tomar unos segundos la primera vez</div>
+        </div>
+      );
+    }
+
+    if (reportData._loadError && (!reportData.cycles || reportData.cycles.length === 0)) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '4rem', gap: '1rem', color: 'var(--text-secondary)' }}>
+          <div style={{ fontSize: '2rem' }}>⚠️</div>
+          <div style={{ fontWeight: 500 }}>El reporte tardó demasiado en cargar</div>
+          <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>Intenta de nuevo con el botón de abajo</div>
+          <button className="btn-primary" onClick={loadReportData} style={{ padding: '0.5rem 1.2rem' }}>
+            🔄 Reintentar
+          </button>
         </div>
       );
     }
