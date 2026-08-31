@@ -1881,7 +1881,7 @@ resolver.define('getIssueDescription', async ({ payload }) => {
 // Paginated migration — processes 2 cycles per call to stay under the 25s Forge timeout.
 // Frontend loops calling this with increasing offset until done=true.
 resolver.define('migrateAllCycles', async ({ payload }) => {
-  const { projectId, config, offset = 0, limit = 2 } = payload;
+  const { projectId, config, offset = 0, limit = 1 } = payload;
   const cycleType = config?.testCycleType || 'Test Cycle';
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
 
