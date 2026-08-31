@@ -4158,24 +4158,53 @@ const renderPlanningTab = () => (
         <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', marginBottom: '2rem' }}>
           <h3 style={{ marginBottom: '0.5rem' }}>🔧 Mantenimiento de datos</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-            Migra todos los ciclos al formato moderno de índice. Ejecuta esto <strong>una sola vez</strong> para eliminar 
-            la sobrecarga de healing y prevenir el rate limiting de Jira. Después de migrar, la app será más rápida y estable.
+            Migra todos los ciclos al formato moderno de índice. Ejecuta esto <strong>una sola vez</strong> para eliminar
+            la sobrecarga de healing y prevenir el rate limiting de Jira. La migración se hace en tandas de 2 ciclos para no exceder los límites de Forge.
           </p>
           {window._migrateResult && (
             <div style={{ marginBottom: '1rem', padding: '0.75rem', borderRadius: '6px', background: window._migrateResult.errors?.length ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', fontSize: '0.85rem' }}>
-              ✅ Migración completada: {window._migrateResult.migrated} migrados, {window._migrateResult.alreadyModern} ya modernos, {window._migrateResult.skipped} sin datos
-              {window._migrateResult.errors?.length > 0 && <div style={{ color: 'var(--danger-color)' }}>Errores: {window._migrateResult.errors.join(', ')}</div>}
+              ✅ Migración completada — Migrados: {window._migrateResult.totalMigrated}, Ya modernos: {window._migrateResult.totalModern}, Sin datos: {window._migrateResult.totalSkipped}
+              {window._migrateResult.errors?.length > 0 && <div style={{ color: 'var(--danger-color)', marginTop: '0.25rem' }}>Errores: {window._migrateResult.errors.join(', ')}</div>}
+            </div>
+          )}
+          {window._migrateProgress && !window._migrateResult && (
+            <div style={{ marginBottom: '1rem' }}>
+              <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>
+                Migrando... {window._migrateProgress.processed} / {window._migrateProgress.total} ciclos
+              </div>
+              <div style={{ background: 'var(--border-color)', borderRadius: '4px', height: '8px', overflow: 'hidden' }}>
+                <div style={{ background: '#78256F', height: '100%', width: `${Math.round((window._migrateProgress.processed / window._migrateProgress.total) * 100)}%`, transition: 'width 0.3s' }} />
+              </div>
             </div>
           )}
           <button
             className="btn-secondary"
+            disabled={loading}
             onClick={async () => {
-              if (!window.confirm('¿Migrar todos los ciclos al formato moderno? Esto puede tardar 1-2 minutos. No cierres la ventana.')) return;
+              if (!window.confirm('¿Migrar todos los ciclos al formato moderno?\n\nEsto puede tardar varios minutos dependiendo del número de ciclos. No cierres la ventana.')) return;
+              window._migrateResult = null;
+              window._migrateProgress = null;
               setLoading(true);
+              const totals = { totalMigrated: 0, totalModern: 0, totalSkipped: 0, errors: [] };
               try {
-                const result = await invoke('migrateAllCycles', { projectId: selectedProjectId, config: projectConfig });
-                window._migrateResult = result;
-                alert(`✅ Migración completada:\n- Migrados: ${result.migrated}\n- Ya modernos: ${result.alreadyModern}\n- Sin datos: ${result.skipped}${result.errors?.length ? `\n- Errores: ${result.errors.join(', ')}` : ''}`);
+                let offset = 0;
+                let done = false;
+                let total = 1;
+                while (!done) {
+                  const result = await invoke('migrateAllCycles', { projectId: selectedProjectId, config: projectConfig, offset, limit: 2 });
+                  totals.totalMigrated += result.migrated || 0;
+                  totals.totalModern += result.alreadyModern || 0;
+                  totals.totalSkipped += result.skipped || 0;
+                  if (result.errors?.length) totals.errors.push(...result.errors);
+                  total = result.total || total;
+                  window._migrateProgress = { processed: result.processed, total };
+                  done = result.done;
+                  offset = result.nextOffset || offset + 2;
+                  if (!done) await new Promise(r => setTimeout(r, 500)); // small gap between calls
+                }
+                window._migrateResult = totals;
+                window._migrateProgress = null;
+                alert(`✅ Migración completa!\n- Migrados: ${totals.totalMigrated}\n- Ya modernos: ${totals.totalModern}\n- Sin datos: ${totals.totalSkipped}${totals.errors.length ? `\n- Errores: ${totals.errors.join(', ')}` : ''}`);
               } catch (err) {
                 alert('Error en migración: ' + err.message);
               } finally {
@@ -4187,6 +4216,7 @@ const renderPlanningTab = () => (
             ⚡ Migrar todos los ciclos al formato moderno
           </button>
         </div>
+
 
       </main>
     </div>

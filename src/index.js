@@ -1878,13 +1878,14 @@ resolver.define('getIssueDescription', async ({ payload }) => {
   }
 });
 
-// One-time migration: converts all legacy execution indexes to modern format
-// Run this ONCE as admin to eliminate healing permanently and prevent rate limiting
+// Paginated migration — processes 2 cycles per call to stay under the 25s Forge timeout.
+// Frontend loops calling this with increasing offset until done=true.
 resolver.define('migrateAllCycles', async ({ payload }) => {
-  const { projectId, config } = payload;
+  const { projectId, config, offset = 0, limit = 2 } = payload;
   const cycleType = config?.testCycleType || 'Test Cycle';
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
 
+  // Fetch all issue stubs (just IDs + execution index) in one JQL call
   let allIssues = [];
   let token = null;
   let isLast = false;
@@ -1897,10 +1898,12 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
     if (!token) break;
   }
 
-  const results = { total: allIssues.length, migrated: 0, alreadyModern: 0, skipped: 0, errors: [] };
+  const total = allIssues.length;
+  const batch = allIssues.slice(offset, offset + limit);
+  const results = { total, processed: offset, migrated: 0, alreadyModern: 0, skipped: 0, errors: [], done: false };
 
-  // Process cycles one-by-one with delay to stay within Jira rate limits
-  for (const issue of allIssues) {
+  for (const issue of batch) {
+    results.processed++;
     try {
       const properties = issue.properties || {};
       const executionRaw = properties['execution'] || [];
@@ -1911,7 +1914,6 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
       }
 
       if (typeof executionRaw[0] === 'object') {
-        // Check if all modern-format entries have executedBy (fully healed)
         const needsHeal = executionRaw.some(
           ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
         );
@@ -1921,8 +1923,7 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
         }
       }
 
-      // Legacy or stale — read real data and write back
-      console.log(`[migrateAllCycles] Migrating ${issue.key}...`);
+      // Legacy or stale — read real statuses from exec_ properties
       const fullData = await getExecutionData(issue.id);
       if (!fullData || fullData.length === 0) {
         results.skipped++;
@@ -1957,16 +1958,15 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
         results.errors.push(`${issue.key}: ${res.status}`);
       }
 
-      // 800ms delay between cycles to stay well within Jira rate limits
-      await new Promise(r => setTimeout(r, 800));
-
     } catch (err) {
       results.errors.push(`${issue.key}: ${err.message}`);
     }
   }
 
-  console.log('[migrateAllCycles] Done:', JSON.stringify(results));
+  results.done = results.processed >= total;
+  results.nextOffset = results.done ? null : offset + limit;
   return results;
 });
+
 
 export const handler = resolver.getDefinitions();
