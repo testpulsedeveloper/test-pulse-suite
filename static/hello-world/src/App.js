@@ -3584,14 +3584,28 @@ const renderPlanningTab = () => (
       <div className="tab-layout full-width" style={{padding: '2rem'}}>
         <div className="header" style={{marginBottom: '0'}}>
           <h1>Dashboard: Métricas de Calidad</h1>
-          <button
-            onClick={loadReportData}
-            disabled={reportLoading}
-            style={{ padding: '0.4rem 0.8rem', marginLeft: 'auto', marginRight: '0.5rem', background: 'var(--bg-surface)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: reportLoading ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', fontSize: '0.9rem' }}
-            title="Recargar datos del reporte"
-          >
-            🔄 Actualizar
-          </button>
+          <div style={{ marginLeft: 'auto', marginRight: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <button
+              onClick={loadReportData}
+              disabled={reportLoading}
+              style={{ padding: '0.4rem 0.8rem', background: 'var(--bg-surface)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: reportLoading ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+              title="Recargar datos del reporte"
+            >
+              🔄 Actualizar
+            </button>
+            {reportData._loadedAt && !reportLoading && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                {Math.round((Date.now() - reportData._loadedAt) / 60000) < 1
+                  ? 'Actualizado < 1 min'
+                  : `Hace ${Math.round((Date.now() - reportData._loadedAt) / 60000)} min`}
+              </span>
+            )}
+            {circuitBreakerActive && (
+              <span style={{ fontSize: '0.75rem', color: '#ff991f', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                ⏸ Rate limit (3 min)
+              </span>
+            )}
+          </div>
           <button 
             className="btn-primary" 
             onClick={handleCopyReportToClipboard}
@@ -4540,6 +4554,7 @@ const renderPlanningTab = () => (
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
         <strong>Test Pulse</strong> v1.2.0 © El Puerto de Liverpool
       </div>
+      {renderModals()}
     </div>
   );
 }
@@ -4579,10 +4594,11 @@ class ErrorBoundary extends React.Component {
 
 function WrappedApp() {
   return (
-    <ErrorBoundary>
-      <App />
-      
-    </ErrorBoundary>
+    <NotificationProvider>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </NotificationProvider>
   );
 }
 
