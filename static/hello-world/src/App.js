@@ -2260,8 +2260,16 @@ Then el sistema valida la identidad.
             setCycleTests([]); // direct set
             return;
           }
-          
-          setCycleTests(executionSummary); // direct set instead of safeSetCycleTests to prevent ghosts
+
+          // Enrich lightweight index with key+summary from the already-loaded testCases array.
+          // The lightweight index only has {id, status, linkedBugs} — new cycle tests would
+          // show blank key/summary without this join.
+          const enriched = executionSummary.map(ex => {
+            if (ex.key && ex.summary) return ex; // already enriched (old cycle)
+            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
+          });
+          setCycleTests(enriched);
         });
     } else if (activeTab === 'reports') {
       // Only reload reports if we don't have data yet, or refreshTrigger changed
@@ -2699,31 +2707,39 @@ const renderPlanningTab = () => (
       setExpandedExecutionTest(null);
     } else {
       setExpandedExecutionTest(testId);
-      
-      // Load BDD/Traditional details
+
+      // 1. Load BDD/Traditional steps (from test case issue — always available)
       if (!executionTestDetails[testId]) {
         const details = await invoke('getTestCaseDetails', { caseId: testId });
         setExecutionTestDetails(prev => ({ ...prev, [testId]: details || { type: 'traditional', content: [] } }));
       }
 
-      // Load full execution details (iterations, description)
-      const test = cycleTests.find(t => t.id === testId);
-      if (test && !test.description) {
+      // 2. Load full execution details (iterations, comment, evidences, description)
+      const test = cycleTests.find(t => String(t.id) === String(testId));
+      if (test && !test._detailLoaded) {
         const fullExec = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
-        if (fullExec) {
-          // Merge full execution details into cycleTests
-          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, ...fullExec } : t));
+
+        if (fullExec && fullExec.description) {
+          // exec_ has description — use directly
+          setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
+            ? { ...t, ...fullExec, _detailLoaded: true } : t));
+        } else if (fullExec) {
+          // exec_ exists but no description — load description from the test case Jira issue
+          const desc = await invoke('getIssueDescription', { issueId: testId }).catch(() => null);
+          setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
+            ? { ...t, ...fullExec, description: desc || null, _detailLoaded: true } : t));
         } else {
-          // Fallback if exec property doesn't have description, trigger backfill for this single test
+          // exec_ property doesn't exist — try backfill (copies description from test issue to exec_)
           const updated = await invoke('backfillDescriptions', {
-              cycleId: selectedCycle.id,
-              testIds: [testId]
+            cycleId: selectedCycle.id,
+            testIds: [testId]
           });
           if (updated) {
-              const backfilled = updated.find(t => String(t.id) === String(testId));
-              if (backfilled) {
-                 setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, ...backfilled } : t));
-              }
+            const backfilled = updated.find(t => String(t.id) === String(testId));
+            if (backfilled) {
+              setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
+                ? { ...t, ...backfilled, _detailLoaded: true } : t));
+            }
           }
         }
       }

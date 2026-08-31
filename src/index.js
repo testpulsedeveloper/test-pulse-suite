@@ -783,8 +783,12 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       if (typeof executionRaw[0] === 'object') {
         execution = executionRaw;
 
-        // Heal if any executed test is missing executedBy (stale lightweight index)
-        const needsHeal = execution.some(
+        // Stubs have _stub:true — written by fast-migration, all statuses 'Not Run'.
+        // Must heal same as legacy format (read exec_ properties for real statuses).
+        const hasStubs = execution.some(ex => ex._stub === true);
+
+        // Also heal if any executed test is missing executedBy (stale lightweight index)
+        const needsHeal = hasStubs || execution.some(
           ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
         );
         if (needsHeal) {
