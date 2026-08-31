@@ -4152,6 +4152,42 @@ const renderPlanningTab = () => (
         )}
 
 
+
+        {/* ── Migración de datos ── */}
+        <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
+        <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', marginBottom: '2rem' }}>
+          <h3 style={{ marginBottom: '0.5rem' }}>🔧 Mantenimiento de datos</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+            Migra todos los ciclos al formato moderno de índice. Ejecuta esto <strong>una sola vez</strong> para eliminar 
+            la sobrecarga de healing y prevenir el rate limiting de Jira. Después de migrar, la app será más rápida y estable.
+          </p>
+          {window._migrateResult && (
+            <div style={{ marginBottom: '1rem', padding: '0.75rem', borderRadius: '6px', background: window._migrateResult.errors?.length ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', fontSize: '0.85rem' }}>
+              ✅ Migración completada: {window._migrateResult.migrated} migrados, {window._migrateResult.alreadyModern} ya modernos, {window._migrateResult.skipped} sin datos
+              {window._migrateResult.errors?.length > 0 && <div style={{ color: 'var(--danger-color)' }}>Errores: {window._migrateResult.errors.join(', ')}</div>}
+            </div>
+          )}
+          <button
+            className="btn-secondary"
+            onClick={async () => {
+              if (!window.confirm('¿Migrar todos los ciclos al formato moderno? Esto puede tardar 1-2 minutos. No cierres la ventana.')) return;
+              setLoading(true);
+              try {
+                const result = await invoke('migrateAllCycles', { projectId: selectedProjectId, config: projectConfig });
+                window._migrateResult = result;
+                alert(`✅ Migración completada:\n- Migrados: ${result.migrated}\n- Ya modernos: ${result.alreadyModern}\n- Sin datos: ${result.skipped}${result.errors?.length ? `\n- Errores: ${result.errors.join(', ')}` : ''}`);
+              } catch (err) {
+                alert('Error en migración: ' + err.message);
+              } finally {
+                setLoading(false);
+              }
+            }}
+            style={{ padding: '0.6rem 1.2rem' }}
+          >
+            ⚡ Migrar todos los ciclos al formato moderno
+          </button>
+        </div>
+
       </main>
     </div>
   );;;

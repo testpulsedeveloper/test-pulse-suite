@@ -1,6 +1,21 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 
+// Rate-limiting utility: processes items in batches with delay between batches
+// Prevents burst requests that trigger Jira's 429 rate limiting
+async function processInBatches(items, batchSize, delayMs, processor) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(processor));
+    results.push(...batchResults);
+    if (i + batchSize < items.length && delayMs > 0) {
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  return results;
+}
+
 async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
   let allIssues = [];
   let token = null;
@@ -592,38 +607,30 @@ const getExecutionData = async (cycleId) => {
   if (response.status === 404) return [];
   const data = await response.json();
   const value = data.value || [];
-  
+
   if (value.length === 0) return [];
-  
+
   const testIds = (typeof value[0] === 'object') ? value.map(t => String(t.id)) : value.map(String);
   if (!Array.isArray(testIds) || testIds.length === 0) return [];
-  
-  let mergedProps = {};
-  const CHUNK_SIZE = 25;
-  for (let i = 0; i < testIds.length; i += CHUNK_SIZE) {
-      const chunk = testIds.slice(i, i + CHUNK_SIZE);
-      const chunkPromises = chunk.map(async (id) => {
-          let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
-          if (res.status === 429) {
-              await new Promise(r => setTimeout(r, 2000));
-              res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
-          }
-          if (res.ok) {
-              const data = await res.json();
-              return { key: `exec_${id}`, value: data.value };
-          }
-          return { key: `exec_${id}`, value: { id: String(id), status: 'Not Run', linkedBugs: [] } };
-      });
-      const resolvedChunk = await Promise.all(chunkPromises);
-      resolvedChunk.forEach(prop => {
-          if (prop) mergedProps[prop.key] = prop.value;
-      });
-  }
-  
-  const results = testIds.map(id => mergedProps[`exec_${id}`]).filter(Boolean);
-  
-  return results;
+
+  // Process in batches of 10 with 200ms delay between batches to avoid 429 rate limiting
+  // (was 25 concurrent with no delay — too aggressive for Jira Cloud limits)
+  const props = await processInBatches(testIds, 10, 200, async (id) => {
+    let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+    if (res.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${id}?t=${Date.now()}`);
+    }
+    if (res.ok) {
+      const d = await res.json();
+      return d.value || { id: String(id), status: 'Not Run', linkedBugs: [] };
+    }
+    return { id: String(id), status: 'Not Run', linkedBugs: [] };
+  });
+
+  return props.filter(Boolean);
 };
+
 
 // Fast initial load endpoint — heals legacy format on the fly
 const getCycleExecutionSummary = async (cycleId) => {
@@ -759,8 +766,11 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       isLast = page.isLast;
       if (!token) break;
   }
-  // Load execution data in PARALLEL — heals stale/legacy cycles simultaneously
-  const cycles = await Promise.all(allIssues.map(async (issue) => {
+  // Process cycles in batches of 3 with 500ms delay to avoid rate-limit bursts.
+  // Cycles without healing needs are fast (just reads lightweight index).
+  // Cycles that need healing call getExecutionData (N sub-requests) — limiting concurrency here
+  // prevents the worst case: Promise.all on 20 cycles × 50 tests = 1000 simultaneous requests.
+  const cycles = await processInBatches(allIssues, 3, 500, async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
     const executionRaw = properties['execution'] || [];
@@ -782,7 +792,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
             linkedBugs: ex.linkedBugs || [],
             executedBy: ex.executedBy
           }));
-          // Write back healed index (don't block response on write)
+          // Write back healed index (fire-and-forget)
           api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -790,7 +800,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
           });
         }
       } else {
-        // Legacy format (array of ID strings) — heal to objects with real statuses
+        // Legacy format — heal to objects with real statuses
         const fullData = await getExecutionData(issue.id);
         execution = fullData.map(ex => ({
           id: String(ex.id),
@@ -798,7 +808,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
           linkedBugs: ex.linkedBugs || [],
           executedBy: ex.executedBy
         }));
-        // Write back healed index
+        // Write back healed index (fire-and-forget)
         api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -814,7 +824,8 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       planId,
       execution
     };
-  }));
+  });
+
 
 
   
@@ -1865,6 +1876,97 @@ resolver.define('getIssueDescription', async ({ payload }) => {
     console.error("Error fetching description:", e);
     return null;
   }
+});
+
+// One-time migration: converts all legacy execution indexes to modern format
+// Run this ONCE as admin to eliminate healing permanently and prevent rate limiting
+resolver.define('migrateAllCycles', async ({ payload }) => {
+  const { projectId, config } = payload;
+  const cycleType = config?.testCycleType || 'Test Cycle';
+  const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+
+  let allIssues = [];
+  let token = null;
+  let isLast = false;
+  while (!isLast) {
+    const page = await fetchJqlPage(jql, ['summary'], null, ['execution'], token, 100);
+    if (page.error) break;
+    allIssues = allIssues.concat(page.issues);
+    token = page.nextPageToken;
+    isLast = page.isLast;
+    if (!token) break;
+  }
+
+  const results = { total: allIssues.length, migrated: 0, alreadyModern: 0, skipped: 0, errors: [] };
+
+  // Process cycles one-by-one with delay to stay within Jira rate limits
+  for (const issue of allIssues) {
+    try {
+      const properties = issue.properties || {};
+      const executionRaw = properties['execution'] || [];
+
+      if (!Array.isArray(executionRaw) || executionRaw.length === 0) {
+        results.skipped++;
+        continue;
+      }
+
+      if (typeof executionRaw[0] === 'object') {
+        // Check if all modern-format entries have executedBy (fully healed)
+        const needsHeal = executionRaw.some(
+          ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
+        );
+        if (!needsHeal) {
+          results.alreadyModern++;
+          continue;
+        }
+      }
+
+      // Legacy or stale — read real data and write back
+      console.log(`[migrateAllCycles] Migrating ${issue.key}...`);
+      const fullData = await getExecutionData(issue.id);
+      if (!fullData || fullData.length === 0) {
+        results.skipped++;
+        continue;
+      }
+
+      const healed = fullData.map(ex => ({
+        id: String(ex.id),
+        status: ex.status || 'Not Run',
+        linkedBugs: ex.linkedBugs || [],
+        executedBy: ex.executedBy
+      }));
+
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(healed)
+      });
+
+      if (res.status === 429) {
+        await new Promise(r => setTimeout(r, 3000));
+        res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(healed)
+        });
+      }
+
+      if (res.ok) {
+        results.migrated++;
+      } else {
+        results.errors.push(`${issue.key}: ${res.status}`);
+      }
+
+      // 800ms delay between cycles to stay well within Jira rate limits
+      await new Promise(r => setTimeout(r, 800));
+
+    } catch (err) {
+      results.errors.push(`${issue.key}: ${err.message}`);
+    }
+  }
+
+  console.log('[migrateAllCycles] Done:', JSON.stringify(results));
+  return results;
 });
 
 export const handler = resolver.getDefinitions();
