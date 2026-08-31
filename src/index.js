@@ -1948,7 +1948,7 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
   const cycleType = config?.testCycleType || 'Test Cycle';
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
 
-  // Fetch all issue stubs (just IDs + execution index) in one JQL call
+  // Fetch all cycle stubs — just IDs + execution snapshot for quick modern-check
   let allIssues = [];
   let token = null;
   let isLast = false;
@@ -1971,12 +1971,8 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
       const properties = issue.properties || {};
       const executionRaw = properties['execution'] || [];
 
-      if (!Array.isArray(executionRaw) || executionRaw.length === 0) {
-        results.skipped++;
-        continue;
-      }
-
-      if (typeof executionRaw[0] === 'object') {
+      // Quick check: already fully modern → skip without any extra requests
+      if (Array.isArray(executionRaw) && executionRaw.length > 0 && typeof executionRaw[0] === 'object') {
         const needsHeal = executionRaw.some(
           ex => ex.status && ex.status !== 'Not Run' && ex.executedBy === undefined
         );
@@ -1986,26 +1982,53 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
         }
       }
 
-      // Legacy or stale — read real statuses from exec_ properties
-      const fullData = await getExecutionData(issue.id);
-      if (!fullData || fullData.length === 0) {
+      // --- Fast rebuild via property-key listing (avoids getExecutionData delays) ---
+      // Step 1: List ALL property keys on this issue (1 request)
+      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties`);
+      if (!keysRes.ok) {
+        results.errors.push(`${issue.key}: keys ${keysRes.status}`);
+        continue;
+      }
+      const keysData = await keysRes.json();
+      const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
+
+      if (execKeys.length === 0) {
         results.skipped++;
         continue;
       }
 
-      const healed = fullData.map(ex => ({
-        id: String(ex.id),
-        status: ex.status || 'Not Run',
-        linkedBugs: ex.linkedBugs || [],
-        executedBy: ex.executedBy
-      }));
+      // Step 2: Read exec_ properties in batches of 15 with 100ms delay
+      // (faster than getExecutionData's 10/200ms since calls are spaced by frontend)
+      const testData = await processInBatches(execKeys, 15, 100, async (key) => {
+        const testId = key.replace('exec_', '');
+        let r = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/${key}`);
+        if (r.status === 429) {
+          await new Promise(x => setTimeout(x, 2000));
+          r = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/${key}`);
+        }
+        if (!r.ok) return null;
+        const d = await r.json();
+        const val = d.value || {};
+        return {
+          id: String(val.id || testId),
+          status: val.status || 'Not Run',
+          linkedBugs: val.linkedBugs || [],
+          executedBy: val.executedBy
+        };
+      });
 
+      const healed = testData.filter(Boolean);
+      if (healed.length === 0) {
+        results.skipped++;
+        continue;
+      }
+
+      // Step 3: Write back the rebuilt index
       let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
         method: 'PUT',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(healed)
       });
-
       if (res.status === 429) {
         await new Promise(r => setTimeout(r, 3000));
         res = await api.asUser().requestJira(route`/rest/api/3/issue/${issue.id}/properties/execution`, {
@@ -2018,7 +2041,7 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
       if (res.ok) {
         results.migrated++;
       } else {
-        results.errors.push(`${issue.key}: ${res.status}`);
+        results.errors.push(`${issue.key}: write ${res.status}`);
       }
 
     } catch (err) {
@@ -2030,6 +2053,7 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
   results.nextOffset = results.done ? null : offset + limit;
   return results;
 });
+
 
 
 export const handler = resolver.getDefinitions();
