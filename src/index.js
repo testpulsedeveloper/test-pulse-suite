@@ -696,54 +696,60 @@ const deleteCycleIndex = async (cycleId) => {
   await storage.delete(CIDX(cycleId)).catch(() => {});
 };
 
-
 const getCycleExecutionSummary = async (cycleId) => {
-  // Tier 1: Forge Storage (no 32KB limit)
-  let entries = await readCycleIndex(cycleId);
+  try {
+    // Tier 1: Forge Storage → Jira execution property (via readCycleIndex)
+    let entries = await readCycleIndex(cycleId);
 
-  // Tier 2: If both Storage and Jira property are empty, rebuild from exec_ keys
-  // This handles the case where the index was corrupted/lost but exec_ data still exists
-  if (entries.length === 0) {
-    console.log(`[getCycleExecutionSummary] Index empty for ${cycleId} — rebuilding from exec_ keys`);
-    const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
-    if (keysRes.ok) {
-      const keysData = await keysRes.json();
-      const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
-      if (execKeys.length > 0) {
-        // Build stubs — real statuses load on expand or via Sincronizar Estatus
-        entries = execKeys.map(key => ({
-          id: key.replace('exec_', ''),
-          status: 'Not Run',
-          linkedBugs: [],
-          _stub: true
-        }));
-        // Persist to Forge Storage so future loads are instant
-        writeCycleIndex(cycleId, entries).catch(console.warn);
+    // Tier 2: If both Storage and Jira property are empty, rebuild from exec_ property keys.
+    // exec_ properties are always written when tests are added — this is the last-resort source.
+    if (entries.length === 0) {
+      console.log(`[getCycleExecutionSummary] Index empty for ${cycleId} — reading exec_ keys`);
+      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+      if (keysRes.ok) {
+        const keysData = await keysRes.json();
+        const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
+        if (execKeys.length > 0) {
+          // Build stubs WITHOUT _stub:true — avoids triggering the slow healing path.
+          // Tests show as "Not Run"; user can sync statuses via "Sincronizar Estatus".
+          entries = execKeys.map(key => ({
+            id: key.replace('exec_', ''),
+            status: 'Not Run',
+            linkedBugs: []
+          }));
+          // Persist so future loads are instant (Forge Storage if available, otherwise noop)
+          writeCycleIndex(cycleId, entries).catch(console.warn);
+          return entries;
+        }
       }
     }
-  }
 
-  if (entries.length === 0) return [];
+    if (entries.length === 0) return [];
 
-  // Heal stubs: read real statuses from exec_ properties
-  const hasStubs = entries.some(ex => ex._stub === true);
-  if (hasStubs) {
-    console.log(`[getCycleExecutionSummary] Healing stubs for ${cycleId}`);
-    const realData = await getExecutionData(cycleId);
-    if (realData && realData.length > 0) {
-      const healed = realData.map(ex => ({
-        id: String(ex.id),
-        status: ex.status || 'Not Run',
-        linkedBugs: trimBugsForIndex(ex.linkedBugs),
-        executedBy: ex.executedBy
-      }));
-      writeCycleIndex(cycleId, healed).catch(console.warn);
-      return healed;
+    // Heal stubs ONLY for small cycles (≤50 tests) to avoid Forge function timeout.
+    // Large cycles: return stubs as-is, user uses "Sincronizar Estatus" for real statuses.
+    const hasStubs = entries.some(ex => ex._stub === true);
+    if (hasStubs && entries.length <= 50) {
+      console.log(`[getCycleExecutionSummary] Healing stubs for ${cycleId} (${entries.length} tests)`);
+      const realData = await getExecutionData(cycleId);
+      if (realData && realData.length > 0) {
+        const healed = realData.map(ex => ({
+          id: String(ex.id),
+          status: ex.status || 'Not Run',
+          linkedBugs: trimBugsForIndex(ex.linkedBugs),
+          executedBy: ex.executedBy
+        }));
+        writeCycleIndex(cycleId, healed).catch(console.warn);
+        return healed;
+      }
     }
-    // Stubs healing failed — return stubs without _stub flag so UI shows tests
+
+    // Remove _stub flag before returning so UI doesn't re-trigger healing
     return entries.map(({ _stub, ...rest }) => rest);
+  } catch (err) {
+    console.error('[getCycleExecutionSummary] Unexpected error:', err.message);
+    return [];
   }
-  return entries;
 };
 
 

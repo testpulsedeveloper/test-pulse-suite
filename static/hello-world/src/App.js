@@ -1927,8 +1927,12 @@ Then el sistema valida la identidad.
     setCycleTests([]); // clear old tests immediately
     deletedIdsRef.current.clear(); // prevent ghosts from previous cycle
     setSelectedCycle(cycle);
-    const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
-    setCycleTests(executionSummary || []); // direct set, no merge, prevents ghosts
+    try {
+      const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
+      setCycleTests(executionSummary || []); // direct set, no merge, prevents ghosts
+    } catch (err) {
+      addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
+    }
   };
 
   const handleCreateFolder = async (parentId = null) => {
