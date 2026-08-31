@@ -1878,7 +1878,70 @@ resolver.define('getIssueDescription', async ({ payload }) => {
   }
 });
 
-// Paginated migration — processes 2 cycles per call to stay under the 25s Forge timeout.
+// Recovery endpoint: rebuilds the execution lightweight index from exec_ properties that exist on the cycle.
+// Uses GET /properties to list ALL property keys on the issue, finds exec_* ones, reads their values,
+// and writes back a corrected index. DOES NOT touch individual exec_ data — preserves all statuses/comments.
+resolver.define('rebuildCycleIndex', async ({ payload }) => {
+  const { cycleId } = payload;
+
+  // Step 1: List ALL property keys on the cycle issue
+  const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+  if (!keysRes.ok) {
+    throw new Error(`Failed to list properties: ${keysRes.status}`);
+  }
+  const keysData = await keysRes.json();
+  const allKeys = (keysData.keys || []).map(k => k.key);
+
+  // Step 2: Filter for exec_* keys (the individual test execution data)
+  const execKeys = allKeys.filter(k => k.startsWith('exec_'));
+  if (execKeys.length === 0) {
+    return { success: true, rebuilt: 0, message: 'No exec_ properties found on this cycle' };
+  }
+
+  // Step 3: Read each exec_ property to get real status (rate-limited batches of 10)
+  const testData = await processInBatches(execKeys, 10, 200, async (key) => {
+    const testId = key.replace('exec_', '');
+    let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}?t=${Date.now()}`);
+    if (res.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}?t=${Date.now()}`);
+    }
+    if (!res.ok) return null;
+    const d = await res.json();
+    const val = d.value || {};
+    return {
+      id: String(val.id || testId),
+      status: val.status || 'Not Run',
+      linkedBugs: val.linkedBugs || [],
+      executedBy: val.executedBy
+    };
+  });
+
+  // Step 4: Build the corrected lightweight index
+  const healed = testData.filter(Boolean);
+
+  // Step 5: Write back the rebuilt index
+  let putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(healed)
+  });
+  if (putRes.status === 429) {
+    await new Promise(r => setTimeout(r, 2000));
+    putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(healed)
+    });
+  }
+  if (!putRes.ok) {
+    throw new Error(`Failed to write rebuilt index: ${putRes.status}`);
+  }
+
+  return { success: true, rebuilt: healed.length };
+});
+
+
 // Frontend loops calling this with increasing offset until done=true.
 resolver.define('migrateAllCycles', async ({ payload }) => {
   const { projectId, config, offset = 0, limit = 1 } = payload;

@@ -3151,7 +3151,39 @@ const renderPlanningTab = () => (
                   )}
                 </div>
               ))}
-              {cycleTests.length === 0 && <p className="empty-state">No tests to execute in this cycle.</p>}
+              {cycleTests.length === 0 && (
+                <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
+                  <p style={{ marginBottom: '1rem' }}>No hay casos en este ciclo.</p>
+                  <p style={{ fontSize: '0.85rem', marginBottom: '1.5rem' }}>
+                    ¿El ciclo debería tener casos? Puede ser que el índice esté desincronizado. Usa el botón para reconstruirlo automáticamente.
+                  </p>
+                  <button
+                    className="btn-secondary"
+                    style={{ padding: '0.5rem 1.2rem' }}
+                    onClick={async () => {
+                      if (!selectedCycle?.id) return;
+                      setLocalLoading(true);
+                      try {
+                        const result = await invoke('rebuildCycleIndex', { cycleId: selectedCycle.id });
+                        if (result.rebuilt > 0) {
+                          const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
+                          if (summary) setCycleTests(summary);
+                          alert(`✅ Índice reconstruido: ${result.rebuilt} casos recuperados.`);
+                        } else {
+                          alert('No se encontraron casos con datos guardados en este ciclo.');
+                        }
+                      } catch(err) {
+                        alert('Error al reconstruir: ' + err.message);
+                      } finally {
+                        setLocalLoading(false);
+                      }
+                    }}
+                  >
+                    🔧 Reconstruir índice del ciclo
+                  </button>
+                </div>
+              )}
+
             </div>
           </div>
         ) : (
