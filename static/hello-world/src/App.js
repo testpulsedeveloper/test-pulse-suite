@@ -4341,47 +4341,8 @@ const renderPlanningTab = () => (
                   )}
                 </div>
 
-                {/* ─── Sección B: Tests SIN bugs ─── */}
-                <div className="chart-card" style={{ overflowX: 'auto' }}>
-                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    ✅ Tests sin Defectos
-                    <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
-                      ({withoutBugsCases.length} caso{withoutBugsCases.length !== 1 ? 's' : ''})
-                    </span>
-                  </h3>
-                  {withoutBugsCases.length > 0 ? (
-                    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
-                      <thead>
-                        <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
-                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Caso</th>
-                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
-                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Ciclo</th>
-                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estatus</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {withoutBugsCases.map((tc, i) => (
-                          <tr key={tc.id + '-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
-                            <td style={{ padding: '0.5rem' }}>
-                              <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + tc.key); }}>{tc.key}</a>
-                            </td>
-                            <td style={{ padding: '0.5rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tc.summary}</td>
-                            <td style={{ padding: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{tc.cycleName}</td>
-                            <td style={{ padding: '0.5rem' }}>
-                              <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: getStatusColor(tc.status), color: getStatusTextColor(tc.status) }}>
-                                {tc.status || 'Not Run'}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>Todos los casos ejecutados tienen al menos un defecto registrado.</p>
-                  )}
-                </div>
+                {/* ─── Sección B: Bugs del proyecto SIN caso de prueba asociado ─── */}
 
-                {/* ─── Sección C: Bugs del proyecto SIN caso de prueba asociado ─── */}
                 <div className="chart-card" style={{ overflowX: 'auto', marginTop: '1.5rem' }}>
                   <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     🔴 Bugs sin caso de prueba asociado
