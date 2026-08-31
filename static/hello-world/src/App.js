@@ -3089,23 +3089,36 @@ const renderPlanningTab = () => (
     <button
       className="btn-secondary"
       onClick={async () => {
-        setLoading(true);
+        setLocalLoading(true);
         try {
-            const updated = await invoke('backfillDescriptions', {
-              cycleId: selectedCycle.id,
-              testIds: cycleTests.map(t => t.id),
-              force: true
-            });
-            if (updated) safeSetCycleTests(updated);
+            // Only backfill tests that don't have exec_ data yet (avoid full-cycle timeout)
+            const needsBackfill = cycleTests.filter(t => !t._detailLoaded && !t.lockedAt).map(t => t.id);
+            if (needsBackfill.length === 0) {
+              addNotification({ type: 'success', title: 'Todo al día', description: 'Todos los casos ya tienen información cargada.' });
+              return;
+            }
+            // Process in chunks of 30 to stay under 25s timeout
+            const CHUNK = 30;
+            for (let i = 0; i < needsBackfill.length; i += CHUNK) {
+              const chunk = needsBackfill.slice(i, i + CHUNK);
+              const updated = await invoke('backfillDescriptions', {
+                cycleId: selectedCycle.id,
+                testIds: chunk
+              });
+              if (updated) safeSetCycleTests(updated);
+              if (i + CHUNK < needsBackfill.length) await new Promise(r => setTimeout(r, 300));
+            }
+            addNotification({ type: 'success', title: 'Información sincronizada', description: `${needsBackfill.length} casos actualizados.` });
         } catch (err) {
             console.error("Refresh Info error:", err);
-            alert("Error al refrescar la información: " + err.message);
+            addNotification({ type: 'error', title: 'Error al sincronizar info', description: err.message });
         } finally {
-            setLoading(false);
+            setLocalLoading(false);
         }
       }}
+      disabled={localLoading}
       style={{marginLeft: '1rem', fontSize: '0.8rem', padding: '0.3rem 0.6rem'}}
-      title="Sincronizar información desde Jira"
+      title="Carga información de descripción de los casos que aún no la tienen"
     >
       🔄 Sincronizar Info
     </button>
