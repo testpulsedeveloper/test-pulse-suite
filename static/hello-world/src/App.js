@@ -358,6 +358,8 @@ function App() {
   const [expandedExecutionTest, setExpandedExecutionTest] = useState(null);
   const [executionTestDetails, setExecutionTestDetails] = useState({});
   const [runningTests, setRunningTests] = useState({});
+  const [unlinkedBugs, setUnlinkedBugs] = useState([]);
+  const [syncProgress, setSyncProgress] = useState(null); // null | { done, total }
   const [isAddingAll, setIsAddingAll] = useState(false);
   const [previewImages, setPreviewImages] = useState({});
   const [previewModalData, setPreviewModalData] = useState(null);
@@ -2038,16 +2040,49 @@ Then el sistema valida la identidad.
 
   const handleUpdateTestStatus = async (testId, status, comment) => {
     if (!selectedCycle) return;
+    const test = cycleTests.find(t => String(t.id) === String(testId));
+
+    // Guard: if trying to reset a locked execution to "Not Run", show confirm first
+    if (status === 'Not Run' && test?.lockedAt) {
+      showConfirm(
+        'Resetear ejecución completada',
+        `Este caso ya fue ejecutado y marcado como "${test.status}". ¿Deseas resetear su estatus a "Not Run"? Solo los administradores pueden hacerlo en producción.`,
+        async () => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          try {
+            await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status: 'Not Run', comment });
+            setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
+              ? { ...t, status: 'Not Run', lockedAt: null } : t));
+          } catch (e) {
+            const msg = e.message || String(e);
+            if (msg.includes('LOCKED')) {
+              addNotification({ type: 'error', title: '🔒 Sin permiso', description: 'Solo un administrador puede resetear esta ejecución.' });
+            } else {
+              addNotification({ type: 'error', title: 'Error al resetear', description: msg });
+            }
+          }
+        },
+        { danger: true, confirmLabel: 'Resetear' }
+      );
+      return;
+    }
+
     try {
-      await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
-      setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { 
-        ...t, 
-        status: status !== undefined ? status : t.status, 
-        comment: comment !== undefined ? comment : t.comment 
+      const res = await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId, status, comment });
+      const TERMINAL = ['Pass', 'Passed', 'Fail', 'Failed', 'Blocked'];
+      setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? {
+        ...t,
+        status: status !== undefined ? status : t.status,
+        comment: comment !== undefined ? comment : t.comment,
+        lockedAt: (res?.lockedAt || (TERMINAL.includes(status) ? (t.lockedAt || Date.now()) : t.lockedAt))
       } : t));
     } catch (e) {
-      console.error(e);
-      addNotification({ type: 'error', title: 'Error actualizando prueba', description: e.message || String(e) });
+      const msg = e.message || String(e);
+      if (msg.includes('LOCKED')) {
+        addNotification({ type: 'error', title: '🔒 Ejecución protegida', description: 'Solo un administrador puede modificar esta ejecución.' });
+      } else {
+        addNotification({ type: 'error', title: 'Error actualizando prueba', description: msg });
+      }
     }
   };
 
@@ -2269,6 +2304,37 @@ Then el sistema valida la identidad.
     }
   };
 
+  const handleSyncCycleIndex = async () => {
+    if (!selectedCycle?.id) return;
+    setLocalLoading(true);
+    setSyncProgress({ done: 0, total: '?' });
+    try {
+      let offset = 0;
+      let done = false;
+      let total = 1;
+      while (!done) {
+        const result = await invoke('rebuildCycleIndex', {
+          cycleId: selectedCycle.id,
+          offset,
+          limit: 50
+        });
+        done = result.done;
+        total = result.total || total;
+        offset = result.nextOffset ?? (offset + 50);
+        setSyncProgress({ done: Math.min(offset, total), total });
+        if (!done) await new Promise(r => setTimeout(r, 400));
+      }
+      const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
+      if (summary) setCycleTests(summary);
+      addNotification({ type: 'success', title: '✅ Índice sincronizado', description: `${total} casos actualizados desde los datos guardados en Jira.` });
+    } catch (err) {
+      addNotification({ type: 'error', title: 'Error al sincronizar', description: err.message });
+    } finally {
+      setLocalLoading(false);
+      setSyncProgress(null);
+    }
+  };
+
   const handleRunTest = async (testId, testKey, test) => {
     try {
       if (test) await handleTakeover(test);
@@ -2425,6 +2491,18 @@ Then el sistema valida la identidad.
     try {
       const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
       setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
+
+      // Collect all bug keys already linked through Test Pulse
+      const linkedBugKeys = [];
+      (data?.cycles || []).forEach(cycle => {
+        (cycle.execution || []).forEach(ex => {
+          (ex.linkedBugs || []).forEach(bug => { if (bug.key) linkedBugKeys.push(bug.key); });
+        });
+      });
+      // Fetch project bugs NOT linked to any test execution
+      invoke('getProjectUnlinkedBugs', { projectId: selectedProjectId, linkedBugKeys })
+        .then(bugs => setUnlinkedBugs(bugs || []))
+        .catch(console.warn);
     } catch(err) {
       console.error("loadReportData error:", err);
       if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
@@ -3008,8 +3086,8 @@ const renderPlanningTab = () => (
               <div style={{display: 'flex', alignItems: 'center'}}>
   <h1>Execution: {selectedCycle.summary} <span style={{fontSize: '1rem', color: 'var(--text-secondary)', fontWeight: 'normal'}}>({cycleTests.length} casos)</span></h1>
   {selectedCycle && (
-    <button 
-      className="btn-secondary" 
+    <button
+      className="btn-secondary"
       onClick={async () => {
         setLoading(true);
         try {
@@ -3030,6 +3108,17 @@ const renderPlanningTab = () => (
       title="Sincronizar información desde Jira"
     >
       🔄 Sincronizar Info
+    </button>
+  )}
+  {selectedCycle && (
+    <button
+      className="btn-secondary"
+      onClick={handleSyncCycleIndex}
+      disabled={localLoading}
+      title="Reconstruye el índice de estatus del ciclo desde los datos reales guardados. Úsalo si los estatus muestran 'Not Run' cuando ya fueron ejecutados."
+      style={{marginLeft: '0.5rem', fontSize: '0.8rem', padding: '0.3rem 0.6rem', fontWeight: 600}}
+    >
+      {syncProgress ? `⏳ ${syncProgress.done}/${syncProgress.total}` : '🛠 Sincronizar Estatus'}
     </button>
   )}
 </div>
@@ -3058,16 +3147,24 @@ const renderPlanningTab = () => (
                           🐞 {test.linkedBugs.length}
                         </span>
                       )}
+                      {test.lockedAt && (
+                        <span title={`Ejecución completada y protegida${isAdmin ? ' (Admin puede resetear)' : ''}`}
+                          style={{ marginLeft: '0.4rem', fontSize: '0.75rem', opacity: 0.7 }}>🔒</span>
+                      )}
                     </div>
                     <div style={{display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0}}>
                       <button 
-                        title={runningTests[test.id] ? 'Detener Ejecución' : 'Iniciar Ejecución'}
+                        title={test.lockedAt && !isAdmin ? 'Ejecución protegida. Contacta al administrador.' : (runningTests[test.id] ? 'Detener Ejecución' : 'Iniciar Ejecución')}
                         onClick={(e) => {
                           e.stopPropagation();
+                          if (test.lockedAt && !isAdmin && !runningTests[test.id]) {
+                            addNotification({ type: 'warning', title: '🔒 Ejecución protegida', description: 'Esta prueba fue completada. Solo un administrador puede re-ejecutarla.' });
+                            return;
+                          }
                           if (runningTests[test.id]) {
                             setRunningTests(prev => ({ ...prev, [test.id]: null }));
                           } else {
-                            handleRunTest(test.id, test.key, test); 
+                            handleRunTest(test.id, test.key, test);
                           }
                         }}
                         disabled={runningTests[test.id] === 'capturing' || runningTests[test.id] === 'uploading'}
@@ -3465,41 +3562,9 @@ const renderPlanningTab = () => (
                     className="btn-secondary"
                     style={{ padding: '0.5rem 1.2rem' }}
                     disabled={localLoading}
-                    onClick={async () => {
-                      if (!selectedCycle?.id) return;
-                      setLocalLoading(true);
-                      try {
-                        let offset = 0;
-                        let done = false;
-                        let total = 1;
-                        let rebuilt = 0;
-                        while (!done) {
-                          const result = await invoke('rebuildCycleIndex', {
-                            cycleId: selectedCycle.id,
-                            offset,
-                            limit: 50
-                          });
-                          done = result.done;
-                          total = result.total || total;
-                          rebuilt = result.rebuilt || 0;
-                          offset = result.nextOffset ?? (offset + 50);
-                          if (!done) await new Promise(r => setTimeout(r, 300));
-                        }
-                        if (rebuilt > 0) {
-                          const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-                          if (summary) setCycleTests(summary);
-                          alert(`✅ Índice reconstruido: ${rebuilt} casos recuperados.`);
-                        } else {
-                          alert('No se encontraron datos guardados en este ciclo. Los casos pueden haberse perdido antes de guardarse.');
-                        }
-                      } catch(err) {
-                        alert('Error al reconstruir: ' + err.message);
-                      } finally {
-                        setLocalLoading(false);
-                      }
-                    }}
+                    onClick={handleSyncCycleIndex}
                   >
-                    {localLoading ? '⏳ Reconstruyendo...' : '🔧 Reconstruir índice del ciclo'}
+                    {syncProgress ? `⏳ Sincronizando ${syncProgress.done}/${syncProgress.total}...` : (localLoading ? '⏳ Reconstruyendo...' : '🔧 Reconstruir índice del ciclo')}
                   </button>
                 </div>
 
@@ -4300,6 +4365,54 @@ const renderPlanningTab = () => (
                     </table>
                   ) : (
                     <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>Todos los casos ejecutados tienen al menos un defecto registrado.</p>
+                  )}
+                </div>
+
+                {/* ─── Sección C: Bugs del proyecto SIN caso de prueba asociado ─── */}
+                <div className="chart-card" style={{ overflowX: 'auto', marginTop: '1.5rem' }}>
+                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    🔴 Bugs sin caso de prueba asociado
+                    <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                      ({unlinkedBugs.length} en el proyecto)
+                    </span>
+                  </h3>
+                  {unlinkedBugs.length > 0 ? (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.85rem' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: 'var(--ds-background-neutral)', borderBottom: '2px solid var(--ds-border)' }}>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Bug</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Descripción</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Prioridad</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Responsable</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Resolución</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Reportado</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unlinkedBugs.map((bug, i) => (
+                          <tr key={bug.key + '-unlinked-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
+                            <td style={{ padding: '0.5rem' }}>
+                              <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}>{bug.key}</a>
+                            </td>
+                            <td style={{ padding: '0.5rem', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bug.summary}</td>
+                            <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.priority || '—'}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span className="status-badge" style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem', backgroundColor: bug.statusCategory === 'done' ? 'var(--success-bg)' : (bug.statusCategory === 'indeterminate' ? '#fff7e6' : 'var(--danger-bg)'), color: bug.statusCategory === 'done' ? 'var(--success-color)' : (bug.statusCategory === 'indeterminate' ? '#ff991f' : 'var(--danger-color)') }}>
+                                {bug.status || '—'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.assignee || 'Sin asignar'}</td>
+                            <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.resolution || 'Unresolved'}</td>
+                            <td style={{ padding: '0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{bug.created ? new Date(bug.created).toLocaleDateString('es-MX') : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>
+                      {reportLoading ? '⏳ Cargando...' : '✅ Todos los bugs del proyecto están asociados a al menos un caso de prueba.'}
+                    </p>
                   )}
                 </div>
               </div>

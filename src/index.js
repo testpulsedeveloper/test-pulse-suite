@@ -1245,30 +1245,38 @@ resolver.define('updateTestStatus', async ({ payload }) => {
   if (resTest.ok) {
       t = (await resTest.json()).value;
   }
-  
+
+  // ── Lock enforcement: prevent resetting a completed execution to "Not Run" ──
+  const TERMINAL = ['Pass', 'Passed', 'Fail', 'Failed', 'Blocked'];
+  if (t && t.lockedAt && status === 'Not Run' && !isAdmin) {
+      throw new Error('LOCKED: Esta ejecución ya fue completada. Solo un administrador puede resetear su estatus a "Not Run".');
+  }
+
   let updatedTest = null;
   if (t) {
       if (!takeover && t.executedBy && userData && t.executedBy.accountId !== userData.accountId && !isAdmin) {
           throw new Error('Solo el usuario que ejecutó la prueba original o un administrador puede modificarla.');
       }
-      updatedTest = { 
-          ...t, 
-          status: status !== undefined ? status : t.status, 
+      const newStatus = status !== undefined ? status : t.status;
+      updatedTest = {
+          ...t,
+          status: newStatus,
           comment: comment !== undefined ? comment : t.comment,
           evidence: evidence !== undefined ? evidence : t.evidence,
           evidences: evidences !== undefined ? evidences : t.evidences,
           linkedBugs: linkedBugs !== undefined ? linkedBugs : t.linkedBugs,
           steps: steps !== undefined ? steps : t.steps,
           iterations: iterations !== undefined ? iterations : t.iterations,
-          executedBy: executorInfo !== undefined ? executorInfo : t.executedBy
+          executedBy: executorInfo !== undefined ? executorInfo : t.executedBy,
+          // Stamp lockedAt when reaching a terminal status for the first time
+          lockedAt: TERMINAL.includes(newStatus) ? (t.lockedAt || Date.now()) : t.lockedAt
       };
   } else {
       // exec_ doesn't exist yet — first time executing this test.
-      // Create it from scratch so the status is actually persisted
-      // (previously this branch silently did nothing, causing "Not Run" on re-open).
+      const newStatus = status !== undefined ? status : 'Not Run';
       updatedTest = {
           id: String(testId),
-          status: status !== undefined ? status : 'Not Run',
+          status: newStatus,
           comment: comment !== undefined ? comment : '',
           evidence: evidence !== undefined ? evidence : null,
           evidences: evidences !== undefined ? evidences : [],
@@ -1276,37 +1284,46 @@ resolver.define('updateTestStatus', async ({ payload }) => {
           iterations: iterations !== undefined ? iterations : [],
           linkedBugs: linkedBugs !== undefined ? linkedBugs : [],
           executedBy: executorInfo || null,
-          description: null
+          description: null,
+          lockedAt: TERMINAL.includes(newStatus) ? Date.now() : null
       };
   }
-  
+
   if (updatedTest) {
     const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(updatedTest)
     });
-    
+
     if (!response.ok) {
       const errText = await response.text();
       throw new Error('Failed to save test data: ' + errText);
     }
-    
+
     await updateLightweightIndex(cycleId, (lw) => {
         const item = lw.find(l => String(l.id) === String(testId));
         if (item) {
             item.status = updatedTest.status;
             item.linkedBugs = updatedTest.linkedBugs || [];
             item.executedBy = updatedTest.executedBy;
+            if (updatedTest.lockedAt) item.lockedAt = updatedTest.lockedAt;
         } else {
-            lw.push({ id: String(testId), status: updatedTest.status, linkedBugs: updatedTest.linkedBugs || [], executedBy: updatedTest.executedBy });
+            lw.push({
+                id: String(testId),
+                status: updatedTest.status,
+                linkedBugs: updatedTest.linkedBugs || [],
+                executedBy: updatedTest.executedBy,
+                ...(updatedTest.lockedAt ? { lockedAt: updatedTest.lockedAt } : {})
+            });
         }
         return lw;
     });
   }
-  
-  return { success: true };
+
+  return { success: true, lockedAt: updatedTest?.lockedAt || null };
 });
+
 
 // Backfills missing description snapshots for tests already in a cycle
 resolver.define('backfillDescriptions', async ({ payload }) => {
@@ -2063,6 +2080,41 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
   results.done = results.processed >= total;
   results.nextOffset = results.done ? null : offset + limit;
   return results;
+});
+
+
+// ── Bugs del proyecto que NO están vinculados a ninguna ejecución en Test Pulse ──
+resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
+  const { projectId, linkedBugKeys = [] } = payload;
+  if (!projectId) return [];
+
+  const linkedSet = new Set(linkedBugKeys);
+
+  // Query Jira: all Bugs in the project (limit 100 most recent)
+  const jql = encodeURIComponent(`project = "${projectId}" AND issuetype in (Bug, Defect) ORDER BY created DESC`);
+  const fields = 'summary,status,assignee,priority,resolution,created,reporter';
+  const res = await api.asUser().requestJira(
+    route`/rest/api/3/search?jql=${decodeURIComponent(jql)}&fields=${fields}&maxResults=100`
+  );
+  if (!res.ok) {
+    console.warn(`getProjectUnlinkedBugs: search failed ${res.status}`);
+    return [];
+  }
+  const data = await res.json();
+
+  return (data.issues || [])
+    .filter(issue => !linkedSet.has(issue.key))
+    .map(issue => ({
+      key: issue.key,
+      summary: issue.fields?.summary || '',
+      status: issue.fields?.status?.name || '',
+      statusCategory: issue.fields?.status?.statusCategory?.key || '',
+      assignee: issue.fields?.assignee?.displayName || null,
+      priority: issue.fields?.priority?.name || null,
+      resolution: issue.fields?.resolution?.name || null,
+      reporter: issue.fields?.reporter?.displayName || null,
+      created: issue.fields?.created || null,
+    }));
 });
 
 
