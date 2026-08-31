@@ -1951,7 +1951,7 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
     rebuilt: merged.length,
     total: merged.length,
     done: true,
-    nextOffset: done ? null : offset + limit
+    nextOffset: null   // single-call rebuild — no pagination
   };
 });
 
