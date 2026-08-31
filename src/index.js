@@ -633,7 +633,16 @@ const getExecutionData = async (cycleId) => {
 
 
 // Fast initial load endpoint — heals legacy format on the fly
+// Lightweight index must stay under Jira's 32KB entity property limit.
+// Full bug data (summary, status, assignee, rawFields…) is stored in exec_ properties.
+// The index only needs bug keys to render the badge count in the UI.
+const trimBugsForIndex = (bugs) => {
+  if (!bugs || !Array.isArray(bugs)) return [];
+  return bugs.map(b => (typeof b === 'string' ? { key: b } : { key: b.key })).filter(b => b.key);
+};
+
 const getCycleExecutionSummary = async (cycleId) => {
+
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
   if (response.status === 404) return [];
   const data = await response.json();
@@ -657,7 +666,7 @@ const getCycleExecutionSummary = async (cycleId) => {
       const healed = realData.map(ex => ({
           id: String(ex.id),
           status: ex.status || 'Not Run',
-          linkedBugs: ex.linkedBugs || [],
+          linkedBugs: trimBugsForIndex(ex.linkedBugs),
           executedBy: ex.executedBy
       }));
       // Write back healed index asynchronously (don't block the response)
@@ -692,7 +701,7 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
                 lightWeight = realData.map(ex => ({
                     id: String(ex.id),
                     status: ex.status || 'Not Run',
-                    linkedBugs: ex.linkedBugs || [],
+                    linkedBugs: trimBugsForIndex(ex.linkedBugs),
                     executedBy: ex.executedBy
                 }));
             } else {
@@ -703,6 +712,8 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
     }
 
     lightWeight = updateFn(lightWeight);
+    // Ensure linkedBugs are trimmed across the entire index before writing (guards against 32KB limit)
+    lightWeight = lightWeight.map(item => ({ ...item, linkedBugs: trimBugsForIndex(item.linkedBugs) }));
 
     let exRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
         method: 'PUT',
@@ -1305,14 +1316,14 @@ resolver.define('updateTestStatus', async ({ payload }) => {
         const item = lw.find(l => String(l.id) === String(testId));
         if (item) {
             item.status = updatedTest.status;
-            item.linkedBugs = updatedTest.linkedBugs || [];
+            item.linkedBugs = trimBugsForIndex(updatedTest.linkedBugs);
             item.executedBy = updatedTest.executedBy;
             if (updatedTest.lockedAt) item.lockedAt = updatedTest.lockedAt;
         } else {
             lw.push({
                 id: String(testId),
                 status: updatedTest.status,
-                linkedBugs: updatedTest.linkedBugs || [],
+                linkedBugs: trimBugsForIndex(updatedTest.linkedBugs),
                 executedBy: updatedTest.executedBy,
                 ...(updatedTest.lockedAt ? { lockedAt: updatedTest.lockedAt } : {})
             });
@@ -1951,7 +1962,7 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
     return {
       id: String(val.id || testId),
       status: val.status || 'Not Run',
-      linkedBugs: val.linkedBugs || [],
+      linkedBugs: trimBugsForIndex(val.linkedBugs),
       executedBy: val.executedBy
     };
   });
