@@ -603,14 +603,12 @@ resolver.define('createTestCycle', async (req) => {
 
 // === Execution Management (Forge Storage — no 32KB limit) ===
 const getExecutionData = async (cycleId) => {
-  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
-  if (response.status === 404) return [];
-  const data = await response.json();
-  const value = data.value || [];
+  // Use readCycleIndex to get test IDs — supports both Forge Storage and Jira property fallback
+  const index = await readCycleIndex(cycleId);
 
-  if (value.length === 0) return [];
+  if (index.length === 0) return [];
 
-  const testIds = (typeof value[0] === 'object') ? value.map(t => String(t.id)) : value.map(String);
+  const testIds = index.map(t => String(t.id));
   if (!Array.isArray(testIds) || testIds.length === 0) return [];
 
   // Process in batches of 10 with 200ms delay between batches to avoid 429 rate limiting
@@ -651,7 +649,9 @@ const CIDX = (id) => `cidx_${id}`;
 const readCycleIndex = async (cycleId) => {
   try {
     const stored = await storage.get(CIDX(cycleId));
-    if (stored !== null && stored !== undefined && Array.isArray(stored)) {
+    // IMPORTANT: treat [] same as null — empty array in Storage is not valid data
+    // (would prevent Jira fallback from working and hide real tests)
+    if (stored !== null && stored !== undefined && Array.isArray(stored) && stored.length > 0) {
       return stored;
     }
   } catch (e) {
@@ -673,19 +673,27 @@ const readCycleIndex = async (cycleId) => {
     : raw;
 
   // Migrate to Forge Storage asynchronously (first access upgrades the cycle)
-  storage.set(CIDX(cycleId), normalized).catch(e =>
-    console.warn('[readCycleIndex] Migration to Storage failed:', e.message)
-  );
+  if (normalized.length > 0) {
+    storage.set(CIDX(cycleId), normalized).catch(e =>
+      console.warn('[readCycleIndex] Migration to Storage failed:', e.message)
+    );
+  }
   return normalized;
 };
 
 const writeCycleIndex = async (cycleId, entries) => {
+  if (!entries || entries.length === 0) {
+    // Never write empty array — would permanently block the Jira property fallback
+    console.warn(`[writeCycleIndex] Refusing to write empty index for ${cycleId}`);
+    return;
+  }
   await storage.set(CIDX(cycleId), entries);
 };
 
 const deleteCycleIndex = async (cycleId) => {
   await storage.delete(CIDX(cycleId)).catch(() => {});
 };
+
 
 const getCycleExecutionSummary = async (cycleId) => {
   // Reads from Forge Storage (no 32KB limit). Falls back to Jira property + auto-migrates.
