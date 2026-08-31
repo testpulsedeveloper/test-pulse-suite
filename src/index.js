@@ -603,13 +603,15 @@ resolver.define('createTestCycle', async (req) => {
 
 // === Execution Management (Forge Storage — no 32KB limit) ===
 const getExecutionData = async (cycleId) => {
-  // Use readCycleIndex to get test IDs — supports both Forge Storage and Jira property fallback
-  const index = await readCycleIndex(cycleId);
+  // List exec_ property keys directly — independent of the index state
+  // This is the only source of truth for which tests have been executed/created
+  const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+  if (!keysRes.ok) return [];
+  const keysData = await keysRes.json();
+  const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
+  const testIds = execKeys.map(k => k.replace('exec_', ''));
 
-  if (index.length === 0) return [];
-
-  const testIds = index.map(t => String(t.id));
-  if (!Array.isArray(testIds) || testIds.length === 0) return [];
+  if (testIds.length === 0) return [];
 
   // Process in batches of 10 with 200ms delay between batches to avoid 429 rate limiting
   // (was 25 concurrent with no delay — too aggressive for Jira Cloud limits)
@@ -696,11 +698,34 @@ const deleteCycleIndex = async (cycleId) => {
 
 
 const getCycleExecutionSummary = async (cycleId) => {
-  // Reads from Forge Storage (no 32KB limit). Falls back to Jira property + auto-migrates.
-  const entries = await readCycleIndex(cycleId);
+  // Tier 1: Forge Storage (no 32KB limit)
+  let entries = await readCycleIndex(cycleId);
+
+  // Tier 2: If both Storage and Jira property are empty, rebuild from exec_ keys
+  // This handles the case where the index was corrupted/lost but exec_ data still exists
+  if (entries.length === 0) {
+    console.log(`[getCycleExecutionSummary] Index empty for ${cycleId} — rebuilding from exec_ keys`);
+    const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+    if (keysRes.ok) {
+      const keysData = await keysRes.json();
+      const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
+      if (execKeys.length > 0) {
+        // Build stubs — real statuses load on expand or via Sincronizar Estatus
+        entries = execKeys.map(key => ({
+          id: key.replace('exec_', ''),
+          status: 'Not Run',
+          linkedBugs: [],
+          _stub: true
+        }));
+        // Persist to Forge Storage so future loads are instant
+        writeCycleIndex(cycleId, entries).catch(console.warn);
+      }
+    }
+  }
+
   if (entries.length === 0) return [];
 
-  // If stubs exist (written by fast-migration), heal them from exec_ properties
+  // Heal stubs: read real statuses from exec_ properties
   const hasStubs = entries.some(ex => ex._stub === true);
   if (hasStubs) {
     console.log(`[getCycleExecutionSummary] Healing stubs for ${cycleId}`);
@@ -715,6 +740,8 @@ const getCycleExecutionSummary = async (cycleId) => {
       writeCycleIndex(cycleId, healed).catch(console.warn);
       return healed;
     }
+    // Stubs healing failed — return stubs without _stub flag so UI shows tests
+    return entries.map(({ _stub, ...rest }) => rest);
   }
   return entries;
 };
