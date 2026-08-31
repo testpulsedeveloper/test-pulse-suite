@@ -2463,6 +2463,80 @@ const renderPlanningTab = () => (
               {cycleTests.length === 0 && <p className="empty-state">No tests added yet.</p>}
             </div>
 
+            {/* ── Missing tests banner ── */}
+            {(() => {
+              const totalInProject = testCases.length;
+              const inCycle = cycleTests.length;
+              const notInCycle = testCases.filter(tc => !cycleTests.some(ct => String(ct.id) === String(tc.id))).length;
+              if (totalInProject === 0 || notInCycle === 0) return null;
+
+              // Visible warning only when cycle has SOME tests but a big gap exists
+              const missingPct = Math.round((notInCycle / totalInProject) * 100);
+              const isAlert = notInCycle > 0;
+
+              return (
+                <div style={{
+                  background: inCycle === 0 ? 'rgba(239,68,68,0.08)' : 'rgba(255,152,0,0.08)',
+                  border: `1px solid ${inCycle === 0 ? 'rgba(239,68,68,0.35)' : 'rgba(255,152,0,0.35)'}`,
+                  borderRadius: '8px',
+                  padding: '0.85rem 1.1rem',
+                  marginBottom: '1.25rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '1rem',
+                  flexWrap: 'wrap'
+                }}>
+                  <div>
+                    <div style={{ fontWeight: 600, color: inCycle === 0 ? '#ef4444' : '#FF9800', marginBottom: '0.2rem' }}>
+                      {inCycle === 0 ? '🔴' : '⚠️'} {inCycle} de {totalInProject} casos del proyecto están en este ciclo
+                    </div>
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                      Faltan <strong>{notInCycle}</strong> caso{notInCycle !== 1 ? 's' : ''} ({missingPct}% del proyecto).
+                      Usa los filtros de abajo para encontrarlos y el botón <em>"Agregar seleccionados"</em> para añadirlos.
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0, flexWrap: 'wrap' }}>
+                    <button
+                      className="btn-secondary"
+                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.82rem' }}
+                      title="Pre-selecciona todos los casos disponibles con los filtros actuales"
+                      onClick={() => {
+                        const available = testCases.filter(tc =>
+                          (planningFolder === '' || tc.folderId === planningFolder) &&
+                          (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
+                          (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual'
+                            ? getExecVal(tc).includes('man')
+                            : getExecVal(tc).includes('auto'))) &&
+                          !cycleTests.some(ct => String(ct.id) === String(tc.id))
+                        );
+                        setSelectedTestsForCycle(available.map(tc => tc.id));
+                      }}
+                    >
+                      ☑️ Seleccionar disponibles ({
+                        testCases.filter(tc =>
+                          (planningFolder === '' || tc.folderId === planningFolder) &&
+                          (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
+                          (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual'
+                            ? getExecVal(tc).includes('man')
+                            : getExecVal(tc).includes('auto'))) &&
+                          !cycleTests.some(ct => String(ct.id) === String(tc.id))
+                        ).length
+                      })
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.82rem', color: 'var(--text-secondary)' }}
+                      onClick={() => setSelectedTestsForCycle([])}
+                      title="Limpiar selección"
+                    >
+                      ✕ Limpiar
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
               <h3 style={{ margin: 0 }}>Available Test Cases</h3>
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
