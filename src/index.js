@@ -956,93 +956,98 @@ resolver.define('getTestExecution', async ({ payload }) => {
 
 resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
-  
-  // LEER SOLO LOS IDs, sin descargar todos los objetos para evitar tronar por rate limits y perder datos (Data Loss)
+
+  // Read the lightweight index ONCE — single GET request
   const response = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution?t=${Date.now()}`);
-  let testIds = [];
+  let lightWeightIndex = [];
   if (response.status !== 404) {
       const data = await response.json();
-      if (typeof data.value[0] !== 'object') {
-          testIds = data.value || [];
-      } else {
-          testIds = data.value.map(t => t.id);
+      const value = data.value || [];
+      if (value.length > 0 && typeof value[0] === 'object') {
+          lightWeightIndex = value;
+      } else if (value.length > 0) {
+          // Legacy format: heal before proceeding to avoid corrupting statuses
+          const realData = await getExecutionData(cycleId);
+          if (realData && realData.length > 0) {
+              lightWeightIndex = realData.map(ex => ({
+                  id: String(ex.id),
+                  status: ex.status || 'Not Run',
+                  linkedBugs: ex.linkedBugs || [],
+                  executedBy: ex.executedBy
+              }));
+          }
       }
   }
-  
-  // OBTENER ESTADO REAL: 
-  // testIds tiene los IDs que la base de datos "cree" tener.
-  // Pero si el UI envió una petición para agregar, y el backend dice que ya está,
-  // puede ser que la propiedad exec_ esté huérfana.
-  // Para ser seguros, SIEMPRE escribimos la propiedad si el frontend nos lo pide.
-  // (El frontend oculta el botón si realmente existe en executionData).
-  const newTests = [];
+
+  const existingIds = new Set(lightWeightIndex.map(t => String(t.id)));
+  const newTests = []; // tests that need exec_ property written
+  const addedTests = []; // all tests for response (includes historical data)
+
   for (const tc of testCases) {
-      const newTest = {
-        id: tc.id,
-        key: tc.key,
-        summary: tc.summary,
-        status: 'Not Run'
-      };
-      newTests.push(newTest);
-      if (!testIds.includes(tc.id)) {
-          testIds.push(tc.id);
+      if (existingIds.has(String(tc.id))) {
+          // Already in index: return its data as historical, no write needed
+          const existing = lightWeightIndex.find(t => String(t.id) === String(tc.id));
+          addedTests.push({ id: tc.id, key: tc.key, summary: tc.summary, status: 'Not Run', _historicalData: existing });
+      } else {
+          // Truly new: needs exec_ property created
+          const newTest = { id: tc.id, key: tc.key, summary: tc.summary, status: 'Not Run' };
+          newTests.push(newTest);
+          addedTests.push(newTest);
       }
   }
-  
+
+  // Write exec_ properties for new tests in parallel chunks (no GET check — index is source of truth)
   if (newTests.length > 0) {
-    const CHUNK_SIZE = 10;
-    for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
-        const chunk = newTests.slice(i, i + CHUNK_SIZE);
-        await Promise.all(chunk.map(async (t) => {
-           // Solo escribir si NO existe para no sobreescribir el estatus de pruebas ya ejecutadas
-           let checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}?t=${Date.now()}`);
-           if (checkRes.status === 429) {
-               await new Promise(r => setTimeout(r, 1000));
-               checkRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}?t=${Date.now()}`);
-           }
-           let res;
-           if (checkRes.status === 404) {
-               res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-                 method: 'PUT',
-                 headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                 body: JSON.stringify(t)
-               });
-           } else {
-               // Ya existe, extraer status histórico para el frontend
-               const existingData = await checkRes.json();
-               if (existingData && existingData.value) {
-                   t._historicalData = existingData.value;
-               }
-               res = { ok: true, status: 200, text: async () => "" };
-           }
-           if (res.status === 429) {
-               await new Promise(r => setTimeout(r, 2000));
-               res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
-                 method: 'PUT',
-                 headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                 body: JSON.stringify(t)
-               });
-           }
-           if (!res.ok) {
-               const errText = await res.text();
-               throw new Error(`Jira PUT exec_${t.id} failed with ${res.status}: ${errText}`);
-           }
-        }));
-    }
-    
-    await updateLightweightIndex(cycleId, (lw) => {
-        newTests.forEach(nt => {
-            if (!lw.find(t => String(t.id) === String(nt.id))) {
-                lw.push({ id: String(nt.id), status: nt.status, linkedBugs: nt.linkedBugs || [] });
-            }
-        });
-        return lw;
-    });
+      const CHUNK_SIZE = 10;
+      for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
+          const chunk = newTests.slice(i, i + CHUNK_SIZE);
+          await Promise.all(chunk.map(async (t) => {
+              let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+                  method: 'PUT',
+                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                  body: JSON.stringify(t)
+              });
+              if (res.status === 429) {
+                  await new Promise(r => setTimeout(r, 1500));
+                  res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${t.id}`, {
+                      method: 'PUT',
+                      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                      body: JSON.stringify(t)
+                  });
+              }
+              if (!res.ok) {
+                  const errText = await res.text();
+                  throw new Error(`Jira PUT exec_${t.id} failed with ${res.status}: ${errText}`);
+              }
+          }));
+      }
+
+      // Update lightweight index directly — single PUT using data already in memory (no extra GET)
+      const updatedIndex = [...lightWeightIndex];
+      newTests.forEach(nt => {
+          if (!updatedIndex.some(t => String(t.id) === String(nt.id))) {
+              updatedIndex.push({ id: String(nt.id), status: 'Not Run', linkedBugs: [] });
+          }
+      });
+
+      let indexRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedIndex)
+      });
+      if (indexRes.status === 429) {
+          await new Promise(r => setTimeout(r, 2000));
+          await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+              method: 'PUT',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify(updatedIndex)
+          });
+      }
   }
-  
-  // Return the newly added items with their historical data
-  return { success: true, addedTests: newTests };
+
+  return { success: true, addedTests };
 });
+
 
 resolver.define('addTestToCycle', async ({ payload }) => {
   const { cycleId, testCase } = payload;

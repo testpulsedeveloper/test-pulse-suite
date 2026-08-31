@@ -2544,17 +2544,9 @@ const renderPlanningTab = () => (
                       
                       // Fetch background after a delay to ensure replication
                       setTimeout(async () => {
-                          const finalExecution = await invoke('getCycleExecution', { cycleId: selectedCycle.id });
+                          const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                           if (finalExecution) {
-                              setCycleTests(prev => {
-                                  const merged = [...finalExecution];
-                                  prev.forEach(pItem => {
-                                      if (!merged.some(mItem => mItem.id === pItem.id)) {
-                                          merged.push(pItem);
-                                      }
-                                  });
-                                  return merged;
-                              });
+                              safeSetCycleTests(finalExecution);
                           }
                       }, 3000);
                       
