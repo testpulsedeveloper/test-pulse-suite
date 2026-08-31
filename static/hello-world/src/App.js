@@ -189,6 +189,103 @@ const SearchableSelect = ({ value, onChange, options, placeholder }) => {
 };
 // ------------------------------------------
 
+
+// ══════════════════════════════════════════════════════════════
+// Notification System (replaces alert / confirm / prompt)
+// ══════════════════════════════════════════════════════════════
+const NotificationContext = React.createContext(null);
+
+const NotificationStack = ({ notifications, onDismiss }) => (
+  <div style={{
+    position: 'fixed', top: '1rem', right: '1rem', zIndex: 9999,
+    display: 'flex', flexDirection: 'column', gap: '0.5rem',
+    maxWidth: '360px', pointerEvents: 'none'
+  }}>
+    {notifications.map(n => {
+      const colorMap = {
+        success: { bg: '#e3fcef', border: '#00875a', icon: '✅' },
+        error:   { bg: '#ffebe6', border: '#de350b', icon: '❌' },
+        warning: { bg: '#fff7e6', border: '#ff991f', icon: '⚠️' },
+        info:    { bg: '#e6f0ff', border: '#0052cc', icon: 'ℹ️' },
+      };
+      const c = colorMap[n.type] || colorMap.info;
+      return (
+        <div key={n.id} onClick={() => onDismiss(n.id)} style={{
+          background: c.bg, border: `1px solid ${c.border}`, borderRadius: '6px',
+          padding: '0.75rem 1rem', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          pointerEvents: 'all', cursor: 'pointer',
+          display: 'flex', gap: '0.6rem', alignItems: 'flex-start'
+        }}>
+          <span style={{ flexShrink: 0 }}>{c.icon}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {n.title && <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: n.description ? '0.2rem' : 0 }}>{n.title}</div>}
+            {n.description && <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', wordBreak: 'break-word' }}>{n.description}</div>}
+          </div>
+        </div>
+      );
+    })}
+  </div>
+);
+
+function NotificationProvider({ children }) {
+  const [notifications, setNotifications] = useState([]);
+  const addNotification = useCallback(({ type = 'info', title, description, duration = 4500 }) => {
+    const id = Date.now() + Math.random();
+    setNotifications(prev => [...prev.slice(-4), { id, type, title, description }]);
+    if (duration > 0) setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), duration);
+  }, []);
+  return (
+    <NotificationContext.Provider value={{ addNotification }}>
+      {children}
+      <NotificationStack notifications={notifications} onDismiss={id => setNotifications(prev => prev.filter(n => n.id !== id))} />
+    </NotificationContext.Provider>
+  );
+}
+
+const useNotification = () => {
+  const ctx = React.useContext(NotificationContext);
+  if (!ctx) return { addNotification: ({ title, description }) => console.warn('Notification:', title, description) };
+  return ctx;
+};
+
+function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmLabel = 'Confirmar', danger = false }) {
+  if (!isOpen) return null;
+  return (
+    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-surface)', borderRadius: '8px', padding: '1.5rem', maxWidth: '400px', width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>{title}</h3>
+        <p style={{ margin: '0 0 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>{message}</p>
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+          <button className="btn-secondary" onClick={onCancel} style={{ padding: '0.4rem 1rem' }}>Cancelar</button>
+          <button onClick={onConfirm} style={{ padding: '0.4rem 1rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, background: danger ? '#de350b' : 'var(--accent-color)', color: 'white' }}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TextInputModal({ isOpen, title, label, defaultValue = '', placeholder = '', onConfirm, onCancel }) {
+  const [value, setValue] = useState(defaultValue);
+  React.useEffect(() => { if (isOpen) setValue(defaultValue); }, [isOpen, defaultValue]);
+  if (!isOpen) return null;
+  return (
+    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-surface)', borderRadius: '8px', padding: '1.5rem', maxWidth: '380px', width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>{title}</h3>
+        {label && <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>{label}</label>}
+        <input autoFocus type="text" value={value} onChange={e => setValue(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && value.trim()) onConfirm(value.trim()); if (e.key === 'Escape') onCancel(); }}
+          placeholder={placeholder}
+          style={{ width: '100%', boxSizing: 'border-box', padding: '0.5rem 0.75rem', border: '1px solid var(--ds-border)', borderRadius: '4px', background: 'var(--bg-main)', color: 'var(--text-primary)', fontSize: '0.9rem', marginBottom: '1rem', outline: 'none' }} />
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+          <button className="btn-secondary" onClick={onCancel} style={{ padding: '0.4rem 1rem' }}>Cancelar</button>
+          <button onClick={() => { if (value.trim()) onConfirm(value.trim()); }} style={{ padding: '0.4rem 1rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, background: 'var(--accent-color)', color: 'white' }}>Aceptar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
   
@@ -326,6 +423,36 @@ function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadError, setLoadError] = useState(null);
 
+  // Notifications
+  const { addNotification } = useNotification();
+
+  // Modal state (replaces alert/confirm/prompt)
+  const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', onConfirm: null, danger: false, confirmLabel: 'Confirmar' });
+  const [textInputModal, setTextInputModal] = useState({ isOpen: false, title: '', label: '', defaultValue: '', placeholder: '', onConfirm: null });
+
+  const showConfirm = useCallback((title, message, onConfirm, { danger = false, confirmLabel = 'Confirmar' } = {}) => {
+    setConfirmModal({ isOpen: true, title, message, onConfirm, danger, confirmLabel });
+  }, []);
+
+  const showTextInput = useCallback((title, onConfirm, { label = '', defaultValue = '', placeholder = '' } = {}) => {
+    setTextInputModal({ isOpen: true, title, label, defaultValue, placeholder, onConfirm });
+  }, []);
+
+  // Circuit breaker — pauses background refreshes after 429 for 3 min
+  const circuitBreakerUntilRef = useRef(null);
+  const [circuitBreakerActive, setCircuitBreakerActive] = useState(false);
+
+  const tripCircuitBreaker = useCallback(() => {
+    circuitBreakerUntilRef.current = Date.now() + 180_000;
+    setCircuitBreakerActive(true);
+    addNotification({ type: 'warning', title: '⏸ Rate limit detectado', description: 'Auto-refresh pausado 3 min.', duration: 10000 });
+    setTimeout(() => { circuitBreakerUntilRef.current = null; setCircuitBreakerActive(false); }, 180_000);
+  }, [addNotification]);
+
+  const isCircuitBroken = useCallback(() =>
+    !!(circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current)
+  , []);
+
   // Bulk Upload State
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [bulkFile, setBulkFile] = useState(null);
@@ -386,113 +513,125 @@ function App() {
       return allIssues;
   };
   const loadData = async (currentProjectId = selectedProjectId) => {
-    if (!testCases.length) setLoading(true);
+    setLoading(true);
+    setLoadError(null);
+
+    // 25s safety: if Forge hangs, show error instead of infinite spinner
+    const loadTimer = setTimeout(() => {
+      setLoading(false);
+      setLoadError('La carga tardó demasiado (>25s). Revisa tu conexión y presiona Reintentar.');
+    }, 25_000);
+
+    const processFields = (fields) => {
+      if (!fields || !Array.isArray(fields) || fields.length === 0) return;
+      const excluded = ['id', 'key', 'project', 'issuetype', 'summary', 'description', 'status', 'resolution', 'created', 'updated'];
+      const filtered = fields.filter(f => !excluded.includes(f.id));
+      if (filtered.length > 0) {
+        setJiraFields(filtered);
+        const sd = {}; filtered.forEach(f => { sd[f.id] = f; }); setBulkFieldSchema(sd);
+        const tf = fields.find(f => {
+          const nl = f.name?.toLowerCase() || '';
+          if (nl.includes('tipo de ejecuci') || nl.includes('execution type')) return true;
+          if (f.allowedValues?.length > 0) {
+            const opts = f.allowedValues.map(v => v.value?.toLowerCase() || '').join(' ');
+            if (opts.includes('manual') && opts.includes('auto')) return true;
+          }
+          return false;
+        });
+        if (tf) setExecutionTypeFieldId(tf.id);
+      }
+    };
+
     try {
+      // Phase 0: context (determines projectId — must be sequential)
       const ctx = await view.getContext();
       setContext(ctx);
-      
       const isContextGlobal = !ctx?.extension?.project?.id;
       setIsGlobal(isContextGlobal);
-      
       let targetProjectId = currentProjectId || ctx?.extension?.project?.id;
-      
+
       if (isContextGlobal && !currentProjectId) {
-        const fetchedProjects = await invoke('getProjects');
-        if (fetchedProjects && fetchedProjects.error) {
-          console.error("getProjects backend error:", fetchedProjects.error);
-          setProjects([{ id: 'error', name: `Error: ${fetchedProjects.error}`, key: 'ERR' }]);
-        } else if (!fetchedProjects || fetchedProjects.length === 0) {
+        const fp = await invoke('getProjects');
+        if (fp && fp.error) {
+          setProjects([{ id: 'error', name: `Error: ${fp.error}`, key: 'ERR' }]);
+        } else if (!fp || fp.length === 0) {
           setProjects([{ id: 'none', name: 'Jira returned 0 projects', key: 'N/A' }]);
         } else {
-          setProjects(fetchedProjects);
-          targetProjectId = fetchedProjects[0].id;
+          setProjects(fp);
+          targetProjectId = fp[0].id;
           setSelectedProjectId(targetProjectId);
         }
       } else if (!currentProjectId) {
         setSelectedProjectId(targetProjectId);
       }
-      
-      if (targetProjectId) {
-        const checkError = (res, name) => {
-          if (res && res._isError) {
-            throw new Error(`API ${name} failed: ${res.status ? res.status + ' ' : ''}${res.message}`);
-          }
-          return res;
-        };
-        // Check if project is allowed
-        const allowedStatus = await invoke('isProjectAllowed', { projectId: targetProjectId });
-        setIsProjectAllowed(allowedStatus.allowed);
 
-        const adminStatus = await invoke('checkAdminPermission', { projectId: targetProjectId });
-        setIsAdmin(adminStatus);
-        
-        if (adminStatus) {
-          const allowed = await invoke('getAllowedProjects');
-          setAllowedProjects(allowed);
-        }
+      if (!targetProjectId) { clearTimeout(loadTimer); setLoading(false); return; }
 
-        const fetchedConfig = await invoke('getConfig', { projectId: targetProjectId });
-        const config = fetchedConfig || { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
-        setProjectConfig(config);
-        
-        const fetchedIssueTypes = await invoke('getProjectIssueTypes', { projectId: targetProjectId });
-        setProjectIssueTypes(fetchedIssueTypes || []);
-        
-        const fetchedFolders = await invoke('getFolders', { projectId: targetProjectId });
-        setFolders(fetchedFolders || []);
-        
-        const fetchedTests = await fetchAllTestCases({ folderId: null, projectId: targetProjectId, config });
-        setTestCases(fetchedTests || []);
-        
-        const fetchedPlans = checkError(await invoke('getTestPlans', { projectId: targetProjectId, config }), 'getTestPlans');
-        setTestPlans(fetchedPlans || []);
-        if (fetchedPlans && fetchedPlans.length > 0) {
-          setSelectedPlanId(fetchedPlans[0].id);
-        }
+      // Phase 1: fast parallel (~2s total) — after this loading=false
+      const [allowedRes, adminRes, configRes, issueTypesRes] = await Promise.allSettled([
+        invoke('isProjectAllowed', { projectId: targetProjectId }),
+        invoke('checkAdminPermission', { projectId: targetProjectId }),
+        invoke('getConfig', { projectId: targetProjectId }),
+        invoke('getProjectIssueTypes', { projectId: targetProjectId }),
+      ]);
 
-        const fetchedCycles = checkError(await invoke('getTestCycles', { projectId: targetProjectId, config }), 'getTestCycles');
-        setTestCycles(fetchedCycles || []);
-        
-        const fields = checkError(await invoke('getFields'), 'getFields');
-        if (fields && Array.isArray(fields)) {
-          if (fields.length === 0) {
-            setJiraFields([{ id: 'debug-empty', name: 'Error: API devolvió 0 campos' }]);
-          } else {
-            const excluded = ['id', 'key', 'project', 'issuetype', 'summary', 'description', 'status', 'resolution', 'created', 'updated'];
-            const filtered = fields.filter(f => !excluded.includes(f.id));
-                        if (filtered.length === 0) {
-              setJiraFields([{ id: 'debug-filtered', name: `Error: Todos los ${fields.length} campos fueron filtrados` }]);
-            } else {
-              setJiraFields(filtered);
-              const schemaDict = {};
-              filtered.forEach(f => { schemaDict[f.id] = f; });
-              setBulkFieldSchema(schemaDict);
-            }
-          }
-          const typeField = (fields.length ? fields : []).find(f => {
-  if (f.name) {
-    const nameLower = f.name.toLowerCase();
-    if (nameLower.includes('tipo de ejecuci') || nameLower.includes('execution type') || nameLower === '"tipo de ejecución"') return true;
-  }
-  if (f.allowedValues && f.allowedValues.length > 0) {
-    const opts = f.allowedValues.map(v => v.value ? v.value.toLowerCase() : '').join(' ');
-    if (opts.includes('manual') && opts.includes('auto')) return true;
-  }
-  return false;
-});
-          if (typeField) setExecutionTypeFieldId(typeField.id);
-        } else {
-          setJiraFields([{ id: 'debug-error', name: `Error: ${JSON.stringify(fields)}` }]);
-        }
-        // Removed setBulkMappingLoaded(true) here so handleOpenBulkPanel can fetch true createmeta schema
+      setIsProjectAllowed(allowedRes.status === 'fulfilled' ? (allowedRes.value?.allowed ?? true) : true);
+      const adminVal = adminRes.status === 'fulfilled' ? adminRes.value : false;
+      const config = (configRes.status === 'fulfilled' && configRes.value)
+        ? configRes.value
+        : { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
+      setIsAdmin(adminVal);
+      setProjectConfig(config);
+      setProjectIssueTypes(issueTypesRes.status === 'fulfilled' ? (issueTypesRes.value || []) : []);
+
+      // ← App shell ready. Stop "Cargando entorno".
+      clearTimeout(loadTimer);
+      setLoading(false);
+
+      // Phase 2: parallel medium (~1.5s each)
+      const [foldersRes, plansRes, cyclesRes] = await Promise.allSettled([
+        invoke('getFolders', { projectId: targetProjectId }),
+        invoke('getTestPlans', { projectId: targetProjectId, config }),
+        invoke('getTestCycles', { projectId: targetProjectId, config }),
+      ]);
+      if (foldersRes.status === 'fulfilled') setFolders(foldersRes.value || []);
+      if (plansRes.status === 'fulfilled') {
+        const plans = plansRes.value || [];
+        setTestPlans(plans);
+        if (plans.length > 0) setSelectedPlanId(plans[0].id);
       }
+      if (cyclesRes.status === 'fulfilled') setTestCycles(cyclesRes.value || []);
+      setRefreshTrigger(prev => prev + 1);
+
+      // Phase 3: background (no spinner shown)
+      // 3a. sessionStorage cache for testCases (instant on second open)
+      const cacheKey = `tp_${targetProjectId}_tc`;
+      try {
+        const raw = sessionStorage.getItem(cacheKey);
+        if (raw) {
+          const { ts, data } = JSON.parse(raw);
+          if (Date.now() - ts < 300_000) setTestCases(data);
+        }
+      } catch (e) {}
+
+      fetchAllTestCases({ folderId: null, projectId: targetProjectId, config })
+        .then(tests => {
+          setTestCases(tests || []);
+          try { sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: tests || [] })); } catch (e) {}
+        }).catch(console.warn);
+
+      // 3b. Fields (bulk upload + execution type)
+      invoke('getFields').then(processFields).catch(console.warn);
+
+      // 3c. Admin-only: allowed project list
+      if (adminVal) invoke('getAllowedProjects').then(a => setAllowedProjects(a)).catch(console.warn);
+
     } catch (err) {
+      clearTimeout(loadTimer);
       console.error("loadData exception:", err);
       const safeMessage = err ? err.message || String(err) : "Unknown error";
       setLoadError(safeMessage);
       setProjects([{ id: 'error', name: `Invoke Error: ${safeMessage}`, key: 'ERR' }]);
-    } finally {
-      setRefreshTrigger(prev => prev + 1);
       setLoading(false);
     }
   };
@@ -573,7 +712,7 @@ function App() {
 
     // Intentar guardar en Jira User Properties (puede fallar si el admin no ha concedido permisos)
     await invoke('saveBulkMapping', { projectId, mapping: bulkFieldMapping, folderId: bulkTargetFolder });
-    alert("¡Configuración de mapeo guardada por defecto (en tu sesión)!");
+    addNotification({ type: 'success', title: 'Configuración de mapeo guardada' });
   };
 
   const handleExportMapping = () => {
@@ -598,9 +737,9 @@ function App() {
         const config = JSON.parse(event.target.result);
         if (config.mapping) setBulkFieldMapping(config.mapping);
         if (config.folderId) setBulkTargetFolder(config.folderId);
-        alert("¡Mapeo importado correctamente!");
+        addNotification({ type: 'success', title: 'Mapeo importado correctamente' });
       } catch (err) {
-        alert("Error al leer el archivo de mapeo. Asegúrate de que sea un archivo JSON o de texto válido generado por la App.");
+        addNotification({ type: 'error', title: 'Error al leer el archivo', description: 'Asegúrate de que sea un JSON válido generado por Test Pulse.' });
       }
       e.target.value = '';
     };
@@ -613,7 +752,38 @@ function App() {
     }
     loadData();
   }, []);
-  
+
+  // Auto-refresh: execution summary every 60s — 1 req, safe with many testers
+  useEffect(() => {
+    if (activeTab !== 'execution' || !selectedCycle) return;
+    const tick = async () => {
+      if (document.hidden) return; // Page Visibility — skip if browser tab not visible
+      if (isCircuitBroken()) return;
+      try {
+        const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
+        if (summary && Array.isArray(summary) && summary.length > 0) {
+          const enriched = summary.map(ex => {
+            if (ex.key && ex.summary) return ex;
+            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
+          });
+          safeSetCycleTests(enriched);
+        }
+      } catch(err) {
+        if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
+      }
+    };
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, [activeTab, selectedCycle?.id]);
+
+  // Reports: auto-refresh when entering tab if data is older than 5 min
+  useEffect(() => {
+    if (activeTab !== 'reports') return;
+    const age = reportData._loadedAt ? Date.now() - reportData._loadedAt : Infinity;
+    if (reportData.cycles.length === 0 || age > 300_000) loadReportData();
+  }, [activeTab]);
+
   // Filtered Data
   const filteredTestCasesAll = testCases.filter(tc => {
     const matchesSearch = tc.key.toLowerCase().includes(searchQuery.toLowerCase()) || tc.summary.toLowerCase().includes(searchQuery.toLowerCase());
@@ -1760,31 +1930,58 @@ Then el sistema valida la identidad.
   };
 
   const handleCreateFolder = async (parentId = null) => {
-    const name = prompt("Enter new folder name:");
-    if (!name || !selectedProjectId) return;
-    setLoading(true);
-    const updatedFolders = await invoke('createFolder', { projectId: selectedProjectId, name, parentId: typeof parentId === 'string' ? parentId : null });
-    setFolders(updatedFolders || []);
-    setLoading(false);
+    if (!selectedProjectId) return;
+    showTextInput('Nueva carpeta', async (name) => {
+      const tempId = 'temp_' + Date.now();
+      setFolders(prev => [...prev, { id: tempId, name, parentId: typeof parentId === 'string' ? parentId : null }]);
+      try {
+        const updated = await invoke('createFolder', { projectId: selectedProjectId, name, parentId: typeof parentId === 'string' ? parentId : null });
+        setFolders(updated || []);
+        addNotification({ type: 'success', title: 'Carpeta creada', description: name });
+      } catch (e) {
+        setFolders(prev => prev.filter(f => f.id !== tempId));
+        addNotification({ type: 'error', title: 'Error al crear carpeta', description: e.message });
+      }
+    }, { label: 'Nombre', placeholder: 'Ej: Regresión' });
   };
 
   const handleUpdateFolder = async (folderId, oldName) => {
-    const newName = prompt("Enter new folder name:", oldName);
-    if (!newName || newName === oldName || !selectedProjectId) return;
-    setLoading(true);
-    const updatedFolders = await invoke('updateFolder', { projectId: selectedProjectId, folderId, newName });
-    setFolders(updatedFolders || []);
-    setLoading(false);
+    if (!selectedProjectId) return;
+    showTextInput('Renombrar carpeta', async (newName) => {
+      if (newName === oldName) return;
+      setFolders(prev => prev.map(f => f.id === folderId ? { ...f, name: newName } : f));
+      try {
+        const updated = await invoke('updateFolder', { projectId: selectedProjectId, folderId, newName });
+        setFolders(updated || []);
+        addNotification({ type: 'success', title: 'Carpeta renombrada' });
+      } catch (e) {
+        setFolders(prev => prev.map(f => f.id === folderId ? { ...f, name: oldName } : f));
+        addNotification({ type: 'error', title: 'Error al renombrar', description: e.message });
+      }
+    }, { label: 'Nuevo nombre', defaultValue: oldName });
   };
 
   const handleDeleteFolder = async (folderId, name) => {
-    if (!window.confirm(`Are you sure you want to delete the folder "${name}"?`)) return;
     if (!selectedProjectId) return;
-    setLoading(true);
-    const updatedFolders = await invoke('deleteFolder', { projectId: selectedProjectId, folderId });
-    setFolders(updatedFolders || []);
-    if (activeFolder === folderId) setActiveFolder(null);
-    setLoading(false);
+    showConfirm(
+      'Eliminar carpeta',
+      `¿Eliminar "${name}"? Esta acción no se puede deshacer.`,
+      async () => {
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        const prev = folders;
+        setFolders(f => f.filter(x => x.id !== folderId));
+        if (activeFolder === folderId) setActiveFolder(null);
+        try {
+          const updated = await invoke('deleteFolder', { projectId: selectedProjectId, folderId });
+          setFolders(updated || []);
+          addNotification({ type: 'success', title: 'Carpeta eliminada' });
+        } catch (e) {
+          setFolders(prev);
+          addNotification({ type: 'error', title: 'Error al eliminar carpeta', description: e.message });
+        }
+      },
+      { danger: true, confirmLabel: 'Eliminar' }
+    );
   };
 
   const handleAddTestToCycle = async (testCase) => {
@@ -1817,7 +2014,7 @@ Then el sistema valida la identidad.
         }, 3000);
     } catch(err) {
         console.error(err);
-        alert("Error al añadir caso: " + err.message);
+        addNotification({ type: 'error', title: 'Error al añadir caso', description: err.message });
         // revert optimistic on error by reloading
         const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
         safeSetCycleTests(execution || []);
@@ -1850,7 +2047,7 @@ Then el sistema valida la identidad.
       } : t));
     } catch (e) {
       console.error(e);
-      alert("Error actualizando prueba: " + (e.message || e));
+      addNotification({ type: 'error', title: 'Error actualizando prueba', description: e.message || String(e) });
     }
   };
 
@@ -1886,7 +2083,7 @@ Then el sistema valida la identidad.
       setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
     } catch (e) {
       console.error(e);
-      alert("Error eliminando iteración: " + (e.message || e));
+      addNotification({ type: 'error', title: 'Error eliminando iteración', description: e.message || String(e) });
     }
   };
 
@@ -1898,7 +2095,7 @@ Then el sistema valida la identidad.
       await invoke('updateTestStatus', { cycleId: selectedCycle.id, testId: test.id, iterations: newIterations, status: newStatus });
     } catch (e) {
       console.error(e);
-      alert("Error guardando cambios de texto: " + (e.message || e));
+      addNotification({ type: 'error', title: 'Error guardando cambios', description: e.message || String(e) });
     }
   };
 
@@ -1964,7 +2161,7 @@ Then el sistema valida la identidad.
       }
     } catch (err) {
       console.error("Failed to upload evidence", err);
-      alert("Error subiendo evidencia");
+      addNotification({ type: 'error', title: 'Error subiendo evidencia' });
     }
   };
 
@@ -2158,35 +2355,34 @@ Then el sistema valida la identidad.
   };
 
   const handleLinkCycleToPlan = async (cycleId, planId) => {
-    setLoading(true);
+    setLocalLoading(true);
     try {
       await invoke('linkCycleToPlan', { cycleId, planId });
-      // Optimistic update to avoid Jira eventual consistency (stale search results)
-      setTestCycles(prev => prev.map(c => 
+      setTestCycles(prev => prev.map(c =>
         c.id === cycleId ? { ...c, planId, properties: { ...c.properties, 'testops-plan-link': { planId } } } : c
       ));
     } catch (e) {
       console.error('Failed to link cycle:', e);
-      alert('Error linking cycle to plan: ' + e.message);
+      addNotification({ type: 'error', title: 'Error al vincular ciclo', description: e.message });
     } finally {
-      setLoading(false);
+      setLocalLoading(false);
     }
   };
 
   const handleUnlinkCycleFromPlan = async (cycleId) => {
-    setLoading(true);
+    setLocalLoading(true);
+    setTestCycles(prev => prev.map(c => c.id === cycleId ? { ...c, planId: null } : c));
     try {
       await invoke('unlinkCycleFromPlan', { cycleId });
-      const cycles = await invoke('getTestCycles', { projectId: selectedProjectId, config: projectConfig });
-      setTestCycles(cycles || []);
-      if (selectedCycle && selectedCycle.id === cycleId) {
-        setSelectedCycle(null);
-      }
+      if (selectedCycle && selectedCycle.id === cycleId) setSelectedCycle(null);
+      addNotification({ type: 'success', title: 'Ciclo desvinculado del plan' });
     } catch (e) {
       console.error('Failed to unlink cycle:', e);
-      alert('Error unlinking cycle from plan: ' + e.message);
+      addNotification({ type: 'error', title: 'Error al desvincular', description: e.message });
+      invoke('getTestCycles', { projectId: selectedProjectId, config: projectConfig })
+        .then(c => setTestCycles(c || [])).catch(console.warn);
     } finally {
-      setLoading(false);
+      setLocalLoading(false);
     }
   };
 
@@ -2220,18 +2416,21 @@ Then el sistema valida la identidad.
 
   const loadReportData = async () => {
     if (!selectedProjectId) return;
-    if (isMigrating) return; // don't compete with migration for Jira API quota
+    if (isMigrating) return;
+    if (isCircuitBroken()) {
+      addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
+      return;
+    }
     setReportLoading(true);
     try {
-        const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
-        setReportData(data || { cycles: [] });
+      const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
+      setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
     } catch(err) {
-        console.error("loadReportData error:", err);
-        // Don't alert() — it freezes JS and interrupts background operations.
-        // User can click the 🔄 Actualizar button to retry.
-        setReportData(prev => ({ ...prev, _loadError: true }));
+      console.error("loadReportData error:", err);
+      if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
+      setReportData(prev => ({ ...prev, _loadError: true }));
     } finally {
-        setReportLoading(false);
+      setReportLoading(false);
     }
   };
 
@@ -4414,6 +4613,29 @@ const renderPlanningTab = () => (
   );;;
 
   const renderModal = () => null;
+
+  const renderModals = () => (
+    <>
+      <ConfirmModal
+        isOpen={confirmModal.isOpen}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        onConfirm={confirmModal.onConfirm}
+        onCancel={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+        danger={confirmModal.danger}
+        confirmLabel={confirmModal.confirmLabel}
+      />
+      <TextInputModal
+        isOpen={textInputModal.isOpen}
+        title={textInputModal.title}
+        label={textInputModal.label}
+        defaultValue={textInputModal.defaultValue}
+        placeholder={textInputModal.placeholder}
+        onConfirm={(v) => { textInputModal.onConfirm(v); setTextInputModal(prev => ({ ...prev, isOpen: false })); }}
+        onCancel={() => setTextInputModal(prev => ({ ...prev, isOpen: false }))}
+      />
+    </>
+  );
 
   if (loading) {
     return (
