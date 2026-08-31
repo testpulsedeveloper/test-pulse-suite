@@ -4314,14 +4314,9 @@ const renderPlanningTab = () => (
                             </td>
                             <td style={{ padding: '0.5rem' }}>{bug.assignee || 'Sin asignar'}</td>
                             <td style={{ padding: '0.5rem' }}>{bug.resolution || 'Unresolved'}</td>
-                            <td style={{ padding: '0.5rem' }}>
-                              <span style={{ fontSize: '0.8rem' }}>
-                                {bug.linkedCases.map((k, idx) => (
-                                  <span key={k}>
-                                    <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + k); }}>{k}</a>
-                                    {idx < bug.linkedCases.length - 1 ? ', ' : ''}
-                                  </span>
-                                ))}
+                            <td style={{ padding: '0.5rem', textAlign: 'center' }}>
+                              <span style={{ display: 'inline-block', minWidth: '2rem', padding: '0.15rem 0.5rem', borderRadius: '999px', backgroundColor: 'var(--ds-background-neutral)', fontWeight: 600, fontSize: '0.85rem' }}>
+                                {bug.linkedCases.length}
                               </span>
                             </td>
                           </tr>
