@@ -2307,26 +2307,14 @@ Then el sistema valida la identidad.
   const handleSyncCycleIndex = async () => {
     if (!selectedCycle?.id) return;
     setLocalLoading(true);
-    setSyncProgress({ done: 0, total: '?' });
+    setSyncProgress({ done: 0, total: '...' });
     try {
-      let offset = 0;
-      let done = false;
-      let total = 1;
-      while (!done) {
-        const result = await invoke('rebuildCycleIndex', {
-          cycleId: selectedCycle.id,
-          offset,
-          limit: 50
-        });
-        done = result.done;
-        total = result.total || total;
-        offset = result.nextOffset ?? (offset + 50);
-        setSyncProgress({ done: Math.min(offset, total), total });
-        if (!done) await new Promise(r => setTimeout(r, 400));
-      }
+      // Forge Storage has no 32KB limit — rebuild is now a single call (no pagination)
+      const result = await invoke('rebuildCycleIndex', { cycleId: selectedCycle.id });
+      setSyncProgress({ done: result.total, total: result.total });
       const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
       if (summary) setCycleTests(summary);
-      addNotification({ type: 'success', title: '✅ Índice sincronizado', description: `${total} casos actualizados desde los datos guardados en Jira.` });
+      addNotification({ type: 'success', title: '✅ Índice sincronizado', description: `${result.total} casos actualizados.` });
     } catch (err) {
       addNotification({ type: 'error', title: 'Error al sincronizar', description: err.message });
     } finally {
