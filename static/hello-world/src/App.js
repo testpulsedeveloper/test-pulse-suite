@@ -322,7 +322,8 @@ function App() {
   const [selectedCycle, setSelectedCycle] = useState(null);
   
   const [cycleTests, setCycleTests] = useState([]);
-  const deletedIdsRef = useRef(new Set()); // Track local deletions to prevent them coming back from stale backend
+  const deletedIdsRef = useRef(new Set()); // in-session deletions (current cycle)
+  const perCycleDeletedRef = useRef({});   // { [cycleId]: Set<testId> } — persists across cycle switches
 
   const safeSetCycleTests = useCallback((newExecutionData) => {
       setCycleTests(prev => {
@@ -1928,12 +1929,16 @@ Then el sistema valida la identidad.
 
   const handleCycleSelect = async (cycle) => {
     setCycleTests([]); // clear old tests immediately
-    deletedIdsRef.current.clear(); // prevent ghosts from previous cycle
+    // Restore per-cycle deleted tracking into deletedIdsRef so safeSetCycleTests keeps filtering correctly
+    deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycle.id] || []);
     setPlanningChecked(new Set()); // clear multi-select
     setSelectedCycle(cycle);
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
-      setCycleTests(executionSummary || []); // direct set, no merge, prevents ghosts
+      // Filter out any tests deleted this session (Jira eventual consistency may return stale data)
+      const deletedForCycle = perCycleDeletedRef.current[cycle.id] || new Set();
+      const filtered = (executionSummary || []).filter(t => !deletedForCycle.has(String(t.id)));
+      setCycleTests(filtered);
     } catch (err) {
       addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
     }
@@ -2035,16 +2040,20 @@ Then el sistema valida la identidad.
     if (!selectedCycle) return;
     const id = String(testId);
     // Optimistic: remove from UI immediately, track to prevent ghost reappear
+    const cycleId = selectedCycle.id;
     deletedIdsRef.current.add(id);
+    if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
+    perCycleDeletedRef.current[cycleId].add(id);
     setPlanningChecked(prev => { const s = new Set(prev); s.delete(id); return s; });
     setCycleTests(prev => prev.filter(t => String(t.id) !== id));
     try {
-      await invoke('removeTestFromCycle', { cycleId: selectedCycle.id, testId: id });
+      await invoke('removeTestFromCycle', { cycleId, testId: id });
     } catch (err) {
       // Rollback on error
       deletedIdsRef.current.delete(id);
+      perCycleDeletedRef.current[cycleId]?.delete(id);
       addNotification({ type: 'error', title: 'Error al eliminar caso', description: err.message });
-      const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id }).catch(() => null);
+      const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
       if (execution) setCycleTests(execution);
     }
   };
@@ -2052,18 +2061,20 @@ Then el sistema valida la identidad.
   const handleRemoveManyFromCycle = async (testIds) => {
     if (!selectedCycle || !testIds || testIds.length === 0) return;
     const ids = testIds.map(String);
+    const cycleId = selectedCycle.id;
     // Optimistic: remove all from UI and clear selection
-    ids.forEach(id => deletedIdsRef.current.add(id));
+    if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
+    ids.forEach(id => { deletedIdsRef.current.add(id); perCycleDeletedRef.current[cycleId].add(id); });
     setPlanningChecked(new Set());
     setCycleTests(prev => prev.filter(t => !ids.includes(String(t.id))));
     try {
-      await invoke('removeManyTestsFromCycle', { cycleId: selectedCycle.id, testIds: ids });
+      await invoke('removeManyTestsFromCycle', { cycleId, testIds: ids });
       addNotification({ type: 'success', title: `${ids.length} caso${ids.length !== 1 ? 's' : ''} eliminado${ids.length !== 1 ? 's' : ''} del ciclo` });
     } catch (err) {
       // Rollback on error
-      ids.forEach(id => deletedIdsRef.current.delete(id));
+      ids.forEach(id => { deletedIdsRef.current.delete(id); perCycleDeletedRef.current[cycleId]?.delete(id); });
       addNotification({ type: 'error', title: 'Error al eliminar casos', description: err.message });
-      const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id }).catch(() => null);
+      const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
       if (execution) setCycleTests(execution);
     }
   };
