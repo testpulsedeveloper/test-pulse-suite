@@ -2071,8 +2071,23 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   // Build issue type filter
   const defaultBugTypes = ['Bug', 'Defect', 'Defecto', 'Falla', 'Error', 'Incident', 'Incidente', 'Issue', 'Problem', 'Problema'];
-  const issueTypes = bugIssueTypes.length > 0 ? bugIssueTypes : defaultBugTypes;
-  const typeList = issueTypes.map(t => `"${t}"`).join(', ');
+  let typeIds = [];
+  try {
+    const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
+    if (projRes.ok) {
+      const projData = await projRes.json();
+      if (projData.issueTypes) {
+         typeIds = projData.issueTypes
+            .filter(t => bugIssueTypes.includes(t.name) || defaultBugTypes.includes(t.name))
+            .map(t => t.id);
+      }
+    }
+  } catch(e) { console.warn("Failed to get project issue types for JQL", e); }
+  
+  if (typeIds.length === 0) {
+     // Fallback to names if API failed
+     typeIds = bugIssueTypes.length > 0 ? bugIssueTypes.map(t => `"${t}"`) : defaultBugTypes.map(t => `"${t}"`);
+  }
 
   let projectJql = '';
   if (allProjectKeys.length > 0) {
@@ -2082,7 +2097,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
     projectJql = `project = ${projectId} AND `;
   }
 
-  const jql = `${projectJql}issuetype in (${typeList}) ORDER BY created DESC`;
+  const jql = `${projectJql}issuetype in (${typeIds.join(',')}) ORDER BY created DESC`;
   const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'reporter', 'issuetype', 'project'];
 
   let issues = [];
@@ -2101,6 +2116,25 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       })
     });
 
+    // --- PROBE QUERY TO DEBUG ISSUE TYPES ---
+    try {
+      const probeRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jql: projectJql.replace(' AND ', ''), maxResults: 100, fields: ['issuetype'] })
+      });
+      if (probeRes.ok) {
+        const probeData = await probeRes.json();
+        const foundTypes = [...new Set((probeData.issues || []).map(i => i.fields.issuetype?.name))];
+        console.log(`getProjectUnlinkedBugs: PROBE project issues. Total found: ${probeData.issues?.length}. Unique types: ${foundTypes.join(', ')}`);
+      } else {
+        console.warn(`PROBE failed ${probeRes.status}`);
+      }
+    } catch (e) {
+      console.error('PROBE exception', e);
+    }
+    // --- END PROBE ---
+
     if (res.ok) {
       const data = await res.json();
       console.log(`getProjectUnlinkedBugs: search SUCCESS! jql: ${jql}, issues length: ${data.issues ? data.issues.length : 'undefined'}`);
@@ -2109,7 +2143,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       const errText = await res.text();
       console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}. Body: ${errText}`);
       // Fallback extremadament simple en caso de que project in () falle
-      const fallbackJql = projectId ? `project = ${projectId} AND issuetype = "Error" ORDER BY created DESC` : `issuetype = "Error" ORDER BY created DESC`;
+      const fallbackJql = projectId ? `project = ${projectId} AND issuetype in (${typeIds.join(',')}) ORDER BY created DESC` : `issuetype in (${typeIds.join(',')}) ORDER BY created DESC`;
       const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
