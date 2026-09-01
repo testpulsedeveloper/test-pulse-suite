@@ -652,6 +652,10 @@ const trimBugsForIndex = (bugs) => {
 const SHARD_SIZE = 200;
 const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 
+// Returns:
+//   null  → shard 0 is 404 (cycle has never had an index — use Tier 2 exec_ scan)
+//   []    → shard 0 exists with empty array (index was explicitly cleared — do NOT use Tier 2)
+//   [...] → tests in the index
 const readCycleIndex = async (cycleId) => {
   const allEntries = [];
   for (let shard = 0; shard <= 10; shard++) {          // max 10 shards = 2000 tests
@@ -659,22 +663,28 @@ const readCycleIndex = async (cycleId) => {
     const res = await api.asUser().requestJira(
       route`/rest/api/3/issue/${cycleId}/properties/${propName}?t=${Date.now()}`
     );
-    if (res.status === 404 || !res.ok) break;            // no more shards
+    if (res.status === 404) {
+      if (shard === 0) return null; // ← No index ever created for this cycle
+      break;                         // No more shards beyond this point
+    }
+    if (!res.ok) break;
     const data = await res.json();
     const raw = data.value || [];
-    if (raw.length === 0) break;
+    if (raw.length === 0) break;     // Empty shard → explicitly cleared or end of data
     const normalized = (typeof raw[0] === 'string')
       ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
       : raw;
     allEntries.push(...normalized);
     if (normalized.length < SHARD_SIZE) break;          // last (partial) shard → done
   }
-  return allEntries;
+  return allEntries; // [] = explicitly cleared, [...] = has tests
 };
 
 const writeCycleIndex = async (cycleId, entries) => {
-  if (!entries || entries.length === 0) return;
-  const shardCount = Math.ceil(entries.length / SHARD_SIZE);
+  // ALWAYS write at least shard 0, even for empty arrays.
+  // An empty shard 0 is the "explicitly cleared" sentinel that prevents
+  // getCycleExecutionSummary Tier 2 from resurrecting deleted tests via exec_ scan.
+  const shardCount = entries.length === 0 ? 1 : Math.ceil(entries.length / SHARD_SIZE);
   for (let shard = 0; shard < shardCount; shard++) {
     const propName = _shardProp(shard);
     const shardEntries = entries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE);
@@ -705,46 +715,47 @@ const deleteCycleIndex = async (cycleId) => {
       route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`,
       { method: 'DELETE' }
     );
-    if (res.status === 404) break;                      // no more shards
+    if (res.status === 404) break; // no more shards
   }
 };
 
 
 const getCycleExecutionSummary = async (cycleId) => {
   try {
-    // Tier 1: Forge Storage → Jira execution property (via readCycleIndex)
-    let entries = await readCycleIndex(cycleId);
+    // readCycleIndex returns:
+    //   null  → shard 0 is 404 (new cycle, never had index) — use Tier 2
+    //   []    → shard 0 exists but empty (index was explicitly cleared) — do NOT use Tier 2
+    //   [...] → tests in index — return directly
+    const entries = await readCycleIndex(cycleId);
 
-    // Tier 2: If both Storage and Jira property are empty, rebuild from exec_ property keys.
-    // exec_ properties are always written when tests are added — this is the last-resort source.
-    if (entries.length === 0) {
-      console.log(`[getCycleExecutionSummary] Index empty for ${cycleId} — reading exec_ keys`);
+    // Tier 2: ONLY when index has never been created (null).
+    // Do NOT run Tier 2 for [] — that means the index was explicitly cleared by a deletion,
+    // and running exec_ scan would resurrect deleted tests from their orphaned exec_ properties.
+    if (entries === null) {
+      console.log(`[getCycleExecutionSummary] No index for ${cycleId} — scanning exec_ keys`);
       const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
       if (keysRes.ok) {
         const keysData = await keysRes.json();
         const execKeys = (keysData.keys || []).map(k => k.key).filter(k => k.startsWith('exec_'));
         if (execKeys.length > 0) {
-          // Build stubs WITHOUT _stub:true — avoids triggering the slow healing path.
-          // Tests show as "Not Run"; user can sync statuses via "Sincronizar Estatus".
-          entries = execKeys.map(key => ({
+          const stubs = execKeys.map(key => ({
             id: key.replace('exec_', ''),
             status: 'Not Run',
             linkedBugs: []
           }));
-          // Persist so future loads are instant (Forge Storage if available, otherwise noop)
-          writeCycleIndex(cycleId, entries).catch(console.warn);
-          return entries;
+          writeCycleIndex(cycleId, stubs).catch(console.warn);
+          return stubs;
         }
       }
+      return []; // No exec_ keys either — cycle is truly empty
     }
 
+    // [] = explicitly cleared — return empty without Tier 2 (prevents ghost resurrection)
     if (entries.length === 0) return [];
 
-    // Heal stubs ONLY for small cycles (≤50 tests) to avoid Forge function timeout.
-    // Large cycles: return stubs as-is, user uses "Sincronizar Estatus" for real statuses.
+    // Has entries — heal stubs ONLY for small cycles (≤50 tests) to avoid Forge 25s timeout
     const hasStubs = entries.some(ex => ex._stub === true);
     if (hasStubs && entries.length <= 50) {
-      console.log(`[getCycleExecutionSummary] Healing stubs for ${cycleId} (${entries.length} tests)`);
       const realData = await getExecutionData(cycleId);
       if (realData && realData.length > 0) {
         const healed = realData.map(ex => ({
@@ -758,7 +769,6 @@ const getCycleExecutionSummary = async (cycleId) => {
       }
     }
 
-    // Remove _stub flag before returning so UI doesn't re-trigger healing
     return entries.map(({ _stub, ...rest }) => rest);
   } catch (err) {
     console.error('[getCycleExecutionSummary] Unexpected error:', err.message);
@@ -768,10 +778,9 @@ const getCycleExecutionSummary = async (cycleId) => {
 
 
 const updateLightweightIndex = async (cycleId, updateFn) => {
-    // Reads from Forge Storage (no 32KB limit), applies updateFn, writes back.
+    // readCycleIndex returns null (no index), [] (cleared), or [...entries]
     let lightWeight = await readCycleIndex(cycleId);
-    lightWeight = updateFn(lightWeight);
-    // Trim linkedBugs to {key} only — exec_ properties hold full bug details
+    lightWeight = updateFn(lightWeight ?? []); // null → [] for updateFn
     lightWeight = lightWeight.map(item => ({ ...item, linkedBugs: trimBugsForIndex(item.linkedBugs) }));
     await writeCycleIndex(cycleId, lightWeight);
 };
@@ -829,7 +838,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
 
     // Read execution index (Forge Storage → Jira property fallback). NO healing here —
     // healing reads all exec_ properties per cycle and causes Forge timeout for large projects.
-    let execution = await readCycleIndex(issue.id);
+    let execution = (await readCycleIndex(issue.id)) ?? [];
 
     // If index is completely empty, list exec_ property KEYS (fast — no content reads)
     // to at least show the cycle has tests and get bug keys.
@@ -999,7 +1008,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
 
   // Read the lightweight index from Forge Storage (no 32KB limit)
-  let lightWeightIndex = await readCycleIndex(cycleId);
+  let lightWeightIndex = (await readCycleIndex(cycleId)) ?? [];
 
   const existingIds = new Set(lightWeightIndex.map(t => String(t.id)));
   const newTests = []; // tests that need exec_ property written
@@ -1062,7 +1071,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
 resolver.define('addTestToCycle', async ({ payload }) => {
   const { cycleId, testCase } = payload;
   
-  const existingIndex = await readCycleIndex(cycleId);
+  const existingIndex = (await readCycleIndex(cycleId)) ?? [];
   // (testIds preserved for compat but updateLightweightIndex is the source of truth)
 
   const newTest = {
@@ -1115,7 +1124,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
 resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases } = payload;
   
-  const existingIndex = await readCycleIndex(cycleId);
+  const existingIndex = (await readCycleIndex(cycleId)) ?? [];
   const existingIdSet = new Set(existingIndex.map(t => String(t.id)));
 
   let changed = false;
@@ -1934,7 +1943,7 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
   //   4. Write merged result to Forge Storage in one call
 
   // Step 1: Read full existing index (all test IDs, executed or not)
-  const existingIndex = await readCycleIndex(cycleId);
+  const existingIndex = (await readCycleIndex(cycleId)) ?? [];
   const indexMap = new Map();
   existingIndex.forEach(entry => indexMap.set(String(entry.id), entry));
 
