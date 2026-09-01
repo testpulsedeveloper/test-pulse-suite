@@ -4432,13 +4432,24 @@ const renderPlanningTab = () => (
                   )}
                 </div>
 
-                {/* ─── Sección B: Bugs del proyecto SIN caso de prueba asociado ─── */}
+                {/* ─── Sección B: Todos los bugs del proyecto (con y sin caso asociado) ─── */}
 
                 <div className="chart-card" style={{ overflowX: 'auto', marginTop: '1.5rem' }}>
-                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    🔴 Bugs sin caso de prueba asociado
+                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    🔴 Bugs del Proyecto
                     <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
-                      ({unlinkedBugs.length} en el proyecto)
+                      ({unlinkedBugs.length} total
+                      {unlinkedBugs.filter(b => b.isLinked).length > 0 && (
+                        <> · <span style={{ color: 'var(--success-color)' }}>
+                          {unlinkedBugs.filter(b => b.isLinked).length} con cobertura
+                        </span></>
+                      )}
+                      {unlinkedBugs.filter(b => !b.isLinked).length > 0 && (
+                        <> · <span style={{ color: 'var(--danger-color)' }}>
+                          {unlinkedBugs.filter(b => !b.isLinked).length} sin cobertura
+                        </span></>
+                      )}
+                      )
                     </span>
                   </h3>
                   {unlinkedBugs.length > 0 ? (
@@ -4451,14 +4462,17 @@ const renderPlanningTab = () => (
                           <th style={{ padding: '0.5rem', textAlign: 'left' }}>Estado</th>
                           <th style={{ padding: '0.5rem', textAlign: 'left' }}>Responsable</th>
                           <th style={{ padding: '0.5rem', textAlign: 'left' }}>Resolución</th>
-                          <th style={{ padding: '0.5rem', textAlign: 'left' }}>Reportado</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'center' }}>Cobertura</th>
                         </tr>
                       </thead>
                       <tbody>
                         {unlinkedBugs.map((bug, i) => (
-                          <tr key={bug.key + '-unlinked-' + i} style={{ borderBottom: '1px solid var(--ds-border)' }}>
-                            <td style={{ padding: '0.5rem' }}>
+                          <tr key={bug.key + '-bug-' + i} style={{ borderBottom: '1px solid var(--ds-border)', backgroundColor: bug.isLinked ? 'transparent' : 'rgba(255,0,0,0.03)' }}>
+                            <td style={{ padding: '0.5rem', whiteSpace: 'nowrap' }}>
                               <a href="#" onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}>{bug.key}</a>
+                              {bug.project && bug.project !== selectedProjectId && (
+                                <span style={{ marginLeft: '4px', fontSize: '0.7rem', color: 'var(--text-secondary)', background: 'var(--bg-surface)', padding: '0 4px', borderRadius: '3px', border: '1px solid var(--ds-border)' }}>{bug.project}</span>
+                              )}
                             </td>
                             <td style={{ padding: '0.5rem', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bug.summary}</td>
                             <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.priority || '—'}</td>
@@ -4469,14 +4483,19 @@ const renderPlanningTab = () => (
                             </td>
                             <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.assignee || 'Sin asignar'}</td>
                             <td style={{ padding: '0.5rem', fontSize: '0.8rem' }}>{bug.resolution || 'Unresolved'}</td>
-                            <td style={{ padding: '0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{bug.created ? new Date(bug.created).toLocaleDateString('es-MX') : '—'}</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'center', fontSize: '0.8rem' }}>
+                              {bug.isLinked
+                                ? <span title="Vinculado a un caso de prueba en Test Pulse" style={{ color: 'var(--success-color)', fontWeight: 600 }}>✅ Cubierto</span>
+                                : <span title="Sin caso de prueba asociado" style={{ color: 'var(--danger-color)', fontWeight: 600 }}>🔴 Sin caso</span>
+                              }
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   ) : (
                     <p style={{ color: 'var(--text-secondary)', marginTop: '0.75rem', fontSize: '0.9rem' }}>
-                      {reportLoading ? '⏳ Cargando...' : '✅ Todos los bugs del proyecto están asociados a al menos un caso de prueba.'}
+                      {reportLoading ? '⏳ Cargando...' : 'No se encontraron bugs en el espacio Jira. Verifica el tipo de issue en Configuración → Bug / Defect Issue Types.'}
                     </p>
                   )}
                 </div>

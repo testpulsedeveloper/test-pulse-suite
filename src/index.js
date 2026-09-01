@@ -2063,77 +2063,58 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
 });
 
 
-// ── Bugs del proyecto/espacio que pueden vincularse a ejecuciones ──
+// ── Todos los bugs del espacio Jira accesibles por el usuario ──
 resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
   const { projectId, linkedBugKeys = [], allProjectKeys = [], bugIssueTypes = [] } = payload;
 
-  const linkedSet = new Set(linkedBugKeys);
+  const linkedSet = new Set(linkedBugKeys.map(String));
 
-  // Build issue type list: use configured types, or fall back to broad default list
+  // Build issue type filter
   const defaultBugTypes = ['Bug', 'Defect', 'Defecto', 'Falla', 'Error', 'Incident', 'Incidente', 'Issue', 'Problem', 'Problema'];
   const issueTypes = bugIssueTypes.length > 0 ? bugIssueTypes : defaultBugTypes;
   const typeList = issueTypes.map(t => `"${t}"`).join(', ');
 
-  // Build project scope:
-  // If allProjectKeys provided → search across all accessible projects
-  // Otherwise fall back to the single selected project
-  let projectJql = '';
-  if (allProjectKeys.length > 0) {
-    const keyList = allProjectKeys.map(k => `"${k}"`).join(', ');
-    projectJql = `project in (${keyList}) AND `;
-  } else if (projectId) {
-    projectJql = `project = "${projectId}" AND `;
-  }
-  // If neither: search entire Jira instance (user sees only what they have access to)
+  // Simple JQL — no project filter, Jira API respects user permissions.
+  // A complex "project in (key1, key2, ...)" clause can hit JQL length limits and fail.
+  const jql = `issuetype in (${typeList}) ORDER BY created DESC`;
+  const fields = 'summary,status,assignee,priority,resolution,created,reporter,issuetype,project';
 
-  const jql = `${projectJql}issuetype in (${typeList}) ORDER BY created DESC`;
-  const fields = 'summary,status,assignee,priority,resolution,created,reporter,issuetype';
-
+  let issues = [];
   const res = await api.asUser().requestJira(
     route`/rest/api/3/search?jql=${jql}&fields=${fields}&maxResults=200`
   );
 
-  if (!res.ok) {
-    console.warn(`getProjectUnlinkedBugs: search failed ${res.status} — JQL: ${jql}`);
-    // Fallback: try without project filter in case of JQL error (e.g., invalid project key)
-    const fallbackJql = `issuetype in (Bug, Defect) ORDER BY created DESC`;
+  if (res.ok) {
+    const data = await res.json();
+    issues = data.issues || [];
+  } else {
+    console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}`);
+    // Fallback: minimal working JQL
     const fallbackRes = await api.asUser().requestJira(
-      route`/rest/api/3/search?jql=${fallbackJql}&fields=${fields}&maxResults=200`
+      route`/rest/api/3/search?jql=issuetype in (Bug, Defect, Error, Falla) ORDER BY created DESC&fields=${fields}&maxResults=200`
     );
-    if (!fallbackRes.ok) return [];
-    const fallbackData = await fallbackRes.json();
-    return (fallbackData.issues || [])
-      .filter(issue => !linkedSet.has(issue.key))
-      .map(issue => ({
-        key: issue.key,
-        summary: issue.fields?.summary || '',
-        status: issue.fields?.status?.name || '',
-        statusCategory: issue.fields?.status?.statusCategory?.key || '',
-        assignee: issue.fields?.assignee?.displayName || null,
-        priority: issue.fields?.priority?.name || null,
-        resolution: issue.fields?.resolution?.name || null,
-        reporter: issue.fields?.reporter?.displayName || null,
-        created: issue.fields?.created || null,
-        issuetype: issue.fields?.issuetype?.name || 'Bug',
-      }));
+    if (fallbackRes.ok) {
+      const fb = await fallbackRes.json();
+      issues = fb.issues || [];
+    }
   }
 
-  const data = await res.json();
-
-  return (data.issues || [])
-    .filter(issue => !linkedSet.has(issue.key))
-    .map(issue => ({
-      key: issue.key,
-      summary: issue.fields?.summary || '',
-      status: issue.fields?.status?.name || '',
-      statusCategory: issue.fields?.status?.statusCategory?.key || '',
-      assignee: issue.fields?.assignee?.displayName || null,
-      priority: issue.fields?.priority?.name || null,
-      resolution: issue.fields?.resolution?.name || null,
-      reporter: issue.fields?.reporter?.displayName || null,
-      created: issue.fields?.created || null,
-      issuetype: issue.fields?.issuetype?.name || 'Bug',
-    }));
+  // Return ALL bugs — mark linked ones instead of filtering them out
+  // This lets the UI show complete coverage picture (all 12 bugs, linked or not)
+  return issues.map(issue => ({
+    key: issue.key,
+    summary: issue.fields?.summary || '',
+    status: issue.fields?.status?.name || '',
+    statusCategory: issue.fields?.status?.statusCategory?.key || '',
+    assignee: issue.fields?.assignee?.displayName || null,
+    priority: issue.fields?.priority?.name || null,
+    resolution: issue.fields?.resolution?.name || null,
+    reporter: issue.fields?.reporter?.displayName || null,
+    created: issue.fields?.created || null,
+    issuetype: issue.fields?.issuetype?.name || 'Bug',
+    project: issue.fields?.project?.key || '',
+    isLinked: linkedSet.has(issue.key), // true = ya vinculado a un caso de prueba
+  }));
 });
 
 
