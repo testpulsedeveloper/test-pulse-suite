@@ -2439,7 +2439,7 @@ Then el sistema valida la identidad.
     
     // Si no tiene extensión (ej. porque el usuario lo renombró "Evidencia 1"), asumimos que es imagen/video
     const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
-    const isMedia = filename.match(/\.(png|jpg|jpeg|gif|pdf|mp4|mov|webm)$/i);
+    const isMedia = filename.match(/\.(png|jpg|jpeg|gif|mp4|mov|webm)$/i);
 
     if (isMedia || !hasExtension) {
       if (!hasExtension) filename += '.png'; // Para que el modal sepa renderizarlo
@@ -5068,10 +5068,6 @@ const renderPlanningTab = () => (
             <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'var(--bg-main)', borderRadius: '4px'}}>
               {previewModalData.loading ? (
                 <p>Cargando vista previa...</p>
-              ) : previewModalData.filename.toLowerCase().endsWith('.pdf') ? (
-                <object data={`data:application/pdf;base64,${previewModalData.base64}`} type="application/pdf" width="100%" height="100%">
-                  <p>Tu navegador no soporta PDFs incrustados. <a href={`/secure/attachment/${previewModalData.id}/${encodeURIComponent(previewModalData.filename)}`} target="_blank" rel="noreferrer">Descargar PDF</a>.</p>
-                </object>
               ) : previewModalData.filename.match(/\.(mp4|mov|webm)$/i) ? (
                 <video controls style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain'}} src={`data:${previewModalData.mimeType || 'video/mp4'};base64,${previewModalData.base64}`} />
               ) : (
