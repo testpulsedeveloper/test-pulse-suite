@@ -2079,7 +2079,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
     const keyList = allProjectKeys.map(k => `"${k}"`).join(', ');
     projectJql = `project in (${keyList}) AND `;
   } else if (projectId) {
-    projectJql = `project = "${projectId}" AND `;
+    projectJql = `project = ${projectId} AND `;
   }
 
   const jql = `${projectJql}issuetype in (${typeList}) ORDER BY created DESC`;
@@ -2103,12 +2103,13 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
     if (res.ok) {
       const data = await res.json();
-      issues = data.issues || [];
+      console.log(`getProjectUnlinkedBugs: search SUCCESS! jql: ${jql}, issues length: ${data.issues ? data.issues.length : 'undefined'}`);
+      issues = data.issues || data.values || [];
     } else {
       const errText = await res.text();
       console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}. Body: ${errText}`);
       // Fallback extremadament simple en caso de que project in () falle
-      const fallbackJql = projectId ? `project = "${projectId}" AND issuetype = "Error" ORDER BY created DESC` : `issuetype = "Error" ORDER BY created DESC`;
+      const fallbackJql = projectId ? `project = ${projectId} AND issuetype = "Error" ORDER BY created DESC` : `issuetype = "Error" ORDER BY created DESC`;
       const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
