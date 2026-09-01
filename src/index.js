@@ -2088,7 +2088,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
   let issues = [];
   
   try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/search`, {
+    const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
@@ -2106,10 +2106,11 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       const data = await res.json();
       issues = data.issues || [];
     } else {
-      console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}`);
+      const errText = await res.text();
+      console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}. Body: ${errText}`);
       // Fallback extremadament simple en caso de que project in () falle
       const fallbackJql = projectId ? `project = "${projectId}" AND issuetype = "Error" ORDER BY created DESC` : `issuetype = "Error" ORDER BY created DESC`;
-      const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search`, {
+      const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ jql: fallbackJql, maxResults: 100, fields, validateQuery: "warn" })
@@ -2117,6 +2118,9 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       if (fallbackRes.ok) {
         const fb = await fallbackRes.json();
         issues = fb.issues || [];
+      } else {
+        const fbErr = await fallbackRes.text();
+        console.warn(`Fallback search also failed ${fallbackRes.status}. Body: ${fbErr}`);
       }
     }
   } catch (e) {
