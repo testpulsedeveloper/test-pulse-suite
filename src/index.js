@@ -2097,8 +2097,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       body: JSON.stringify({
         jql: jql,
         maxResults: 200,
-        fields: fields,
-        validateQuery: "warn" // <--- CRÍTICO: Evita que Jira lance error 400 si un tipo de issue (ej. "Falla") no existe en esta instancia
+        fields: fields
       })
     });
 
@@ -2113,7 +2112,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jql: fallbackJql, maxResults: 100, fields, validateQuery: "warn" })
+        body: JSON.stringify({ jql: fallbackJql, maxResults: 100, fields })
       });
       if (fallbackRes.ok) {
         const fb = await fallbackRes.json();

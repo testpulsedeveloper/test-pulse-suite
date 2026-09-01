@@ -3823,7 +3823,7 @@ const renderPlanningTab = () => (
                 totalBugs++;
                 
                 const s = (bug.status || '').toLowerCase(); 
-                if (['done', 'closed', 'resolved', 'cerrada', 'cerrado', 'resuelta', 'resuelto', 'terminado'].includes(s)) closedBugs++;
+                if (['done', 'closed', 'cerrada', 'cerrado', 'terminado'].includes(s)) closedBugs++;
                 
                 if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
                     for (const [state, hours] of Object.entries(bug.timesSpent)) {
