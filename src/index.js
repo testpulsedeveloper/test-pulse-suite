@@ -1181,27 +1181,33 @@ resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
   if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
   const ids = testIds.map(String);
 
-  // Single atomic index update
+  // STEP 1 (mandatory, fast): Remove from index — this is the source of truth.
+  // Tests not in the index will not show in the cycle, even if exec_ properties exist.
   await updateLightweightIndex(cycleId, (lw) => lw.filter(t => !ids.includes(String(t.id))));
 
-  // Delete exec_ properties in parallel batches (10 at a time, 200ms gap)
-  await processInBatches(ids, 10, 200, async (testId) => {
-    const r = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
-      { method: 'DELETE' }
-    );
-    if (r.status === 429) {
-      await new Promise(x => setTimeout(x, 2000));
-      await api.asUser().requestJira(
+  // STEP 2 (best-effort, for small batches only): Delete exec_ properties.
+  // For large batches (>50), skip to avoid Forge's 25s timeout.
+  // Orphaned exec_ properties are cleaned by rebuildCycleIndex when user syncs.
+  if (ids.length <= 50) {
+    await processInBatches(ids, 10, 150, async (testId) => {
+      const r = await api.asUser().requestJira(
         route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
         { method: 'DELETE' }
       );
-    }
-    return true;
-  });
+      if (r.status === 429) {
+        await new Promise(x => setTimeout(x, 1500));
+        await api.asUser().requestJira(
+          route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
+          { method: 'DELETE' }
+        );
+      }
+      return true;
+    });
+  }
 
   return { success: true, removed: ids.length };
 });
+
 
 resolver.define('updateTestStatus', async ({ payload }) => {
   const { cycleId, testId, status, comment, evidence, evidences, linkedBugs, steps, iterations, projectId, takeover } = payload;
@@ -1942,6 +1948,9 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
   if (execKeys.length > 0) {
     await processInBatches(execKeys, 15, 100, async (key) => {
       const testId = key.replace('exec_', '');
+      // Only update tests already IN the index — skip orphaned exec_ properties
+      // (tests that were deleted from the cycle but whose exec_ properties weren't cleaned up yet)
+      if (!indexMap.has(String(testId))) return null;
       let r = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${key}`);
       if (r.status === 429) {
         await new Promise(x => setTimeout(x, 2000));
@@ -1950,8 +1959,8 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
       if (!r.ok) return null;
       const d = await r.json();
       const val = d.value || {};
-      // Overlay exec_ data onto the existing entry (or create new entry if test was added externally)
-      const existing = indexMap.get(String(testId)) || {};
+      // Overlay exec_ data onto the existing entry
+      const existing = indexMap.get(String(testId));
       indexMap.set(String(testId), {
         ...existing,
         id: String(val.id || testId),

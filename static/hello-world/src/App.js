@@ -4869,7 +4869,10 @@ const renderPlanningTab = () => (
         isOpen={confirmModal.isOpen}
         title={confirmModal.title}
         message={confirmModal.message}
-        onConfirm={confirmModal.onConfirm}
+        onConfirm={() => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          confirmModal.onConfirm?.();
+        }}
         onCancel={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
         danger={confirmModal.danger}
         confirmLabel={confirmModal.confirmLabel}
