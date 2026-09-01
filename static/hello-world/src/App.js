@@ -2583,7 +2583,10 @@ Then el sistema valida la identidad.
             const tc = testCases.find(t => String(t.id) === String(ex.id));
             return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
           });
-          setCycleTests(enriched);
+          // Filter out any tests deleted this session (avoids stale-read ghosts from Jira eventual consistency)
+          const deletedForCycle = perCycleDeletedRef.current[selectedCycle.id] || new Set();
+          const filteredEnriched = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+          setCycleTests(filteredEnriched);
         });
     } else if (activeTab === 'reports') {
       // Only reload reports if we don't have data yet, or refreshTrigger changed
