@@ -2446,7 +2446,12 @@ Then el sistema valida la identidad.
       if (!hasExtension) filename += '.png';
       
       if (isPdf) {
-         // Attempt to fetch base64 and open as a Blob URL in a new tab to force browser PDF preview
+         // Open window synchronously to avoid popup blocker
+         const newWin = window.open('about:blank', '_blank');
+         if (newWin) {
+             newWin.document.write('<p style="font-family:sans-serif;padding:20px;">Cargando PDF...</p>');
+         }
+         
          const data = await invoke('getAttachmentContent', { attachmentId: id });
          if (data && !data.error) {
             try {
@@ -2458,11 +2463,24 @@ Then el sistema valida la identidad.
               const byteArray = new Uint8Array(byteNumbers);
               const blob = new Blob([byteArray], { type: 'application/pdf' });
               const blobUrl = URL.createObjectURL(blob);
-              window.open(blobUrl, '_blank');
+              
+              if (newWin) {
+                  newWin.location.href = blobUrl;
+              } else {
+                  // Fallback if popup blocker still blocked the synchronous open (e.g. strict settings)
+                  const a = document.createElement('a');
+                  a.href = blobUrl;
+                  a.target = '_blank';
+                  a.click();
+              }
               return;
-            } catch(e) { console.error('Blob URL failed', e); }
+            } catch(e) { 
+               console.error('Blob URL failed', e); 
+               if (newWin) newWin.close();
+            }
          }
          // Fallback if fetch fails
+         if (newWin) newWin.close();
          router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
          return;
       }
