@@ -2536,8 +2536,16 @@ Then el sistema valida la identidad.
           (ex.linkedBugs || []).forEach(bug => { if (bug.key) linkedBugKeys.push(bug.key); });
         });
       });
-      // Fetch project bugs NOT linked to any test execution
-      invoke('getProjectUnlinkedBugs', { projectId: selectedProjectId, linkedBugKeys })
+      // Fetch bugs from ALL accessible projects (not just the selected one)
+      // allProjectKeys: all projects the user has access to
+      // bugIssueTypes: configured bug type names (empty = use broad default list)
+      const allProjectKeys = projects.filter(p => p.key && p.key !== 'ERR' && p.key !== 'N/A').map(p => p.key);
+      invoke('getProjectUnlinkedBugs', {
+        projectId: selectedProjectId,
+        linkedBugKeys,
+        allProjectKeys,
+        bugIssueTypes: projectConfig?.bugIssueTypes || [],
+      })
         .then(bugs => setUnlinkedBugs(bugs || []))
         .catch(console.warn);
     } catch(err) {
@@ -4661,6 +4669,33 @@ const renderPlanningTab = () => (
                 </select>
               </div>
               
+              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
+              <h3 style={{ marginBottom: '1rem' }}>Bug / Defect Issue Types</h3>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                Selecciona los tipos de issue que representan bugs en tu proyecto (usados en Reportes). Si no seleccionas ninguno, se usarán todos los tipos comunes: Bug, Defect, Falla, Error, Incident, etc.
+              </p>
+
+              <div className="form-group">
+                <label>Tipos de Bug / Defecto</label>
+                <select
+                  className="status-badge"
+                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)', height: '100px' }}
+                  multiple
+                  value={projectConfig.bugIssueTypes || []}
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
+                    setProjectConfig({...projectConfig, bugIssueTypes: selected});
+                  }}
+                >
+                  {projectIssueTypes.map(it => (
+                    <option key={it.id} value={it.name}>{it.name}</option>
+                  ))}
+                </select>
+                <small style={{ color: 'var(--text-secondary)' }}>
+                  Ctrl/Cmd + clic para seleccionar múltiples. Vacío = busca Bug, Defect, Falla, Error, Incident, Incidente, Problem, Issue en todos los proyectos accesibles.
+                </small>
+              </div>
+
               <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
               <h3 style={{ marginBottom: '1rem' }}>Widgets del Tablero de Reportes</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>

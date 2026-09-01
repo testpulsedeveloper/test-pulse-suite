@@ -2063,23 +2063,61 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
 });
 
 
-// ── Bugs del proyecto que NO están vinculados a ninguna ejecución en Test Pulse ──
+// ── Bugs del proyecto/espacio que pueden vincularse a ejecuciones ──
 resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
-  const { projectId, linkedBugKeys = [] } = payload;
-  if (!projectId) return [];
+  const { projectId, linkedBugKeys = [], allProjectKeys = [], bugIssueTypes = [] } = payload;
 
   const linkedSet = new Set(linkedBugKeys);
 
-  // Query Jira: all Bugs in the project (limit 100 most recent)
-  const jql = encodeURIComponent(`project = "${projectId}" AND issuetype in (Bug, Defect) ORDER BY created DESC`);
-  const fields = 'summary,status,assignee,priority,resolution,created,reporter';
-  const res = await api.asUser().requestJira(
-    route`/rest/api/3/search?jql=${decodeURIComponent(jql)}&fields=${fields}&maxResults=100`
-  );
-  if (!res.ok) {
-    console.warn(`getProjectUnlinkedBugs: search failed ${res.status}`);
-    return [];
+  // Build issue type list: use configured types, or fall back to broad default list
+  const defaultBugTypes = ['Bug', 'Defect', 'Defecto', 'Falla', 'Error', 'Incident', 'Incidente', 'Issue', 'Problem', 'Problema'];
+  const issueTypes = bugIssueTypes.length > 0 ? bugIssueTypes : defaultBugTypes;
+  const typeList = issueTypes.map(t => `"${t}"`).join(', ');
+
+  // Build project scope:
+  // If allProjectKeys provided → search across all accessible projects
+  // Otherwise fall back to the single selected project
+  let projectJql = '';
+  if (allProjectKeys.length > 0) {
+    const keyList = allProjectKeys.map(k => `"${k}"`).join(', ');
+    projectJql = `project in (${keyList}) AND `;
+  } else if (projectId) {
+    projectJql = `project = "${projectId}" AND `;
   }
+  // If neither: search entire Jira instance (user sees only what they have access to)
+
+  const jql = `${projectJql}issuetype in (${typeList}) ORDER BY created DESC`;
+  const fields = 'summary,status,assignee,priority,resolution,created,reporter,issuetype';
+
+  const res = await api.asUser().requestJira(
+    route`/rest/api/3/search?jql=${jql}&fields=${fields}&maxResults=200`
+  );
+
+  if (!res.ok) {
+    console.warn(`getProjectUnlinkedBugs: search failed ${res.status} — JQL: ${jql}`);
+    // Fallback: try without project filter in case of JQL error (e.g., invalid project key)
+    const fallbackJql = `issuetype in (Bug, Defect) ORDER BY created DESC`;
+    const fallbackRes = await api.asUser().requestJira(
+      route`/rest/api/3/search?jql=${fallbackJql}&fields=${fields}&maxResults=200`
+    );
+    if (!fallbackRes.ok) return [];
+    const fallbackData = await fallbackRes.json();
+    return (fallbackData.issues || [])
+      .filter(issue => !linkedSet.has(issue.key))
+      .map(issue => ({
+        key: issue.key,
+        summary: issue.fields?.summary || '',
+        status: issue.fields?.status?.name || '',
+        statusCategory: issue.fields?.status?.statusCategory?.key || '',
+        assignee: issue.fields?.assignee?.displayName || null,
+        priority: issue.fields?.priority?.name || null,
+        resolution: issue.fields?.resolution?.name || null,
+        reporter: issue.fields?.reporter?.displayName || null,
+        created: issue.fields?.created || null,
+        issuetype: issue.fields?.issuetype?.name || 'Bug',
+      }));
+  }
+
   const data = await res.json();
 
   return (data.issues || [])
@@ -2094,6 +2132,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       resolution: issue.fields?.resolution?.name || null,
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
+      issuetype: issue.fields?.issuetype?.name || 'Bug',
     }));
 });
 
