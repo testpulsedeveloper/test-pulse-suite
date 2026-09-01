@@ -2439,10 +2439,33 @@ Then el sistema valida la identidad.
     
     // Si no tiene extensión (ej. porque el usuario lo renombró "Evidencia 1"), asumimos que es imagen/video
     const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
-    const isMedia = filename.match(/\.(png|jpg|jpeg|gif|mp4|mov|webm)$/i);
+    const isImageOrVideo = filename.match(/\.(png|jpg|jpeg|gif|mp4|mov|webm)$/i);
+    const isPdf = filename.match(/\.(pdf)$/i);
 
-    if (isMedia || !hasExtension) {
-      if (!hasExtension) filename += '.png'; // Para que el modal sepa renderizarlo
+    if (isImageOrVideo || isPdf || !hasExtension) {
+      if (!hasExtension) filename += '.png';
+      
+      if (isPdf) {
+         // Attempt to fetch base64 and open as a Blob URL in a new tab to force browser PDF preview
+         const data = await invoke('getAttachmentContent', { attachmentId: id });
+         if (data && !data.error) {
+            try {
+              const byteCharacters = atob(data.base64);
+              const byteNumbers = new Array(byteCharacters.length);
+              for (let i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+              }
+              const byteArray = new Uint8Array(byteNumbers);
+              const blob = new Blob([byteArray], { type: 'application/pdf' });
+              const blobUrl = URL.createObjectURL(blob);
+              window.open(blobUrl, '_blank');
+              return;
+            } catch(e) { console.error('Blob URL failed', e); }
+         }
+         // Fallback if fetch fails
+         router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
+         return;
+      }
       
       setPreviewModalData({ id, filename, loading: true });
       const data = await invoke('getAttachmentContent', { attachmentId: id });
