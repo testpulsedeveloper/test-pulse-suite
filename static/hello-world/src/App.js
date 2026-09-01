@@ -3275,7 +3275,23 @@ const renderPlanningTab = () => (
             </div>
             
             <div className="test-list">
-              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())).map(test => (
+              {cycleTests.filter(test => !searchQuery || test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase()))
+                .sort((a, b) => {
+                  const sA = (a.status || 'not run').toLowerCase();
+                  const sB = (b.status || 'not run').toLowerCase();
+                  const getRank = (s) => {
+                    if (s === 'not run') return 1;
+                    if (s === 'fail') return 2;
+                    if (s === 'blocked') return 3;
+                    if (s === 'pass') return 4;
+                    return 5;
+                  };
+                  const rankA = getRank(sA);
+                  const rankB = getRank(sB);
+                  if (rankA !== rankB) return rankA - rankB;
+                  return (a.key || '').localeCompare(b.key || '');
+                })
+                .map(test => (
                 <div key={test.id} className="test-card glass" style={{display: 'flex', flexDirection: 'column'}}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'auto 100px 1fr auto', gap: '1rem', alignItems: 'center', width: '100%' }}>
                     <div onClick={() => handleToggleExecutionTest(test.id)} style={{cursor: 'pointer', display: 'flex', alignItems: 'center'}}>
