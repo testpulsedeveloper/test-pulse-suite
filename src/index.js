@@ -2074,33 +2074,56 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
   const issueTypes = bugIssueTypes.length > 0 ? bugIssueTypes : defaultBugTypes;
   const typeList = issueTypes.map(t => `"${t}"`).join(', ');
 
-  // Simple JQL — no project filter, Jira API respects user permissions.
-  // A complex "project in (key1, key2, ...)" clause can hit JQL length limits and fail.
-  const jql = `issuetype in (${typeList}) ORDER BY created DESC`;
-  const fields = 'summary,status,assignee,priority,resolution,created,reporter,issuetype,project';
+  let projectJql = '';
+  if (allProjectKeys.length > 0) {
+    const keyList = allProjectKeys.map(k => `"${k}"`).join(', ');
+    projectJql = `project in (${keyList}) AND `;
+  } else if (projectId) {
+    projectJql = `project = "${projectId}" AND `;
+  }
+
+  const jql = `${projectJql}issuetype in (${typeList}) ORDER BY created DESC`;
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'reporter', 'issuetype', 'project'];
 
   let issues = [];
-  const res = await api.asUser().requestJira(
-    route`/rest/api/3/search?jql=${jql}&fields=${fields}&maxResults=200`
-  );
+  
+  try {
+    const res = await api.asUser().requestJira(route`/rest/api/3/search`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        jql: jql,
+        maxResults: 200,
+        fields: fields,
+        validateQuery: "warn" // <--- CRÍTICO: Evita que Jira lance error 400 si un tipo de issue (ej. "Falla") no existe en esta instancia
+      })
+    });
 
-  if (res.ok) {
-    const data = await res.json();
-    issues = data.issues || [];
-  } else {
-    console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}`);
-    // Fallback: minimal working JQL
-    const fallbackRes = await api.asUser().requestJira(
-      route`/rest/api/3/search?jql=issuetype in (Bug, Defect, Error, Falla) ORDER BY created DESC&fields=${fields}&maxResults=200`
-    );
-    if (fallbackRes.ok) {
-      const fb = await fallbackRes.json();
-      issues = fb.issues || [];
+    if (res.ok) {
+      const data = await res.json();
+      issues = data.issues || [];
+    } else {
+      console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}`);
+      // Fallback extremadament simple en caso de que project in () falle
+      const fallbackJql = projectId ? `project = "${projectId}" AND issuetype = "Error" ORDER BY created DESC` : `issuetype = "Error" ORDER BY created DESC`;
+      const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jql: fallbackJql, maxResults: 100, fields, validateQuery: "warn" })
+      });
+      if (fallbackRes.ok) {
+        const fb = await fallbackRes.json();
+        issues = fb.issues || [];
+      }
     }
+  } catch (e) {
+    console.error("Exception in getProjectUnlinkedBugs:", e);
   }
 
   // Return ALL bugs — mark linked ones instead of filtering them out
-  // This lets the UI show complete coverage picture (all 12 bugs, linked or not)
   return issues.map(issue => ({
     key: issue.key,
     summary: issue.fields?.summary || '',
@@ -2113,7 +2136,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
     created: issue.fields?.created || null,
     issuetype: issue.fields?.issuetype?.name || 'Bug',
     project: issue.fields?.project?.key || '',
-    isLinked: linkedSet.has(issue.key), // true = ya vinculado a un caso de prueba
+    isLinked: linkedSet.has(issue.key),
   }));
 });
 
