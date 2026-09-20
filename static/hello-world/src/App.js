@@ -548,20 +548,6 @@ function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [loading, setLoading] = useState(true);
   const [localLoading, setLocalLoading] = useState(false);
-  const [isMigrating, setIsMigrating] = useState(false);
-  const [isBackingUp, setIsBackingUp] = useState(false);
-  const [selectedPilotCycleId, setSelectedPilotCycleId] = useState('');
-  const [migrationCycles, setMigrationCycles] = useState([]);
-  const [isLoadingMigrationStatus, setIsLoadingMigrationStatus] = useState(false);
-  const [isMigratingAll, setIsMigratingAll] = useState(false);
-  const [stopMigrationRef, setStopMigrationRef] = useState(false);
-  const [globalMigrationProgress, setGlobalMigrationProgress] = useState(null);
-  const [activeMigratingCycleId, setActiveMigratingCycleId] = useState(null);
-  const [isMigratingPilot, setIsMigratingPilot] = useState(false);
-  const [pilotMigrationResult, setPilotMigrationResult] = useState(null);
-  const [pilotProgress, setPilotProgress] = useState(null);
-  const [backupProgress, setBackupProgress] = useState(null);
-  const [migrateProgress, setMigrateProgress] = useState(null); // {processed, total, migrated, modern, skipped, errors}
 
   // Project Context & Config State
   const [projects, setProjects] = useState([]);
@@ -3879,7 +3865,6 @@ Then el sistema valida la identidad.
 
   const loadReportData = async () => {
     if (!selectedProjectId) return;
-    if (isMigrating) return;
     if (isCircuitBroken()) {
       addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
       return;
@@ -6221,15 +6206,24 @@ const renderPlanningTab = () => {
   };
 
   const handleSaveConfig = async (e) => {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     if (!selectedProjectId) return;
     setIsSavingConfig(true);
     try {
       await invoke('setConfig', { projectId: selectedProjectId, config: projectConfig });
       await loadData(selectedProjectId);
+      addNotification({
+        type: 'success',
+        title: '✅ Configuración guardada',
+        description: 'Las opciones del proyecto y mapeos de Jira se han actualizado correctamente.'
+      });
     } catch (err) {
       console.error("Error saving config:", err);
-      alert("Error saving configuration.");
+      addNotification({
+        type: 'error',
+        title: 'Error al guardar configuración',
+        description: err.message || 'Ocurrió un problema al guardar los cambios en Jira.'
+      });
     } finally {
       setIsSavingConfig(false);
     }
@@ -8163,940 +8157,661 @@ const renderPlanningTab = () => {
     };
   };
 
-  
-  const loadMigrationStatus = useCallback(async () => {
-    if (!selectedProjectId) return;
-    setIsLoadingMigrationStatus(true);
-    try {
-      const res = await invoke('getProjectCyclesMigrationStatus', {
-        projectId: selectedProjectId,
-        config: projectConfig
-      });
-      if (res && res.success && Array.isArray(res.cycles)) {
-        setMigrationCycles(res.cycles);
-      }
-    } catch (err) {
-      console.warn('Error loading migration status:', err);
-    } finally {
-      setIsLoadingMigrationStatus(false);
-    }
-  }, [selectedProjectId, projectConfig]);
+    const renderConfigTab = () => {
+    const currentProject = projects.find(p => String(p.id) === String(selectedProjectId));
+    const projectName = currentProject?.name || 'Proyecto';
+    const projectKey = currentProject?.key || selectedProjectId;
 
-  useEffect(() => {
-    if (activeTab === 'config' && selectedProjectId && isAdmin) {
-      loadMigrationStatus();
-    }
-  }, [activeTab, selectedProjectId, isAdmin, loadMigrationStatus]);
-
-  const migrateCycleWorker = async (cycleId, cycleLabel, onProgress) => {
-    // 1. Fetch current V1 executions and existing Test Runs
-    const [executionsRes, summaryRes, existingRunsRes] = await Promise.all([
-      invoke('getCycleExecution', { cycleId }).catch(() => []),
-      invoke('getCycleExecutionSummary', { cycleId }).catch(() => []),
-      invoke('getCycleTestRuns', { cycleId, projectId: selectedProjectId, config: projectConfig }).catch(() => ({ testRuns: [] }))
-    ]);
-
-    let testList = Array.isArray(executionsRes) && executionsRes.length > 0 ? executionsRes : (Array.isArray(summaryRes) ? summaryRes : []);
-    if (testList.length === 0) {
-      // Empty cycle - finalize as V2
-      await invoke('finalizeCycleMigration', { cycleId, totalMigrated: 0 });
-      return { success: true, count: 0, newlyCreated: 0, syncedExisting: 0, cycleKey: cycleLabel };
-    }
-
-    const existingRuns = existingRunsRes?.testRuns || [];
-    const existingRunsMap = new Map();
-    existingRuns.forEach(r => {
-      existingRunsMap.set(String(r.testCaseId || r.id), r);
-    });
-
-    const pendingTests = testList.filter(tc => !existingRunsMap.has(String(tc.id)));
-    const existingToSync = testList
-      .filter(tc => existingRunsMap.has(String(tc.id)))
-      .map(tc => {
-        const runMeta = existingRunsMap.get(String(tc.id));
-        return {
-          testRunId: runMeta.testRunId || runMeta.testRunKey,
-          testExec: tc
-        };
-      });
-
-    let newlyMigratedCount = 0;
-    let syncedCount = 0;
-    const allCreatedRuns = [...existingRuns];
-
-    // 2. Create pending Test Runs in batches of 5 (with attachments + tester)
-    if (pendingTests.length > 0) {
-      const CHUNK_SIZE = 5;
-      const chunks = [];
-      for (let i = 0; i < pendingTests.length; i += CHUNK_SIZE) {
-        chunks.push(pendingTests.slice(i, i + CHUNK_SIZE));
-      }
-
-      for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
-        const batch = chunks[cIdx];
-        const currentProcessed = cIdx * CHUNK_SIZE + batch.length;
-        const percent = Math.round(10 + ((cIdx + 1) / chunks.length) * 45);
-
-        if (onProgress) {
-          onProgress(percent, `Creando Test Runs (${currentProcessed}/${pendingTests.length}) con snapshots y evidencias...`);
-        }
-
-        const resBatch = await invoke('migrateCycleBatch', {
-          projectId: selectedProjectId,
-          cycleId,
-          cycleKey: cycleLabel,
-          batch,
-          config: projectConfig
-        });
-
-        if (resBatch && resBatch.created) {
-          newlyMigratedCount += resBatch.created.length;
-          allCreatedRuns.push(...resBatch.created);
-        }
-      }
-    }
-
-    // 3. Sync existing Test Runs (re-attach files + assign tester + transition status) in batches of 5
-    if (existingToSync.length > 0) {
-      const SYNC_CHUNK_SIZE = 5;
-      const syncChunks = [];
-      for (let i = 0; i < existingToSync.length; i += SYNC_CHUNK_SIZE) {
-        syncChunks.push(existingToSync.slice(i, i + SYNC_CHUNK_SIZE));
-      }
-
-      for (let sIdx = 0; sIdx < syncChunks.length; sIdx++) {
-        const batch = syncChunks[sIdx];
-        const currentProcessed = sIdx * SYNC_CHUNK_SIZE + batch.length;
-        const percent = Math.round(55 + ((sIdx + 1) / syncChunks.length) * 35);
-
-        if (onProgress) {
-          onProgress(percent, `Sincronizando comentarios, adjuntos y testers (${currentProcessed}/${existingToSync.length})...`);
-        }
-
-        const resSync = await invoke('syncCycleBatchTestRuns', { batch, cycleKey: cycleLabel });
-        if (resSync && resSync.synced) {
-          syncedCount += resSync.synced;
-        }
-      }
-    }
-
-    // 4. Finalize migration
-    if (onProgress) onProgress(95, 'Registrando ciclo V2 en Jira...');
-    await invoke('finalizeCycleMigration', {
-      cycleId,
-      totalMigrated: allCreatedRuns.length
-    });
-
-    if (onProgress) onProgress(100, '¡Ciclo migrado con éxito!');
-    return {
-      success: true,
-      count: allCreatedRuns.length,
-      newlyCreated: newlyMigratedCount,
-      syncedExisting: syncedCount,
-      cycleKey: cycleLabel,
-      runs: allCreatedRuns
-    };
-  };
-
-  const handleMigrateSingleCycleFromTable = async (cycle) => {
-    if (!cycle) return;
-    const cycleLabel = cycle.key ? `${cycle.key} - ${cycle.summary}` : cycle.summary;
-    if (!window.confirm(`¿Deseas migrar/sincronizar el ciclo "${cycleLabel}" a la Arquitectura V2 (Test Runs)?`)) {
-      return;
-    }
-
-    setActiveMigratingCycleId(cycle.id);
-    setPilotProgress({ percent: 5, message: `Iniciando migración de ${cycle.key || cycle.summary}...` });
-
-    try {
-      const result = await migrateCycleWorker(cycle.id, cycle.key || cycle.summary, (pct, msg) => {
-        setPilotProgress({ percent: pct, message: msg });
-      });
-
-      addNotification({
-        type: 'success',
-        title: '✅ Ciclo Migrado a V2',
-        description: `El ciclo ${cycle.key || cycle.summary} ahora cuenta con ${result.count} Test Runs en Jira.`
-      });
-
-      await loadMigrationStatus();
-    } catch (err) {
-      addNotification({
-        type: 'error',
-        title: 'Error en la migración',
-        description: err.message
-      });
-    } finally {
-      setActiveMigratingCycleId(null);
-      setPilotProgress(null);
-    }
-  };
-
-  const handleMigrateAllPendingCycles = async () => {
-    const pendingCycles = migrationCycles.filter(c => !c.isV2);
-    if (pendingCycles.length === 0) {
-      if (!window.confirm('Todos los ciclos ya están marcados como V2. ¿Deseas re-sincronizar todos los ciclos del proyecto de nuevo?')) {
-        return;
-      }
-    } else {
-      if (!window.confirm(`¿Iniciar la MIGRACIÓN MASIVA de ${pendingCycles.length} ciclos a la Arquitectura V2 (Test Runs)?
-
-Este proceso:
-1. Creará incidencias Test Run oficiales en Jira.
-2. Clonará los snapshots 1:1 de los casos de prueba en las descripciones.
-3. Copiará las evidencias y capturas físicas a Jira.
-4. Publicará los comentarios de iteraciones y asignará a los testers ejecutores.
-
-Puedes detener el proceso en cualquier momento de forma segura.`)) {
-        return;
-      }
-    }
-
-    const targetList = pendingCycles.length > 0 ? pendingCycles : migrationCycles;
-    setIsMigratingAll(true);
-    setStopMigrationRef(false);
-
-    let completedCycles = 0;
-    let totalRunsCreated = 0;
-    let totalRunsSynced = 0;
-
-    for (let i = 0; i < targetList.length; i++) {
-      const cycle = targetList[i];
-      const cycleLabel = cycle.key ? `${cycle.key} - ${cycle.summary}` : cycle.summary;
-
-      setActiveMigratingCycleId(cycle.id);
-      setGlobalMigrationProgress({
-        currentCycleIndex: i + 1,
-        totalCycles: targetList.length,
-        currentCycleLabel: cycleLabel,
-        globalPercent: Math.round((i / targetList.length) * 100),
-        subMessage: `Iniciando ciclo ${i + 1} de ${targetList.length}...`
-      });
-
-      try {
-        const result = await migrateCycleWorker(cycle.id, cycle.key || cycle.summary, (pct, msg) => {
-          setGlobalMigrationProgress({
-            currentCycleIndex: i + 1,
-            totalCycles: targetList.length,
-            currentCycleLabel: cycleLabel,
-            globalPercent: Math.round(((i + (pct / 100)) / targetList.length) * 100),
-            subMessage: msg
-          });
-        });
-
-        completedCycles++;
-        totalRunsCreated += (result.newlyCreated || 0);
-        totalRunsSynced += (result.syncedExisting || 0);
-      } catch (errCycle) {
-        console.error(`Error migrating cycle ${cycle.key}:`, errCycle);
-        addNotification({
-          type: 'warning',
-          title: `Advertencia en ciclo ${cycle.key}`,
-          description: errCycle.message
-        });
-      }
-
-      // Check if user requested stop
-      if (stopMigrationRef) {
-        addNotification({
-          type: 'info',
-          title: 'Migración masiva pausada',
-          description: `Se procesaron ${completedCycles} de ${targetList.length} ciclos.`
-        });
-        break;
-      }
-    }
-
-    setIsMigratingAll(false);
-    setActiveMigratingCycleId(null);
-    setGlobalMigrationProgress(null);
-
-    await loadMigrationStatus();
-
-    addNotification({
-      type: 'success',
-      title: '🎉 Migración Masiva Completada',
-      description: `Se migraron ${completedCycles} ciclos (${totalRunsCreated} Test Runs creados, ${totalRunsSynced} sincronizados).`
-    });
-  };
-
-
-  const handleMigratePilotCycle = async () => {
-    if (!selectedPilotCycleId) return;
-    const targetCycle = testCycles.find(c => String(c.id) === String(selectedPilotCycleId));
-    const cycleLabel = targetCycle ? (targetCycle.key || targetCycle.summary) : selectedPilotCycleId;
-
-    if (!window.confirm(`¿Deseas sincronizar la migración piloto en el ciclo "${cycleLabel}"?\n\nSe transferirán los testers asignados (ejecutores), estatus y se re-adjuntarán físicamente todas las capturas/evidencias a los tickets Test Run en Jira.`)) {
-      return;
-    }
-
-    setIsMigratingPilot(true);
-    setPilotMigrationResult(null);
-    setPilotProgress({ percent: 5, message: 'Verificando ejecuciones y Test Runs en Jira...' });
-
-    try {
-      // 1. Fetch current V1 executions and existing Test Runs
-      const [executionsRes, summaryRes, existingRunsRes] = await Promise.all([
-        invoke('getCycleExecution', { cycleId: selectedPilotCycleId }).catch(() => []),
-        invoke('getCycleExecutionSummary', { cycleId: selectedPilotCycleId }).catch(() => []),
-        invoke('getCycleTestRuns', { cycleId: selectedPilotCycleId, projectId: selectedProjectId, config: projectConfig }).catch(() => ({ testRuns: [] }))
-      ]);
-
-      let testList = Array.isArray(executionsRes) && executionsRes.length > 0 ? executionsRes : (Array.isArray(summaryRes) ? summaryRes : []);
-      if (testList.length === 0) {
-        setPilotMigrationResult({ success: false, message: 'El ciclo seleccionado no contiene casos de prueba para migrar.' });
-        setIsMigratingPilot(false);
-        setPilotProgress(null);
-        return;
-      }
-
-      const existingRuns = existingRunsRes?.testRuns || [];
-      const existingRunsMap = new Map();
-      existingRuns.forEach(r => {
-        existingRunsMap.set(String(r.testCaseId || r.id), r);
-      });
-
-      const pendingTests = testList.filter(tc => !existingRunsMap.has(String(tc.id)));
-      const existingToSync = testList
-        .filter(tc => existingRunsMap.has(String(tc.id)))
-        .map(tc => {
-          const runMeta = existingRunsMap.get(String(tc.id));
-          return {
-            testRunId: runMeta.testRunId || runMeta.testRunKey,
-            testExec: tc
-          };
-        });
-
-      let newlyMigratedCount = 0;
-      let syncedCount = 0;
-      const allCreatedRuns = [...existingRuns];
-
-      // 2. Create pending Test Runs in batches of 5 (with attachments + tester)
-      if (pendingTests.length > 0) {
-        const CHUNK_SIZE = 5;
-        const chunks = [];
-        for (let i = 0; i < pendingTests.length; i += CHUNK_SIZE) {
-          chunks.push(pendingTests.slice(i, i + CHUNK_SIZE));
-        }
-
-        for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
-          const batch = chunks[cIdx];
-          const currentProcessed = cIdx * CHUNK_SIZE + batch.length;
-          const percent = Math.round(10 + ((cIdx + 1) / chunks.length) * 40);
-
-          setPilotProgress({
-            percent,
-            message: `Creando nuevos Test Runs (${currentProcessed}/${pendingTests.length}) con tester y adjuntos...`
-          });
-
-          const resBatch = await invoke('migrateCycleBatch', {
-            projectId: selectedProjectId,
-            cycleId: selectedPilotCycleId,
-            cycleKey: cycleLabel,
-            batch,
-            config: projectConfig
-          });
-
-          if (resBatch && resBatch.created) {
-            newlyMigratedCount += resBatch.created.length;
-            allCreatedRuns.push(...resBatch.created);
-          }
-        }
-      }
-
-      // 3. Sync existing Test Runs (re-attach files + assign tester + transition status) in batches of 5
-      if (existingToSync.length > 0) {
-        const SYNC_CHUNK_SIZE = 5;
-        const syncChunks = [];
-        for (let i = 0; i < existingToSync.length; i += SYNC_CHUNK_SIZE) {
-          syncChunks.push(existingToSync.slice(i, i + SYNC_CHUNK_SIZE));
-        }
-
-        for (let sIdx = 0; sIdx < syncChunks.length; sIdx++) {
-          const batch = syncChunks[sIdx];
-          const currentProcessed = sIdx * SYNC_CHUNK_SIZE + batch.length;
-          const percent = Math.round(50 + ((sIdx + 1) / syncChunks.length) * 40);
-
-          setPilotProgress({
-            percent,
-            message: `Re-adjuntando evidencias y testers en Jira (${currentProcessed}/${existingToSync.length})...`
-          });
-
-          const resSync = await invoke('syncCycleBatchTestRuns', { batch, cycleKey: cycleLabel });
-          if (resSync && resSync.synced) {
-            syncedCount += resSync.synced;
-          }
-        }
-      }
-
-      // 4. Finalize migration
-      setPilotProgress({ percent: 95, message: 'Finalizando y registrando ciclo V2 en Jira...' });
-      await invoke('finalizeCycleMigration', {
-        cycleId: selectedPilotCycleId,
-        totalMigrated: allCreatedRuns.length
-      });
-
-      setPilotProgress({ percent: 100, message: '¡Sincronización de Test Runs y adjuntos completada!' });
-      setPilotMigrationResult({
-        success: true,
-        count: allCreatedRuns.length,
-        newlyCreated: newlyMigratedCount,
-        syncedExisting: syncedCount,
-        cycleKey: cycleLabel,
-        runs: allCreatedRuns,
-        message: `¡Migración completada! Se actualizaron los testers asignados, estatus y evidencias adjuntas en ${allCreatedRuns.length} Test Runs.`
-      });
-
-      addNotification({
-        type: 'success',
-        title: '✅ Testers y Adjuntos Sincronizados',
-        description: `Ciclo ${cycleLabel} actualizado con ${allCreatedRuns.length} Test Runs en Jira.`
-      });
-
-    } catch (err) {
-      console.error('Error in handleMigratePilotCycle:', err);
-      setPilotMigrationResult({ success: false, message: err.message || String(err) });
-      addNotification({
-        type: 'error',
-        title: 'Error en Sincronización',
-        description: err.message || 'Error durante la sincronización'
-      });
-    } finally {
-      setIsMigratingPilot(false);
-    }
-  };
-
-    const renderConfigTab = () => (
-    <div className="tab-layout">
-      <main className="main-content" style={{ maxWidth: '800px', margin: '0 auto' }}>
-        <div className="header">
-          <h1>Project Configurations</h1>
-        </div>
-        
-        {!selectedProjectId ? (
-          <div className="empty-state">
-            <p>Please select a project from the top navigation to configure issue types.</p>
-          </div>
-        ) : (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px' }}>
-            <h2 style={{ marginBottom: '1rem' }}>Map Issue Types</h2>
-            <p style={{ marginBottom: '2rem', color: 'var(--ds-text-subtlest)' }}>
-              Select the custom Jira issue types used in this project to represent Test Cases, Test Cycles, and Test Sets.
-            </p>
-            
-            <form onSubmit={handleSaveConfig}>
-              <div className="form-group">
-                <label>Test Case Issue Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.testCaseType}
-                  onChange={(e) => setProjectConfig({...projectConfig, testCaseType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
+    return (
+      <div className="tab-layout" style={{ background: 'var(--bg-main, #0d1117)', minHeight: 'calc(100vh - 120px)', padding: '1.5rem 2rem 4rem 2rem' }}>
+        <main className="main-content" style={{ maxWidth: '1080px', margin: '0 auto' }}>
+          
+          {/* Header Banner */}
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            gap: '1.2rem',
+            paddingBottom: '1.5rem',
+            marginBottom: '1.75rem',
+            borderBottom: '1px solid var(--ds-border, #30363d)'
+          }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.35rem' }}>
+                <span style={{ fontSize: '1.6rem' }}>⚙️</span>
+                <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: '700', color: 'var(--text-primary, #e6edf3)' }}>
+                  Configuración del Proyecto
+                </h1>
+                {projectKey && (
+                  <span style={{
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    background: 'rgba(56, 139, 253, 0.15)',
+                    color: '#58a6ff',
+                    border: '1px solid rgba(56, 139, 253, 0.3)',
+                    padding: '0.2rem 0.6rem',
+                    borderRadius: '12px'
+                  }}>
+                    {projectName} ({projectKey})
+                  </span>
+                )}
               </div>
-              
-              <div className="form-group">
-                <label>Test Cycle Issue Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.testCycleType}
-                  onChange={(e) => setProjectConfig({...projectConfig, testCycleType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div className="form-group">
-                <label>Test Plan Issue Type (Test Set)</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.planIssueType || ''}
-                  onChange={(e) => setProjectConfig({...projectConfig, planIssueType: e.target.value})}
-                  required
-                >
-                  <option value="">Select an issue type...</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label>Test Run Issue Type (Ejecución V2)</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.testRunType || 'Test Run'}
-                  onChange={(e) => setProjectConfig({...projectConfig, testRunType: e.target.value})}
-                >
-                  <option value="Test Run">Test Run (Predeterminado)</option>
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-                <small style={{ color: 'var(--text-secondary)' }}>
-                  Tipo de incidencia estándar para almacenar ejecuciones y evidencias de forma ilimitada en Jira.
-                </small>
-              </div>
-
-              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
-              <h3 style={{ marginBottom: '1rem' }}>Requirements Traceability</h3>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Select the issue types that represent requirements (e.g., Story, Epic) and the link type used to connect Test Cases to those requirements.
+              <p style={{ margin: 0, color: 'var(--text-secondary, #8b949e)', fontSize: '0.92rem', lineHeight: '1.4' }}>
+                Administra el mapeo de entidades nativas de Jira, trazabilidad de requerimientos, métricas visibles del tablero y permisos de acceso para Test Pulse Suite v2.0.0.
               </p>
-
-              <div className="form-group">
-                <label>Requirement Issue Types</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)', height: '100px' }}
-                  multiple
-                  value={projectConfig.requirementIssueTypes || []}
-                  onChange={(e) => {
-                    const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
-                    setProjectConfig({...projectConfig, requirementIssueTypes: selected});
-                  }}
-                >
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-                <small style={{ color: 'var(--text-secondary)' }}>Hold Ctrl/Cmd to select multiple.</small>
-              </div>
-
-              <div className="form-group">
-                <label>Test-to-Requirement Link Type</label>
-                <select 
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)' }}
-                  value={projectConfig.requirementLinkType || 'ANY'}
-                  onChange={(e) => setProjectConfig({...projectConfig, requirementLinkType: e.target.value})}
-                >
-                  <option value="ANY">Any Link Type</option>
-                  {linkTypes.map(lt => (
-                    <option key={lt.id} value={lt.name}>{lt.name} ({lt.outward} / {lt.inward})</option>
-                  ))}
-                </select>
-              </div>
-              
-              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
-              <h3 style={{ marginBottom: '1rem' }}>Bug / Defect Issue Types</h3>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Selecciona los tipos de issue que representan bugs en tu proyecto (usados en Reportes). Si no seleccionas ninguno, se usarán todos los tipos comunes: Bug, Defect, Falla, Error, Incident, etc.
-              </p>
-
-              <div className="form-group">
-                <label>Tipos de Bug / Defecto</label>
-                <select
-                  className="status-badge"
-                  style={{ width: '100%', padding: '0.5rem', backgroundColor: 'transparent', border: '1px solid var(--ds-border)', height: '100px' }}
-                  multiple
-                  value={projectConfig.bugIssueTypes || []}
-                  onChange={(e) => {
-                    const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
-                    setProjectConfig({...projectConfig, bugIssueTypes: selected});
-                  }}
-                >
-                  {projectIssueTypes.map(it => (
-                    <option key={it.id} value={it.name}>{it.name}</option>
-                  ))}
-                </select>
-                <small style={{ color: 'var(--text-secondary)' }}>
-                  Ctrl/Cmd + clic para seleccionar múltiples. Vacío = busca Bug, Defect, Falla, Error, Incident, Incidente, Problem, Issue en todos los proyectos accesibles.
-                </small>
-              </div>
-
-              <hr style={{ margin: '2rem 0', borderColor: 'var(--ds-border)' }} />
-              <h3 style={{ marginBottom: '1rem' }}>Widgets del Tablero de Reportes</h3>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
-                Selecciona qué métricas y gráficas estarán visibles en la pestaña de Reportes.
-              </p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                   <input 
-                     type="checkbox" 
-                     checked={projectConfig.showProgreso !== false}
-                     onChange={e => setProjectConfig({...projectConfig, showProgreso: e.target.checked})}
-                     style={{ width: '1.2rem', height: '1.2rem' }}
-                   />
-                   <span style={{ fontWeight: '500' }}>Mostrar Progreso por Ciclo de Pruebas</span>
-                </label>
-                
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                   <input 
-                     type="checkbox" 
-                     checked={projectConfig.showTesterStats !== false}
-                     onChange={e => setProjectConfig({...projectConfig, showTesterStats: e.target.checked})}
-                     style={{ width: '1.2rem', height: '1.2rem' }}
-                   />
-                   <span style={{ fontWeight: '500' }}>Mostrar Casos por Tester</span>
-                </label>
-    
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                   <input 
-                     type="checkbox" 
-                     checked={projectConfig.showExecTypeStats !== false}
-                     onChange={e => setProjectConfig({...projectConfig, showExecTypeStats: e.target.checked})}
-                     style={{ width: '1.2rem', height: '1.2rem' }}
-                   />
-                   <span style={{ fontWeight: '500' }}>Mostrar Casos por Tipo de Ejecución (Manual/Auto)</span>
-                </label>
-    
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                   <input 
-                     type="checkbox" 
-                     checked={projectConfig.showBugTimes !== false}
-                     onChange={e => setProjectConfig({...projectConfig, showBugTimes: e.target.checked})}
-                     style={{ width: '1.2rem', height: '1.2rem' }}
-                   />
-                   <span style={{ fontWeight: '500' }}>Mostrar Tiempo de Resolución de Defectos (Horas Laborales)</span>
-                </label>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                   <input 
-                     type="checkbox" 
-                     checked={projectConfig.showFeatureStats !== false}
-                     onChange={e => setProjectConfig({...projectConfig, showFeatureStats: e.target.checked})}
-                     style={{ width: '1.2rem', height: '1.2rem' }}
-                   />
-                   <span style={{ fontWeight: '500' }}>Mostrar Casos por Funcionalidad (Carpetas)</span>
-                </label>
-              </div>
-
-              <div style={{ marginTop: '2rem' }}>
-                <button type="submit" className="btn-primary" disabled={isSavingConfig}>
-                  {isSavingConfig ? 'Saving...' : 'Save Configuration'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Allowlist Section (Admin only) */}
-        {selectedProjectId && isAdmin && (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px', marginTop: '2rem', marginBottom: '2rem' }}>
-            <h2 style={{ marginBottom: '1rem', color: 'var(--danger-color)' }}>Restricción por Proyecto</h2>
-            <p style={{ marginBottom: '1rem', color: 'var(--ds-text-subtlest)' }}>
-              Puedes habilitar o deshabilitar Test Pulse específicamente para este proyecto.
-              Si lo deshabilitas, los usuarios regulares no podrán ver ni usar la app aquí.
-            </p>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.5rem' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'bold' }}>
-                <input 
-                  type="checkbox" 
-                  checked={isProjectAllowed}
-                  onChange={async (e) => {
-                    const enabled = e.target.checked;
-                    setIsProjectAllowed(enabled);
-                    await invoke('setAllowedProjects', { projectId: selectedProjectId, enabled });
-                    alert(`Test Pulse ha sido ${enabled ? 'habilitado' : 'deshabilitado'} para este proyecto.`);
-                  }}
-                />
-                Habilitar Test Pulse en este proyecto
-              </label>
             </div>
-          </div>
-        )}
 
-        {/* Respaldo Section */}
-        {selectedProjectId && isAdmin && (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px', marginTop: '2rem', marginBottom: '2rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.8rem' }}>
-              <span style={{ fontSize: '1.5rem' }}>🛡️</span>
-              <h2 style={{ margin: 0, color: 'var(--brand-color)' }}>Copia de Seguridad Completa (Full Project Backup)</h2>
-            </div>
-            <p style={{ marginBottom: '1.5rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-              Genera y descarga un archivo <code>.json</code> con <strong>absolutamente toda la base de datos</strong> de este proyecto: carpetas, suites, casos de prueba con sus pasos detallados (BDD/Tradicional), planes de prueba, ciclos y el <strong>historial completo de ejecuciones</strong> (iteraciones, evidencias, comentarios, testers y bugs asociados).
-            </p>
-
-            {/* Progress Bar during Backup */}
-            {isBackingUp && backupProgress && (
-              <div style={{ marginBottom: '1.5rem', background: 'var(--bg-main)', padding: '1.2rem', borderRadius: '8px', border: '1px solid var(--ds-border)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', marginBottom: '0.5rem', fontWeight: 'bold' }}>
-                  <span>⏳ {backupProgress.message}</span>
-                  <span>{backupProgress.percent}%</span>
-                </div>
-                <div style={{ background: 'var(--border-color)', borderRadius: '6px', height: '12px', overflow: 'hidden' }}>
-                  <div style={{
-                    background: 'linear-gradient(90deg, #36B37E, #00B8D9)',
-                    height: '100%',
-                    width: `${backupProgress.percent}%`,
-                    transition: 'width 0.3s ease'
-                  }} />
-                </div>
-              </div>
-            )}
-
-            {/* Success Card */}
-            {!isBackingUp && backupProgress?.done && (
-              <div style={{ marginBottom: '1.5rem', padding: '1rem', borderRadius: '8px', background: 'rgba(54, 179, 126, 0.15)', border: '1px solid #36B37E', color: 'var(--text-primary)' }}>
-                <div style={{ fontWeight: 'bold', fontSize: '1rem', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <span>✅</span> ¡Copia de seguridad generada y descargada exitosamente!
-                </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  Archivo guardado: <code>{backupProgress.filename}</code>
-                </div>
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.6rem', fontSize: '0.85rem' }}>
-                  <span>📁 Carpetas: <strong>{backupProgress.stats.totalFolders}</strong></span>
-                  <span>📋 Casos: <strong>{backupProgress.stats.totalTestCases}</strong></span>
-                  <span>📦 Planes: <strong>{backupProgress.stats.totalTestPlans}</strong></span>
-                  <span>🔄 Ciclos: <strong>{backupProgress.stats.totalTestCycles}</strong></span>
-                  <span>🎯 Ejecuciones: <strong>{backupProgress.stats.totalExecutions}</strong></span>
-                </div>
-              </div>
-            )}
-            
-            <button 
-                id="backup-download-btn"
+            {selectedProjectId && (
+              <button
+                type="button"
+                onClick={handleSaveConfig}
+                disabled={isSavingConfig}
                 className="btn-primary"
-                disabled={isBackingUp}
-                onClick={handleDownloadFullBackup}
-                style={{ 
-                  background: isBackingUp ? '#6B778C' : '#36B37E', 
-                  border: 'none', 
-                  padding: '0.85rem 1.8rem', 
-                  color: 'white', 
-                  borderRadius: '6px', 
-                  cursor: isBackingUp ? 'not-allowed' : 'pointer', 
-                  fontWeight: 'bold', 
-                  fontSize: '1rem',
+                style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '0.5rem',
-                  boxShadow: '0 2px 6px rgba(0,0,0,0.15)'
+                  padding: '0.65rem 1.4rem',
+                  fontSize: '0.95rem',
+                  fontWeight: '600',
+                  borderRadius: '6px',
+                  background: isSavingConfig ? '#484f58' : '#238636',
+                  color: '#ffffff',
+                  border: '1px solid rgba(240, 246, 252, 0.1)',
+                  cursor: isSavingConfig ? 'not-allowed' : 'pointer',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                  transition: 'all 0.2s ease'
                 }}
-            >
-              <span>{isBackingUp ? '⏳ Generando Copia...' : '📥 Descargar Copia de Seguridad (.JSON)'}</span>
-            </button>
+              >
+                <span>{isSavingConfig ? '⏳' : '💾'}</span>
+                <span>{isSavingConfig ? 'Guardando...' : 'Guardar Configuración'}</span>
+              </button>
+            )}
           </div>
-        )}
 
-        {/* ── Centro de Migración Oficial a Arquitectura V2 (Test Runs) ── */}
-        {selectedProjectId && isAdmin && (
-          <div className="glass" style={{ padding: '2rem', borderRadius: '8px', marginTop: '2rem', marginBottom: '2rem', borderLeft: '4px solid #0052CC', background: 'var(--bg-surface)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.2rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
-                <span style={{ fontSize: '1.8rem' }}>🚀</span>
-                <div>
-                  <h2 style={{ margin: 0, color: '#0052CC', fontSize: '1.3rem' }}>Centro de Migración a Arquitectura V2 (Test Runs Nativos)</h2>
-                  <p style={{ margin: '0.2rem 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                    Migra todos los ciclos a incidencias <code>{projectConfig.testRunType || 'Test Run'}</code> oficiales en Jira con snapshots 1:1, evidencias, comentarios e iteraciones.
-                  </p>
+          {!selectedProjectId ? (
+            <div className="glass" style={{ padding: '3.5rem 2rem', textAlign: 'center', borderRadius: '12px', border: '1px dashed var(--ds-border, #30363d)' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>📂</div>
+              <h3 style={{ margin: '0 0 0.5rem 0', color: 'var(--text-primary, #e6edf3)' }}>Selecciona un Proyecto de Jira</h3>
+              <p style={{ margin: 0, color: 'var(--text-secondary, #8b949e)', fontSize: '0.95rem' }}>
+                Por favor selecciona un proyecto en la barra superior para acceder y personalizar su configuración.
+              </p>
+            </div>
+          ) : (
+            <form onSubmit={handleSaveConfig} style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+              
+              {/* Card 1: Mapeo de Tipos de Incidencia */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                  <span style={{ fontSize: '1.3rem' }}>🧩</span>
+                  <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                    Mapeo de Tipos de Incidencias Nativas de Jira
+                  </h2>
+                </div>
+                <p style={{ margin: '0 0 1.25rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' }}>
+                  Asocia los tipos de issue de tu proyecto con las entidades principales de Test Pulse. Toda la información se almacena y sincroniza de forma nativa en Jira.
+                </p>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                  gap: '1.25rem'
+                }}>
+                  {/* Test Case */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Casos de Prueba</span>
+                      <span style={{ fontSize: '0.72rem', color: '#f85149', background: 'rgba(248,81,73,0.1)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>Requerido</span>
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        padding: '0.6rem 0.75rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.9rem'
+                      }}
+                      value={projectConfig.testCaseType || ''}
+                      onChange={(e) => setProjectConfig({ ...projectConfig, testCaseType: e.target.value })}
+                      required
+                    >
+                      <option value="">Selecciona un tipo de incidencia...</option>
+                      {projectIssueTypes.map(it => (
+                        <option key={it.id} value={it.name}>{it.name}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Define los pasos, precondiciones y especificaciones del caso.
+                    </span>
+                  </div>
+
+                  {/* Test Cycle */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Ciclos de Prueba</span>
+                      <span style={{ fontSize: '0.72rem', color: '#f85149', background: 'rgba(248,81,73,0.1)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>Requerido</span>
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        padding: '0.6rem 0.75rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.9rem'
+                      }}
+                      value={projectConfig.testCycleType || ''}
+                      onChange={(e) => setProjectConfig({ ...projectConfig, testCycleType: e.target.value })}
+                      required
+                    >
+                      <option value="">Selecciona un tipo de incidencia...</option>
+                      {projectIssueTypes.map(it => (
+                        <option key={it.id} value={it.name}>{it.name}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Agrupa ejecuciones para un sprint, versión o entrega de QA.
+                    </span>
+                  </div>
+
+                  {/* Test Plan */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Planes de Prueba / Sets</span>
+                      <span style={{ fontSize: '0.72rem', color: '#f85149', background: 'rgba(248,81,73,0.1)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>Requerido</span>
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        padding: '0.6rem 0.75rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.9rem'
+                      }}
+                      value={projectConfig.planIssueType || ''}
+                      onChange={(e) => setProjectConfig({ ...projectConfig, planIssueType: e.target.value })}
+                      required
+                    >
+                      <option value="">Selecciona un tipo de incidencia...</option>
+                      {projectIssueTypes.map(it => (
+                        <option key={it.id} value={it.name}>{it.name}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Estructura los conjuntos maestros de pruebas y ciclos asociados.
+                    </span>
+                  </div>
+
+                  {/* Test Run */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Ejecución Nativa (Test Run)</span>
+                      <span style={{ fontSize: '0.72rem', color: '#2da44e', background: 'rgba(45,164,78,0.1)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>Nativo V2</span>
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        padding: '0.6rem 0.75rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.9rem'
+                      }}
+                      value={projectConfig.testRunType || 'Test Run'}
+                      onChange={(e) => setProjectConfig({ ...projectConfig, testRunType: e.target.value })}
+                    >
+                      <option value="Test Run">Test Run (Recomendado / Predeterminado)</option>
+                      {projectIssueTypes.map(it => (
+                        <option key={it.id} value={it.name}>{it.name}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Almacena snapshots 1:1, pasos, evidencias y comentarios en Jira.
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+              {/* Card 2: Trazabilidad y Requerimientos */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                  <span style={{ fontSize: '1.3rem' }}>🔗</span>
+                  <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                    Trazabilidad de Requerimientos y Enlaces
+                  </h2>
+                </div>
+                <p style={{ margin: '0 0 1.25rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' }}>
+                  Configura qué incidencias representan requerimientos de negocio y el tipo de enlace para la matriz de trazabilidad y cobertura.
+                </p>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                  gap: '1.25rem'
+                }}>
+                  {/* Requirement Types */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                      Tipos de Incidencias de Requisitos
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        minHeight: '110px',
+                        padding: '0.5rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.88rem'
+                      }}
+                      multiple
+                      value={projectConfig.requirementIssueTypes || []}
+                      onChange={(e) => {
+                        const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
+                        setProjectConfig({ ...projectConfig, requirementIssueTypes: selected });
+                      }}
+                    >
+                      {projectIssueTypes.map(it => (
+                        <option key={it.id} value={it.name}>{it.name}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Mantén presionado <kbd style={{ background: '#21262d', padding: '0.1rem 0.3rem', borderRadius: '3px' }}>Ctrl</kbd> o <kbd style={{ background: '#21262d', padding: '0.1rem 0.3rem', borderRadius: '3px' }}>Cmd</kbd> para seleccionar varios (ej: Story, Epic, Task).
+                    </span>
+                  </div>
+
+                  {/* Link Type */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                      Tipo de Enlace en Jira (Issue Link Type)
+                    </label>
+                    <select
+                      className="form-control"
+                      style={{
+                        width: '100%',
+                        padding: '0.6rem 0.75rem',
+                        background: 'var(--bg-main, #0d1117)',
+                        color: 'var(--text-primary, #e6edf3)',
+                        border: '1px solid var(--ds-border, #30363d)',
+                        borderRadius: '6px',
+                        fontSize: '0.9rem'
+                      }}
+                      value={projectConfig.requirementLinkType || 'ANY'}
+                      onChange={(e) => setProjectConfig({ ...projectConfig, requirementLinkType: e.target.value })}
+                    >
+                      <option value="ANY">Cualquier tipo de enlace (Automático)</option>
+                      {linkTypes.map(lt => (
+                        <option key={lt.id} value={lt.name}>{lt.name} ({lt.outward} / {lt.inward})</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                      Tipo de relación Jira que vincula los casos de prueba con las historias/epics.
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Card 3: Gestión de Defectos (Bugs) */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                  <span style={{ fontSize: '1.3rem' }}>🐞</span>
+                  <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                    Gestión y Detección de Defectos (Bugs)
+                  </h2>
+                </div>
+                <p style={{ margin: '0 0 1.25rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' }}>
+                  Filtro de incidencias para contabilizar defectos y calcular métricas de fallas en los reportes y dashboards.
+                </p>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  <label style={{ fontSize: '0.88rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                    Tipos de Incidencias de Defecto
+                  </label>
+                  <select
+                    className="form-control"
+                    style={{
+                      width: '100%',
+                      minHeight: '100px',
+                      padding: '0.5rem',
+                      background: 'var(--bg-main, #0d1117)',
+                      color: 'var(--text-primary, #e6edf3)',
+                      border: '1px solid var(--ds-border, #30363d)',
+                      borderRadius: '6px',
+                      fontSize: '0.88rem'
+                    }}
+                    multiple
+                    value={projectConfig.bugIssueTypes || []}
+                    onChange={(e) => {
+                      const selected = Array.from(e.target.selectedOptions).map(opt => opt.value);
+                      setProjectConfig({ ...projectConfig, bugIssueTypes: selected });
+                    }}
+                  >
+                    {projectIssueTypes.map(it => (
+                      <option key={it.id} value={it.name}>{it.name}</option>
+                    ))}
+                  </select>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                    {projectConfig.bugIssueTypes && projectConfig.bugIssueTypes.length > 0
+                      ? `Seleccionados: ${projectConfig.bugIssueTypes.join(', ')}`
+                      : 'Ninguno seleccionado: Detectará automáticamente tipos comunes (Bug, Defect, Defecto, Falla, Error, Incident, Incidente).'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 4: Widgets y Métricas del Tablero */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                  <span style={{ fontSize: '1.3rem' }}>📊</span>
+                  <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                    Personalización de Widgets del Dashboard
+                  </h2>
+                </div>
+                <p style={{ margin: '0 0 1.25rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' }}>
+                  Elige qué widgets y análisis gráficos estarán activos y visibles para el equipo en el Dashboard de Ejecución.
+                </p>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                  gap: '0.9rem'
+                }}>
+                  {/* Widget 1 */}
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    background: projectConfig.showProgreso !== false ? 'rgba(56, 139, 253, 0.08)' : 'var(--bg-main, #0d1117)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={projectConfig.showProgreso !== false}
+                      onChange={e => setProjectConfig({ ...projectConfig, showProgreso: e.target.checked })}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        📈 Progreso por Ciclo de Pruebas
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                        Visualiza el avance global, tasa de aprobación y distribución por estatus.
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Widget 2 */}
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    background: projectConfig.showTesterStats !== false ? 'rgba(56, 139, 253, 0.08)' : 'var(--bg-main, #0d1117)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={projectConfig.showTesterStats !== false}
+                      onChange={e => setProjectConfig({ ...projectConfig, showTesterStats: e.target.checked })}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        👥 Distribución por Tester
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                        Gráfica de productividad y balance de carga de trabajo por tester asignado.
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Widget 3 */}
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    background: projectConfig.showExecTypeStats !== false ? 'rgba(56, 139, 253, 0.08)' : 'var(--bg-main, #0d1117)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={projectConfig.showExecTypeStats !== false}
+                      onChange={e => setProjectConfig({ ...projectConfig, showExecTypeStats: e.target.checked })}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        ⚙️ Pruebas Manuales vs Automatizadas
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                        Compara la proporción de cobertura entre tipos de ejecución.
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Widget 4 */}
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    background: projectConfig.showBugTimes !== false ? 'rgba(56, 139, 253, 0.08)' : 'var(--bg-main, #0d1117)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={projectConfig.showBugTimes !== false}
+                      onChange={e => setProjectConfig({ ...projectConfig, showBugTimes: e.target.checked })}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        ⏱️ Tiempo de Resolución de Defectos (MTTR)
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                        Calcula el promedio de horas laborales para la corrección de fallas.
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Widget 5 */}
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    background: projectConfig.showFeatureStats !== false ? 'rgba(56, 139, 253, 0.08)' : 'var(--bg-main, #0d1117)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={projectConfig.showFeatureStats !== false}
+                      onChange={e => setProjectConfig({ ...projectConfig, showFeatureStats: e.target.checked })}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        📁 Estado por Módulo o Funcionalidad
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                        Analiza la cobertura funcional agrupada por carpetas y suites de prueba.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Card 5: Control de Acceso al Proyecto (Admin Only) */}
+              {isAdmin && (
+                <div className="glass" style={{
+                  background: 'var(--bg-surface, #161b22)',
+                  border: '1px solid var(--ds-border, #30363d)',
+                  borderRadius: '10px',
+                  padding: '1.5rem 1.75rem',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                        <span style={{ fontSize: '1.3rem' }}>🛡️</span>
+                        <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                          Control de Acceso y Estado de la Suite
+                        </h2>
+                      </div>
+                      <p style={{ margin: '0 0 1rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem', maxWidth: '650px' }}>
+                        Habilita o deshabilita el acceso a Test Pulse Suite para este proyecto. Si está deshabilitado, los usuarios no administradores no podrán ver ni interactuar con la app en este proyecto.
+                      </p>
+                    </div>
+
+                    <span style={{
+                      padding: '0.35rem 0.8rem',
+                      borderRadius: '20px',
+                      fontSize: '0.82rem',
+                      fontWeight: '600',
+                      background: isProjectAllowed ? 'rgba(45, 164, 78, 0.15)' : 'rgba(248, 81, 73, 0.15)',
+                      color: isProjectAllowed ? '#3fb950' : '#f85149',
+                      border: `1px solid ${isProjectAllowed ? 'rgba(45, 164, 78, 0.3)' : 'rgba(248, 81, 73, 0.3)'}`
+                    }}>
+                      {isProjectAllowed ? '🟢 Activo en este Proyecto' : '⚪ Inactivo en este Proyecto'}
+                    </span>
+                  </div>
+
+                  <label style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.75rem',
+                    cursor: 'pointer',
+                    background: 'var(--bg-main, #0d1117)',
+                    padding: '0.75rem 1.25rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--ds-border, #30363d)',
+                    fontWeight: '500',
+                    color: 'var(--text-primary, #e6edf3)',
+                    fontSize: '0.9rem'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={isProjectAllowed}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        setIsProjectAllowed(enabled);
+                        try {
+                          await invoke('setAllowedProjects', { projectId: selectedProjectId, enabled });
+                          addNotification({
+                            type: enabled ? 'success' : 'info',
+                            title: enabled ? 'Proyecto Habilitado' : 'Proyecto Deshabilitado',
+                            description: `Test Pulse Suite ha sido ${enabled ? 'habilitado' : 'deshabilitado'} para este proyecto.`
+                          });
+                        } catch (err) {
+                          console.error("Error setting allowed project:", err);
+                          addNotification({
+                            type: 'error',
+                            title: 'Error de permisos',
+                            description: err.message || 'No se pudo actualizar el estado de acceso del proyecto.'
+                          });
+                        }
+                      }}
+                      style={{ width: '1.2rem', height: '1.2rem', accentColor: '#238636', cursor: 'pointer' }}
+                    />
+                    <span>Habilitar Test Pulse Suite para usuarios de este proyecto</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Bottom Action Bar */}
+              <div style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                alignItems: 'center',
+                gap: '1rem',
+                paddingTop: '1rem',
+                borderTop: '1px solid var(--ds-border, #30363d)',
+                marginBottom: '2rem'
+              }}>
                 <button
-                  className="btn-secondary"
-                  onClick={loadMigrationStatus}
-                  disabled={isLoadingMigrationStatus || isMigratingAll}
-                  style={{ padding: '0.55rem 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem', borderRadius: '4px', border: '1px solid var(--ds-border)', background: 'var(--bg-main)', cursor: 'pointer', fontWeight: '500' }}
+                  type="submit"
+                  disabled={isSavingConfig}
+                  className="btn-primary"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    padding: '0.75rem 2rem',
+                    fontSize: '1rem',
+                    fontWeight: '600',
+                    borderRadius: '6px',
+                    background: isSavingConfig ? '#484f58' : '#238636',
+                    color: '#ffffff',
+                    border: '1px solid rgba(240, 246, 252, 0.1)',
+                    cursor: isSavingConfig ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.2)'
+                  }}
                 >
-                  <span>{isLoadingMigrationStatus ? '⏳ Actualizando...' : '🔄 Actualizar Diagnóstico'}</span>
+                  <span>{isSavingConfig ? '⏳' : '💾'}</span>
+                  <span>{isSavingConfig ? 'Guardando cambios...' : 'Guardar Configuración'}</span>
                 </button>
+              </div>
 
-                {!isMigratingAll ? (
-                  <button
-                    className="btn-primary"
-                    disabled={isMigratingAll || migrationCycles.length === 0}
-                    onClick={handleMigrateAllPendingCycles}
-                    style={{
-                      background: '#0052CC',
-                      border: 'none',
-                      padding: '0.65rem 1.4rem',
-                      color: 'white',
-                      borderRadius: '4px',
-                      cursor: (isMigratingAll || migrationCycles.length === 0) ? 'not-allowed' : 'pointer',
-                      fontWeight: 'bold',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.5rem',
-                      boxShadow: '0 2px 5px rgba(0,82,204,0.3)'
-                    }}
-                  >
-                    <span>🚀 Migrar Todos los Ciclos Pendientes a V2</span>
-                  </button>
-                ) : (
-                  <button
-                    className="btn-danger"
-                    onClick={() => setStopMigrationRef(true)}
-                    style={{
-                      background: '#DE350B',
-                      border: 'none',
-                      padding: '0.65rem 1.4rem',
-                      color: 'white',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontWeight: 'bold',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.5rem'
-                    }}
-                  >
-                    <span>⏹ Detener Migración Masiva</span>
-                  </button>
-                )}
-              </div>
-            </div>
+            </form>
+          )}
 
-            {/* Metric Summary Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
-              <div style={{ padding: '1rem', background: 'var(--bg-main)', borderRadius: '6px', border: '1px solid var(--ds-border)', textAlign: 'center' }}>
-                <div style={{ fontSize: '1.6rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>{migrationCycles.length}</div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Total Ciclos en Proyecto</div>
-              </div>
-              <div style={{ padding: '1rem', background: 'rgba(54, 179, 126, 0.1)', borderRadius: '6px', border: '1px solid #36B37E', textAlign: 'center' }}>
-                <div style={{ fontSize: '1.6rem', fontWeight: 'bold', color: '#00875A' }}>
-                  {migrationCycles.filter(c => c.isV2).length}
-                </div>
-                <div style={{ fontSize: '0.85rem', color: '#00875A', fontWeight: '500' }}>✅ Ciclos en V2 (Completados)</div>
-              </div>
-              <div style={{ padding: '1rem', background: 'rgba(255, 171, 0, 0.1)', borderRadius: '6px', border: '1px solid #FFAB00', textAlign: 'center' }}>
-                <div style={{ fontSize: '1.6rem', fontWeight: 'bold', color: '#FF8B00' }}>
-                  {migrationCycles.filter(c => !c.isV2).length}
-                </div>
-                <div style={{ fontSize: '0.85rem', color: '#FF8B00', fontWeight: '500' }}>⏳ Ciclos Pendientes V1</div>
-              </div>
-            </div>
-
-            {/* Global Migration Progress Bar */}
-            {isMigratingAll && globalMigrationProgress && (
-              <div style={{ marginBottom: '1.5rem', background: 'var(--bg-main)', padding: '1.2rem', borderRadius: '8px', border: '1px solid #0052CC', boxShadow: '0 2px 8px rgba(0,82,204,0.15)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.95rem', marginBottom: '0.4rem', fontWeight: 'bold', color: '#0052CC' }}>
-                  <span>📦 Migrando Ciclo {globalMigrationProgress.currentCycleIndex} de {globalMigrationProgress.totalCycles}: {globalMigrationProgress.currentCycleLabel}</span>
-                  <span>{globalMigrationProgress.globalPercent}%</span>
-                </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.6rem' }}>
-                  ⏳ {globalMigrationProgress.subMessage}
-                </div>
-                <div style={{ background: 'var(--border-color)', borderRadius: '6px', height: '14px', overflow: 'hidden' }}>
-                  <div style={{
-                    background: 'linear-gradient(90deg, #0052CC, #36B37E)',
-                    height: '100%',
-                    width: `${globalMigrationProgress.globalPercent}%`,
-                    transition: 'width 0.3s ease'
-                  }} />
-                </div>
-              </div>
-            )}
-
-            {/* Single Cycle Progress Bar */}
-            {activeMigratingCycleId && !isMigratingAll && pilotProgress && (
-              <div style={{ marginBottom: '1.5rem', background: 'var(--bg-main)', padding: '1.2rem', borderRadius: '8px', border: '1px solid #0052CC' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', marginBottom: '0.4rem', fontWeight: 'bold' }}>
-                  <span>⏳ {pilotProgress.message}</span>
-                  <span>{pilotProgress.percent}%</span>
-                </div>
-                <div style={{ background: 'var(--border-color)', borderRadius: '6px', height: '10px', overflow: 'hidden' }}>
-                  <div style={{
-                    background: 'linear-gradient(90deg, #0052CC, #00B8D9)',
-                    height: '100%',
-                    width: `${pilotProgress.percent}%`,
-                    transition: 'width 0.3s ease'
-                  }} />
-                </div>
-              </div>
-            )}
-
-            {/* Interactive Cycles Table */}
-            <div style={{ marginTop: '1.5rem' }}>
-              <h3 style={{ fontSize: '1.05rem', margin: '0 0 0.8rem 0', color: 'var(--text-primary)' }}>Diagnóstico y Estado de Ciclos por Incidencia</h3>
-              <div style={{ maxHeight: '420px', overflowY: 'auto', border: '1px solid var(--ds-border)', borderRadius: '6px' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem', textAlign: 'left' }}>
-                  <thead>
-                    <tr style={{ background: 'var(--bg-surface-hover)', borderBottom: '2px solid var(--ds-border)', position: 'sticky', top: 0, zIndex: 2 }}>
-                      <th style={{ padding: '0.75rem 1rem' }}>Ciclo / Resumen</th>
-                      <th style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>Total Pruebas</th>
-                      <th style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>Estado Arquitectura</th>
-                      <th style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>Test Runs Creados</th>
-                      <th style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>Última Migración</th>
-                      <th style={{ padding: '0.75rem 1rem', textAlign: 'right' }}>Acción</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {migrationCycles.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                          {isLoadingMigrationStatus ? '⏳ Cargando diagnóstico de ciclos...' : 'No se encontraron ciclos en este proyecto.'}
-                        </td>
-                      </tr>
-                    ) : (
-                      migrationCycles.map(c => {
-                        const isCurrentlyMigrating = activeMigratingCycleId === c.id;
-                        return (
-                          <tr key={c.id} style={{ borderBottom: '1px solid var(--ds-border)', background: isCurrentlyMigrating ? 'rgba(0,82,204,0.05)' : 'transparent' }}>
-                            <td style={{ padding: '0.75rem 1rem' }}>
-                              <div style={{ fontWeight: 'bold', color: 'var(--text-primary)' }}>{c.key ? `${c.key} - ` : ''}{c.summary}</div>
-                              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {c.id}</div>
-                            </td>
-                            <td style={{ padding: '0.75rem 1rem', textAlign: 'center', fontWeight: 'bold' }}>
-                              {c.totalTests || 0}
-                            </td>
-                            <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
-                              {c.isV2 ? (
-                                <span style={{ padding: '0.25rem 0.6rem', borderRadius: '4px', background: 'rgba(54, 179, 126, 0.2)', color: '#00875A', fontWeight: 'bold', fontSize: '0.8rem' }}>
-                                  ✅ 100% V2 (Test Runs)
-                                </span>
-                              ) : (
-                                <span style={{ padding: '0.25rem 0.6rem', borderRadius: '4px', background: 'rgba(255, 171, 0, 0.2)', color: '#FF8B00', fontWeight: 'bold', fontSize: '0.8rem' }}>
-                                  ⏳ Pendiente V1
-                                </span>
-                              )}
-                            </td>
-                            <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
-                              <span style={{ fontWeight: 'bold', color: c.totalMigrated > 0 ? '#0052CC' : 'var(--text-secondary)' }}>
-                                {c.totalMigrated || (c.isV2 ? c.totalTests : 0)}
-                              </span>
-                            </td>
-                            <td style={{ padding: '0.75rem 1rem', textAlign: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                              {c.migratedAt ? new Date(c.migratedAt).toLocaleString() : '—'}
-                            </td>
-                            <td style={{ padding: '0.75rem 1rem', textAlign: 'right' }}>
-                              <button
-                                className="btn-secondary"
-                                disabled={isMigratingAll || isCurrentlyMigrating}
-                                onClick={() => handleMigrateSingleCycleFromTable(c)}
-                                style={{
-                                  padding: '0.4rem 0.8rem',
-                                  fontSize: '0.8rem',
-                                  borderRadius: '4px',
-                                  border: '1px solid var(--ds-border)',
-                                  background: c.isV2 ? 'var(--bg-main)' : '#0052CC',
-                                  color: c.isV2 ? 'var(--text-primary)' : 'white',
-                                  cursor: (isMigratingAll || isCurrentlyMigrating) ? 'not-allowed' : 'pointer',
-                                  fontWeight: 'bold'
-                                }}
-                              >
-                                {isCurrentlyMigrating ? '⏳ Migrando...' : (c.isV2 ? '🔄 Re-sincronizar' : '⚡ Migrar a V2')}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-    </div>
-  );;;
+        </main>
+      </div>
+    );
+  };
 
   const renderModal = () => null;
 
