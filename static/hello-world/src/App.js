@@ -1602,7 +1602,7 @@ Then el sistema valida la identidad.
       {(isProjectAllowed || isAdmin) && (
         <>
           {/* Navigation Tabs with Badges & Indicators */}
-          <div className="nav-tabs" style={{ marginLeft: '1rem', flex: 1, overflowX: 'auto', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '0.25rem', height: '100%' }}>
+          <div className="nav-tabs" style={{ marginLeft: '1rem', flex: 1, overflowX: 'auto', overflowY: 'hidden', scrollbarWidth: 'none', msOverflowStyle: 'none', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '0.25rem', height: '100%' }}>
             <button 
               className={`nav-tab ${activeTab === 'design' ? 'active' : ''}`} 
               onClick={() => setActiveTab('design')}
@@ -1738,7 +1738,7 @@ Then el sistema valida la identidad.
               <input 
                 ref={searchInputRef}
                 type="text" 
-                placeholder="Buscar tests (Cmd + K)..."
+                placeholder="Buscar Test..."
                 title="Presiona Cmd+K o Ctrl+K para buscar"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -10678,7 +10678,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.9.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.9.1 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
