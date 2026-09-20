@@ -480,7 +480,6 @@ function App() {
   const [executionTestDetails, setExecutionTestDetails] = useState({});
   const [runningTests, setRunningTests] = useState({});
   const [unlinkedBugs, setUnlinkedBugs] = useState([]);
-  const [syncProgress, setSyncProgress] = useState(null); // null | { done, total }
   const [isAddingAll, setIsAddingAll] = useState(false);
   const [previewImages, setPreviewImages] = useState({});
   const [previewModalData, setPreviewModalData] = useState(null);
@@ -3640,35 +3639,6 @@ Then el sistema valida la identidad.
     }
   };
 
-  const handleSyncCycleIndex = async () => {
-    if (!selectedCycle?.id) return;
-    setLocalLoading(true);
-    setSyncProgress({ done: 0, total: '...' });
-    try {
-      // Forge Storage has no 32KB limit — rebuild is now a single call (no pagination)
-      const result = await invoke('rebuildCycleIndex', { cycleId: selectedCycle.id });
-      setSyncProgress({ done: result.total, total: result.total });
-      const summary = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-      if (summary) {
-          const enriched = summary.map(ex => {
-            if (ex.key && ex.summary) return ex;
-            const tc = testCases.find(t => String(t.id) === String(ex.id));
-            return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
-          });
-          
-          enriched;
-          
-          setCycleTests(enriched);
-      }
-      addNotification({ type: 'success', title: '✅ Índice sincronizado', description: `${result.total} casos actualizados.` });
-    } catch (err) {
-      addNotification({ type: 'error', title: 'Error al sincronizar', description: err.message });
-    } finally {
-      setLocalLoading(false);
-      setSyncProgress(null);
-    }
-  };
-
   const handleRunTest = async (testId, testKey, test) => {
     try {
       if (test) {
@@ -6068,14 +6038,13 @@ const renderPlanningTab = () => {
                           <>
                             <div style={{ fontSize: '1.75rem', marginBottom: '0.5rem' }}>📭</div>
                             <p style={{ fontWeight: 600, color: '#172B4D', margin: '0 0 0.5rem 0' }}>No hay casos asignados a este ciclo.</p>
-                            <p style={{ fontSize: '12px', margin: '0 0 1rem 0' }}>Ve a la pestaña de <strong>Planning</strong> para agregar casos a este ciclo o reconstruye el índice si ya existen.</p>
+                            <p style={{ fontSize: '12px', margin: '0 0 1rem 0' }}>Ve a la pestaña de <strong>Planning</strong> para agregar casos de prueba a este ciclo.</p>
                             <button
-                              className="btn-secondary"
+                              className="btn-primary"
                               style={{ padding: '0.4rem 1rem', fontSize: '12px', fontWeight: 600 }}
-                              disabled={localLoading}
-                              onClick={handleSyncCycleIndex}
+                              onClick={() => setActiveTab('planning')}
                             >
-                              {syncProgress ? `⏳ Sincronizando ${syncProgress.done}/${syncProgress.total}...` : (localLoading ? '⏳ Reconstruyendo...' : '🔧 Reconstruir índice del ciclo')}
+                              📋 Ir a Planning
                             </button>
                           </>
                         ) : (
