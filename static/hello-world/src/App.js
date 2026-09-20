@@ -621,6 +621,25 @@ function App() {
   const [isProjectAllowed, setIsProjectAllowed] = useState(true);
   const bulkFileRef = useRef(null);
 
+  // Report Automation (Jira Automation Webhook & Scheduled Trigger)
+  const [showReportAutomationModal, setShowReportAutomationModal] = useState(false);
+  const [reportAutomationConfig, setReportAutomationConfig] = useState({
+    enabled: false,
+    webhookUrl: '',
+    recipients: '',
+    frequency: 'weekdays', // 'daily', 'weekdays', 'weekly'
+    weeklyDay: '5', // 5 = Friday
+    hour: '18', // 18:00
+    minute: '00',
+    timezone: 'America/Mexico_City',
+    scopePlan: 'all', // 'all', 'latest'
+    scopeCycle: 'all' // 'all', 'latest'
+  });
+  const [reportAutomationLastDispatch, setReportAutomationLastDispatch] = useState(null);
+  const [reportAutomationLoading, setReportAutomationLoading] = useState(false);
+  const [reportAutomationTesting, setReportAutomationTesting] = useState(false);
+  const [reportAutomationActiveTab, setReportAutomationActiveTab] = useState('config'); // 'config' | 'guide' | 'history'
+
   const folderPaths = useMemo(() => {
     const getPath = (f) => {
       const parent = folders.find(p => p.id === f.parentId);
@@ -748,6 +767,13 @@ function App() {
       setProjectConfig(config);
       setProjectIssueTypes(issueTypesRes.status === 'fulfilled' ? (issueTypesRes.value || []) : []);
 
+      invoke('getReportAutomationConfig', { projectId: targetProjectId }).then(autoRes => {
+        if (autoRes && autoRes.success && autoRes.config) {
+          setReportAutomationConfig(autoRes.config);
+          setReportAutomationLastDispatch(autoRes.lastDispatch || null);
+        }
+      }).catch(() => {});
+
       // ← App shell ready. Stop "Cargando entorno".
       clearTimeout(loadTimer);
       setLoading(false);
@@ -797,6 +823,67 @@ function App() {
       setLoadError(safeMessage);
       setProjects([{ id: 'error', name: `Invoke Error: ${safeMessage}`, key: 'ERR' }]);
       setLoading(false);
+    }
+  };
+
+  const loadReportAutomationConfig = async (projId = selectedProjectId) => {
+    const targetId = projId || context?.extension?.project?.id;
+    if (!targetId) return;
+    try {
+      setReportAutomationLoading(true);
+      const res = await invoke('getReportAutomationConfig', { projectId: targetId });
+      if (res && res.success && res.config) {
+        setReportAutomationConfig(res.config);
+        setReportAutomationLastDispatch(res.lastDispatch || null);
+      }
+    } catch (err) {
+      console.error('Error al cargar configuración de automatización:', err);
+    } finally {
+      setReportAutomationLoading(false);
+    }
+  };
+
+  const saveReportAutomationConfigHandler = async () => {
+    const targetId = selectedProjectId || context?.extension?.project?.id;
+    if (!targetId) {
+      addNotification({
+        type: 'error',
+        title: 'Error de Proyecto',
+        description: 'Por favor selecciona un proyecto de Jira.'
+      });
+      return;
+    }
+
+    try {
+      setReportAutomationLoading(true);
+      const res = await invoke('saveReportAutomationConfig', {
+        projectId: targetId,
+        config: reportAutomationConfig
+      });
+
+      if (res && res.success) {
+        addNotification({
+          type: 'success',
+          title: '💾 Configuración Guardada',
+          description: reportAutomationConfig.enabled
+            ? `Automatización ACTIVADA (${reportAutomationConfig.hour || 18}:00 hrs CDMX).`
+            : 'Configuración guardada (Automatización en PAUSA).'
+        });
+      } else {
+        addNotification({
+          type: 'error',
+          title: 'Error al Guardar',
+          description: res?.error || 'No se pudo guardar la configuración.'
+        });
+      }
+    } catch (err) {
+      addNotification({
+        type: 'error',
+        title: 'Error de Conexión',
+        description: err.message
+      });
+    } finally {
+      setReportAutomationLoading(false);
     }
   };
 
@@ -6553,351 +6640,384 @@ const renderPlanningTab = () => {
       ? `${currentProjectName} (${currentProjectKey})`
       : currentProjectName;
 
-    const handleCopyReportToClipboard = async () => {
-      try {
-        const baseUrl = context?.siteUrl || '';
-        const now = new Date();
-        const dateFormatted = now.toLocaleDateString('es-ES', { 
-          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' 
-        });
+    const buildExecutiveReportData = () => {
+      const baseUrl = context?.siteUrl || '';
+      const now = new Date();
+      const dateFormatted = now.toLocaleDateString('es-ES', { 
+        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' 
+      });
 
-        // Scope description
-        let scopeCyclesText = 'Todos los ciclos del proyecto';
-        if (reportSelectedCycles.length === 1) {
-          scopeCyclesText = filteredCycles[0]?.summary || 'Ciclo seleccionado';
-        } else if (reportSelectedCycles.length > 1) {
-          scopeCyclesText = `${reportSelectedCycles.length} Ciclos seleccionados (${filteredCycles.map(c => c.summary).slice(0, 3).join(', ')}${filteredCycles.length > 3 ? '...' : ''})`;
-        }
+      // Scope description
+      let scopeCyclesText = 'Todos los ciclos del proyecto';
+      if (reportSelectedCycles.length === 1) {
+        scopeCyclesText = filteredCycles[0]?.summary || 'Ciclo seleccionado';
+      } else if (reportSelectedCycles.length > 1) {
+        scopeCyclesText = `${reportSelectedCycles.length} Ciclos seleccionados (${filteredCycles.map(c => c.summary).slice(0, 3).join(', ')}${filteredCycles.length > 3 ? '...' : ''})`;
+      }
 
-        let scopePlansText = 'Todos los planes';
-        if (reportSelectedPlans.length === 1) {
-          const pl = testPlans.find(p => p.id === reportSelectedPlans[0]);
-          scopePlansText = pl?.summary || 'Plan seleccionado';
-        } else if (reportSelectedPlans.length > 1) {
-          scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
-        }
+      let scopePlansText = 'Todos los planes';
+      if (reportSelectedPlans.length === 1) {
+        const pl = testPlans.find(p => p.id === reportSelectedPlans[0]);
+        scopePlansText = pl?.summary || 'Plan seleccionado';
+      } else if (reportSelectedPlans.length > 1) {
+        scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
+      }
 
-        // Generate Bug Rows from allBugsMap (6 well-proportioned columns to prevent cutoff)
-        const allBugsArray = Array.from(allBugsMap.values());
-        let tableRows = '';
-        if (allBugsArray.length === 0) {
-          tableRows = `
-            <tr>
-              <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
-                🟢 No se registraron defectos vinculados en las ejecuciones evaluadas.
+      // Generate Bug Rows from allBugsMap (6 well-proportioned columns to prevent cutoff)
+      const allBugsArray = Array.from(allBugsMap.values());
+      let tableRows = '';
+      if (allBugsArray.length === 0) {
+        tableRows = `
+          <tr>
+            <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
+              🟢 No se registraron defectos vinculados en las ejecuciones evaluadas.
+            </td>
+          </tr>
+        `;
+      } else {
+        allBugsArray.forEach((bug, idx) => {
+          const isEven = idx % 2 === 0;
+          const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+          
+          // Severity styling (Liverpool & Jira harmonious tones)
+          let sevBg = '#F4F5F7';
+          let sevColor = '#172B4D';
+          const sLow = (bug.severity || '').toLowerCase();
+          if (sLow.includes('bloq') || sLow.includes('high') || sLow.includes('alt')) {
+            sevBg = '#FFEBE6';
+            sevColor = '#BF2600';
+          } else if (sLow.includes('crit')) {
+            sevBg = '#FDF0F6';
+            sevColor = '#C20062';
+          } else if (sLow.includes('med') || sLow.includes('may')) {
+            sevBg = '#FFF0B3';
+            sevColor = '#172B4D';
+          } else if (sLow.includes('min') || sLow.includes('low') || sLow.includes('baj')) {
+            sevBg = '#EAE6FF';
+            sevColor = '#403294';
+          }
+
+          // Status styling
+          const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
+          const statusColor = bug.isDone ? '#006644' : '#BF2600';
+
+          tableRows += `
+            <tr style="background-color: ${bgRow};">
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 700; width: 14%; vertical-align: top;">
+                <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline;" target="_blank">
+                  ${bug.key}
+                </a>
+              </td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 36%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
+                ${bug.summary || 'Sin resumen'}
+              </td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
+                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
+                  ${bug.severity || 'Media'}
+                </span>
+              </td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
+                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
+                  ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
+                </span>
+              </td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 14%; word-break: break-word; vertical-align: top;">
+                ${bug.assignee || 'Sin asignar'}
+              </td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
+                ${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}
               </td>
             </tr>
           `;
-        } else {
-          allBugsArray.forEach((bug, idx) => {
-            const isEven = idx % 2 === 0;
-            const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+        });
+      }
+
+      // Modules breakdown (Functional tests only)
+      let moduleSectionHtml = '';
+      const featureKeys = Object.keys(featureStats || {});
+      if (featureKeys.length > 0) {
+        let modRows = '';
+        featureKeys.forEach((mod, idx) => {
+          const st = featureStats[mod];
+          const isEven = idx % 2 === 0;
+          const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+          const modRate = st.total > 0 ? (((st.passed) / st.total) * 100).toFixed(0) : '0';
+          const isGood = Number(modRate) >= 80;
+          modRows += `
+            <tr style="background-color: ${bgRow};">
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D; width: 35%; word-break: break-word;">📁 ${mod}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #172B4D; width: 13%;">${st.total}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #00875A; font-weight: 600; width: 13%;">${st.passed}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #DE350B; font-weight: 600; width: 13%;">${st.failed}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #FFAB00; font-weight: 600; width: 13%;">${st.blocked}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'}; width: 13%;">${modRate}%</td>
+            </tr>
+          `;
+        });
+
+        moduleSectionHtml = `
+          <div style="margin-bottom: 22px;">
+            <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+              📂 Cobertura y Éxito por Módulo (Pruebas Funcionales)
+            </div>
+            <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
+              <thead>
+                <tr style="background-color: #002D62; color: #ffffff;">
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; width: 35%; font-weight: 700;">Módulo Funcional</th>
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Total</th>
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Pasados</th>
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Fallidos</th>
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Bloqueados</th>
+                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">% Éxito</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${modRows}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      // Verdict Text
+      let verdictText = '';
+      const numSuccess = Number(successRate);
+      if (numSuccess >= 90 && totalOpenBugs === 0) {
+        verdictText = '🟢 <strong>Estado Favorable (Aprobado):</strong> La suite de pruebas presenta una alta tasa de éxito y no se registran defectos bloqueantes abiertos. El ciclo se encuentra en condiciones óptimas para pase a producción o liberación.';
+      } else if (numSuccess >= 75) {
+        verdictText = `🟡 <strong>Estado con Observaciones (Riesgo Moderado):</strong> Se alcanzó una tasa de éxito del ${successRate}%, con ${totalOpenBugs} defecto(s) abierto(s) que requieren seguimiento antes del cierre final del ciclo.`;
+      } else {
+        verdictText = `🔴 <strong>Estado Crítico (Riesgo Alto):</strong> La tasa de éxito actual es del ${successRate}% con ${totalOpenBugs} defecto(s) abierto(s) y ${failed} caso(s) fallido(s). Se recomienda detener la liberación hasta estabilizar las incidencias reportadas.`;
+      }
+
+      const htmlTemplate = `
+        <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
+          
+          <!-- Header Banner (Liverpool Gradient) -->
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
+            <tr>
+              <td style="vertical-align: middle;">
+                <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 4px;">
+                  ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO
+                </div>
+                <div style="font-size: 22px; font-weight: 700; color: #ffffff; margin: 0;">
+                  Reporte Ejecutivo
+                </div>
+              </td>
+              <td style="vertical-align: middle; text-align: right;">
+                <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
+                  📅 ${dateFormatted}
+                </span>
+              </td>
+            </tr>
+          </table>
+
+          <div style="padding: 24px 26px;">
             
-            // Severity styling (Liverpool & Jira harmonious tones)
-            let sevBg = '#F4F5F7';
-            let sevColor = '#172B4D';
-            const sLow = (bug.severity || '').toLowerCase();
-            if (sLow.includes('bloq') || sLow.includes('high') || sLow.includes('alt')) {
-              sevBg = '#FFEBE6';
-              sevColor = '#BF2600';
-            } else if (sLow.includes('crit')) {
-              sevBg = '#FDF0F6';
-              sevColor = '#C20062';
-            } else if (sLow.includes('med') || sLow.includes('may')) {
-              sevBg = '#FFF0B3';
-              sevColor = '#172B4D';
-            } else if (sLow.includes('min') || sLow.includes('low') || sLow.includes('baj')) {
-              sevBg = '#EAE6FF';
-              sevColor = '#403294';
-            }
-
-            // Status styling
-            const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
-            const statusColor = bug.isDone ? '#006644' : '#BF2600';
-
-            tableRows += `
-              <tr style="background-color: ${bgRow};">
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 700; width: 14%; vertical-align: top;">
-                  <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline;" target="_blank">
-                    ${bug.key}
-                  </a>
+            <!-- Project & Scope Meta Box -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
+              <tr>
+                <td style="padding: 4px 8px; font-size: 13px;">
+                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
+                  <span style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 36%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
-                  ${bug.summary || 'Sin resumen'}
+                <td style="padding: 4px 8px; font-size: 13px;">
+                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
+                  <span style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
-                  <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
-                    ${bug.severity || 'Media'}
-                  </span>
+                <td style="padding: 4px 8px; font-size: 13px;">
+                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
+                  <span style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
-                  <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
-                    ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
-                  </span>
-                </td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 14%; word-break: break-word; vertical-align: top;">
-                  ${bug.assignee || 'Sin asignar'}
-                </td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
-                  ${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}
+                <td style="padding: 4px 8px; font-size: 13px;">
+                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
+                  <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
                 </td>
               </tr>
-            `;
-          });
-        }
+            </table>
 
-        // Modules breakdown (Functional tests only)
-        let moduleSectionHtml = '';
-        const featureKeys = Object.keys(featureStats || {});
-        if (featureKeys.length > 0) {
-          let modRows = '';
-          featureKeys.forEach((mod, idx) => {
-            const st = featureStats[mod];
-            const isEven = idx % 2 === 0;
-            const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
-            const modRate = st.total > 0 ? (((st.passed) / st.total) * 100).toFixed(0) : '0';
-            const isGood = Number(modRate) >= 80;
-            modRows += `
-              <tr style="background-color: ${bgRow};">
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D; width: 35%; word-break: break-word;">📁 ${mod}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #172B4D; width: 13%;">${st.total}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #00875A; font-weight: 600; width: 13%;">${st.passed}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #DE350B; font-weight: 600; width: 13%;">${st.failed}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #FFAB00; font-weight: 600; width: 13%;">${st.blocked}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'}; width: 13%;">${modRate}%</td>
+            <!-- Executive KPI Grid (Cards) -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 22px;">
+              <tr>
+                <!-- Card 1: Total Casos -->
+                <td width="20%" style="padding: 0 4px 0 0;">
+                  <div style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
+                    <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${ejecutados} evaluados</div>
+                  </div>
+                </td>
+
+                <!-- Card 2: Tasa de Éxito -->
+                <td width="20%" style="padding: 0 4px;">
+                  <div style="background: #E8F8F0; border: 1px solid #B7EBCE; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="font-size: 11px; font-weight: 700; color: #0E8A4C; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #0E8A4C; line-height: 1.1;">${successRate}%</div>
+                    <div style="font-size: 11px; color: #0E8A4C; margin-top: 4px;">${passed} Pasados</div>
+                  </div>
+                </td>
+
+                <!-- Card 3: Cobertura -->
+                <td width="20%" style="padding: 0 4px;">
+                  <div style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
+                    <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
+                  </div>
+                </td>
+
+                <!-- Card 4: Defectos -->
+                <td width="20%" style="padding: 0 4px;">
+                  <div style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalAllBugs}</div>
+                    <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${totalOpenBugs}</strong> abiertos (${totalClosedBugs} cerrados)</div>
+                  </div>
+                </td>
+
+                <!-- Card 5: MTTR -->
+                <td width="20%" style="padding: 0 0 0 4px;">
+                  <div style="background: #EEF2FB; border: 1px solid #CCD7F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="font-size: 11px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${avgResolutionHours}h</div>
+                    <div style="font-size: 11px; color: #002D62; margin-top: 4px;">Resolución</div>
+                  </div>
+                </td>
               </tr>
-            `;
-          });
+            </table>
 
-          moduleSectionHtml = `
+            <!-- Desglose de Ejecución (Visual Bar) -->
             <div style="margin-bottom: 22px;">
               <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-                📂 Cobertura y Éxito por Módulo (Pruebas Funcionales)
+                📊 Distribución de Ejecución
+              </div>
+              
+              <!-- Progress Multi-Segment Bar -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
+                <tr>
+                  ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #28A745;" title="Passed: ${passed}"></td>` : ''}
+                  ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #E1007A;" title="Failed: ${failed}"></td>` : ''}
+                  ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FF9800;" title="Blocked: ${blocked}"></td>` : ''}
+                  ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #CBD5E1;" title="Not Run: ${notRun}"></td>` : ''}
+                </tr>
+              </table>
+
+              <!-- Status Legend Grid -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px;">
+                <tr>
+                  <td width="25%" style="color: #172B4D;">
+                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #28A745; margin-right: 6px;"></span>
+                    <strong>Pasados:</strong> ${passed} (${pPct.toFixed(1)}%)
+                  </td>
+                  <td width="25%" style="color: #172B4D;">
+                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #E1007A; margin-right: 6px;"></span>
+                    <strong>Fallidos:</strong> ${failed} (${fPct.toFixed(1)}%)
+                  </td>
+                  <td width="25%" style="color: #172B4D;">
+                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF9800; margin-right: 6px;"></span>
+                    <strong>Bloqueados:</strong> ${blocked} (${bPct.toFixed(1)}%)
+                  </td>
+                  <td width="25%" style="color: #626F86;">
+                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #CBD5E1; margin-right: 6px;"></span>
+                    <strong>Sin Ejecutar:</strong> ${notRun} (${nPct.toFixed(1)}%)
+                  </td>
+                </tr>
+              </table>
+            </div>
+
+            <!-- Defect Matrix Table (Fixed Widths, No Clipping) -->
+            <div style="margin-bottom: 22px;">
+              <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                🐞 Matriz de Defectos (${totalAllBugs})
               </div>
               <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
                 <thead>
                   <tr style="background-color: #002D62; color: #ffffff;">
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; width: 35%; font-weight: 700;">Módulo Funcional</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Total</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Pasados</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Fallidos</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Bloqueados</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">% Éxito</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Key</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 36%;">Resumen</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Estado</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Responsable</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 12%;">Resolución</th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${modRows}
+                  ${tableRows}
                 </tbody>
               </table>
             </div>
-          `;
-        }
 
-        // Verdict Text
-        let verdictText = '';
-        const numSuccess = Number(successRate);
-        if (numSuccess >= 90 && totalOpenBugs === 0) {
-          verdictText = '🟢 <strong>Estado Favorable (Aprobado):</strong> La suite de pruebas presenta una alta tasa de éxito y no se registran defectos bloqueantes abiertos. El ciclo se encuentra en condiciones óptimas para pase a producción o liberación.';
-        } else if (numSuccess >= 75) {
-          verdictText = `🟡 <strong>Estado con Observaciones (Riesgo Moderado):</strong> Se alcanzó una tasa de éxito del ${successRate}%, con ${totalOpenBugs} defecto(s) abierto(s) que requieren seguimiento antes del cierre final del ciclo.`;
-        } else {
-          verdictText = `🔴 <strong>Estado Crítico (Riesgo Alto):</strong> La tasa de éxito actual es del ${successRate}% con ${totalOpenBugs} defecto(s) abierto(s) y ${failed} caso(s) fallido(s). Se recomienda detener la liberación hasta estabilizar las incidencias reportadas.`;
-        }
+            <!-- Status by Module (Functional Tests Only) -->
+            ${moduleSectionHtml}
 
-        const htmlTemplate = `
-          <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
-            
-            <!-- Header Banner (Liverpool Gradient) -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
-              <tr>
-                <td style="vertical-align: middle;">
-                  <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 4px;">
-                    ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO
-                  </div>
-                  <div style="font-size: 22px; font-weight: 700; color: #ffffff; margin: 0;">
-                    Reporte Ejecutivo
-                  </div>
-                </td>
-                <td style="vertical-align: middle; text-align: right;">
-                  <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
-                    📅 ${dateFormatted}
-                  </span>
-                </td>
-              </tr>
-            </table>
-
-            <div style="padding: 24px 26px;">
-              
-              <!-- Project & Scope Meta Box -->
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
-                <tr>
-                  <td style="padding: 4px 8px; font-size: 13px;">
-                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
-                    <span style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
-                  </td>
-                  <td style="padding: 4px 8px; font-size: 13px;">
-                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
-                    <span style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
-                  </td>
-                  <td style="padding: 4px 8px; font-size: 13px;">
-                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
-                    <span style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
-                  </td>
-                  <td style="padding: 4px 8px; font-size: 13px;">
-                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
-                    <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- Executive KPI Grid (Cards) -->
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 22px;">
-                <tr>
-                  <!-- Card 1: Total Casos -->
-                  <td width="20%" style="padding: 0 4px 0 0;">
-                    <div style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
-                      <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${ejecutados} evaluados</div>
-                    </div>
-                  </td>
-
-                  <!-- Card 2: Tasa de Éxito -->
-                  <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #E8F8F0; border: 1px solid #B7EBCE; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #0E8A4C; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #0E8A4C; line-height: 1.1;">${successRate}%</div>
-                      <div style="font-size: 11px; color: #0E8A4C; margin-top: 4px;">${passed} Pasados</div>
-                    </div>
-                  </td>
-
-                  <!-- Card 3: Cobertura -->
-                  <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
-                      <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
-                    </div>
-                  </td>
-
-                  <!-- Card 4: Defectos -->
-                  <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalAllBugs}</div>
-                      <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${totalOpenBugs}</strong> abiertos (${totalClosedBugs} cerrados)</div>
-                    </div>
-                  </td>
-
-                  <!-- Card 5: MTTR -->
-                  <td width="20%" style="padding: 0 0 0 4px;">
-                    <div style="background: #EEF2FB; border: 1px solid #CCD7F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${avgResolutionHours}h</div>
-                      <div style="font-size: 11px; color: #002D62; margin-top: 4px;">Resolución</div>
-                    </div>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- Desglose de Ejecución (Visual Bar) -->
-              <div style="margin-bottom: 22px;">
-                <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-                  📊 Distribución de Ejecución
-                </div>
-                
-                <!-- Progress Multi-Segment Bar -->
-                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
-                  <tr>
-                    ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #28A745;" title="Passed: ${passed}"></td>` : ''}
-                    ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #E1007A;" title="Failed: ${failed}"></td>` : ''}
-                    ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FF9800;" title="Blocked: ${blocked}"></td>` : ''}
-                    ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #CBD5E1;" title="Not Run: ${notRun}"></td>` : ''}
-                  </tr>
-                </table>
-
-                <!-- Status Legend Grid -->
-                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px;">
-                  <tr>
-                    <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #28A745; margin-right: 6px;"></span>
-                      <strong>Pasados:</strong> ${passed} (${pPct.toFixed(1)}%)
-                    </td>
-                    <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #E1007A; margin-right: 6px;"></span>
-                      <strong>Fallidos:</strong> ${failed} (${fPct.toFixed(1)}%)
-                    </td>
-                    <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF9800; margin-right: 6px;"></span>
-                      <strong>Bloqueados:</strong> ${blocked} (${bPct.toFixed(1)}%)
-                    </td>
-                    <td width="25%" style="color: #626F86;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #CBD5E1; margin-right: 6px;"></span>
-                      <strong>Sin Ejecutar:</strong> ${notRun} (${nPct.toFixed(1)}%)
-                    </td>
-                  </tr>
-                </table>
+            <!-- QA Assessment & Next Steps Box -->
+            <div style="background-color: #FDF8FA; border-left: 4px solid #E1007A; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
+              <div style="font-size: 13px; font-weight: 700; color: #E1007A; text-transform: uppercase; margin-bottom: 6px;">
+                📌 Evaluación de Calidad & Próximos Pasos
               </div>
-
-              <!-- Defect Matrix Table (Fixed Widths, No Clipping) -->
-              <div style="margin-bottom: 22px;">
-                <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-                  🐞 Matriz de Defectos (${totalAllBugs})
-                </div>
-                <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
-                  <thead>
-                    <tr style="background-color: #002D62; color: #ffffff;">
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Key</th>
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 36%;">Resumen</th>
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Estado</th>
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Responsable</th>
-                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 12%;">Resolución</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${tableRows}
-                  </tbody>
-                </table>
-              </div>
-
-              <!-- Status by Module (Functional Tests Only) -->
-              ${moduleSectionHtml}
-
-              <!-- QA Assessment & Next Steps Box -->
-              <div style="background-color: #FDF8FA; border-left: 4px solid #E1007A; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
-                <div style="font-size: 13px; font-weight: 700; color: #E1007A; text-transform: uppercase; margin-bottom: 6px;">
-                  📌 Evaluación de Calidad & Próximos Pasos
-                </div>
-                <p style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
-                  ${verdictText}
-                </p>
-                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
-                  <li>Priorizar la atención y resolución de los <strong>${totalOpenBugs}</strong> defectos abiertos con el equipo de desarrollo.</li>
-                  <li>Realizar re-test de casos fallidos tras el despliegue del siguiente build o corrección.</li>
-                  ${notRun > 0 ? `<li>Completar la ejecución de los <strong>${notRun}</strong> casos pendientes para alcanzar la cobertura total.</li>` : '<li>Cierre formal y firma del ciclo de pruebas tras verificación de criterios de aceptación.</li>'}
-                </ul>
-              </div>
-
+              <p style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
+                ${verdictText}
+              </p>
+              <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
+                <li>Priorizar la atención y resolución de los <strong>${totalOpenBugs}</strong> defectos abiertos con el equipo de desarrollo.</li>
+                <li>Realizar re-test de casos fallidos tras el despliegue del siguiente build o corrección.</li>
+                ${notRun > 0 ? `<li>Completar la ejecución de los <strong>${notRun}</strong> casos pendientes para alcanzar la cobertura total.</li>` : '<li>Cierre formal y firma del ciclo de pruebas tras verificación de criterios de aceptación.</li>'}
+              </ul>
             </div>
 
-            <!-- Footer -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
-              <tr>
-                <td style="font-size: 11px; color: #626F86;">
-                  Test Pulse Suite v2.0.0 • Jira Cloud Quality Management • El Puerto de Liverpool
-                </td>
-                <td style="font-size: 11px; color: #626F86; text-align: right;">
-                  Generado automáticamente
-                </td>
-              </tr>
-            </table>
-
           </div>
-        `;
 
-        // Plain text fallback
-        const plainText = `TEST PULSE SUITE - Reporte Ejecutivo\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
+          <!-- Footer -->
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
+            <tr>
+              <td style="font-size: 11px; color: #626F86;">
+                Test Pulse Suite v2.0.0 • Jira Cloud Quality Management • El Puerto de Liverpool
+              </td>
+              <td style="font-size: 11px; color: #626F86; text-align: right;">
+                Generado automáticamente
+              </td>
+            </tr>
+          </table>
+
+        </div>
+      `;
+
+      // Plain text fallback
+      const plainText = `TEST PULSE SUITE - Reporte Ejecutivo\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
+      const emailSubject = `[Reporte Ejecutivo] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`;
+
+      return {
+        htmlReport: htmlTemplate,
+        plainText,
+        emailSubject,
+        projectDisplay,
+        projectName: currentProjectName,
+        projectKey: currentProjectKey,
+        dateFormatted,
+        scopeCyclesText,
+        scopePlansText,
+        stats: {
+          total: allTotal,
+          passed,
+          failed,
+          blocked,
+          notRun,
+          successRate,
+          coverageRate,
+          totalAllBugs,
+          totalOpenBugs,
+          totalClosedBugs,
+          avgResolutionHours
+        }
+      };
+    };
+
+    const handleCopyReportToClipboard = async () => {
+      try {
+        const reportData = buildExecutiveReportData();
+        const htmlTemplate = reportData.htmlReport;
+        const plainText = reportData.plainText;
+        const emailSubject = reportData.emailSubject;
 
         // Copy rich HTML to clipboard
         let copied = false;
@@ -6939,7 +7059,7 @@ const renderPlanningTab = () => {
           description: 'El reporte con diseño ejecutivo HTML está en tu portapapeles. Usa Ctrl+V o Cmd+V en Gmail para pegarlo.'
         });
 
-        const subject = encodeURIComponent(`[Reporte Ejecutivo] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`);
+        const subject = encodeURIComponent(emailSubject);
         router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
       } catch(err) {
         console.error('Error al generar reporte:', err);
@@ -6948,6 +7068,69 @@ const renderPlanningTab = () => {
           title: 'Error al exportar reporte',
           description: err.message
         });
+      }
+    };
+
+    const handleTestAutomatedReportDispatch = async () => {
+      if (!reportAutomationConfig.webhookUrl || !reportAutomationConfig.webhookUrl.startsWith('http')) {
+        addNotification({
+          type: 'warning',
+          title: 'Webhook Inválido',
+          description: 'Por favor ingresa una URL de Webhook válida de Jira Automation (ej. https://automation.atlassian.com/pro/hooks/...)'
+        });
+        return;
+      }
+
+      try {
+        setReportAutomationTesting(true);
+        const report = buildExecutiveReportData();
+        const payload = {
+          timestamp: new Date().toISOString(),
+          source: 'Test Pulse Suite v2.0.0 (Manual Test Dispatch)',
+          projectId: selectedProjectId,
+          projectName: report.projectName,
+          projectKey: report.projectKey,
+          recipients: reportAutomationConfig.recipients || '',
+          emailSubject: report.emailSubject,
+          htmlReport: report.htmlReport,
+          plainText: report.plainText,
+          summary: {
+            scopePlans: report.scopePlansText,
+            scopeCycles: report.scopeCyclesText,
+            generatedAt: report.dateFormatted
+          },
+          stats: report.stats
+        };
+
+        const res = await invoke('triggerManualReportDispatch', {
+          projectId: selectedProjectId,
+          webhookUrl: reportAutomationConfig.webhookUrl,
+          reportData: payload
+        });
+
+        if (res && res.success) {
+          setReportAutomationLastDispatch(res.lastDispatch || null);
+          addNotification({
+            type: 'success',
+            title: '⚡ ¡Prueba de Envío Exitosa!',
+            description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${res.status || 200}). Revisa la regla y tu correo.`
+          });
+        } else {
+          setReportAutomationLastDispatch(res?.lastDispatch || null);
+          addNotification({
+            type: 'error',
+            title: 'Error al Despachar',
+            description: res?.error || 'Jira Automation rechazó la petición.'
+          });
+        }
+      } catch (err) {
+        addNotification({
+          type: 'error',
+          title: 'Error de Despacho',
+          description: err.message || String(err)
+        });
+      } finally {
+        setReportAutomationTesting(false);
       }
     };
 
@@ -7249,6 +7432,31 @@ const renderPlanningTab = () => {
                   title="Recargar datos de ejecución y Jira"
                 >
                   🔄 {reportLoading ? 'Sincronizando...' : 'Sincronizar Métricas'}
+                </button>
+
+                <button 
+                  className="btn-secondary" 
+                  onClick={() => {
+                    loadReportAutomationConfig();
+                    setShowReportAutomationModal(true);
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 14px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    borderRadius: '6px',
+                    border: '1px solid',
+                    borderColor: reportAutomationConfig.enabled ? '#F5B8D8' : 'var(--jira-border, #DCDFE4)',
+                    background: reportAutomationConfig.enabled ? '#FDF2F7' : '#FFFFFF',
+                    color: reportAutomationConfig.enabled ? '#E1007A' : 'var(--jira-dark, #172B4D)',
+                    cursor: 'pointer'
+                  }}
+                  title="Configurar horario y envío automático programado con Jira Automation"
+                >
+                  ⏰ {reportAutomationConfig.enabled ? '🟢 Envío Automático (Activo)' : '⏰ Automatizar Envío'}
                 </button>
 
                 <button 
@@ -9011,6 +9219,83 @@ const renderPlanningTab = () => {
                 </div>
               </div>
 
+              {/* Card 4.5: Automatización y Envío Programado de Reportes Ejecutivos */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem', marginBottom: '0.8rem' }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                      <span style={{ fontSize: '1.3rem' }}>⏰</span>
+                      <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                        Automatización y Programación de Reportes Ejecutivos
+                      </h2>
+                    </div>
+                    <p style={{ margin: 0, color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem', maxWidth: '650px' }}>
+                      Programa el envío recurrente del reporte ejecutivo de QA por correo mediante el disparador horario de Atlassian Forge y reglas de <strong>Jira Automation</strong> con estilo corporativo de El Puerto de Liverpool.
+                    </p>
+                  </div>
+
+                  <span style={{
+                    padding: '0.35rem 0.8rem',
+                    borderRadius: '20px',
+                    fontSize: '0.82rem',
+                    fontWeight: '600',
+                    background: reportAutomationConfig.enabled ? 'rgba(225, 0, 122, 0.15)' : 'rgba(139, 148, 158, 0.15)',
+                    color: reportAutomationConfig.enabled ? '#E1007A' : '#8b949e',
+                    border: `1px solid ${reportAutomationConfig.enabled ? 'rgba(225, 0, 122, 0.3)' : 'rgba(139, 148, 158, 0.3)'}`
+                  }}>
+                    {reportAutomationConfig.enabled ? '🟢 Programador Activo' : '⚪ Programador en Pausa'}
+                  </span>
+                </div>
+
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '12px',
+                  padding: '1rem 1.25rem',
+                  background: 'var(--bg-main, #0d1117)',
+                  borderRadius: '8px',
+                  border: '1px solid var(--ds-border, #30363d)',
+                  marginTop: '0.5rem'
+                }}>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-primary, #e6edf3)' }}>
+                    <div>
+                      <strong>Horario Programado:</strong> {reportAutomationConfig.frequency === 'daily' ? 'Diario (Lun - Dom)' : reportAutomationConfig.frequency === 'weekly' ? 'Semanal (Viernes)' : 'Lunes a Viernes'} a las <strong>{reportAutomationConfig.hour || 18}:00 hrs CDMX</strong>
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)', marginTop: '2px' }}>
+                      Webhook: {reportAutomationConfig.webhookUrl ? (reportAutomationConfig.webhookUrl.substring(0, 45) + '...') : 'No configurado'}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      loadReportAutomationConfig();
+                      setShowReportAutomationModal(true);
+                    }}
+                    className="btn-primary"
+                    style={{
+                      padding: '0.5rem 1.25rem',
+                      fontSize: '0.85rem',
+                      fontWeight: '600',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      background: '#E1007A',
+                      borderColor: '#E1007A'
+                    }}
+                  >
+                    ⚙️ Configurar Automatización
+                  </button>
+                </div>
+              </div>
+
               {/* Card 5: Control de Acceso al Proyecto (Admin Only) */}
               {isAdmin && (
                 <div className="glass" style={{
@@ -9130,6 +9415,713 @@ const renderPlanningTab = () => {
     );
   };
 
+  const handleGlobalTestAutomatedReportDispatch = async () => {
+    if (!reportAutomationConfig.webhookUrl || !reportAutomationConfig.webhookUrl.startsWith('http')) {
+      addNotification({
+        type: 'warning',
+        title: 'Webhook Inválido',
+        description: 'Por favor ingresa una URL de Webhook válida de Jira Automation (ej. https://automation.atlassian.com/pro/hooks/...)'
+      });
+      return;
+    }
+
+    try {
+      setReportAutomationTesting(true);
+      const targetId = selectedProjectId || context?.extension?.project?.id;
+      const currentProjectObj = projects.find(p => String(p.id) === String(targetId) || String(p.key) === String(targetId));
+      const projName = currentProjectObj?.name || context?.extension?.project?.name || 'Proyecto';
+      const projKey = currentProjectObj?.key || context?.extension?.project?.key || targetId;
+
+      const res = await invoke('triggerManualReportDispatch', {
+        projectId: targetId,
+        webhookUrl: reportAutomationConfig.webhookUrl,
+        reportData: {
+          projectName: projName,
+          projectKey: projKey,
+          recipients: reportAutomationConfig.recipients || ''
+        }
+      });
+
+      if (res && res.success) {
+        setReportAutomationLastDispatch(res.lastDispatch || null);
+        addNotification({
+          type: 'success',
+          title: '⚡ ¡Prueba de Envío Exitosa!',
+          description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${res.statusCode || 200}). Revisa la regla y tu correo.`
+        });
+      } else {
+        setReportAutomationLastDispatch(res?.lastDispatch || null);
+        addNotification({
+          type: 'error',
+          title: 'Error al Despachar',
+          description: res?.error || 'Jira Automation rechazó la petición.'
+        });
+      }
+    } catch (err) {
+      addNotification({
+        type: 'error',
+        title: 'Error de Despacho',
+        description: err.message || String(err)
+      });
+    } finally {
+      setReportAutomationTesting(false);
+    }
+  };
+
+  const renderReportAutomationModal = () => {
+    if (!showReportAutomationModal) return null;
+
+    const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
+    const ctxProj = context?.extension?.project;
+    let projName = currentProjectObj?.name || ctxProj?.name || 'Proyecto Actual';
+    let projKey = currentProjectObj?.key || ctxProj?.key || selectedProjectId;
+
+    return (
+      <div className="modal-overlay" style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(9, 30, 66, 0.65)',
+        backdropFilter: 'blur(3px)',
+        zIndex: 9999,
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: '1rem'
+      }}>
+        <div style={{
+          background: '#FFFFFF',
+          borderRadius: '12px',
+          width: '100%',
+          maxWidth: '820px',
+          maxHeight: '90vh',
+          display: 'flex',
+          flexDirection: 'column',
+          boxShadow: '0 16px 40px rgba(0, 45, 98, 0.25)',
+          border: '1px solid #DFE1E6',
+          overflow: 'hidden'
+        }}>
+          
+          {/* Header (Liverpool Gradient Banner) */}
+          <div style={{
+            background: 'linear-gradient(135deg, #E1007A 0%, #002D62 100%)',
+            color: '#ffffff',
+            padding: '20px 24px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center'
+          }}>
+            <div>
+              <div style={{
+                fontSize: '11px',
+                fontWeight: 800,
+                letterSpacing: '1px',
+                textTransform: 'uppercase',
+                color: '#FFE0F0',
+                marginBottom: '4px'
+              }}>
+                ⚡ TEST PULSE SUITE • JIRA AUTOMATION
+              </div>
+              <h2 style={{
+                margin: 0,
+                fontSize: '19px',
+                fontWeight: 700,
+                color: '#ffffff',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}>
+                <span>⏰</span> Programación y Envío Automático de Reportes
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowReportAutomationModal(false)}
+              style={{
+                background: 'rgba(255, 255, 255, 0.2)',
+                border: 'none',
+                color: '#ffffff',
+                width: '32px',
+                height: '32px',
+                borderRadius: '50%',
+                cursor: 'pointer',
+                fontSize: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'background 0.2s'
+              }}
+              title="Cerrar ventana"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Sub-Tabs Nav */}
+          <div style={{
+            display: 'flex',
+            borderBottom: '1px solid #DFE1E6',
+            background: '#F8F9FA',
+            padding: '0 24px'
+          }}>
+            <button
+              type="button"
+              onClick={() => setReportAutomationActiveTab('config')}
+              style={{
+                padding: '12px 18px',
+                border: 'none',
+                background: 'transparent',
+                borderBottom: reportAutomationActiveTab === 'config' ? '3px solid #E1007A' : '3px solid transparent',
+                color: reportAutomationActiveTab === 'config' ? '#E1007A' : '#626F86',
+                fontWeight: reportAutomationActiveTab === 'config' ? 700 : 600,
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              ⚙️ Configuración del Envío
+            </button>
+            <button
+              type="button"
+              onClick={() => setReportAutomationActiveTab('guide')}
+              style={{
+                padding: '12px 18px',
+                border: 'none',
+                background: 'transparent',
+                borderBottom: reportAutomationActiveTab === 'guide' ? '3px solid #E1007A' : '3px solid transparent',
+                color: reportAutomationActiveTab === 'guide' ? '#E1007A' : '#626F86',
+                fontWeight: reportAutomationActiveTab === 'guide' ? 700 : 600,
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              📖 Guía de Jira Automation (Paso a Paso)
+            </button>
+            <button
+              type="button"
+              onClick={() => setReportAutomationActiveTab('history')}
+              style={{
+                padding: '12px 18px',
+                border: 'none',
+                background: 'transparent',
+                borderBottom: reportAutomationActiveTab === 'history' ? '3px solid #E1007A' : '3px solid transparent',
+                color: reportAutomationActiveTab === 'history' ? '#E1007A' : '#626F86',
+                fontWeight: reportAutomationActiveTab === 'history' ? 700 : 600,
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              📜 Historial y Último Envío
+            </button>
+          </div>
+
+          {/* Modal Content Body */}
+          <div style={{ padding: '22px 26px', overflowY: 'auto', flex: 1, color: '#172B4D' }}>
+            
+            {/* TAB 1: CONFIG */}
+            {reportAutomationActiveTab === 'config' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                
+                {/* Status Toggle Card */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '14px 18px',
+                  borderRadius: '8px',
+                  background: reportAutomationConfig.enabled ? '#FDF2F7' : '#F4F5F7',
+                  border: `1px solid ${reportAutomationConfig.enabled ? '#F5B8D8' : '#DFE1E6'}`
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '50%',
+                        background: reportAutomationConfig.enabled ? '#28A745' : '#8993A4'
+                      }} />
+                      <strong style={{ fontSize: '14px', color: reportAutomationConfig.enabled ? '#E1007A' : '#172B4D' }}>
+                        {reportAutomationConfig.enabled ? 'Automatización de Reportes ACTIVADA' : 'Automatización en PAUSA (Desactivada)'}
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#626F86', marginTop: '4px' }}>
+                      {reportAutomationConfig.enabled
+                        ? `El reporte se enviará de forma automática según la frecuencia seleccionada (${reportAutomationConfig.hour || 18}:00 hrs CDMX).`
+                        : 'El programador horario no despachará correos automáticos hasta que lo actives.'}
+                    </div>
+                  </div>
+
+                  <label style={{ position: 'relative', display: 'inline-block', width: '48px', height: '26px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!reportAutomationConfig.enabled}
+                      onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+                      style={{ opacity: 0, width: 0, height: 0 }}
+                    />
+                    <span style={{
+                      position: 'absolute',
+                      top: 0, left: 0, right: 0, bottom: 0,
+                      backgroundColor: reportAutomationConfig.enabled ? '#E1007A' : '#C1C7D0',
+                      borderRadius: '26px',
+                      transition: '0.3s'
+                    }}>
+                      <span style={{
+                        position: 'absolute',
+                        height: '20px',
+                        width: '20px',
+                        left: reportAutomationConfig.enabled ? '24px' : '3px',
+                        bottom: '3px',
+                        backgroundColor: '#ffffff',
+                        borderRadius: '50%',
+                        transition: '0.3s',
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                      }} />
+                    </span>
+                  </label>
+                </div>
+
+                {/* Scope Preview Banner */}
+                <div style={{
+                  padding: '10px 14px',
+                  background: '#F8F9FA',
+                  borderRadius: '6px',
+                  border: '1px solid #DFE1E6',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: '12px',
+                  color: '#44546F'
+                }}>
+                  <span><strong>Proyecto Asociado:</strong> <span style={{ color: '#E1007A', fontWeight: 600 }}>{projName} ({projKey})</span></span>
+                  <span><strong>Zona Horaria:</strong> América/Ciudad de México (CDMX / GMT-6)</span>
+                </div>
+
+                {/* Field 1: Jira Automation Webhook URL */}
+                <div>
+                  <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                    🔗 URL del Webhook de Jira Automation <span style={{ color: '#DE350B' }}>*</span>
+                  </label>
+                  <input
+                    type="url"
+                    placeholder="https://automation.atlassian.com/pro/hooks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    value={reportAutomationConfig.webhookUrl || ''}
+                    onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, webhookUrl: e.target.value.trim() }))}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      borderRadius: '6px',
+                      border: '1px solid #DFE1E6',
+                      boxSizing: 'border-box',
+                      color: '#172B4D',
+                      fontFamily: 'monospace',
+                      background: '#FFFFFF'
+                    }}
+                  />
+                  <div style={{ fontSize: '11px', color: '#626F86', marginTop: '4px' }}>
+                    Obtén esta URL creando una regla en <strong>Jira Automation</strong> con el disparador <em>"Incoming Webhook"</em>.
+                  </div>
+                </div>
+
+                {/* Field 2: Recipients */}
+                <div>
+                  <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                    👥 Lista de Destinatarios (Correos Electrónicos)
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="lider.qa@liverpool.com.mx, product.manager@liverpool.com.mx, equipo-dev@liverpool.com.mx"
+                    value={reportAutomationConfig.recipients || ''}
+                    onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, recipients: e.target.value }))}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      borderRadius: '6px',
+                      border: '1px solid #DFE1E6',
+                      boxSizing: 'border-box',
+                      color: '#172B4D',
+                      background: '#FFFFFF',
+                      resize: 'vertical'
+                    }}
+                  />
+                  <div style={{ fontSize: '11px', color: '#626F86', marginTop: '4px' }}>
+                    Separa múltiples direcciones con comas. Jira Automation recibirá esta lista en el smart value <code style={{ background: '#F4F5F7', padding: '1px 4px', borderRadius: '3px' }}>&#123;&#123;webhookData.recipients&#125;&#125;</code>.
+                  </div>
+                </div>
+
+                {/* Grid: Frequency & Time */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                  {/* Frequency */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                      📅 Frecuencia de Envío
+                    </label>
+                    <select
+                      value={reportAutomationConfig.frequency || 'weekdays'}
+                      onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, frequency: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        fontSize: '13px',
+                        borderRadius: '6px',
+                        border: '1px solid #DFE1E6',
+                        background: '#FFFFFF',
+                        color: '#172B4D'
+                      }}
+                    >
+                      <option value="weekdays">Lunes a Viernes (Días Hábiles)</option>
+                      <option value="daily">Diario (Todos los días, Lun - Dom)</option>
+                      <option value="weekly">Semanal (Viernes de Cierre)</option>
+                    </select>
+                  </div>
+
+                  {/* Scheduled Hour */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                      ⏰ Hora de Envío (CDMX GMT-6)
+                    </label>
+                    <select
+                      value={reportAutomationConfig.hour || '18'}
+                      onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, hour: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        fontSize: '13px',
+                        borderRadius: '6px',
+                        border: '1px solid #DFE1E6',
+                        background: '#FFFFFF',
+                        color: '#172B4D'
+                      }}
+                    >
+                      <option value="08">08:00 hrs (Inicio de Jornada)</option>
+                      <option value="09">09:00 hrs</option>
+                      <option value="10">10:00 hrs</option>
+                      <option value="11">11:00 hrs</option>
+                      <option value="12">12:00 hrs (Mediodía)</option>
+                      <option value="13">13:00 hrs</option>
+                      <option value="14">14:00 hrs</option>
+                      <option value="15">15:00 hrs</option>
+                      <option value="16">16:00 hrs</option>
+                      <option value="17">17:00 hrs</option>
+                      <option value="18">18:00 hrs (Fin de Jornada - Recomendado)</option>
+                      <option value="19">19:00 hrs</option>
+                      <option value="20">20:00 hrs</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Scope selectors */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                      📋 Alcance de Planes de Prueba
+                    </label>
+                    <select
+                      value={reportAutomationConfig.scopePlan || 'all'}
+                      onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, scopePlan: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        fontSize: '13px',
+                        borderRadius: '6px',
+                        border: '1px solid #DFE1E6',
+                        background: '#FFFFFF',
+                        color: '#172B4D'
+                      }}
+                    >
+                      <option value="all">Todos los planes activos del proyecto</option>
+                      <option value="latest">Último plan de pruebas creado</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
+                      🔄 Alcance de Ciclos de Ejecución
+                    </label>
+                    <select
+                      value={reportAutomationConfig.scopeCycle || 'all'}
+                      onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, scopeCycle: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        fontSize: '13px',
+                        borderRadius: '6px',
+                        border: '1px solid #DFE1E6',
+                        background: '#FFFFFF',
+                        color: '#172B4D'
+                      }}
+                    >
+                      <option value="all">Todos los ciclos del proyecto</option>
+                      <option value="latest">Último ciclo ejecutado</option>
+                    </select>
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+            {/* TAB 2: GUIDE */}
+            {reportAutomationActiveTab === 'guide' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', fontSize: '13px' }}>
+                <div style={{ background: '#FDF8FA', borderLeft: '4px solid #E1007A', padding: '12px 16px', borderRadius: '0 6px 6px 0' }}>
+                  <strong style={{ color: '#E1007A' }}>¿Cómo funciona la integración con Jira Automation?</strong>
+                  <p style={{ margin: '4px 0 0 0', color: '#44546F', fontSize: '12px', lineHeight: 1.4 }}>
+                    Test Pulse Suite genera el reporte ejecutivo con el diseño corporativo de El Puerto de Liverpool y lo envía mediante una petición HTTP POST segura al Webhook de Jira Automation. Jira Automation se encarga de despachar el correo con la infraestructura nativa de Atlassian.
+                  </p>
+                </div>
+
+                {/* Step 1 */}
+                <div style={{ border: '1px solid #DFE1E6', borderRadius: '8px', padding: '14px 16px', background: '#FFFFFF' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <span style={{ background: '#002D62', color: '#fff', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>1</span>
+                    <strong style={{ fontSize: '14px', color: '#002D62' }}>Crear Regla en Jira Automation</strong>
+                  </div>
+                  <div style={{ color: '#44546F', fontSize: '12px', lineHeight: 1.5, paddingLeft: '30px' }}>
+                    En tu proyecto de Jira, ve a <strong>Configuración del proyecto</strong> (<em>Project settings</em>) &gt; <strong>Automatización</strong> (<em>Automation</em>) y haz clic en <strong>Crear regla</strong> (<em>Create rule</em>).
+                  </div>
+                </div>
+
+                {/* Step 2 */}
+                <div style={{ border: '1px solid #DFE1E6', borderRadius: '8px', padding: '14px 16px', background: '#FFFFFF' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <span style={{ background: '#002D62', color: '#fff', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>2</span>
+                    <strong style={{ fontSize: '14px', color: '#002D62' }}>Configurar Disparador: Webhook Entrante</strong>
+                  </div>
+                  <div style={{ color: '#44546F', fontSize: '12px', lineHeight: 1.5, paddingLeft: '30px' }}>
+                    <p style={{ margin: '0 0 6px 0' }}>
+                      Selecciona el componente <strong>Webhook entrante</strong> (<em>Incoming webhook</em>) y configura:
+                    </p>
+                    <ul style={{ margin: '0 0 8px 0', paddingLeft: '20px' }}>
+                      <li><strong>Incidencias del webhook:</strong> Selecciona <em>No hay incidencias en el webhook (No issues from webhook)</em>.</li>
+                    </ul>
+                    <p style={{ margin: '0' }}>
+                      Copia la <strong>URL del Webhook</strong> generada y pégala en la pestaña <strong>⚙️ Configuración del Envío</strong> de este modal.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 3 */}
+                <div style={{ border: '1px solid #DFE1E6', borderRadius: '8px', padding: '14px 16px', background: '#FFFFFF' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <span style={{ background: '#002D62', color: '#fff', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>3</span>
+                    <strong style={{ fontSize: '14px', color: '#002D62' }}>Agregar Acción: Enviar Correo Electrónico</strong>
+                  </div>
+                  <div style={{ color: '#44546F', fontSize: '12px', lineHeight: 1.5, paddingLeft: '30px' }}>
+                    <p style={{ margin: '0 0 8px 0' }}>
+                      Agrega la acción <strong>Enviar correo electrónico</strong> (<em>Send email</em>) y mapea los campos usando los <strong>Smart Values</strong> de Jira:
+                    </p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {/* Smart Value 1 */}
+                      <div style={{ background: '#F4F5F7', padding: '8px 12px', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong>Para (To):</strong> <code style={{ color: '#E1007A', fontWeight: 700 }}>&#123;&#123;webhookData.recipients&#125;&#125;</code>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText('{{webhookData.recipients}}');
+                            addNotification({ type: 'success', title: 'Copiado', description: '{{webhookData.recipients}} copiado al portapapeles' });
+                          }}
+                          style={{ padding: '3px 8px', fontSize: '11px', borderRadius: '4px', border: '1px solid #DFE1E6', background: '#fff', cursor: 'pointer' }}
+                        >
+                          📋 Copiar
+                        </button>
+                      </div>
+
+                      {/* Smart Value 2 */}
+                      <div style={{ background: '#F4F5F7', padding: '8px 12px', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong>Asunto (Subject):</strong> <code style={{ color: '#E1007A', fontWeight: 700 }}>&#123;&#123;webhookData.emailSubject&#125;&#125;</code>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText('{{webhookData.emailSubject}}');
+                            addNotification({ type: 'success', title: 'Copiado', description: '{{webhookData.emailSubject}} copiado al portapapeles' });
+                          }}
+                          style={{ padding: '3px 8px', fontSize: '11px', borderRadius: '4px', border: '1px solid #DFE1E6', background: '#fff', cursor: 'pointer' }}
+                        >
+                          📋 Copiar
+                        </button>
+                      </div>
+
+                      {/* Smart Value 3 */}
+                      <div style={{ background: '#F4F5F7', padding: '8px 12px', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong>Contenido (Content HTML):</strong> <code style={{ color: '#E1007A', fontWeight: 700 }}>&#123;&#123;webhookData.htmlReport&#125;&#125;</code>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText('{{webhookData.htmlReport}}');
+                            addNotification({ type: 'success', title: 'Copiado', description: '{{webhookData.htmlReport}} copiado al portapapeles' });
+                          }}
+                          style={{ padding: '3px 8px', fontSize: '11px', borderRadius: '4px', border: '1px solid #DFE1E6', background: '#fff', cursor: 'pointer' }}
+                        >
+                          📋 Copiar
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: '10px', color: '#626F86', fontSize: '11px' }}>
+                      💡 <strong>Tip:</strong> Asegúrate de marcar la casilla <em>"Convert line breaks to HTML"</em> o permitir HTML en el cuerpo del correo en Jira Automation.
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+            {/* TAB 3: HISTORY */}
+            {reportAutomationActiveTab === 'history' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '13px' }}>
+                <div style={{ fontSize: '13px', fontWeight: 700, color: '#002D62' }}>
+                  📜 Registro del Último Envío Despachado
+                </div>
+
+                {reportAutomationLastDispatch ? (
+                  <div style={{
+                    border: `1px solid ${reportAutomationLastDispatch.status === 'SUCCESS' || reportAutomationLastDispatch.success ? '#B7EBCE' : '#FFCCC7'}`,
+                    background: reportAutomationLastDispatch.status === 'SUCCESS' || reportAutomationLastDispatch.success ? '#F4FBF7' : '#FFF1F0',
+                    borderRadius: '8px',
+                    padding: '16px 18px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '4px 10px',
+                        borderRadius: '12px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        background: reportAutomationLastDispatch.status === 'SUCCESS' || reportAutomationLastDispatch.success ? '#E3FCEF' : '#FFEBE6',
+                        color: reportAutomationLastDispatch.status === 'SUCCESS' || reportAutomationLastDispatch.success ? '#006644' : '#BF2600'
+                      }}>
+                        {reportAutomationLastDispatch.status === 'SUCCESS' || reportAutomationLastDispatch.success ? '🟢 Despacho Exitoso' : '🔴 Falló el Despacho'}
+                      </span>
+                      <span style={{ fontSize: '12px', color: '#626F86' }}>
+                        📅 {new Date(reportAutomationLastDispatch.timestamp).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })} (CDMX)
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px', color: '#172B4D' }}>
+                      <div>
+                        <strong>Código HTTP / Estado:</strong> <code>{reportAutomationLastDispatch.statusCode || reportAutomationLastDispatch.status || '200 OK'}</code>
+                      </div>
+                      <div>
+                        <strong>Asunto Enviado:</strong> {reportAutomationLastDispatch.emailSubject || reportAutomationLastDispatch.subject || 'Reporte Ejecutivo'}
+                      </div>
+                      <div>
+                        <strong>Destinatarios:</strong> {reportAutomationLastDispatch.recipients || 'Configurados en Jira Automation'}
+                      </div>
+                      {reportAutomationLastDispatch.responseSummary && (
+                        <div>
+                          <strong>Respuesta del Servidor:</strong>
+                          <pre style={{ margin: '4px 0 0 0', padding: '6px 10px', background: '#FFFFFF', border: '1px solid #DFE1E6', borderRadius: '4px', fontSize: '11px', overflowX: 'auto' }}>
+                            {reportAutomationLastDispatch.responseSummary}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{
+                    padding: '2rem',
+                    textAlign: 'center',
+                    background: '#F8F9FA',
+                    borderRadius: '8px',
+                    border: '1px dashed #DFE1E6',
+                    color: '#626F86'
+                  }}>
+                    <div style={{ fontSize: '2rem', marginBottom: '8px' }}>📬</div>
+                    <strong>Aún no se han registrado envíos para este proyecto.</strong>
+                    <div style={{ fontSize: '12px', marginTop: '4px' }}>
+                      Configura la URL del webhook y haz clic en <em>"⚡ Probar Envío Inmediato"</em> para verificar la conexión.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+
+          {/* Modal Footer */}
+          <div style={{
+            padding: '14px 24px',
+            borderTop: '1px solid #DFE1E6',
+            background: '#F8F9FA',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center'
+          }}>
+            <button
+              type="button"
+              disabled={reportAutomationTesting || !reportAutomationConfig.webhookUrl}
+              onClick={handleGlobalTestAutomatedReportDispatch}
+              style={{
+                padding: '8px 16px',
+                fontSize: '13px',
+                fontWeight: 600,
+                borderRadius: '6px',
+                border: '1px solid #002D62',
+                background: '#FFFFFF',
+                color: '#002D62',
+                cursor: (reportAutomationTesting || !reportAutomationConfig.webhookUrl) ? 'not-allowed' : 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+              title="Envía una prueba real a Jira Automation en este momento"
+            >
+              {reportAutomationTesting ? '⏳ Probando Envío...' : '⚡ Probar Envío Inmediato'}
+            </button>
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                type="button"
+                onClick={() => setShowReportAutomationModal(false)}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  borderRadius: '6px',
+                  border: '1px solid #DFE1E6',
+                  background: '#FFFFFF',
+                  color: '#44546F',
+                  cursor: 'pointer'
+                }}
+              >
+                Cerrar
+              </button>
+              <button
+                type="button"
+                disabled={reportAutomationLoading}
+                onClick={saveReportAutomationConfigHandler}
+                style={{
+                  padding: '8px 20px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: '#E1007A',
+                  color: '#FFFFFF',
+                  cursor: reportAutomationLoading ? 'not-allowed' : 'pointer',
+                  boxShadow: '0 2px 6px rgba(225, 0, 122, 0.3)'
+                }}
+              >
+                {reportAutomationLoading ? '💾 Guardando...' : '💾 Guardar Configuración'}
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    );
+  };
+
   const renderModal = () => null;
 
   const renderModals = () => (
@@ -9155,6 +10147,7 @@ const renderPlanningTab = () => {
         onConfirm={(v) => { textInputModal.onConfirm(v); setTextInputModal(prev => ({ ...prev, isOpen: false })); }}
         onCancel={() => setTextInputModal(prev => ({ ...prev, isOpen: false }))}
       />
+      {renderReportAutomationModal()}
     </>
   );
 

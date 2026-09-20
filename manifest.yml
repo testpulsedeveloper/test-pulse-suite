@@ -11,9 +11,15 @@ modules:
       resolver:
         function: resolver
       title: Test Pulse (Global)
+  scheduledTrigger:
+    - key: automated-report-trigger
+      function: scheduledReportHandler
+      interval: hour
   function:
     - key: resolver
       handler: index.handler
+    - key: scheduledReportHandler
+      handler: index.scheduledReportHandler
 resources:
   - key: main
     path: static/hello-world/build
@@ -24,6 +30,12 @@ permissions:
     - read:jira-user
     - manage:jira-project
     - storage:app
+  external:
+    fetch:
+      backend:
+        - address: "*.atlassian.com"
+        - address: "*.atlassian.net"
+        - address: https://automation.atlassian.com
 app:
   runtime:
     name: nodejs24.x
