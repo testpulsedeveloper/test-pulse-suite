@@ -342,14 +342,57 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
     const jql = `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`;
-    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, ['testops-plan-link']);
-    return allIssues.map(issue => ({
-      id: issue.id,
-      key: issue.key,
-      summary: issue.fields.summary,
-      status: issue.fields.status?.name || 'To Do',
-      planId: issue.properties && issue.properties['testops-plan-link'] ? issue.properties['testops-plan-link'].planId : null
-    }));
+    const propNames = [
+      'testops-plan-link',
+      'execution',
+      'execution_1',
+      'execution_2',
+      'execution_3',
+      'execution_4',
+      'execution_5',
+      'execution_6',
+      'execution_7',
+      'execution_8',
+      'execution_9',
+      'execution_10',
+      'tests'
+    ];
+    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, propNames);
+    return allIssues.map(issue => {
+      const props = issue.properties || {};
+      let totalTests = 0;
+      const seenIds = new Set();
+      for (let shard = 0; shard <= 10; shard++) {
+        const pName = shard === 0 ? 'execution' : `execution_${shard}`;
+        const val = props[pName];
+        if (Array.isArray(val)) {
+          for (const item of val) {
+            const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
+            if (id && !seenIds.has(id)) {
+              seenIds.add(id);
+              totalTests++;
+            }
+          }
+        }
+      }
+      if (totalTests === 0 && Array.isArray(props['tests'])) {
+        for (const item of props['tests']) {
+          const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+            totalTests++;
+          }
+        }
+      }
+      return {
+        id: issue.id,
+        key: issue.key,
+        summary: issue.fields.summary,
+        status: issue.fields.status?.name || 'To Do',
+        planId: props['testops-plan-link'] ? props['testops-plan-link'].planId : null,
+        testCount: totalTests
+      };
+    });
   } catch (e) {
     console.error("getTestCycles exception:", e);
     return { _isError: true, message: String(e) };
@@ -1272,8 +1315,19 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const cycles = await processInBatches(allIssues, 5, 200, async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
-    let execution = (await readCycleIndex(issue.id)) ?? [];
-    execution = execution.map(({ _stub, ...rest }) => rest);
+    let rawExecution = (await readCycleIndex(issue.id)) ?? [];
+    
+    // Deduplicate by test case ID so count strictly matches getCycleExecutionSummary
+    const seenTc = new Set();
+    const execution = [];
+    for (const item of rawExecution) {
+      const tcId = String(item.id || item.testCaseId || '');
+      if (!tcId || !seenTc.has(tcId)) {
+        if (tcId) seenTc.add(tcId);
+        const { _stub, ...rest } = item;
+        execution.push(rest);
+      }
+    }
 
     return {
       id: issue.id,

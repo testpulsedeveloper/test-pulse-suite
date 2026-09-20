@@ -595,6 +595,8 @@ function App() {
   const [resolutionStage, setResolutionStage] = useState('Nuevo a Abierto');
   const [dashboardSubView, setDashboardSubView] = useState('runs'); // 'runs', 'bugs', 'traceability'
   const [dashboardBugSearch, setDashboardBugSearch] = useState('');
+  const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
+  const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
   
   // Modal State
@@ -4512,6 +4514,16 @@ Then el sistema valida la identidad.
       const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
       setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
 
+      if (data?.cycles && Array.isArray(data.cycles)) {
+        setTestCycles(prev => prev.map(c => {
+          const rc = data.cycles.find(rc => String(rc.id) === String(c.id));
+          if (rc && Array.isArray(rc.execution)) {
+            return { ...c, testCount: rc.execution.length };
+          }
+          return c;
+        }));
+      }
+
       // Collect all bug keys already linked through Test Pulse
       const linkedBugKeys = [];
       (data?.cycles || []).forEach(cycle => {
@@ -5581,7 +5593,10 @@ const renderPlanningTab = () => {
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
             {(selectedPlanId ? filteredTestCycles.filter(c => c.planId === selectedPlanId) : filteredTestCycles).map(cycle => {
               const isSelected = selectedCycle?.id === cycle.id;
-              const testCount = cycle.testCount || (selectedCycle?.id === cycle.id ? cycleTests.length : (cycle.tests?.length || 0));
+              const reportCycle = reportData?.cycles?.find(rc => String(rc.id) === String(cycle.id));
+              const testCount = (isSelected && cycleTests.length > 0)
+                ? cycleTests.length
+                : (cycle.testCount !== undefined ? cycle.testCount : (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
               return (
                 <div
                   key={cycle.id}
@@ -6890,22 +6905,17 @@ const renderPlanningTab = () => {
       );
     }
 
-    let filteredCycles = reportData.cycles || [];
+    // 1. Plan Cycles (all cycles within the selected plan(s), or all cycles if no plan filter)
+    let planCycles = reportData.cycles || [];
     if (reportSelectedPlans && reportSelectedPlans.length > 0) {
-      filteredCycles = filteredCycles.filter(c => reportSelectedPlans.includes(c.planId));
+      planCycles = planCycles.filter(c => reportSelectedPlans.includes(c.planId));
     }
+
+    // 2. Cycle-filtered Cycles (cycles filtered by specific cycle selection for Runs & Cycle Bugs)
+    let filteredCycles = planCycles;
     if (reportSelectedCycles && reportSelectedCycles.length > 0) {
       filteredCycles = filteredCycles.filter(c => reportSelectedCycles.includes(c.id));
     }
-
-    // Filter by folder if activeFolder is selected
-    const getSubtreeFolderIds = (fId) => {
-      const result = [fId];
-      const children = folders.filter(f => f.parentId === fId);
-      children.forEach(c => result.push(...getSubtreeFolderIds(c.id)));
-      return result;
-    };
-    const selectedFolderIds = activeFolder ? getSubtreeFolderIds(activeFolder) : null;
 
     // ── Bug & Field Extraction Helpers ──
     const isActualBug = (bug) => {
@@ -6953,6 +6963,21 @@ const renderPlanningTab = () => {
       if (low.includes('may') || low.includes('major')) return 'Mayor';
       if (low.includes('men') || low.includes('minor') || low.includes('baja') || low.includes('trivial')) return 'Menor';
       return s;
+    };
+
+    const renderBugStatusLozenge = (statusStr, isDone) => {
+      const st = (statusStr || '').trim();
+      const low = st.toLowerCase();
+      if (isDone || ['done', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(low)) {
+        return <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Cerrado'}</span>;
+      }
+      if (low.includes('prog') || low.includes('curs') || low.includes('desarr') || low.includes('dev')) {
+        return <span className="ads-lozenge ads-lozenge-brand" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'En progreso'}</span>;
+      }
+      if (low.includes('hold') || low.includes('espera') || low.includes('anal') || low.includes('rev') || low.includes('block') || low.includes('bloq') || low.includes('qa') || low.includes('test')) {
+        return <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'En análisis'}</span>;
+      }
+      return <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Abierto'}</span>;
     };
 
     // Test Type extraction helper for filtering Functional tests
@@ -7006,16 +7031,105 @@ const renderPlanningTab = () => {
       auto: { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 }
     };
 
-    const allBugsMap = new Map();
-    const openBugsMap = new Map();
+    // ── 1. Plan-Level Bugs (Consolidated across all cycles in plan, all statuses) ──
+    const planAllBugsMap = new Map();
+    planCycles.forEach(cycle => {
+      if (cycle.execution && Array.isArray(cycle.execution)) {
+        const seenTcInCycle = new Set();
+        cycle.execution.forEach(ex => {
+          const tcId = String(ex.id || ex.testCaseId || '');
+          if (tcId && seenTcInCycle.has(tcId)) return;
+          if (tcId) seenTcInCycle.add(tcId);
+
+          if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
+            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
+            const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
+
+            ex.linkedBugs.forEach(bug => {
+              if (!bug || !bug.key || !isActualBug(bug)) return;
+
+              const statusStr = (bug.status || '').toLowerCase().trim();
+              const isDone = ['done', 'closed', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(statusStr) ||
+                             (bug.resolution && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver' && bug.resolution !== 'Done');
+
+              const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
+
+              let resName = 'Sin resolver';
+              if (bug.resolution && typeof bug.resolution === 'string' && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver') {
+                resName = bug.resolution;
+              } else if (bug.rawFields?.resolution?.name) {
+                resName = bug.rawFields.resolution.name;
+              } else if (typeof bug.resolution === 'object' && bug.resolution?.name) {
+                resName = bug.resolution.name;
+              }
+
+              const bugKey = bug.key;
+              const cycleName = cycle.summary || cycle.key || String(cycle.id);
+
+              if (!planAllBugsMap.has(bugKey)) {
+                planAllBugsMap.set(bugKey, {
+                  key: bugKey,
+                  summary: bug.summary || 'Defecto detectado en ciclo',
+                  severity: finalSeverity,
+                  assignee: (typeof bug.assignee === 'object' && bug.assignee !== null) ? (bug.assignee.displayName || bug.assignee.name || 'Sin asignar') : (bug.assignee || 'Sin asignar'),
+                  status: bug.status || (isDone ? 'Cerrado' : 'Abierto'),
+                  resolution: resName,
+                  isDone: isDone,
+                  cycles: new Set([cycleName]),
+                  affectedCases: new Map()
+                });
+
+                if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
+                  for (const [state, hours] of Object.entries(bug.timesSpent)) {
+                    if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
+                    bugTimes[state].totalHours += hours;
+                    bugTimes[state].count++;
+                    
+                    const stateLow = state.toLowerCase();
+                    if (stateLow === 'in progress' || stateLow === 'en curso') {
+                      totalResolutionHours += hours;
+                    }
+                  }
+                  resolvedCount++;
+                }
+              } else {
+                planAllBugsMap.get(bugKey).cycles.add(cycleName);
+              }
+
+              const entry = planAllBugsMap.get(bugKey);
+              entry.affectedCases.set(String(ex.id), {
+                id: ex.id,
+                key: tcKey,
+                summary: tcSummary,
+                status: ex.status,
+                cycleName: cycleName
+              });
+            });
+          }
+        });
+      }
+    });
+
+    const planGeneralBugsList = Array.from(planAllBugsMap.values()).map(item => ({
+      ...item,
+      cycleList: Array.from(item.cycles).join(', '),
+      affectedCount: item.affectedCases.size,
+      affectedCasesList: Array.from(item.affectedCases.values())
+    }));
+
+    // ── 2. Cycle-Level Runs & Open Bugs (Scoped to filteredCycles) ──
+    const cycleOpenBugsMap = new Map();
 
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
+        const seenTcInCycle = new Set();
         cycle.execution.forEach(ex => {
+          const tcId = String(ex.id || ex.testCaseId || '');
+          if (tcId && seenTcInCycle.has(tcId)) return;
+          if (tcId) seenTcInCycle.add(tcId);
+
           const tc = testCases.find(t => String(t.id) === String(ex.id));
-          if (selectedFolderIds && (!tc || !selectedFolderIds.includes(tc.folderId))) {
-            return;
-          }
 
           totalCases++;
           if (ex.status === 'Passed') passed++;
@@ -7074,7 +7188,7 @@ const renderPlanningTab = () => {
             }
           }
 
-          // Bugs tracking
+          // Bugs tracking (Open Bugs in selected cycle(s))
           if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
             const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
@@ -7085,6 +7199,8 @@ const renderPlanningTab = () => {
               const statusStr = (bug.status || '').toLowerCase().trim();
               const isDone = ['done', 'closed', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(statusStr) ||
                              (bug.resolution && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver' && bug.resolution !== 'Done');
+
+              if (isDone) return; // Only open bugs for the cycle-specific list
 
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
 
@@ -7098,60 +7214,43 @@ const renderPlanningTab = () => {
               }
 
               const bugKey = bug.key;
-              if (!allBugsMap.has(bugKey)) {
-                allBugsMap.set(bugKey, {
+              if (!cycleOpenBugsMap.has(bugKey)) {
+                cycleOpenBugsMap.set(bugKey, {
                   key: bugKey,
                   summary: bug.summary || 'Defecto detectado en ciclo',
                   severity: finalSeverity,
                   assignee: (typeof bug.assignee === 'object' && bug.assignee !== null) ? (bug.assignee.displayName || bug.assignee.name || 'Sin asignar') : (bug.assignee || 'Sin asignar'),
-                  status: bug.status || (isDone ? 'Cerrado' : 'Abierto'),
+                  status: bug.status || 'Abierto',
                   resolution: resName,
-                  isDone: isDone,
+                  isDone: false,
                   affectedCases: new Map()
                 });
-
-                if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
-                  for (const [state, hours] of Object.entries(bug.timesSpent)) {
-                    if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
-                    bugTimes[state].totalHours += hours;
-                    bugTimes[state].count++;
-                    
-                    const stateLow = state.toLowerCase();
-                    if (stateLow === 'in progress' || stateLow === 'en curso') {
-                      totalResolutionHours += hours;
-                    }
-                  }
-                  resolvedCount++;
-                }
               }
 
-              const entry = allBugsMap.get(bugKey);
+              const entry = cycleOpenBugsMap.get(bugKey);
               entry.affectedCases.set(String(ex.id), {
                 id: ex.id,
                 key: tcKey,
                 summary: tcSummary,
                 status: ex.status
               });
-
-              if (!isDone) {
-                if (!openBugsMap.has(bugKey)) {
-                  openBugsMap.set(bugKey, entry);
-                }
-              }
             });
           }
         });
       }
     });
 
-    const totalAllBugs = allBugsMap.size;
-    const criticalCycleBugs = Array.from(openBugsMap.values()).map(item => ({
+    const allBugsMap = planAllBugsMap;
+    const totalAllBugs = planAllBugsMap.size;
+    const criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
       affectedCount: item.affectedCases.size,
       affectedCasesList: Array.from(item.affectedCases.values())
     }));
     const totalOpenBugs = criticalCycleBugs.length;
-    const totalClosedBugs = Array.from(allBugsMap.values()).filter(b => b.isDone).length;
+    const totalClosedBugs = Array.from(planAllBugsMap.values()).filter(b => b.isDone).length;
+    const totalOpenPlanBugs = Array.from(planAllBugsMap.values()).filter(b => !b.isDone).length;
+    const totalClosedPlanBugs = totalClosedBugs;
 
     const ejecutados = passed + failed;
     const successRate = ejecutados > 0 ? ((passed / ejecutados) * 100).toFixed(1) : '0.0';
@@ -7787,6 +7886,22 @@ const renderPlanningTab = () => {
       );
     });
 
+    const filteredPlanGeneralBugsList = planGeneralBugsList.filter(bug => {
+      if (dashboardGeneralBugStatusTab === 'OPEN' && bug.isDone) return false;
+      if (dashboardGeneralBugStatusTab === 'CLOSED' && !bug.isDone) return false;
+      if (!dashboardGeneralBugSearch) return true;
+      const q = dashboardGeneralBugSearch.toLowerCase().trim();
+      return (
+        bug.key.toLowerCase().includes(q) ||
+        bug.summary.toLowerCase().includes(q) ||
+        bug.assignee.toLowerCase().includes(q) ||
+        String(bug.severity).toLowerCase().includes(q) ||
+        String(bug.status).toLowerCase().includes(q) ||
+        String(bug.resolution).toLowerCase().includes(q) ||
+        (bug.cycleList && bug.cycleList.toLowerCase().includes(q))
+      );
+    });
+
     const filteredTraceabilityRows = traceabilityRows.filter(row => {
       if (!dashboardTraceabilitySearch) return true;
       const q = dashboardTraceabilitySearch.toLowerCase().trim();
@@ -7896,7 +8011,7 @@ const renderPlanningTab = () => {
                 </span>
               </div>
               <div style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)', paddingLeft: '23px', fontWeight: 500 }}>
-                {criticalCycleBugs.length} {criticalCycleBugs.length === 1 ? 'abierto' : 'abiertos'} · {totalClosedBugs} cerrados
+                {totalOpenPlanBugs} {totalOpenPlanBugs === 1 ? 'abierto' : 'abiertos'} · {totalClosedPlanBugs} cerrados
               </div>
             </div>
 
@@ -8877,27 +8992,27 @@ const renderPlanningTab = () => {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               {/* Bugs KPI Scorecard (5 Cards) */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
-                {/* Card 1: Total Defectos */}
+                {/* Card 1: Total Defectos (Plan) */}
                 <div className="dashboard-kpi-card">
                   <div className="dashboard-kpi-header">
-                    <span style={{ color: 'var(--jira-dark, #172B4D)', fontWeight: 700 }}>🐞 TOTAL DEFECTOS</span>
-                    <span className="dashboard-kpi-pill blue">{totalAllBugs} totales</span>
+                    <span style={{ color: 'var(--jira-dark, #172B4D)', fontWeight: 700 }}>🐞 TOTAL DEFECTOS (PLAN)</span>
+                    <span className="dashboard-kpi-pill blue">{totalAllPlanBugs} totales</span>
                   </div>
                   <div className="dashboard-kpi-value" style={{ color: 'var(--jira-dark, #172B4D)' }}>
-                    {totalAllBugs}
+                    {totalAllPlanBugs}
                   </div>
                   <div className="dashboard-kpi-footer">
-                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
-                    <span style={{ color: criticalCycleBugs.length > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
-                      {criticalCycleBugs.length} Abiertos
+                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedPlanBugs} Cerrados</span>
+                    <span style={{ color: totalOpenPlanBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
+                      {totalOpenPlanBugs} Abiertos
                     </span>
                   </div>
                 </div>
 
-                {/* Card 2: Defectos Abiertos */}
+                {/* Card 2: Defectos Abiertos en Ciclo */}
                 <div className="dashboard-kpi-card">
                   <div className="dashboard-kpi-header">
-                    <span style={{ color: '#DE350B', fontWeight: 700 }}>🐞 DEFECTOS ABIERTOS</span>
+                    <span style={{ color: '#DE350B', fontWeight: 700 }}>🐞 DEFECTOS ABIERTOS (CICLO)</span>
                     <span className="dashboard-kpi-pill red">{criticalCycleBugs.length} Activos</span>
                   </div>
                   <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
@@ -8905,7 +9020,7 @@ const renderPlanningTab = () => {
                   </div>
                   <div className="dashboard-kpi-footer">
                     <span>En ciclo(s) seleccionados</span>
-                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
+                    <span style={{ color: '#0C66E4', fontWeight: 600 }}>{totalOpenPlanBugs} en Plan</span>
                   </div>
                 </div>
 
@@ -8916,10 +9031,10 @@ const renderPlanningTab = () => {
                     <span className="dashboard-kpi-pill red">Alta prioridad</span>
                   </div>
                   <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
-                    {criticalCycleBugs.filter(b => getSevRank(b.severity) <= 2).length}
+                    {planGeneralBugsList.filter(b => !b.isDone && getSevRank(b.severity) <= 2).length}
                   </div>
                   <div className="dashboard-kpi-footer">
-                    <span>Requieren atención inmediata</span>
+                    <span>Abiertos en el Plan</span>
                   </div>
                 </div>
 
@@ -8930,10 +9045,10 @@ const renderPlanningTab = () => {
                     <span className="dashboard-kpi-pill orange">Media/Baja</span>
                   </div>
                   <div className="dashboard-kpi-value" style={{ color: '#FF8B00' }}>
-                    {criticalCycleBugs.filter(b => getSevRank(b.severity) > 2).length}
+                    {planGeneralBugsList.filter(b => !b.isDone && getSevRank(b.severity) > 2).length}
                   </div>
                   <div className="dashboard-kpi-footer">
-                    <span>Defectos no bloqueantes</span>
+                    <span>Abiertos no bloqueantes</span>
                   </div>
                 </div>
 
@@ -8952,16 +9067,19 @@ const renderPlanningTab = () => {
                 </div>
               </div>
 
-              {/* Bugs Dedicated Card */}
+              {/* ─── TABLA 1: DEFECTOS ABIERTOS EN CICLO(S) SELECCIONADOS ─── */}
               <div className="dashboard-card" style={{ overflowX: 'auto' }}>
                 <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
                   <div>
                     <div className="dashboard-card-title">
                       <span style={{ color: '#DE350B' }}>🐞</span>
-                      <span>Tablero de Defectos y Fallos Críticos de Jira</span>
+                      <span>Defectos Abiertos en Ciclo(s) Seleccionados</span>
+                      <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '11px', fontWeight: 700, marginLeft: '8px' }}>
+                        {criticalCycleBugs.length} activos
+                      </span>
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
-                      Vista dedicada a la gestión de defectos abiertos en el ciclo activo
+                      Defectos no resueltos vinculados a casos de prueba en los ciclos actualmente seleccionados en la barra superior.
                     </div>
                   </div>
 
@@ -8969,7 +9087,7 @@ const renderPlanningTab = () => {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <input
                       type="text"
-                      placeholder="Buscar bug, responsable, severidad..."
+                      placeholder="Buscar bug en ciclo..."
                       value={dashboardBugSearch}
                       onChange={(e) => setDashboardBugSearch(e.target.value)}
                       style={{
@@ -9038,9 +9156,7 @@ const renderPlanningTab = () => {
 
                           {/* 4. Estado */}
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '10px', fontWeight: 700 }}>
-                              {bug.status || 'Abierto'}
-                            </span>
+                            {renderBugStatusLozenge(bug.status, false)}
                           </td>
 
                           {/* 5. Responsable */}
@@ -9081,6 +9197,215 @@ const renderPlanningTab = () => {
                 ) : (
                   <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
                     {dashboardBugSearch ? '🔍 No se encontraron bugs con ese criterio de búsqueda.' : '✅ No hay bugs abiertos en el ciclo seleccionado.'}
+                  </div>
+                )}
+              </div>
+
+              {/* ─── TABLA 2: RELACIÓN GENERAL DE BUGS DEL PLAN DE PRUEBAS ─── */}
+              <div className="dashboard-card" style={{ overflowX: 'auto' }}>
+                <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
+                  <div>
+                    <div className="dashboard-card-title">
+                      <span style={{ color: '#0C66E4' }}>📋</span>
+                      <span>Relación General de Bugs del Plan de Pruebas</span>
+                      <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px', fontWeight: 700, marginLeft: '8px' }}>
+                        {planGeneralBugsList.length} total
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
+                      Listado general consolidado de todos los defectos vinculados al Plan (Abiertos, On Hold, En progreso, En análisis y Cerrados).
+                    </div>
+                  </div>
+
+                  {/* Filter controls: Status Tabs & Search input */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    {/* Status filter tabs */}
+                    <div style={{ display: 'flex', background: '#F1F2F4', padding: '2px', borderRadius: '6px', gap: '2px' }}>
+                      <button
+                        type="button"
+                        onClick={() => setDashboardGeneralBugStatusTab('ALL')}
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '11px',
+                          fontWeight: dashboardGeneralBugStatusTab === 'ALL' ? 700 : 500,
+                          background: dashboardGeneralBugStatusTab === 'ALL' ? '#FFFFFF' : 'transparent',
+                          color: dashboardGeneralBugStatusTab === 'ALL' ? '#0C66E4' : '#44546F',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          boxShadow: dashboardGeneralBugStatusTab === 'ALL' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                        }}
+                      >
+                        Todos ({planGeneralBugsList.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDashboardGeneralBugStatusTab('OPEN')}
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '11px',
+                          fontWeight: dashboardGeneralBugStatusTab === 'OPEN' ? 700 : 500,
+                          background: dashboardGeneralBugStatusTab === 'OPEN' ? '#FFFFFF' : 'transparent',
+                          color: dashboardGeneralBugStatusTab === 'OPEN' ? '#DE350B' : '#44546F',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          boxShadow: dashboardGeneralBugStatusTab === 'OPEN' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                        }}
+                      >
+                        Abiertos ({totalOpenPlanBugs})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDashboardGeneralBugStatusTab('CLOSED')}
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '11px',
+                          fontWeight: dashboardGeneralBugStatusTab === 'CLOSED' ? 700 : 500,
+                          background: dashboardGeneralBugStatusTab === 'CLOSED' ? '#FFFFFF' : 'transparent',
+                          color: dashboardGeneralBugStatusTab === 'CLOSED' ? '#006644' : '#44546F',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          boxShadow: dashboardGeneralBugStatusTab === 'CLOSED' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                        }}
+                      >
+                        Cerrados ({totalClosedPlanBugs})
+                      </button>
+                    </div>
+
+                    {/* Search input */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="text"
+                        placeholder="Buscar en bugs del plan..."
+                        value={dashboardGeneralBugSearch}
+                        onChange={(e) => setDashboardGeneralBugSearch(e.target.value)}
+                        style={{
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          border: '1px solid var(--jira-border, #DCDFE4)',
+                          borderRadius: '6px',
+                          width: '240px'
+                        }}
+                      />
+                      {dashboardGeneralBugSearch && (
+                        <button
+                          onClick={() => setDashboardGeneralBugSearch('')}
+                          style={{ padding: '4px 8px', fontSize: '11px', background: '#F1F2F4', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                        >
+                          Limpiar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {filteredPlanGeneralBugsList.length > 0 ? (
+                  <table className="dashboard-defects-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Resumen del bug</th>
+                        <th>Ciclo(s) origen</th>
+                        <th>Severidad</th>
+                        <th>Estado</th>
+                        <th>Responsable</th>
+                        <th>Resolución</th>
+                        <th style={{ textAlign: 'center' }}>Casos afectados</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredPlanGeneralBugsList.map((bug) => (
+                        <tr key={bug.key} style={{ opacity: bug.isDone ? 0.85 : 1 }}>
+                          {/* 1. ID */}
+                          <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span className={`dashboard-bug-icon ${bug.isDone ? 'done' : ''}`}>B</span>
+                              <a
+                                href={`/browse/${bug.key}`}
+                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
+                                style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
+                                title="Abrir incidencia en Jira"
+                              >
+                                {bug.key}
+                              </a>
+                            </div>
+                          </td>
+
+                          {/* 2. Resumen del bug */}
+                          <td style={{ maxWidth: '380px' }}>
+                            <div style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
+                              {bug.summary}
+                            </div>
+                          </td>
+
+                          {/* 3. Ciclo(s) origen */}
+                          <td style={{ maxWidth: '200px' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                              {Array.from(bug.cycles || []).map((cName, idx) => (
+                                <span
+                                  key={idx}
+                                  className="ads-lozenge ads-lozenge-subtle"
+                                  style={{ fontSize: '10px', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={cName}
+                                >
+                                  {cName}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+
+                          {/* 4. Severidad */}
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
+                              {getSeverityLabel(bug.severity)}
+                            </span>
+                          </td>
+
+                          {/* 5. Estado */}
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            {renderBugStatusLozenge(bug.status, bug.isDone)}
+                          </td>
+
+                          {/* 6. Responsable */}
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
+                                {getInitials(bug.assignee)}
+                              </div>
+                              <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
+                                {bug.assignee}
+                              </span>
+                            </div>
+                          </td>
+
+                          {/* 7. Resolución */}
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
+                              <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
+                                Sin resolver
+                              </span>
+                            ) : (
+                              <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
+                                {bug.resolution}
+                              </span>
+                            )}
+                          </td>
+
+                          {/* 8. Casos afectados */}
+                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+                            <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
+                              {bug.affectedCount}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
+                    {dashboardGeneralBugSearch ? '🔍 No se encontraron bugs en el plan con ese criterio de búsqueda.' : '✅ No hay defectos registrados en este Plan de Pruebas.'}
                   </div>
                 )}
               </div>
