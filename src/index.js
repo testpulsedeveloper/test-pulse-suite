@@ -1,6 +1,29 @@
 import Resolver from '@forge/resolver';
-import api, { route, storage, fetch } from '@forge/api';
+import api, { route, fetch } from '@forge/api';
 
+const getAppStorage = async (key) => {
+  try {
+    const res = await api.asApp().requestJira(route`/rest/api/3/app/properties/${key}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.value?.data ?? data.value ?? null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const setAppStorage = async (key, val) => {
+  try {
+    await api.asApp().requestJira(route`/rest/api/3/app/properties/${key}`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: val })
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
 
 // Rate-limiting utility: processes items in batches with delay between batches
 // Prevents burst requests that trigger Jira's 429 rate limiting
@@ -23,16 +46,16 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
   let isLast = false;
   let pages = 0;
   while (!isLast && pages < maxPages) {
-      const page = await fetchJqlPage(jql, fields, expand, properties, token, 100);
-      if (page.error) {
-          console.error("fetchAllIssues error:", page.error);
-          break;
-      }
-      allIssues = allIssues.concat(page.issues);
-      token = page.nextPageToken;
-      isLast = page.isLast;
-      if (!token) break;
-      pages++;
+    const page = await fetchJqlPage(jql, fields, expand, properties, token, 100);
+    if (page.error) {
+      console.error("fetchAllIssues error:", page.error);
+      break;
+    }
+    allIssues = allIssues.concat(page.issues);
+    token = page.nextPageToken;
+    isLast = page.isLast;
+    if (!token) break;
+    pages++;
   }
   return allIssues;
 }
@@ -41,12 +64,12 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
   try {
     let safeFields = fields;
     if (Array.isArray(fields) && fields.includes('*all')) {
-        safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
-        fields.forEach(f => {
-           if (f !== '*all' && !safeFields.includes(f)) safeFields.push(f);
-        });
+      safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
+      fields.forEach(f => {
+        if (f !== '*all' && !safeFields.includes(f)) safeFields.push(f);
+      });
     } else if (fields === '*all') {
-        safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
+      safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
     }
     
     const body = {
@@ -56,7 +79,11 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
     };
     if (nextPageToken) body.nextPageToken = nextPageToken;
     if (expand) body.expand = Array.isArray(expand) ? expand.join(',') : expand;
-    if (properties) body.properties = Array.isArray(properties) ? properties : [properties];
+    if (properties) {
+      const propArray = Array.isArray(properties) ? properties : [properties];
+      // Jira REST API strictly enforces a maximum of 5 properties in JQL search
+      body.properties = propArray.slice(0, 5);
+    }
 
     const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
@@ -326,12 +353,12 @@ resolver.define('getTestPlans', async ({ payload }) => {
     return allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
-      summary: issue.fields.summary,
-      status: issue.fields.status.name
+      summary: issue.fields?.summary || issue.key,
+      status: issue.fields?.status?.name || 'To Do'
     }));
   } catch (e) {
     console.error("getTestPlans exception:", e);
-    return { _isError: true, message: String(e) };
+    return [];
   }
 });
 
@@ -342,40 +369,26 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
     const jql = `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`;
-    const propNames = [
-      'testops-plan-link',
-      'execution',
-      'execution_1',
-      'execution_2',
-      'execution_3',
-      'execution_4',
-      'execution_5',
-      'execution_6',
-      'execution_7',
-      'execution_8',
-      'execution_9',
-      'execution_10',
-      'tests'
-    ];
+    // Pass at most 3 properties (Jira allows max 5)
+    const propNames = ['testops-plan-link', 'execution', 'tests'];
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, propNames);
     return allIssues.map(issue => {
       const props = issue.properties || {};
       let totalTests = 0;
       const seenIds = new Set();
-      for (let shard = 0; shard <= 10; shard++) {
-        const pName = shard === 0 ? 'execution' : `execution_${shard}`;
-        const rawVal = props[pName];
-        const val = Array.isArray(rawVal) ? rawVal : (Array.isArray(rawVal?.value) ? rawVal.value : null);
-        if (Array.isArray(val)) {
-          for (const item of val) {
-            const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
-            if (id && !seenIds.has(id)) {
-              seenIds.add(id);
-              totalTests++;
-            }
+      
+      const rawExec = props['execution'];
+      const execVal = Array.isArray(rawExec) ? rawExec : (Array.isArray(rawExec?.value) ? rawExec.value : null);
+      if (Array.isArray(execVal)) {
+        for (const item of execVal) {
+          const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+            totalTests++;
           }
         }
       }
+      
       const rawTests = props['tests'];
       const testsVal = Array.isArray(rawTests) ? rawTests : (Array.isArray(rawTests?.value) ? rawTests.value : null);
       if (totalTests === 0 && Array.isArray(testsVal)) {
@@ -387,20 +400,21 @@ resolver.define('getTestCycles', async ({ payload }) => {
           }
         }
       }
+      
       const planLink = props['testops-plan-link'];
       const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : null;
       return {
         id: issue.id,
         key: issue.key,
-        summary: issue.fields.summary,
-        status: issue.fields.status?.name || 'To Do',
+        summary: issue.fields?.summary || issue.key,
+        status: issue.fields?.status?.name || 'To Do',
         planId,
         testCount: totalTests
       };
     });
   } catch (e) {
     console.error("getTestCycles exception:", e);
-    return { _isError: true, message: String(e) };
+    return [];
   }
 });
 
@@ -4069,8 +4083,8 @@ resolver.define('getReportAutomationConfig', async ({ payload, context }) => {
     const projectId = String(payload?.projectId || context?.extension?.project?.id || '');
     if (!projectId) return { success: false, error: 'ProjectId es requerido' };
     
-    const config = await storage.get(`report_automation_config_${projectId}`);
-    const lastDispatch = await storage.get(`report_automation_last_dispatch_${projectId}`);
+    const config = await getAppStorage(`report_automation_config_${projectId}`);
+    const lastDispatch = await getAppStorage(`report_automation_last_dispatch_${projectId}`);
     
     return {
       success: true,
@@ -4102,18 +4116,18 @@ resolver.define('saveReportAutomationConfig', async ({ payload, context }) => {
     if (!projectId) return { success: false, error: 'ProjectId es requerido' };
     if (!config) return { success: false, error: 'Configuración es requerida' };
 
-    await storage.set(`report_automation_config_${projectId}`, config);
+    await setAppStorage(`report_automation_config_${projectId}`, config);
 
     // Update active projects registry
-    let activeProjects = (await storage.get('report_automation_active_projects')) || [];
+    let activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
     if (!Array.isArray(activeProjects)) activeProjects = [];
     
     if (config.enabled && !activeProjects.includes(projectId)) {
       activeProjects.push(projectId);
-      await storage.set('report_automation_active_projects', activeProjects);
+      await setAppStorage('report_automation_active_projects', activeProjects);
     } else if (!config.enabled && activeProjects.includes(projectId)) {
       activeProjects = activeProjects.filter(id => String(id) !== String(projectId));
-      await storage.set('report_automation_active_projects', activeProjects);
+      await setAppStorage('report_automation_active_projects', activeProjects);
     }
 
     return { success: true, config };
@@ -4200,12 +4214,12 @@ resolver.define('triggerManualReportDispatch', async ({ payload, context }) => {
       statusCode: webhookRes.status,
       statusText: webhookRes.statusText || (isSuccess ? 'OK' : 'Error'),
       responseSummary: resText ? resText.substring(0, 300) : '',
-      recipients: reportData.recipients || 'Configurados en regla de Jira',
+      recipients: reportData?.recipients || 'Configurados en regla de Jira',
       emailSubject: bodyPayload.emailSubject
     };
 
     if (projectId) {
-      await storage.set(`report_automation_last_dispatch_${projectId}`, dispatchLog);
+      await setAppStorage(`report_automation_last_dispatch_${projectId}`, dispatchLog);
     }
 
     if (!isSuccess) {
@@ -4232,7 +4246,7 @@ resolver.define('triggerManualReportDispatch', async ({ payload, context }) => {
 export async function scheduledReportHandler(event, context) {
   try {
     console.log('[scheduledReportHandler] Running scheduled report check...');
-    const activeProjects = (await storage.get('report_automation_active_projects')) || [];
+    const activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
     if (!Array.isArray(activeProjects) || activeProjects.length === 0) {
       console.log('[scheduledReportHandler] No active report automation projects found.');
       return;
@@ -4247,7 +4261,7 @@ export async function scheduledReportHandler(event, context) {
 
     for (const projectId of activeProjects) {
       try {
-        const config = await storage.get(`report_automation_config_${projectId}`);
+        const config = await getAppStorage(`report_automation_config_${projectId}`);
         if (!config || !config.enabled || !config.webhookUrl) continue;
 
         const targetHour = parseInt(config.hour || '18', 10);
@@ -4262,7 +4276,7 @@ export async function scheduledReportHandler(event, context) {
         }
 
         // Prevent duplicate execution in the same day & hour
-        const lastDispatch = await storage.get(`report_automation_last_dispatch_${projectId}`);
+        const lastDispatch = await getAppStorage(`report_automation_last_dispatch_${projectId}`);
         if (lastDispatch && lastDispatch.timestamp) {
           const lastDate = new Date(lastDispatch.timestamp);
           const lastCdmxStr = lastDate.toLocaleString("en-US", { timeZone: "America/Mexico_City" });
@@ -4308,7 +4322,7 @@ export async function scheduledReportHandler(event, context) {
           body: JSON.stringify(bodyPayload)
         });
 
-        await storage.set(`report_automation_last_dispatch_${projectId}`, {
+        await setAppStorage(`report_automation_last_dispatch_${projectId}`, {
           timestamp: now.toISOString(),
           status: res.ok ? 'SUCCESS' : 'ERROR',
           statusCode: res.status,

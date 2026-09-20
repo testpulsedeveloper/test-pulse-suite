@@ -1026,11 +1026,16 @@ function App() {
       ]);
       if (foldersRes.status === 'fulfilled') setFolders(foldersRes.value || []);
       if (plansRes.status === 'fulfilled') {
-        const plans = plansRes.value || [];
+        const plans = Array.isArray(plansRes.value) ? plansRes.value : [];
         setTestPlans(plans);
-        if (plans.length > 0) setSelectedPlanId(plans[0].id);
+        if (plans.length > 0) {
+          setSelectedPlanId(prev => (prev && plans.some(p => String(p.id) === String(prev))) ? prev : plans[0].id);
+        }
       }
-      if (cyclesRes.status === 'fulfilled') setTestCycles(cyclesRes.value || []);
+      if (cyclesRes.status === 'fulfilled') {
+        const cycs = Array.isArray(cyclesRes.value) ? cyclesRes.value : [];
+        setTestCycles(cycs);
+      }
       setRefreshTrigger(prev => prev + 1);
 
       // Phase 3: background
@@ -4500,13 +4505,25 @@ Then el sistema valida la identidad.
       setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
 
       if (data?.cycles && Array.isArray(data.cycles)) {
-        setTestCycles(prev => prev.map(c => {
-          const rc = data.cycles.find(rc => String(rc.id) === String(c.id));
-          if (rc && Array.isArray(rc.execution)) {
-            return { ...c, testCount: rc.execution.length };
+        setTestCycles(prev => {
+          if (!prev || prev.length === 0) {
+            return data.cycles.map(rc => ({
+              id: rc.id,
+              key: rc.key,
+              summary: rc.summary,
+              status: rc.status || 'To Do',
+              planId: rc.planId || null,
+              testCount: Array.isArray(rc.execution) ? rc.execution.length : 0
+            }));
           }
-          return c;
-        }));
+          return prev.map(c => {
+            const rc = data.cycles.find(rc => String(rc.id) === String(c.id));
+            if (rc && Array.isArray(rc.execution)) {
+              return { ...c, testCount: rc.execution.length, planId: rc.planId !== undefined ? rc.planId : c.planId };
+            }
+            return c;
+          });
+        });
       }
 
       // Collect all bug keys already linked through Test Pulse
