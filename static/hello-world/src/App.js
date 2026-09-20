@@ -1844,21 +1844,30 @@ Then el sistema valida la identidad.
           <li 
             className={`folder-item ${activeFolder === null ? 'active' : ''} ${dragOverFolderId === '__ROOT__' ? 'drag-over' : ''}`} 
             onClick={() => setActiveFolder(null)} 
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
+            }}
             onDragOver={(e) => {
               e.preventDefault();
+              e.stopPropagation();
               e.dataTransfer.dropEffect = 'move';
               if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
             }}
             onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
               if (e.currentTarget.contains(e.relatedTarget)) return;
               if (dragOverFolderId === '__ROOT__') setDragOverFolderId(null);
             }}
             onDrop={(e) => {
               e.preventDefault();
+              e.stopPropagation();
               setDragOverFolderId(null);
               let idsToMove = draggedDesignTestIds;
               try {
-                const dataStr = e.dataTransfer.getData('application/json');
+                const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
                 if (dataStr) {
                   const parsed = JSON.parse(dataStr);
                   if (parsed?.testIds?.length) idsToMove = parsed.testIds;
@@ -1900,21 +1909,30 @@ Then el sistema valida la identidad.
                       <li 
                         className={`folder-item ${activeFolder === folder.id ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`} 
                         onClick={() => setActiveFolder(folder.id)} 
+                        onDragEnter={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
+                        }}
                         onDragOver={(e) => {
                           e.preventDefault();
+                          e.stopPropagation();
                           e.dataTransfer.dropEffect = 'move';
                           if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
                         }}
                         onDragLeave={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
                           if (e.currentTarget.contains(e.relatedTarget)) return;
                           if (dragOverFolderId === folder.id) setDragOverFolderId(null);
                         }}
                         onDrop={(e) => {
                           e.preventDefault();
+                          e.stopPropagation();
                           setDragOverFolderId(null);
                           let idsToMove = draggedDesignTestIds;
                           try {
-                            const dataStr = e.dataTransfer.getData('application/json');
+                            const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
                             if (dataStr) {
                               const parsed = JSON.parse(dataStr);
                               if (parsed?.testIds?.length) idsToMove = parsed.testIds;
@@ -2363,9 +2381,54 @@ Then el sistema valida la identidad.
               <span>Seleccionar página</span>
             </label>
             {selectedDesignTestIds.size > 0 && (
-              <span className="ads-lozenge ads-lozenge-brand" style={{ borderRadius: '9999px', fontSize: '11px' }}>
-                {selectedDesignTestIds.size} seleccionados
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span className="ads-lozenge ads-lozenge-brand" style={{ borderRadius: '9999px', fontSize: '11px', background: '#E1007A', color: '#FFFFFF', border: 'none' }}>
+                  {selectedDesignTestIds.size} seleccionados
+                </span>
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    if (e.target.value !== '') {
+                      const fId = e.target.value === '__ROOT__' ? null : e.target.value;
+                      const fName = fId ? (folders.find(f => f.id === fId)?.name || 'Carpeta') : 'Raíz (All Tests)';
+                      handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), fId, fName);
+                      setSelectedDesignTestIds(new Set());
+                      e.target.value = '';
+                    }
+                  }}
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    border: '1px solid #E1007A',
+                    background: '#FDF2F7',
+                    color: '#E1007A',
+                    fontWeight: 600,
+                    fontSize: '0.74rem',
+                    cursor: 'pointer',
+                    outline: 'none'
+                  }}
+                  title="Mover todos los casos seleccionados a una carpeta"
+                >
+                  <option value="" disabled>📁 Mover a carpeta...</option>
+                  <option value="__ROOT__">📁 Raíz (Sin carpeta / All Tests)</option>
+                  {folderPaths.map(f => <option key={f.id} value={f.id}>📁 {f.path}</option>)}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDesignTestIds(new Set())}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--jira-subtle, #626F86)',
+                    fontSize: '0.74rem',
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                    padding: '2px 4px'
+                  }}
+                >
+                  Limpiar selección
+                </button>
+              </div>
             )}
           </div>
 
@@ -2405,7 +2468,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'automated' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                ⚡ Automatizados ({testCases.filter(isAutomatedTest).length})
+                ⚡ Auto ({testCases.filter(t => t.labels?.includes('automated') || t.labels?.includes('automation') || t.labels?.includes('qa-auto')).length})
               </button>
               <button
                 type="button"
@@ -2422,22 +2485,22 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'manual' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                Manuales ({testCases.filter(t => !isAutomatedTest(t)).length})
+                Manual ({testCases.filter(t => !(t.labels?.includes('automated') || t.labels?.includes('automation') || t.labels?.includes('qa-auto'))).length})
               </button>
             </div>
 
             {/* Sort Dropdown */}
             <select
-              value={designSortOrder}
-              onChange={(e) => setDesignSortOrder(e.target.value)}
+              value={designSortBy}
+              onChange={(e) => setDesignSortBy(e.target.value)}
               style={{
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                padding: '0.3rem 0.5rem',
-                borderRadius: '6px',
+                padding: '4px 8px',
+                borderRadius: '4px',
                 border: '1px solid var(--jira-border, #DCDFE4)',
-                backgroundColor: '#FFFFFF',
-                color: 'var(--jira-text, #172B4D)',
+                background: '#FFFFFF',
+                color: 'var(--jira-navy, #091E42)',
+                fontSize: '0.75rem',
+                fontWeight: 500,
                 cursor: 'pointer',
                 outline: 'none'
               }}
@@ -2511,7 +2574,6 @@ Then el sistema valida la identidad.
                   <div 
                     key={test.id} 
                     className={`modern-test-card ${isSelected ? 'selected' : ''} ${draggedDesignTestIds?.includes(test.id) ? 'dragging' : ''}`}
-                    onClick={() => { setSelectedTestCase(test); setModalDetailTab('details'); loadTestCaseDetails(test.id); }}
                     draggable={true}
                     onDragStart={(e) => {
                       let ids = [test.id];
@@ -2519,12 +2581,27 @@ Then el sistema valida la identidad.
                         ids = Array.from(selectedDesignTestIds);
                       }
                       setDraggedDesignTestIds(ids);
-                      e.dataTransfer.setData('application/json', JSON.stringify({ type: 'TEST_CASES', testIds: ids }));
+                      const payload = JSON.stringify({ type: 'TEST_CASES', testIds: ids });
+                      try {
+                        e.dataTransfer.setData('text/plain', payload);
+                        e.dataTransfer.setData('application/json', payload);
+                      } catch (err) {
+                        try { e.dataTransfer.setData('text', payload); } catch (e2) {}
+                      }
                       e.dataTransfer.effectAllowed = 'move';
                     }}
                     onDragEnd={() => {
+                      window.__justFinishedDrag = Date.now();
                       setDraggedDesignTestIds(null);
                       setDragOverFolderId(null);
+                    }}
+                    onClick={() => { 
+                      if (window.__justFinishedDrag && Date.now() - window.__justFinishedDrag < 350) {
+                        return;
+                      }
+                      setSelectedTestCase(test); 
+                      setModalDetailTab('details'); 
+                      loadTestCaseDetails(test.id); 
                     }}
                     style={{ cursor: 'grab' }}
                   >
