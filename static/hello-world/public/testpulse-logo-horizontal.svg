@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 64" width="320" height="64" fill="none">
+  <defs>
+    <linearGradient id="brandIconGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0C66E4"/>
+      <stop offset="50%" stop-color="#5E4DB2"/>
+      <stop offset="100%" stop-color="#8247E5"/>
+    </linearGradient>
+    <linearGradient id="pulseLineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#E9F2FF"/>
+    </linearGradient>
+    <filter id="iconGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Isotipo Squircle (48x48) -->
+  <rect x="8" y="8" width="48" height="48" rx="12" fill="url(#brandIconGrad)"/>
+  <rect x="8" y="8" width="48" height="48" rx="12" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- Radar circles -->
+  <circle cx="32" cy="32" r="14" stroke="#FFFFFF" stroke-opacity="0.15" stroke-width="1" stroke-dasharray="2 2"/>
+
+  <!-- Wave line -->
+  <path d="M16 32 H22 L27 24 L32 40 L38 20 L43 35 L48 32" stroke="url(#pulseLineGrad)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#iconGlow)"/>
+
+  <!-- Apex Beacon -->
+  <circle cx="38" cy="20" r="2.5" fill="#FFFFFF"/>
+  <circle cx="38" cy="20" r="5" stroke="#FFFFFF" stroke-width="0.8" stroke-opacity="0.5"/>
+
+  <!-- Wordmark "Test Pulse" -->
+  <text x="68" y="35" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="800" fill="#172B4D" letter-spacing="-0.02em">Test</text>
+  <text x="116" y="35" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="800" fill="#8247E5" letter-spacing="-0.02em">Pulse</text>
+
+  <!-- Lozenge Pill "SUITE" -->
+  <rect x="180" y="20" width="46" height="18" rx="9" fill="#F3F0FF" stroke="#D8CCFF" stroke-width="1"/>
+  <text x="188" y="33" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="800" fill="#5E4DB2" letter-spacing="0.05em">SUITE</text>
+
+  <!-- Subtitle -->
+  <text x="69" y="49" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5" font-weight="500" fill="#626F86" letter-spacing="-0.01em">Automated &amp; Manual QA Engine for Forge</text>
+</svg>
