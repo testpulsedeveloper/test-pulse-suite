@@ -711,8 +711,22 @@ function App() {
           targetProjectId = fp[0].id;
           setSelectedProjectId(targetProjectId);
         }
-      } else if (!currentProjectId) {
-        setSelectedProjectId(targetProjectId);
+      } else {
+        if (ctx?.extension?.project) {
+          setProjects(prev => {
+            const proj = ctx.extension.project;
+            const exists = prev.some(p => String(p.id) === String(proj.id) || String(p.key) === String(proj.key));
+            return exists ? prev : [proj, ...prev];
+          });
+        }
+        if (!currentProjectId) {
+          setSelectedProjectId(targetProjectId);
+        }
+        invoke('getProjects').then(fp => {
+          if (Array.isArray(fp) && fp.length > 0) {
+            setProjects(fp);
+          }
+        }).catch(() => {});
       }
 
       if (!targetProjectId) { clearTimeout(loadTimer); setLoading(false); return; }
@@ -6391,9 +6405,9 @@ const renderPlanningTab = () => {
             else moduleStats[folderName].notRun++;
           }
 
-          // Feature
-          const tcFeature = testCases.find(t => String(t.id) === String(ex.id));
-          if (tcFeature && tcFeature.folderId) {
+          // Feature / Module (Only Functional Tests)
+          const tcFeature = tc || testCases.find(t => String(t.id) === String(ex.id));
+          if (tcFeature && tcFeature.folderId && isFunctionalTest(tcFeature, ex)) {
             const fObj = folderPaths.find(f => f.id === tcFeature.folderId);
             if (fObj) {
               const folderPath = fObj.path;
@@ -6497,9 +6511,47 @@ const renderPlanningTab = () => {
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
     const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '13.6';
-    const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId));
-    const currentProjectKey = currentProjectObj?.key || selectedProjectId || 'POS-E2E';
-    const currentProjectName = currentProjectObj?.name || currentProjectKey;
+    const ctxProj = context?.extension?.project;
+    const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
+    
+    // Project Name & Key resolution
+    let currentProjectName = currentProjectObj?.name;
+    if (!currentProjectName && ctxProj) {
+      if (!selectedProjectId || String(ctxProj.id) === String(selectedProjectId) || String(ctxProj.key) === String(selectedProjectId)) {
+        currentProjectName = ctxProj.name;
+      }
+    }
+    if (!currentProjectName && ctxProj?.name) {
+      currentProjectName = ctxProj.name;
+    }
+
+    let currentProjectKey = currentProjectObj?.key || ctxProj?.key || '';
+    if (!currentProjectKey && selectedProjectId && isNaN(Number(selectedProjectId))) {
+      currentProjectKey = selectedProjectId;
+    }
+    if (!currentProjectKey) {
+      const sampleBug = Array.from(allBugsMap.values())[0];
+      if (sampleBug?.key && sampleBug.key.includes('-')) {
+        currentProjectKey = sampleBug.key.split('-')[0];
+      } else if (testCases[0]?.key && testCases[0].key.includes('-')) {
+        currentProjectKey = testCases[0].key.split('-')[0];
+      }
+    }
+
+    // Clean up numeric-only names like "19919"
+    if (!currentProjectName || /^\d+$/.test(String(currentProjectName).trim())) {
+      if (ctxProj?.name && !/^\d+$/.test(String(ctxProj.name).trim())) {
+        currentProjectName = ctxProj.name;
+      } else if (currentProjectKey) {
+        currentProjectName = currentProjectKey;
+      } else {
+        currentProjectName = 'Proyecto';
+      }
+    }
+
+    const projectDisplay = (currentProjectName && currentProjectKey && currentProjectName !== currentProjectKey && !/^\d+$/.test(currentProjectKey))
+      ? `${currentProjectName} (${currentProjectKey})`
+      : currentProjectName;
 
     const handleCopyReportToClipboard = async () => {
       try {
@@ -6525,13 +6577,13 @@ const renderPlanningTab = () => {
           scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
         }
 
-        // Generate Bug Rows from allBugsMap
+        // Generate Bug Rows from allBugsMap (6 well-proportioned columns to prevent cutoff)
         const allBugsArray = Array.from(allBugsMap.values());
         let tableRows = '';
         if (allBugsArray.length === 0) {
           tableRows = `
             <tr>
-              <td colspan="7" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
+              <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
                 🟢 No se registraron defectos vinculados en las ejecuciones evaluadas.
               </td>
             </tr>
@@ -6541,13 +6593,16 @@ const renderPlanningTab = () => {
             const isEven = idx % 2 === 0;
             const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
             
-            // Severity styling
-            let sevBg = '#DFE1E6';
+            // Severity styling (Liverpool & Jira harmonious tones)
+            let sevBg = '#F4F5F7';
             let sevColor = '#172B4D';
             const sLow = (bug.severity || '').toLowerCase();
-            if (sLow.includes('bloq') || sLow.includes('crit') || sLow.includes('high') || sLow.includes('alt')) {
+            if (sLow.includes('bloq') || sLow.includes('high') || sLow.includes('alt')) {
               sevBg = '#FFEBE6';
               sevColor = '#BF2600';
+            } else if (sLow.includes('crit')) {
+              sevBg = '#FDF0F6';
+              sevColor = '#C20062';
             } else if (sLow.includes('med') || sLow.includes('may')) {
               sevBg = '#FFF0B3';
               sevColor = '#172B4D';
@@ -6559,43 +6614,39 @@ const renderPlanningTab = () => {
             // Status styling
             const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
             const statusColor = bug.isDone ? '#006644' : '#BF2600';
-            const caseCount = bug.affectedCases ? bug.affectedCases.size : (bug.linkedCases ? bug.linkedCases.length : 0);
 
             tableRows += `
               <tr style="background-color: ${bgRow};">
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; font-weight: 700; white-space: nowrap;">
-                  <a href="${baseUrl}/browse/${bug.key}" style="color: #0052CC; text-decoration: underline;" target="_blank">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 700; width: 14%; vertical-align: top;">
+                  <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline;" target="_blank">
                     ${bug.key}
                   </a>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #172B4D; font-size: 12px; line-height: 1.4;">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 36%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
                   ${bug.summary || 'Sin resumen'}
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; white-space: nowrap;">
-                  <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor};">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
+                  <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
                     ${bug.severity || 'Media'}
                   </span>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; white-space: nowrap;">
-                  <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor};">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
+                  <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
                     ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
                   </span>
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #44546F; font-size: 12px; white-space: nowrap;">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 14%; word-break: break-word; vertical-align: top;">
                   ${bug.assignee || 'Sin asignar'}
                 </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #44546F; font-size: 12px; white-space: nowrap;">
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
                   ${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}
-                </td>
-                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; color: #626F86; font-size: 11px; white-space: nowrap;">
-                  <strong>${caseCount}</strong> caso${caseCount !== 1 ? 's' : ''}
                 </td>
               </tr>
             `;
           });
         }
 
-        // Modules breakdown
+        // Modules breakdown (Functional tests only)
         let moduleSectionHtml = '';
         const featureKeys = Object.keys(featureStats || {});
         if (featureKeys.length > 0) {
@@ -6608,30 +6659,30 @@ const renderPlanningTab = () => {
             const isGood = Number(modRate) >= 80;
             modRows += `
               <tr style="background-color: ${bgRow};">
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; font-weight: 600; color: #172B4D;">📁 ${mod}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #172B4D;">${st.total}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #00875A; font-weight: 600;">${st.passed}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #DE350B; font-weight: 600;">${st.failed}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #FFAB00; font-weight: 600;">${st.blocked}</td>
-                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'};">${modRate}%</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D; width: 35%; word-break: break-word;">📁 ${mod}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #172B4D; width: 13%;">${st.total}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #00875A; font-weight: 600; width: 13%;">${st.passed}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #DE350B; font-weight: 600; width: 13%;">${st.failed}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #FFAB00; font-weight: 600; width: 13%;">${st.blocked}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'}; width: 13%;">${modRate}%</td>
               </tr>
             `;
           });
 
           moduleSectionHtml = `
             <div style="margin-bottom: 22px;">
-              <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-                📂 Cobertura y Éxito por Módulo o Funcionalidad
+              <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                📂 Cobertura y Éxito por Módulo (Pruebas Funcionales)
               </div>
-              <table width="100%" cellpadding="6" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
+              <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
                 <thead>
-                  <tr style="background-color: #F4F5F7; color: #172B4D;">
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left;">Módulo</th>
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Total</th>
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Pasados</th>
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Fallidos</th>
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Bloqueados</th>
-                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">% Éxito</th>
+                  <tr style="background-color: #002D62; color: #ffffff;">
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; width: 35%; font-weight: 700;">Módulo Funcional</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Total</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Pasados</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Fallidos</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Bloqueados</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">% Éxito</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -6654,21 +6705,21 @@ const renderPlanningTab = () => {
         }
 
         const htmlTemplate = `
-          <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #DFE1E6; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(9, 30, 66, 0.08);">
+          <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
             
-            <!-- Header Banner -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #0052CC 0%, #0747A6 100%); background-color: #0052CC; color: #ffffff; padding: 22px 26px;">
+            <!-- Header Banner (Liverpool Gradient) -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
               <tr>
                 <td style="vertical-align: middle;">
-                  <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #DEEBFF; margin-bottom: 4px;">
-                    ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO DE QA
+                  <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 4px;">
+                    ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO
                   </div>
-                  <div style="font-size: 20px; font-weight: 700; color: #ffffff; margin: 0;">
-                    Resumen Ejecutivo de Calidad y Pruebas
+                  <div style="font-size: 22px; font-weight: 700; color: #ffffff; margin: 0;">
+                    Reporte Ejecutivo
                   </div>
                 </td>
                 <td style="vertical-align: middle; text-align: right;">
-                  <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
+                  <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
                     📅 ${dateFormatted}
                   </span>
                 </td>
@@ -6678,15 +6729,15 @@ const renderPlanningTab = () => {
             <div style="padding: 24px 26px;">
               
               <!-- Project & Scope Meta Box -->
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border: 1px solid #EBECF0; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
                 <tr>
                   <td style="padding: 4px 8px; font-size: 13px;">
                     <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
-                    <span style="font-weight: 700; color: #172B4D; font-size: 14px;">${currentProjectName} (${currentProjectKey})</span>
+                    <span style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
                   </td>
                   <td style="padding: 4px 8px; font-size: 13px;">
                     <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
-                    <span style="font-weight: 700; color: #0052CC; font-size: 14px;">🟢 QA</span>
+                    <span style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
                   </td>
                   <td style="padding: 4px 8px; font-size: 13px;">
                     <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
@@ -6704,46 +6755,46 @@ const renderPlanningTab = () => {
                 <tr>
                   <!-- Card 1: Total Casos -->
                   <td width="20%" style="padding: 0 4px 0 0;">
-                    <div style="background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
                       <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #172B4D; line-height: 1.1;">${allTotal}</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
                       <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${ejecutados} evaluados</div>
                     </div>
                   </td>
 
                   <!-- Card 2: Tasa de Éxito -->
                   <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #E3FCEF; border: 1px solid #ABF5D1; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #006644; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #00875A; line-height: 1.1;">${successRate}%</div>
-                      <div style="font-size: 11px; color: #006644; margin-top: 4px;">${passed} Pasados</div>
+                    <div style="background: #E8F8F0; border: 1px solid #B7EBCE; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #0E8A4C; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #0E8A4C; line-height: 1.1;">${successRate}%</div>
+                      <div style="font-size: 11px; color: #0E8A4C; margin-top: 4px;">${passed} Pasados</div>
                     </div>
                   </td>
 
                   <!-- Card 3: Cobertura -->
                   <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #DEEBFF; border: 1px solid #B3D4FF; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #0747A6; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #0052CC; line-height: 1.1;">${coverageRate}%</div>
-                      <div style="font-size: 11px; color: #0747A6; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
+                    <div style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
+                      <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
                     </div>
                   </td>
 
                   <!-- Card 4: Defectos -->
                   <td width="20%" style="padding: 0 4px;">
-                    <div style="background: #FFEBE6; border: 1px solid #FFBDAD; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
                       <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #DE350B; line-height: 1.1;">${totalAllBugs}</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalAllBugs}</div>
                       <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${totalOpenBugs}</strong> abiertos (${totalClosedBugs} cerrados)</div>
                     </div>
                   </td>
 
                   <!-- Card 5: MTTR -->
                   <td width="20%" style="padding: 0 0 0 4px;">
-                    <div style="background: #EAE6FF; border: 1px solid #C0B6F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                      <div style="font-size: 11px; font-weight: 700; color: #403294; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
-                      <div style="font-size: 22px; font-weight: 800; color: #5243AA; line-height: 1.1;">${avgResolutionHours}h</div>
-                      <div style="font-size: 11px; color: #403294; margin-top: 4px;">Resolución</div>
+                    <div style="background: #EEF2FB; border: 1px solid #CCD7F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${avgResolutionHours}h</div>
+                      <div style="font-size: 11px; color: #002D62; margin-top: 4px;">Resolución</div>
                     </div>
                   </td>
                 </tr>
@@ -6751,17 +6802,17 @@ const renderPlanningTab = () => {
 
               <!-- Desglose de Ejecución (Visual Bar) -->
               <div style="margin-bottom: 22px;">
-                <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
                   📊 Distribución de Ejecución
                 </div>
                 
                 <!-- Progress Multi-Segment Bar -->
                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
                   <tr>
-                    ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #36B37E;" title="Passed: ${passed}"></td>` : ''}
-                    ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #FF5630;" title="Failed: ${failed}"></td>` : ''}
-                    ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FFAB00;" title="Blocked: ${blocked}"></td>` : ''}
-                    ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #C1C7D0;" title="Not Run: ${notRun}"></td>` : ''}
+                    ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #28A745;" title="Passed: ${passed}"></td>` : ''}
+                    ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #E1007A;" title="Failed: ${failed}"></td>` : ''}
+                    ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FF9800;" title="Blocked: ${blocked}"></td>` : ''}
+                    ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #CBD5E1;" title="Not Run: ${notRun}"></td>` : ''}
                   </tr>
                 </table>
 
@@ -6769,40 +6820,39 @@ const renderPlanningTab = () => {
                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px;">
                   <tr>
                     <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #36B37E; margin-right: 6px;"></span>
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #28A745; margin-right: 6px;"></span>
                       <strong>Pasados:</strong> ${passed} (${pPct.toFixed(1)}%)
                     </td>
                     <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF5630; margin-right: 6px;"></span>
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #E1007A; margin-right: 6px;"></span>
                       <strong>Fallidos:</strong> ${failed} (${fPct.toFixed(1)}%)
                     </td>
                     <td width="25%" style="color: #172B4D;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FFAB00; margin-right: 6px;"></span>
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF9800; margin-right: 6px;"></span>
                       <strong>Bloqueados:</strong> ${blocked} (${bPct.toFixed(1)}%)
                     </td>
                     <td width="25%" style="color: #626F86;">
-                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #C1C7D0; margin-right: 6px;"></span>
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #CBD5E1; margin-right: 6px;"></span>
                       <strong>Sin Ejecutar:</strong> ${notRun} (${nPct.toFixed(1)}%)
                     </td>
                   </tr>
                 </table>
               </div>
 
-              <!-- Defect Matrix Table -->
+              <!-- Defect Matrix Table (Fixed Widths, No Clipping) -->
               <div style="margin-bottom: 22px;">
-                <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
                   🐞 Matriz de Defectos (${totalAllBugs})
                 </div>
-                <table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
+                <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
                   <thead>
-                    <tr style="background-color: #091E42; color: #ffffff;">
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Key</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Resumen</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Severidad</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Estado</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Responsable</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Resolución</th>
-                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Impacto</th>
+                    <tr style="background-color: #002D62; color: #ffffff;">
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Key</th>
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 36%;">Resumen</th>
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Estado</th>
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Responsable</th>
+                      <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 12%;">Resolución</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -6811,12 +6861,12 @@ const renderPlanningTab = () => {
                 </table>
               </div>
 
-              <!-- Status by Module (if available) -->
+              <!-- Status by Module (Functional Tests Only) -->
               ${moduleSectionHtml}
 
               <!-- QA Assessment & Next Steps Box -->
-              <div style="background-color: #F4F5F7; border-left: 4px solid #0052CC; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
-                <div style="font-size: 13px; font-weight: 700; color: #0052CC; text-transform: uppercase; margin-bottom: 6px;">
+              <div style="background-color: #FDF8FA; border-left: 4px solid #E1007A; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
+                <div style="font-size: 13px; font-weight: 700; color: #E1007A; text-transform: uppercase; margin-bottom: 6px;">
                   📌 Evaluación de Calidad & Próximos Pasos
                 </div>
                 <p style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
@@ -6847,7 +6897,7 @@ const renderPlanningTab = () => {
         `;
 
         // Plain text fallback
-        const plainText = `TEST PULSE SUITE - Reporte Ejecutivo QA\nProyecto: ${currentProjectName} (${currentProjectKey})\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
+        const plainText = `TEST PULSE SUITE - Reporte Ejecutivo\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
 
         // Copy rich HTML to clipboard
         let copied = false;
@@ -6889,7 +6939,7 @@ const renderPlanningTab = () => {
           description: 'El reporte con diseño ejecutivo HTML está en tu portapapeles. Usa Ctrl+V o Cmd+V en Gmail para pegarlo.'
         });
 
-        const subject = encodeURIComponent(`[Reporte Ejecutivo QA] ${currentProjectKey} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`);
+        const subject = encodeURIComponent(`[Reporte Ejecutivo] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`);
         router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
       } catch(err) {
         console.error('Error al generar reporte:', err);
