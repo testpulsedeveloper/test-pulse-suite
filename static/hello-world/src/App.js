@@ -2491,8 +2491,8 @@ Then el sistema valida la identidad.
 
             {/* Sort Dropdown */}
             <select
-              value={designSortBy}
-              onChange={(e) => setDesignSortBy(e.target.value)}
+              value={designSortOrder}
+              onChange={(e) => setDesignSortOrder(e.target.value)}
               style={{
                 padding: '4px 8px',
                 borderRadius: '4px',
