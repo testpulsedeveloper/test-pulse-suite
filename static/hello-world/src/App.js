@@ -539,6 +539,7 @@ function App() {
   const [folderSearchQuery, setFolderSearchQuery] = useState('');
   const [selectedDesignTestIds, setSelectedDesignTestIds] = useState(new Set());
   const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
+  const [pointerDragState, setPointerDragState] = useState(null);
   const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const [designTypeFilter, setDesignTypeFilter] = useState('all'); // 'all' | 'automated' | 'manual'
   const [designSortOrder, setDesignSortOrder] = useState('recent'); // 'recent' | 'az'
@@ -1782,6 +1783,83 @@ Then el sistema valida la identidad.
     </nav>
   );
 
+  const handleCardPointerDown = (e, test) => {
+    // If clicking an interactive control like checkbox, dropdown, button, link, don't drag
+    if (e.target.closest('input, select, button, a, option')) {
+      return;
+    }
+    // Only primary mouse button or touch
+    if (e.button !== undefined && e.button !== 0) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let isDragging = false;
+    
+    let ids = [test.id];
+    if (selectedDesignTestIds.has(test.id) && selectedDesignTestIds.size > 1) {
+      ids = Array.from(selectedDesignTestIds);
+    }
+
+    const onPointerMove = (moveEvent) => {
+      const dx = Math.abs(moveEvent.clientX - startX);
+      const dy = Math.abs(moveEvent.clientY - startY);
+      
+      if (!isDragging && (dx > 5 || dy > 5)) {
+        isDragging = true;
+        setPointerDragState({
+          active: true,
+          testIds: ids,
+          primaryTest: test,
+          x: moveEvent.clientX,
+          y: moveEvent.clientY
+        });
+        document.body.style.cursor = 'grabbing';
+      }
+
+      if (isDragging) {
+        setPointerDragState(prev => prev ? ({
+          ...prev,
+          x: moveEvent.clientX,
+          y: moveEvent.clientY
+        }) : null);
+
+        // Find folder element under cursor
+        const elem = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+        const folderElem = elem?.closest('[data-folder-id]');
+        if (folderElem) {
+          const fId = folderElem.getAttribute('data-folder-id');
+          setDragOverFolderId(fId);
+        } else {
+          setDragOverFolderId(null);
+        }
+      }
+    };
+
+    const onPointerUp = (upEvent) => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      document.body.style.cursor = '';
+
+      if (isDragging) {
+        window.__justFinishedDrag = Date.now();
+        const elem = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
+        const folderElem = elem?.closest('[data-folder-id]');
+        if (folderElem) {
+          const targetFolderId = folderElem.getAttribute('data-folder-id');
+          const finalFolderId = targetFolderId === '__ROOT__' ? null : targetFolderId;
+          const targetFolderName = finalFolderId ? (folders.find(f => f.id === finalFolderId)?.name || 'Carpeta') : 'Raíz (All Tests)';
+          handleBatchLinkTestsToFolder(ids, finalFolderId, targetFolderName);
+          setSelectedDesignTestIds(new Set());
+        }
+        setPointerDragState(null);
+        setDragOverFolderId(null);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
+
   const renderDesignTab = () => (
     <div className="tab-layout">
       {/* Sidebar Navigation (Folders) */}
@@ -1842,6 +1920,7 @@ Then el sistema valida la identidad.
 
         <ul className="folder-list" style={{ padding: '0.5rem 0', margin: 0, listStyle: 'none', overflowY: 'auto', flex: 1 }}>
           <li 
+            data-folder-id="__ROOT__"
             className={`folder-item ${activeFolder === null ? 'active' : ''} ${dragOverFolderId === '__ROOT__' ? 'drag-over' : ''}`} 
             onClick={() => setActiveFolder(null)} 
             onDragEnter={(e) => {
@@ -1907,6 +1986,7 @@ Then el sistema valida la identidad.
                   return (
                     <React.Fragment key={folder.id}>
                       <li 
+                        data-folder-id={folder.id}
                         className={`folder-item ${activeFolder === folder.id ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`} 
                         onClick={() => setActiveFolder(folder.id)} 
                         onDragEnter={(e) => {
@@ -2381,54 +2461,9 @@ Then el sistema valida la identidad.
               <span>Seleccionar página</span>
             </label>
             {selectedDesignTestIds.size > 0 && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span className="ads-lozenge ads-lozenge-brand" style={{ borderRadius: '9999px', fontSize: '11px', background: '#E1007A', color: '#FFFFFF', border: 'none' }}>
-                  {selectedDesignTestIds.size} seleccionados
-                </span>
-                <select
-                  defaultValue=""
-                  onChange={(e) => {
-                    if (e.target.value !== '') {
-                      const fId = e.target.value === '__ROOT__' ? null : e.target.value;
-                      const fName = fId ? (folders.find(f => f.id === fId)?.name || 'Carpeta') : 'Raíz (All Tests)';
-                      handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), fId, fName);
-                      setSelectedDesignTestIds(new Set());
-                      e.target.value = '';
-                    }
-                  }}
-                  style={{
-                    padding: '2px 8px',
-                    borderRadius: '4px',
-                    border: '1px solid #E1007A',
-                    background: '#FDF2F7',
-                    color: '#E1007A',
-                    fontWeight: 600,
-                    fontSize: '0.74rem',
-                    cursor: 'pointer',
-                    outline: 'none'
-                  }}
-                  title="Mover todos los casos seleccionados a una carpeta"
-                >
-                  <option value="" disabled>📁 Mover a carpeta...</option>
-                  <option value="__ROOT__">📁 Raíz (Sin carpeta / All Tests)</option>
-                  {folderPaths.map(f => <option key={f.id} value={f.id}>📁 {f.path}</option>)}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => setSelectedDesignTestIds(new Set())}
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'var(--jira-subtle, #626F86)',
-                    fontSize: '0.74rem',
-                    cursor: 'pointer',
-                    textDecoration: 'underline',
-                    padding: '2px 4px'
-                  }}
-                >
-                  Limpiar selección
-                </button>
-              </div>
+              <span className="ads-lozenge ads-lozenge-brand" style={{ borderRadius: '9999px', fontSize: '11px', background: 'var(--jira-blue, #0C66E4)', color: '#FFFFFF', border: 'none' }}>
+                {selectedDesignTestIds.size} seleccionados
+              </span>
             )}
           </div>
 
@@ -2511,35 +2546,6 @@ Then el sistema valida la identidad.
           </div>
         </div>
 
-        {/* Dragging Active Banner Feedback */}
-        {draggedDesignTestIds && draggedDesignTestIds.length > 0 && (
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '0.6rem',
-            padding: '0.5rem 0.85rem',
-            backgroundColor: '#FDF2F7',
-            border: '1.5px dashed #E1007A',
-            borderRadius: '8px',
-            color: '#E1007A',
-            fontSize: '0.82rem',
-            fontWeight: 600,
-            marginBottom: '0.85rem'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="7 10 12 15 17 10"></polyline>
-                <line x1="12" y1="15" x2="12" y2="3"></line>
-              </svg>
-              <span>Arrastrando <strong>{draggedDesignTestIds.length}</strong> caso(s) de prueba. Suelta sobre una carpeta en el panel izquierdo para moverlo(s).</span>
-            </div>
-            <span className="ads-lozenge ads-lozenge-brand" style={{ background: '#E1007A', color: '#FFFFFF', border: 'none', borderRadius: '9999px', fontSize: '11px', padding: '1px 8px' }}>
-              Mover activo
-            </span>
-          </div>
-        )}
-
         {loading ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '3rem', color: 'var(--jira-subtle, #626F86)', gap: '0.75rem' }}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--jira-blue, #0C66E4)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite' }}>
@@ -2570,31 +2576,13 @@ Then el sistema valida la identidad.
                   statusBadgeClass = 'ads-lozenge-danger';
                 }
 
+                const isBeingDragged = (pointerDragState?.testIds?.includes(test.id)) || (draggedDesignTestIds?.includes(test.id));
+
                 return (
                   <div 
                     key={test.id} 
-                    className={`modern-test-card ${isSelected ? 'selected' : ''} ${draggedDesignTestIds?.includes(test.id) ? 'dragging' : ''}`}
-                    draggable={true}
-                    onDragStart={(e) => {
-                      let ids = [test.id];
-                      if (selectedDesignTestIds.has(test.id) && selectedDesignTestIds.size > 1) {
-                        ids = Array.from(selectedDesignTestIds);
-                      }
-                      setDraggedDesignTestIds(ids);
-                      const payload = JSON.stringify({ type: 'TEST_CASES', testIds: ids });
-                      try {
-                        e.dataTransfer.setData('text/plain', payload);
-                        e.dataTransfer.setData('application/json', payload);
-                      } catch (err) {
-                        try { e.dataTransfer.setData('text', payload); } catch (e2) {}
-                      }
-                      e.dataTransfer.effectAllowed = 'move';
-                    }}
-                    onDragEnd={() => {
-                      window.__justFinishedDrag = Date.now();
-                      setDraggedDesignTestIds(null);
-                      setDragOverFolderId(null);
-                    }}
+                    className={`modern-test-card ${isSelected ? 'selected' : ''} ${isBeingDragged ? 'dragging' : ''}`}
+                    onPointerDown={(e) => handleCardPointerDown(e, test)}
                     onClick={() => { 
                       if (window.__justFinishedDrag && Date.now() - window.__justFinishedDrag < 350) {
                         return;
@@ -2758,12 +2746,12 @@ Then el sistema valida la identidad.
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <select
                     onChange={(e) => {
-                      if (e.target.value !== undefined) {
-                        const targetFolder = e.target.value;
-                        selectedDesignTestIds.forEach(testId => {
-                          handleLinkTestToFolder(testId, targetFolder);
-                        });
+                      if (e.target.value !== '') {
+                        const targetFolder = e.target.value === '__ROOT__' ? null : e.target.value;
+                        const targetFolderName = targetFolder ? (folders.find(f => f.id === targetFolder)?.name || 'Carpeta') : 'Raíz (All Tests)';
+                        handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), targetFolder, targetFolderName);
                         setSelectedDesignTestIds(new Set());
+                        e.target.value = '';
                       }
                     }}
                     defaultValue=""
@@ -2778,8 +2766,8 @@ Then el sistema valida la identidad.
                       outline: 'none'
                     }}
                   >
-                    <option value="" disabled style={{ color: '#000' }}>Mover a carpeta...</option>
-                    <option value="" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz)</option>
+                    <option value="" disabled style={{ color: '#000' }}>📁 Mover a carpeta...</option>
+                    <option value="__ROOT__" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz / All Tests)</option>
                     {folderPaths.map(f => <option key={f.id} value={f.id} style={{ color: '#000' }}>📁 {f.path}</option>)}
                   </select>
                   <button
@@ -2849,6 +2837,52 @@ Then el sistema valida la identidad.
           </div>
         )}
       </main>
+
+      {/* Floating Pointer Drag Ghost Badge */}
+      {pointerDragState?.active && (
+        <div style={{
+          position: 'fixed',
+          left: pointerDragState.x + 14,
+          top: pointerDragState.y + 14,
+          zIndex: 999999,
+          pointerEvents: 'none',
+          backgroundColor: '#FFFFFF',
+          border: '2px solid #E1007A',
+          borderRadius: '8px',
+          boxShadow: '0 8px 24px rgba(225, 0, 122, 0.35)',
+          padding: '0.6rem 0.9rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.65rem',
+          maxWidth: '320px',
+          transform: 'rotate(-2deg)',
+          backdropFilter: 'blur(4px)'
+        }}>
+          <div style={{ background: '#FDF2F7', padding: '6px', borderRadius: '6px', display: 'flex', alignItems: 'center' }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="#E1007A">
+              <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
+            </svg>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <strong style={{ color: '#E1007A', fontSize: '0.82rem', fontFamily: 'monospace' }}>
+                {pointerDragState.primaryTest?.key}
+              </strong>
+              {pointerDragState.testIds?.length > 1 && (
+                <span style={{ background: '#E1007A', color: '#fff', fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: '9999px' }}>
+                  +{pointerDragState.testIds.length - 1} más
+                </span>
+              )}
+            </div>
+            <span style={{ fontSize: '0.75rem', color: 'var(--jira-navy, #091E42)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '230px' }}>
+              {pointerDragState.primaryTest?.summary || pointerDragState.primaryTest?.name}
+            </span>
+            <span style={{ fontSize: '0.7rem', color: dragOverFolderId ? '#E1007A' : '#626F86', fontWeight: dragOverFolderId ? 700 : 400, marginTop: '2px' }}>
+              {dragOverFolderId ? '⚡ Suelta para mover' : '👉 Arrastra sobre una carpeta'}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 
