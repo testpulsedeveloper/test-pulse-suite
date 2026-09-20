@@ -364,7 +364,8 @@ resolver.define('getTestCycles', async ({ payload }) => {
       const seenIds = new Set();
       for (let shard = 0; shard <= 10; shard++) {
         const pName = shard === 0 ? 'execution' : `execution_${shard}`;
-        const val = props[pName];
+        const rawVal = props[pName];
+        const val = Array.isArray(rawVal) ? rawVal : (Array.isArray(rawVal?.value) ? rawVal.value : null);
         if (Array.isArray(val)) {
           for (const item of val) {
             const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
@@ -375,8 +376,10 @@ resolver.define('getTestCycles', async ({ payload }) => {
           }
         }
       }
-      if (totalTests === 0 && Array.isArray(props['tests'])) {
-        for (const item of props['tests']) {
+      const rawTests = props['tests'];
+      const testsVal = Array.isArray(rawTests) ? rawTests : (Array.isArray(rawTests?.value) ? rawTests.value : null);
+      if (totalTests === 0 && Array.isArray(testsVal)) {
+        for (const item of testsVal) {
           const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
           if (id && !seenIds.has(id)) {
             seenIds.add(id);
@@ -384,12 +387,14 @@ resolver.define('getTestCycles', async ({ payload }) => {
           }
         }
       }
+      const planLink = props['testops-plan-link'];
+      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : null;
       return {
         id: issue.id,
         key: issue.key,
         summary: issue.fields.summary,
         status: issue.fields.status?.name || 'To Do',
-        planId: props['testops-plan-link'] ? props['testops-plan-link'].planId : null,
+        planId,
         testCount: totalTests
       };
     });

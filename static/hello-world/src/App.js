@@ -1063,6 +1063,9 @@ function App() {
       // 3c. Admin-only: allowed project list
       if (adminVal) invoke('getAllowedProjects').then(a => setAllowedProjects(a)).catch(console.warn);
 
+      // 3d. Preload Execution & Cycle metrics
+      loadReportData(targetProjectId, config).catch(console.warn);
+
     } catch (err) {
       clearTimeout(loadTimer);
       console.error("loadData exception:", err);
@@ -2256,15 +2259,7 @@ Then el sistema valida la identidad.
                 {isAllTestsExpanded ? <polyline points="6 9 12 15 18 9"></polyline> : <polyline points="9 18 15 12 9 6"></polyline>}
               </svg>
             </div>
-            {isAllTestsExpanded ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill={dragOverFolderId === '__ROOT__' ? 'var(--jira-blue, #0C66E4)' : (activeFolder === null ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
-                <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
-              </svg>
-            ) : (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill={dragOverFolderId === '__ROOT__' ? 'var(--jira-blue, #0C66E4)' : (activeFolder === null ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
-                <path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" />
-              </svg>
-            )}
+            <span style={{ fontSize: '15px', flexShrink: 0, lineHeight: 1 }}>📁</span>
             <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : 'Sin Carpeta'}
             </span>
@@ -2342,15 +2337,7 @@ Then el sistema valida la identidad.
                               </svg>
                             ) : null}
                           </div>
-                          {isExpanded ? (
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? 'var(--jira-blue, #0C66E4)' : (activeFolder === folder.id ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
-                              <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
-                            </svg>
-                          ) : (
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? 'var(--jira-blue, #0C66E4)' : (activeFolder === folder.id ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
-                              <path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" />
-                            </svg>
-                          )}
+                          <span style={{ fontSize: '15px', flexShrink: 0, lineHeight: 1 }}>📁</span>
                           <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isDragTarget ? 700 : (activeFolder === folder.id ? 600 : 400) }} title={folder.name}>
                             {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
                           </span>
@@ -2402,9 +2389,7 @@ Then el sistema valida la identidad.
         <div className="header" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--jira-subtle, #626F86)" stroke="none" style={{ flexShrink: 0 }}>
-                <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
-              </svg>
+              <span style={{ fontSize: '18px', lineHeight: 1, flexShrink: 0 }}>📁</span>
               <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
                 {activeFolder === null ? 'Sin Carpeta (Raíz)' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta')}
               </h1>
@@ -3171,9 +3156,7 @@ Then el sistema valida la identidad.
           backdropFilter: 'blur(4px)'
         }}>
           <div style={{ background: '#FDF2F7', padding: '6px', borderRadius: '6px', display: 'flex', alignItems: 'center' }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="#E1007A">
-              <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
-            </svg>
+            <span style={{ fontSize: '16px', lineHeight: 1 }}>📁</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -3319,7 +3302,7 @@ Then el sistema valida la identidad.
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
                 {/* Folder Path Breadcrumb */}
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#626F86', backgroundColor: '#F1F2F4', padding: '2px 8px', borderRadius: '3px' }}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--jira-subtle, #626F86)"><path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" /></svg>
+                  <span style={{ fontSize: '12px', lineHeight: 1 }}>📁</span>
                   <span>{folderPathStr}</span>
                 </span>
                 <span style={{ color: '#DCDFE4' }}>/</span>
@@ -4503,15 +4486,17 @@ Then el sistema valida la identidad.
     setLoading(false);
   };
 
-  const loadReportData = async () => {
-    if (!selectedProjectId) return;
+  const loadReportData = async (overrideProjectId = null, overrideConfig = null) => {
+    const projId = overrideProjectId || selectedProjectId;
+    const cfg = overrideConfig || projectConfig;
+    if (!projId) return;
     if (isCircuitBroken()) {
       addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
       return;
     }
     setReportLoading(true);
     try {
-      const data = await invoke('getExecutionReport', { projectId: selectedProjectId, config: projectConfig });
+      const data = await invoke('getExecutionReport', { projectId: projId, config: cfg });
       setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
 
       if (data?.cycles && Array.isArray(data.cycles)) {
@@ -4532,14 +4517,12 @@ Then el sistema valida la identidad.
         });
       });
       // Fetch bugs from ALL accessible projects (not just the selected one)
-      // allProjectKeys: all projects the user has access to
-      // bugIssueTypes: configured bug type names (empty = use broad default list)
       const allProjectKeys = projects.filter(p => p.key && p.key !== 'ERR' && p.key !== 'N/A').map(p => p.key);
       invoke('getProjectUnlinkedBugs', {
-        projectId: selectedProjectId,
+        projectId: projId,
         linkedBugKeys,
         allProjectKeys,
-        bugIssueTypes: projectConfig?.bugIssueTypes || [],
+        bugIssueTypes: cfg?.bugIssueTypes || [],
       })
         .then(bugs => setUnlinkedBugs(bugs || []))
         .catch(console.warn);
@@ -5596,7 +5579,7 @@ const renderPlanningTab = () => {
               const reportCycle = reportData?.cycles?.find(rc => String(rc.id) === String(cycle.id));
               const testCount = (isSelected && cycleTests.length > 0)
                 ? cycleTests.length
-                : (cycle.testCount !== undefined ? cycle.testCount : (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
+                : (cycle.testCount || (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
               return (
                 <div
                   key={cycle.id}
@@ -8139,30 +8122,6 @@ const renderPlanningTab = () => {
                   </button>
                 )}
 
-                <button 
-                  className="btn-secondary" 
-                  onClick={() => {
-                    loadReportAutomationConfig();
-                    setShowReportAutomationModal(true);
-                  }}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    padding: '6px 14px',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    borderRadius: '6px',
-                    border: '1px solid',
-                    borderColor: reportAutomationConfig.enabled ? '#F5B8D8' : 'var(--jira-border, #DCDFE4)',
-                    background: reportAutomationConfig.enabled ? '#FDF2F7' : '#FFFFFF',
-                    color: reportAutomationConfig.enabled ? '#E1007A' : 'var(--jira-dark, #172B4D)',
-                    cursor: 'pointer'
-                  }}
-                  title="Configurar horario y envío automático programado con Jira Automation"
-                >
-                  ⏰ {reportAutomationConfig.enabled ? '🟢 Envío Automático (Activo)' : '⏰ Automatizar Envío'}
-                </button>
 
                 <button 
                   className="btn-primary" 
@@ -11684,9 +11643,7 @@ const renderPlanningTab = () => {
       {isGlobal && !selectedProjectId ? (
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', flex: 1, backgroundColor: 'var(--bg-main)' }}>
           <div style={{ textAlign: 'center', padding: '3rem', backgroundColor: 'var(--bg-surface)', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="var(--ds-background-neutral, #DFE1E6)" stroke="none" style={{ marginBottom: '1rem' }}>
-              <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
-            </svg>
+            <span style={{ fontSize: '40px', marginBottom: '1rem', display: 'inline-block' }}>📁</span>
             <h2 style={{ color: 'var(--text-primary)', marginTop: 0 }}>Select a Project</h2>
             <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto' }}>Please select a Jira project from the dropdown in the top navigation bar to view and manage its tests.</p>
           </div>
