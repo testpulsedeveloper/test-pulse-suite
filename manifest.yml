@@ -33,9 +33,8 @@ permissions:
   external:
     fetch:
       backend:
-        - address: "*.atlassian.com"
-        - address: "*.atlassian.net"
-        - address: https://automation.atlassian.com
+        - '*.atlassian.com'
+        - '*.atlassian.net'
 app:
   runtime:
     name: nodejs24.x

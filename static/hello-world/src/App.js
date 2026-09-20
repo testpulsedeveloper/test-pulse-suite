@@ -9432,31 +9432,98 @@ const renderPlanningTab = () => {
       const projName = currentProjectObj?.name || context?.extension?.project?.name || 'Proyecto';
       const projKey = currentProjectObj?.key || context?.extension?.project?.key || targetId;
 
-      const res = await invoke('triggerManualReportDispatch', {
-        projectId: targetId,
-        webhookUrl: reportAutomationConfig.webhookUrl,
-        reportData: {
+      let backendSuccess = false;
+      try {
+        const res = await invoke('triggerManualReportDispatch', {
+          projectId: targetId,
+          webhookUrl: reportAutomationConfig.webhookUrl,
+          reportData: {
+            projectName: projName,
+            projectKey: projKey,
+            recipients: reportAutomationConfig.recipients || ''
+          }
+        });
+
+        if (res && res.success) {
+          backendSuccess = true;
+          setReportAutomationLastDispatch(res.lastDispatch || null);
+          addNotification({
+            type: 'success',
+            title: '⚡ ¡Prueba de Envío Exitosa!',
+            description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${res.statusCode || 200}). Revisa la regla y tu correo.`
+          });
+          return;
+        }
+      } catch (backendErr) {
+        console.warn('[Automation] Backend dispatch attempt failed, falling back to client-side direct webhook...', backendErr);
+      }
+
+      // Fallback: Direct client-side dispatch
+      const nowFormatted = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
+      const testHtml = `
+        <div style="max-width: 700px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; border: 1px solid #DFE1E6; border-radius: 8px; overflow: hidden; background: #ffffff;">
+          <div style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); color: #ffffff; padding: 20px 24px;">
+            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #FFE0F0;">TEST PULSE SUITE • PRUEBA DE CONEXIÓN</div>
+            <h2 style="margin: 4px 0 0 0; font-size: 20px; color: #ffffff;">Reporte Ejecutivo (Prueba)</h2>
+          </div>
+          <div style="padding: 24px; color: #172B4D;">
+            <p style="font-size: 14px; line-height: 1.5; margin: 0 0 12px 0;">Este es un correo de prueba de <strong>Test Pulse Suite</strong> para verificar la regla de <strong>Jira Automation</strong>.</p>
+            <p style="font-size: 13px; margin: 0 0 8px 0;"><strong>Proyecto:</strong> ${projName} (${projKey})</p>
+            <p style="font-size: 13px; margin: 0 0 16px 0;"><strong>Fecha y Hora de Prueba:</strong> ${nowFormatted} (CDMX)</p>
+            <div style="background: #E3FCEF; border: 1px solid #ABF5D1; color: #006644; padding: 12px 16px; border-radius: 6px; font-weight: 600; font-size: 13px;">
+              🟢 La integración con el webhook entrante de Jira Automation está operando correctamente.
+            </div>
+          </div>
+          <div style="background: #FAFBFC; padding: 12px 24px; border-top: 1px solid #EBECF0; font-size: 11px; color: #626F86; text-align: center;">
+            Test Pulse Suite • El Puerto de Liverpool
+          </div>
+        </div>
+      `;
+
+      const directRes = await fetch(reportAutomationConfig.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          timestamp: new Date().toISOString(),
+          source: 'Test Pulse Suite v2.0.0',
+          projectId: targetId || 'N/A',
           projectName: projName,
           projectKey: projKey,
-          recipients: reportAutomationConfig.recipients || ''
-        }
+          recipients: reportAutomationConfig.recipients || '',
+          emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`,
+          htmlReport: testHtml,
+          plainText: `Test Pulse Suite - Prueba de Conexión para ${projName} (${nowFormatted})`,
+          summary: { type: 'TEST_DISPATCH' },
+          stats: {}
+        })
       });
 
-      if (res && res.success) {
-        setReportAutomationLastDispatch(res.lastDispatch || null);
+      const lastLog = {
+        timestamp: new Date().toISOString(),
+        status: directRes.ok ? 'SUCCESS' : 'ERROR',
+        statusCode: directRes.status,
+        statusText: directRes.statusText || (directRes.ok ? 'OK' : 'Error'),
+        recipients: reportAutomationConfig.recipients || 'Configurados en Jira Automation',
+        emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`
+      };
+      setReportAutomationLastDispatch(lastLog);
+
+      if (directRes.ok || (directRes.status >= 200 && directRes.status < 300)) {
         addNotification({
           type: 'success',
           title: '⚡ ¡Prueba de Envío Exitosa!',
-          description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${res.statusCode || 200}). Revisa la regla y tu correo.`
+          description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${directRes.status}). Revisa la regla y tu correo.`
         });
       } else {
-        setReportAutomationLastDispatch(res?.lastDispatch || null);
         addNotification({
           type: 'error',
           title: 'Error al Despachar',
-          description: res?.error || 'Jira Automation rechazó la petición.'
+          description: `Jira Automation respondió con código ${directRes.status}. Revisa que la URL sea la correcta.`
         });
       }
+
     } catch (err) {
       addNotification({
         type: 'error',
