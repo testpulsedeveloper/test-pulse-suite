@@ -550,6 +550,7 @@ function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [loading, setLoading] = useState(true);
   const [localLoading, setLocalLoading] = useState(false);
+  const [isFetchingTests, setIsFetchingTests] = useState(true);
 
   // Project Context & Config State
   const [projects, setProjects] = useState([]);
@@ -796,22 +797,29 @@ function App() {
       if (cyclesRes.status === 'fulfilled') setTestCycles(cyclesRes.value || []);
       setRefreshTrigger(prev => prev + 1);
 
-      // Phase 3: background (no spinner shown)
+      // Phase 3: background
       // 3a. sessionStorage cache for testCases (instant on second open)
       const cacheKey = `tp_${targetProjectId}_tc`;
       try {
         const raw = sessionStorage.getItem(cacheKey);
         if (raw) {
           const { ts, data } = JSON.parse(raw);
-          if (Date.now() - ts < 300_000) setTestCases(data);
+          if (Date.now() - ts < 300_000 && Array.isArray(data) && data.length > 0) {
+            setTestCases(data);
+          }
         }
       } catch (e) {}
 
+      setIsFetchingTests(true);
       fetchAllTestCases({ folderId: null, projectId: targetProjectId, config })
         .then(tests => {
           setTestCases(tests || []);
           try { sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: tests || [] })); } catch (e) {}
-        }).catch(console.warn);
+        })
+        .catch(console.warn)
+        .finally(() => {
+          setIsFetchingTests(false);
+        });
 
       // 3b. Fields (bulk upload + execution type)
       invoke('getFields').then(processFields).catch(console.warn);
@@ -1563,8 +1571,11 @@ Then el sistema valida la identidad.
             <select 
               value={selectedProjectId || ''} 
               onChange={(e) => {
-                setSelectedProjectId(e.target.value);
-                loadData(e.target.value);
+                const newPid = e.target.value;
+                setSelectedProjectId(newPid);
+                setTestCases([]);
+                setIsFetchingTests(true);
+                loadData(newPid);
               }}
               style={{
                 padding: '0.25rem 0.5rem', 
@@ -1612,7 +1623,7 @@ Then el sistema valida la identidad.
             >
               <span>Design</span>
               <span className={`ads-lozenge ${activeTab === 'design' ? 'ads-lozenge-brand' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px' }}>
-                {testCases.length}
+                {isFetchingTests && testCases.length === 0 ? '...' : testCases.length}
               </span>
               {activeTab === 'design' && <div className="tab-indicator" />}
             </button>
@@ -1770,6 +1781,16 @@ Then el sistema valida la identidad.
                     setLocalLoading(true);
                     const rawExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                     safeSetCycleTests(rawExecution || []);
+                  } else if (activeTab === 'design') {
+                    setLocalLoading(true);
+                    setIsFetchingTests(true);
+                    const config = projectConfig || { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
+                    const [fetchedCases, fetchedFolders] = await Promise.all([
+                      fetchAllTestCases({ folderId: null, projectId: selectedProjectId, config }),
+                      invoke('getFolders', { projectId: selectedProjectId })
+                    ]);
+                    if (fetchedCases && !fetchedCases._isError) setTestCases(fetchedCases);
+                    if (fetchedFolders && !fetchedFolders._isError) setFolders(fetchedFolders);
                   } else {
                     setLocalLoading(true);
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
@@ -1784,6 +1805,7 @@ Then el sistema valida la identidad.
                   console.error('Refresh error:', e);
                 } finally {
                   setLocalLoading(false);
+                  setIsFetchingTests(false);
                   setTimeout(() => setIsRefreshing(false), 600);
                 }
               }} 
@@ -2010,7 +2032,9 @@ Then el sistema valida la identidad.
             <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : 'Sin Carpeta'}
             </span>
-            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.filter(t => !t.folderId || !existingFolderIdSet.has(t.folderId)).length}</span>
+            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>
+              {isFetchingTests && testCases.length === 0 ? '...' : testCases.filter(t => !t.folderId || !existingFolderIdSet.has(t.folderId)).length}
+            </span>
           </li>
           {isAllTestsExpanded && (() => {
             const renderTree = (parentId = null, depth = 0) => {
@@ -2095,7 +2119,7 @@ Then el sistema valida la identidad.
                             {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
                           </span>
                           <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', marginLeft: 'auto', marginRight: '4px' }}>
-                            {getFolderTotalCount(folder.id)}
+                            {isFetchingTests && testCases.length === 0 ? '...' : getFolderTotalCount(folder.id)}
                           </span>
                         </div>
                         <div className="folder-actions" style={{ display: 'flex', gap: '0.2rem', flexShrink: 0 }}>
@@ -2149,8 +2173,14 @@ Then el sistema valida la identidad.
                 {activeFolder === null ? 'Sin Carpeta (Raíz)' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta')}
               </h1>
               <span className="ads-lozenge ads-lozenge-subtle">
-                ({activeFolderScopedTestCases.length} casos)
+                {isFetchingTests && testCases.length === 0 ? '(Cargando casos...)' : `(${activeFolderScopedTestCases.length} casos)`}
               </span>
+              {isFetchingTests && testCases.length > 0 && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#0C66E4', backgroundColor: '#E9F2FF', padding: '2px 8px', borderRadius: '12px', fontWeight: 500 }}>
+                  <span className="spinner" style={{ width: '9px', height: '9px', border: '2px solid #B3D4FF', borderTop: '2px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></span>
+                  Sincronizando...
+                </span>
+              )}
             </div>
             <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', color: 'var(--jira-subtle, #626F86)' }}>
               Explora, edita y organiza casos de prueba vinculados a la suite de regresión y diseño.
@@ -2534,7 +2564,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'all' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                Todos ({activeFolderScopedTestCases.length})
+                Todos ({isFetchingTests && testCases.length === 0 ? '...' : activeFolderScopedTestCases.length})
               </button>
               <button
                 type="button"
@@ -2551,7 +2581,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'automated' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                ⚡ Auto ({activeFolderScopedTestCases.filter(isAutomatedTest).length})
+                ⚡ Auto ({isFetchingTests && testCases.length === 0 ? '...' : activeFolderScopedTestCases.filter(isAutomatedTest).length})
               </button>
               <button
                 type="button"
@@ -2568,7 +2598,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'manual' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                Manual ({activeFolderScopedTestCases.filter(t => !isAutomatedTest(t)).length})
+                Manual ({isFetchingTests && testCases.length === 0 ? '...' : activeFolderScopedTestCases.filter(t => !isAutomatedTest(t)).length})
               </button>
             </div>
 
@@ -2594,15 +2624,36 @@ Then el sistema valida la identidad.
           </div>
         </div>
 
-        {loading ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '3rem', color: 'var(--jira-subtle, #626F86)', gap: '0.75rem' }}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--jira-blue, #0C66E4)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite' }}>
-              <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
-              <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
-              <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
-              <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
-            </svg>
-            <span style={{ fontSize: '0.85rem', fontWeight: 500 }}>Cargando suite de pruebas...</span>
+        {loading || (isFetchingTests && testCases.length === 0) ? (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '4rem 2rem',
+            backgroundColor: '#FFFFFF',
+            borderRadius: '8px',
+            border: '1px solid var(--jira-border, #DCDFE4)',
+            boxShadow: '0 1px 3px rgba(9, 30, 66, 0.05)',
+            textAlign: 'center',
+            color: 'var(--jira-subtle, #626F86)',
+            margin: '0.5rem 0'
+          }}>
+            <div style={{
+              width: '32px',
+              height: '32px',
+              borderRadius: '50%',
+              border: '3px solid #DCDFE4',
+              borderTopColor: 'var(--jira-blue, #0C66E4)',
+              animation: 'spin 0.8s linear infinite',
+              marginBottom: '1rem'
+            }} />
+            <p style={{ margin: '0 0 0.35rem 0', fontWeight: 600, fontSize: '0.95rem', color: 'var(--jira-text, #172B4D)' }}>
+              Cargando casos de prueba...
+            </p>
+            <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--jira-subtle, #626F86)' }}>
+              Sincronizando casos y carpetas desde Jira. Por favor espera un momento.
+            </p>
           </div>
         ) : (
           <div className="test-list-container" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -2720,7 +2771,7 @@ Then el sistema valida la identidad.
                 );
               })}
 
-              {filteredTestCases.length === 0 && (
+              {!isFetchingTests && filteredTestCases.length === 0 && (
                 <div style={{
                   display: 'flex',
                   flexDirection: 'column',
@@ -2830,7 +2881,7 @@ Then el sistema valida la identidad.
                   Salud de Automatización:
                 </span>
                 <span className="ads-lozenge ads-lozenge-purple" style={{ fontSize: '11px', fontWeight: 700 }}>
-                  ⚡ {activeFolderScopedTestCases.length > 0 ? Math.round((activeFolderScopedTestCases.filter(isAutomatedTest).length / activeFolderScopedTestCases.length) * 100) : 0}% ({activeFolderScopedTestCases.filter(isAutomatedTest).length} / {activeFolderScopedTestCases.length})
+                  ⚡ {isFetchingTests && testCases.length === 0 ? 'Calculando...' : `${activeFolderScopedTestCases.length > 0 ? Math.round((activeFolderScopedTestCases.filter(isAutomatedTest).length / activeFolderScopedTestCases.length) * 100) : 0}% (${activeFolderScopedTestCases.filter(isAutomatedTest).length} / ${activeFolderScopedTestCases.length})`}
                 </span>
               </div>
 
@@ -10627,7 +10678,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.8.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.9.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
