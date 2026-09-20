@@ -4108,7 +4108,7 @@ resolver.define('triggerManualReportDispatch', async ({ payload, context }) => {
 
     const bodyPayload = {
       timestamp: new Date().toISOString(),
-      source: 'Test Pulse Suite v2.0.0',
+      source: 'Test Pulse Suite v2.1.0',
       projectId: projectId || 'N/A',
       projectName: activeReportData.projectName || 'Proyecto',
       projectKey: activeReportData.projectKey || '',

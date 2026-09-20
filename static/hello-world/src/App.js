@@ -7117,7 +7117,7 @@ const renderPlanningTab = () => {
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
             <tr>
               <td style="font-size: 11px; color: #626F86;">
-                Test Pulse Suite v2.0.0 • Jira Cloud Quality Management • El Puerto de Liverpool
+                Test Pulse Suite v2.1.0 • Jira Cloud Quality Management • El Puerto de Liverpool
               </td>
               <td style="font-size: 11px; color: #626F86; text-align: right;">
                 Generado automáticamente
@@ -7232,7 +7232,7 @@ const renderPlanningTab = () => {
         const report = buildExecutiveReportData();
         const payload = {
           timestamp: new Date().toISOString(),
-          source: 'Test Pulse Suite v2.0.0 (Manual Test Dispatch)',
+          source: 'Test Pulse Suite v2.1.0 (Manual Test Dispatch)',
           projectId: selectedProjectId,
           projectName: report.projectName,
           projectKey: report.projectKey,
@@ -8869,7 +8869,7 @@ const renderPlanningTab = () => {
                 )}
               </div>
               <p style={{ margin: 0, color: 'var(--text-secondary, #8b949e)', fontSize: '0.92rem', lineHeight: '1.4' }}>
-                Administra el mapeo de entidades nativas de Jira, trazabilidad de requerimientos, métricas visibles del tablero y permisos de acceso para Test Pulse Suite v2.0.0.
+                Administra el mapeo de entidades nativas de Jira, trazabilidad de requerimientos, métricas visibles del tablero y permisos de acceso para Test Pulse Suite v2.1.0.
               </p>
             </div>
 
@@ -9633,7 +9633,7 @@ const renderPlanningTab = () => {
         },
         body: JSON.stringify({
           timestamp: new Date().toISOString(),
-          source: 'Test Pulse Suite v2.0.0',
+          source: 'Test Pulse Suite v2.1.0',
           projectId: targetId || 'N/A',
           projectName: projName,
           projectKey: projKey,
@@ -10491,7 +10491,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v2.0.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v2.1.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
