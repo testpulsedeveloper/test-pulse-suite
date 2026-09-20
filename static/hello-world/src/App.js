@@ -1083,21 +1083,24 @@ function App() {
     return result;
   }, [folders]);
 
+  // Set of valid folder IDs currently existing in the project
+  const existingFolderIdSet = useMemo(() => new Set(folders.map(f => f.id)), [folders]);
+
   // Helper to count test cases in a folder and all its subfolders recursively
   const getFolderTotalCount = useCallback((folderId) => {
     const descendantIds = getFolderDescendantIds(folderId);
-    return testCases.filter(t => descendantIds.has(t.folderId)).length;
+    return testCases.filter(t => t.folderId && descendantIds.has(t.folderId)).length;
   }, [getFolderDescendantIds, testCases]);
 
   // Scoped tests for the active folder selection in Design Tab
   const activeFolderScopedTestCases = useMemo(() => {
     if (activeFolder === null) {
-      // "Sin Carpeta" -> Only tests without folder assigned
-      return testCases.filter(tc => !tc.folderId);
+      // "Sin Carpeta" -> Only tests without folder assigned OR assigned to a deleted folder
+      return testCases.filter(tc => !tc.folderId || !existingFolderIdSet.has(tc.folderId));
     }
     const descendantIds = getFolderDescendantIds(activeFolder);
-    return testCases.filter(tc => descendantIds.has(tc.folderId));
-  }, [activeFolder, testCases, getFolderDescendantIds]);
+    return testCases.filter(tc => tc.folderId && descendantIds.has(tc.folderId));
+  }, [activeFolder, testCases, getFolderDescendantIds, existingFolderIdSet]);
 
   // Filtered Data based on active folder scope, search, and type filter
   const filteredTestCasesAll = useMemo(() => {
@@ -1995,13 +1998,19 @@ Then el sistema valida la identidad.
                 {isAllTestsExpanded ? <polyline points="6 9 12 15 18 9"></polyline> : <polyline points="9 18 15 12 9 6"></polyline>}
               </svg>
             </div>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="#FFAB00" stroke="none" style={{ flexShrink: 0 }}>
-              <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
-            </svg>
+            {isAllTestsExpanded ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill={dragOverFolderId === '__ROOT__' ? 'var(--jira-blue, #0C66E4)' : (activeFolder === null ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
+                <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill={dragOverFolderId === '__ROOT__' ? 'var(--jira-blue, #0C66E4)' : (activeFolder === null ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
+                <path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" />
+              </svg>
+            )}
             <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : '📁 Sin Carpeta'}
+              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : 'Sin Carpeta'}
             </span>
-            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.filter(t => !t.folderId).length}</span>
+            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.filter(t => !t.folderId || !existingFolderIdSet.has(t.folderId)).length}</span>
           </li>
           {isAllTestsExpanded && (() => {
             const renderTree = (parentId = null, depth = 0) => {
@@ -2073,10 +2082,16 @@ Then el sistema valida la identidad.
                               </svg>
                             ) : null}
                           </div>
-                          <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? '#E1007A' : '#FFAB00'} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
-                            <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
-                          </svg>
-                          <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isDragTarget ? 700 : 400 }} title={folder.name}>
+                          {isExpanded ? (
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? 'var(--jira-blue, #0C66E4)' : (activeFolder === folder.id ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
+                              <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
+                            </svg>
+                          ) : (
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? 'var(--jira-blue, #0C66E4)' : (activeFolder === folder.id ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)')} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
+                              <path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" />
+                            </svg>
+                          )}
+                          <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isDragTarget ? 700 : (activeFolder === folder.id ? 600 : 400) }} title={folder.name}>
                             {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
                           </span>
                           <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', marginLeft: 'auto', marginRight: '4px' }}>
@@ -2127,15 +2142,18 @@ Then el sistema valida la identidad.
         <div className="header" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--jira-subtle, #626F86)" stroke="none" style={{ flexShrink: 0 }}>
+                <path d="M19 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v1.5a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 0-.49.62l1.6 6.4a2 2 0 0 0 1.94 1.48H20.4a1.5 1.5 0 0 0 1.45-1.95l-1.35-4.5a.5.5 0 0 1 .48-.65H22a.5.5 0 0 1 .5.5v7a2 2 0 0 1-2 2z" opacity="0.9" />
+              </svg>
               <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
-                {activeFolder === null ? '📁 Sin Carpeta (Raíz)' : `📁 ${folders.find(f => f.id === activeFolder)?.name || 'Carpeta'}`}
+                {activeFolder === null ? 'Sin Carpeta (Raíz)' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta')}
               </h1>
               <span className="ads-lozenge ads-lozenge-subtle">
                 ({activeFolderScopedTestCases.length} casos)
               </span>
             </div>
             <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', color: 'var(--jira-subtle, #626F86)' }}>
-              Explora, edita y organiza casos automatizados vinculados a la suite de regresión POS.
+              Explora, edita y organiza casos de prueba vinculados a la suite de regresión y diseño.
             </p>
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -3014,7 +3032,7 @@ Then el sistema valida la identidad.
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
                 {/* Folder Path Breadcrumb */}
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#626F86', backgroundColor: '#F1F2F4', padding: '2px 8px', borderRadius: '3px' }}>
-                  <svg width="12" height="12" viewBox="0 0 20 20" fill="#FFAB00"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--jira-subtle, #626F86)"><path d="M2.5 5A2.5 2.5 0 0 1 5 2.5h5.5l1.65 2.5H20a2.5 2.5 0 0 1 2.5 2.5v12A2.5 2.5 0 0 1 20 22H5a2.5 2.5 0 0 1-2.5-2.5V5z" /></svg>
                   <span>{folderPathStr}</span>
                 </span>
                 <span style={{ color: '#DCDFE4' }}>/</span>
@@ -3124,7 +3142,7 @@ Then el sistema valida la identidad.
           </div>
 
           {/* Modal Body */}
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: '1.25rem 1.5rem', backgroundColor: '#FAFBFC', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: '1.25rem 1.5rem 1.75rem 1.5rem', backgroundColor: '#FAFBFC', display: 'flex', flexDirection: 'column' }}>
             {modalDetailTab === 'details' ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 290px', gap: '1.25rem', height: '100%', minHeight: 0, alignItems: 'stretch' }}>
                 {/* Left Column (65%): Scenario Description */}
@@ -3143,7 +3161,7 @@ Then el sistema valida la identidad.
                   </div>
 
                   {/* Scrollable content container for Description */}
-                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '6px' }}>
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '8px', paddingBottom: '2.5rem' }}>
                     {loadingDescription ? (
                       <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
                         <div className="spinner" style={{ margin: '0 auto 1rem auto', width: '28px', height: '28px', border: '3px solid #DCDFE4', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
@@ -3153,7 +3171,7 @@ Then el sistema valida la identidad.
                     ) : selectedTestCaseDescription ? (
                       <div 
                         className="description-content"
-                        style={{ fontSize: '0.85rem', lineHeight: '1.6', color: '#172B4D' }}
+                        style={{ fontSize: '0.85rem', lineHeight: '1.6', color: '#172B4D', paddingBottom: '2.5rem' }}
                         dangerouslySetInnerHTML={{ __html: adfToHtml(selectedTestCaseDescription) }} 
                       />
                     ) : (
@@ -3165,7 +3183,7 @@ Then el sistema valida la identidad.
                 </div>
 
                 {/* Right Column (35%): Properties Sidebar (Fixed & Pinned) */}
-                <div style={{ backgroundColor: '#FFFFFF', borderRadius: '6px', border: '1px solid #DCDFE4', padding: '1.25rem', boxShadow: '0 1px 2px rgba(9,30,66,0.04)', display: 'flex', flexDirection: 'column', gap: '0.9rem', height: '100%', minHeight: 0, overflowY: 'auto' }}>
+                <div style={{ backgroundColor: '#FFFFFF', borderRadius: '6px', border: '1px solid #DCDFE4', padding: '1.25rem 1.25rem 2.5rem 1.25rem', boxShadow: '0 1px 2px rgba(9,30,66,0.04)', display: 'flex', flexDirection: 'column', gap: '0.9rem', height: '100%', minHeight: 0, overflowY: 'auto' }}>
                   <h3 style={{ fontSize: '11px', fontWeight: 700, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.04em', margin: 0, paddingBottom: '0.5rem', borderBottom: '1px solid #F1F2F4', flexShrink: 0 }}>
                     Propiedades del Caso
                   </h3>
@@ -3298,7 +3316,7 @@ Then el sistema valida la identidad.
                   </span>
                 </div>
 
-                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: '2.5rem' }}>
                   {testCaseDetailsLoading ? (
                     <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
                       <div className="spinner" style={{ margin: '0 auto 1rem auto', width: '24px', height: '24px', border: '3px solid #DCDFE4', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
@@ -10609,7 +10627,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.7.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.8.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
