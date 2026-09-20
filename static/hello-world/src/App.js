@@ -1070,24 +1070,54 @@ function App() {
     return false;
   }, [executionTypeFieldId]);
 
-  // Filtered Data
-  const filteredTestCasesAll = testCases.filter(tc => {
-    const matchesSearch = tc.key.toLowerCase().includes(searchQuery.toLowerCase()) || tc.summary.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesFolder = activeFolder === null || tc.folderId === activeFolder;
-    const isAuto = isAutomatedTest(tc);
-    const matchesType = designTypeFilter === 'all' 
-      || (designTypeFilter === 'automated' && isAuto)
-      || (designTypeFilter === 'manual' && !isAuto);
-    return matchesSearch && matchesFolder && matchesType;
-  }).sort((a, b) => {
-    if (designSortOrder === 'az') {
-      return (a.summary || '').localeCompare(b.summary || '');
+  // Helper to get all descendant folder IDs for a given folder (including itself)
+  const getFolderDescendantIds = useCallback((folderId) => {
+    const result = new Set([folderId]);
+    const addChildren = (fId) => {
+      folders.filter(f => f.parentId === fId).forEach(child => {
+        result.add(child.id);
+        addChildren(child.id);
+      });
+    };
+    addChildren(folderId);
+    return result;
+  }, [folders]);
+
+  // Helper to count test cases in a folder and all its subfolders recursively
+  const getFolderTotalCount = useCallback((folderId) => {
+    const descendantIds = getFolderDescendantIds(folderId);
+    return testCases.filter(t => descendantIds.has(t.folderId)).length;
+  }, [getFolderDescendantIds, testCases]);
+
+  // Scoped tests for the active folder selection in Design Tab
+  const activeFolderScopedTestCases = useMemo(() => {
+    if (activeFolder === null) {
+      // "Sin Carpeta" -> Only tests without folder assigned
+      return testCases.filter(tc => !tc.folderId);
     }
-    // Default: recent (numeric key ID desc)
-    const numA = parseInt((a.key || '').replace(/\D/g, ''), 10) || 0;
-    const numB = parseInt((b.key || '').replace(/\D/g, ''), 10) || 0;
-    return numB - numA;
-  });
+    const descendantIds = getFolderDescendantIds(activeFolder);
+    return testCases.filter(tc => descendantIds.has(tc.folderId));
+  }, [activeFolder, testCases, getFolderDescendantIds]);
+
+  // Filtered Data based on active folder scope, search, and type filter
+  const filteredTestCasesAll = useMemo(() => {
+    return activeFolderScopedTestCases.filter(tc => {
+      const matchesSearch = tc.key.toLowerCase().includes(searchQuery.toLowerCase()) || (tc.summary || '').toLowerCase().includes(searchQuery.toLowerCase());
+      const isAuto = isAutomatedTest(tc);
+      const matchesType = designTypeFilter === 'all' 
+        || (designTypeFilter === 'automated' && isAuto)
+        || (designTypeFilter === 'manual' && !isAuto);
+      return matchesSearch && matchesType;
+    }).sort((a, b) => {
+      if (designSortOrder === 'az') {
+        return (a.summary || '').localeCompare(b.summary || '');
+      }
+      // Default: recent (numeric key ID desc)
+      const numA = parseInt((a.key || '').replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt((b.key || '').replace(/\D/g, ''), 10) || 0;
+      return numB - numA;
+    });
+  }, [activeFolderScopedTestCases, searchQuery, isAutomatedTest, designTypeFilter, designSortOrder]);
   
   const totalPages = Math.ceil(filteredTestCasesAll.length / itemsPerPage);
   const filteredTestCases = filteredTestCasesAll.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -1847,7 +1877,7 @@ Then el sistema valida la identidad.
         if (folderElem) {
           const targetFolderId = folderElem.getAttribute('data-folder-id');
           const finalFolderId = targetFolderId === '__ROOT__' ? null : targetFolderId;
-          const targetFolderName = finalFolderId ? (folders.find(f => f.id === finalFolderId)?.name || 'Carpeta') : 'Raíz (All Tests)';
+          const targetFolderName = finalFolderId ? (folders.find(f => f.id === finalFolderId)?.name || 'Carpeta') : 'Sin Carpeta (Raíz)';
           handleBatchLinkTestsToFolder(ids, finalFolderId, targetFolderName);
           setSelectedDesignTestIds(new Set());
         }
@@ -1953,7 +1983,7 @@ Then el sistema valida la identidad.
                 }
               } catch (err) {}
               if (idsToMove && idsToMove.length > 0) {
-                handleBatchLinkTestsToFolder(idsToMove, null, 'Raíz (All Tests)');
+                handleBatchLinkTestsToFolder(idsToMove, null, 'Sin Carpeta (Raíz)');
                 setSelectedDesignTestIds(new Set());
                 setDraggedDesignTestIds(null);
               }
@@ -1969,9 +1999,9 @@ Then el sistema valida la identidad.
               <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
             </svg>
             <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Raíz)' : 'All Tests'}
+              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : '📁 Sin Carpeta'}
             </span>
-            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.length}</span>
+            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.filter(t => !t.folderId).length}</span>
           </li>
           {isAllTestsExpanded && (() => {
             const renderTree = (parentId = null, depth = 0) => {
@@ -2050,7 +2080,7 @@ Then el sistema valida la identidad.
                             {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
                           </span>
                           <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', marginLeft: 'auto', marginRight: '4px' }}>
-                            {testCases.filter(t => t.folderId === folder.id).length}
+                            {getFolderTotalCount(folder.id)}
                           </span>
                         </div>
                         <div className="folder-actions" style={{ display: 'flex', gap: '0.2rem', flexShrink: 0 }}>
@@ -2098,10 +2128,10 @@ Then el sistema valida la identidad.
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
-                Design: Folders &amp; Test Cases
+                {activeFolder === null ? '📁 Sin Carpeta (Raíz)' : `📁 ${folders.find(f => f.id === activeFolder)?.name || 'Carpeta'}`}
               </h1>
               <span className="ads-lozenge ads-lozenge-subtle">
-                ({testCases.length} casos)
+                ({activeFolderScopedTestCases.length} casos)
               </span>
             </div>
             <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', color: 'var(--jira-subtle, #626F86)' }}>
@@ -2299,7 +2329,7 @@ Then el sistema valida la identidad.
                     onChange={e => setBulkTargetFolder(e.target.value)}
                     style={{ width: '100%', maxWidth: '300px' }}
                   >
-                    <option value="">All Tests (Sin carpeta)</option>
+                    <option value="">Sin Carpeta (Raíz)</option>
                     {folderPaths.map(f => (
                   <option key={f.id} value={f.id}>{f.path}</option>
                 ))}
@@ -2486,7 +2516,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'all' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                Todos ({testCases.length})
+                Todos ({activeFolderScopedTestCases.length})
               </button>
               <button
                 type="button"
@@ -2503,7 +2533,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'automated' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                ⚡ Auto ({testCases.filter(t => t.labels?.includes('automated') || t.labels?.includes('automation') || t.labels?.includes('qa-auto')).length})
+                ⚡ Auto ({activeFolderScopedTestCases.filter(isAutomatedTest).length})
               </button>
               <button
                 type="button"
@@ -2520,7 +2550,7 @@ Then el sistema valida la identidad.
                   boxShadow: designTypeFilter === 'manual' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                 }}
               >
-                Manual ({testCases.filter(t => !(t.labels?.includes('automated') || t.labels?.includes('automation') || t.labels?.includes('qa-auto'))).length})
+                Manual ({activeFolderScopedTestCases.filter(t => !isAutomatedTest(t)).length})
               </button>
             </div>
 
@@ -2662,29 +2692,6 @@ Then el sistema valida la identidad.
                       </span>
                     </div>
 
-                    {/* Folder Assignment Select */}
-                    <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-                      <select 
-                        value={test.folderId || ''} 
-                        onChange={(e) => handleLinkTestToFolder(test.id, e.target.value)}
-                        style={{
-                          padding: '0.2rem 0.4rem',
-                          borderRadius: '4px',
-                          border: '1px solid var(--jira-border, #DCDFE4)',
-                          background: 'var(--jira-bg-subtle, #F1F2F4)',
-                          color: 'var(--jira-text, #172B4D)',
-                          fontSize: '0.74rem',
-                          maxWidth: '180px',
-                          cursor: 'pointer',
-                          outline: 'none'
-                        }}
-                        title="Asignar a carpeta"
-                      >
-                        <option value="">📁 Sin Carpeta (Raíz)</option>
-                        {folderPaths.map(f => <option key={f.id} value={f.id}>📁 {f.path}</option>)}
-                      </select>
-                    </div>
-
                     {/* Detail Chevron */}
                     <div style={{ color: 'var(--jira-subtle, #626F86)', display: 'flex', alignItems: 'center' }}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2748,7 +2755,7 @@ Then el sistema valida la identidad.
                     onChange={(e) => {
                       if (e.target.value !== '') {
                         const targetFolder = e.target.value === '__ROOT__' ? null : e.target.value;
-                        const targetFolderName = targetFolder ? (folders.find(f => f.id === targetFolder)?.name || 'Carpeta') : 'Raíz (All Tests)';
+                        const targetFolderName = targetFolder ? (folders.find(f => f.id === targetFolder)?.name || 'Carpeta') : 'Sin Carpeta (Raíz)';
                         handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), targetFolder, targetFolderName);
                         setSelectedDesignTestIds(new Set());
                         e.target.value = '';
@@ -2767,7 +2774,7 @@ Then el sistema valida la identidad.
                     }}
                   >
                     <option value="" disabled style={{ color: '#000' }}>📁 Mover a carpeta...</option>
-                    <option value="__ROOT__" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz / All Tests)</option>
+                    <option value="__ROOT__" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz)</option>
                     {folderPaths.map(f => <option key={f.id} value={f.id} style={{ color: '#000' }}>📁 {f.path}</option>)}
                   </select>
                   <button
@@ -2805,7 +2812,7 @@ Then el sistema valida la identidad.
                   Salud de Automatización:
                 </span>
                 <span className="ads-lozenge ads-lozenge-purple" style={{ fontSize: '11px', fontWeight: 700 }}>
-                  ⚡ {testCases.length > 0 ? Math.round((testCases.filter(isAutomatedTest).length / testCases.length) * 100) : 0}% ({testCases.filter(isAutomatedTest).length} / {testCases.length})
+                  ⚡ {activeFolderScopedTestCases.length > 0 ? Math.round((activeFolderScopedTestCases.filter(isAutomatedTest).length / activeFolderScopedTestCases.length) * 100) : 0}% ({activeFolderScopedTestCases.filter(isAutomatedTest).length} / {activeFolderScopedTestCases.length})
                 </span>
               </div>
 
@@ -3598,7 +3605,7 @@ Then el sistema valida la identidad.
       addNotification({
         type: 'success',
         title: '📁 Casos reubicados',
-        description: `Se ${idsArray.length === 1 ? 'movió 1 caso' : `movieron ${idsArray.length} casos`} a ${folderName || (targetFolderId ? 'la carpeta' : 'All Tests (Sin carpeta)')}.`
+        description: `Se ${idsArray.length === 1 ? 'movió 1 caso' : `movieron ${idsArray.length} casos`} a ${folderName || (targetFolderId ? 'la carpeta' : 'Sin Carpeta (Raíz)')}.`
       });
     } catch (err) {
       addNotification({
@@ -10602,7 +10609,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v2.1.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.7.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
