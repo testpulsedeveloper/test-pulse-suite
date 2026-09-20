@@ -6496,112 +6496,410 @@ const renderPlanningTab = () => {
     const bPct = allTotal > 0 ? (blocked / allTotal) * 100 : 0;
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
-    const handleCopyReportToClipboard = () => {
+    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '13.6';
+    const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId));
+    const currentProjectKey = currentProjectObj?.key || selectedProjectId || 'POS-E2E';
+    const currentProjectName = currentProjectObj?.name || currentProjectKey;
+
+    const handleCopyReportToClipboard = async () => {
       try {
         const baseUrl = context?.siteUrl || '';
-        let tableRows = '';
-      
-        const bugGroups = {};
-        filteredCycles.forEach(cycle => {
-          if (cycle.execution && Array.isArray(cycle.execution)) {
-            cycle.execution.forEach(ex => {
-              if (ex.linkedBugs && ex.linkedBugs.length > 0) {
-                ex.linkedBugs.forEach(bug => {
-                  if (!isActualBug(bug)) return;
-                  if (!bugGroups[bug.key]) {
-                    bugGroups[bug.key] = { ...bug, linkedCases: [] };
-                  }
-                  if (!bugGroups[bug.key].linkedCases.includes(ex.id)) {
-                    bugGroups[bug.key].linkedCases.push(ex.id);
-                  }
-                });
-              }
-            });
-          }
+        const now = new Date();
+        const dateFormatted = now.toLocaleDateString('es-ES', { 
+          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' 
         });
 
-        Object.values(bugGroups).forEach(bug => {
-          tableRows += `
+        // Scope description
+        let scopeCyclesText = 'Todos los ciclos del proyecto';
+        if (reportSelectedCycles.length === 1) {
+          scopeCyclesText = filteredCycles[0]?.summary || 'Ciclo seleccionado';
+        } else if (reportSelectedCycles.length > 1) {
+          scopeCyclesText = `${reportSelectedCycles.length} Ciclos seleccionados (${filteredCycles.map(c => c.summary).slice(0, 3).join(', ')}${filteredCycles.length > 3 ? '...' : ''})`;
+        }
+
+        let scopePlansText = 'Todos los planes';
+        if (reportSelectedPlans.length === 1) {
+          const pl = testPlans.find(p => p.id === reportSelectedPlans[0]);
+          scopePlansText = pl?.summary || 'Plan seleccionado';
+        } else if (reportSelectedPlans.length > 1) {
+          scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
+        }
+
+        // Generate Bug Rows from allBugsMap
+        const allBugsArray = Array.from(allBugsMap.values());
+        let tableRows = '';
+        if (allBugsArray.length === 0) {
+          tableRows = `
             <tr>
-              <td style="border: 1px solid #ddd; padding: 8px;"><a href="${baseUrl}/browse/${bug.key}">${bug.key}</a></td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.summary || 'N/A'}</td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.severity || 'N/A'}</td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.status || 'Desconocido'}</td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.assignee || 'Sin asignar'}</td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.resolution || 'Unresolved'}</td>
-              <td style="border: 1px solid #ddd; padding: 8px;">${bug.linkedCases.length} caso${bug.linkedCases.length !== 1 ? 's' : ''} impactado${bug.linkedCases.length !== 1 ? 's' : ''}</td>
+              <td colspan="7" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
+                🟢 No se registraron defectos vinculados en las ejecuciones evaluadas.
+              </td>
             </tr>
           `;
-        });
+        } else {
+          allBugsArray.forEach((bug, idx) => {
+            const isEven = idx % 2 === 0;
+            const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+            
+            // Severity styling
+            let sevBg = '#DFE1E6';
+            let sevColor = '#172B4D';
+            const sLow = (bug.severity || '').toLowerCase();
+            if (sLow.includes('bloq') || sLow.includes('crit') || sLow.includes('high') || sLow.includes('alt')) {
+              sevBg = '#FFEBE6';
+              sevColor = '#BF2600';
+            } else if (sLow.includes('med') || sLow.includes('may')) {
+              sevBg = '#FFF0B3';
+              sevColor = '#172B4D';
+            } else if (sLow.includes('min') || sLow.includes('low') || sLow.includes('baj')) {
+              sevBg = '#EAE6FF';
+              sevColor = '#403294';
+            }
+
+            // Status styling
+            const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
+            const statusColor = bug.isDone ? '#006644' : '#BF2600';
+            const caseCount = bug.affectedCases ? bug.affectedCases.size : (bug.linkedCases ? bug.linkedCases.length : 0);
+
+            tableRows += `
+              <tr style="background-color: ${bgRow};">
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; font-weight: 700; white-space: nowrap;">
+                  <a href="${baseUrl}/browse/${bug.key}" style="color: #0052CC; text-decoration: underline;" target="_blank">
+                    ${bug.key}
+                  </a>
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #172B4D; font-size: 12px; line-height: 1.4;">
+                  ${bug.summary || 'Sin resumen'}
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; white-space: nowrap;">
+                  <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor};">
+                    ${bug.severity || 'Media'}
+                  </span>
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; white-space: nowrap;">
+                  <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor};">
+                    ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
+                  </span>
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #44546F; font-size: 12px; white-space: nowrap;">
+                  ${bug.assignee || 'Sin asignar'}
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; color: #44546F; font-size: 12px; white-space: nowrap;">
+                  ${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}
+                </td>
+                <td style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; color: #626F86; font-size: 11px; white-space: nowrap;">
+                  <strong>${caseCount}</strong> caso${caseCount !== 1 ? 's' : ''}
+                </td>
+              </tr>
+            `;
+          });
+        }
+
+        // Modules breakdown
+        let moduleSectionHtml = '';
+        const featureKeys = Object.keys(featureStats || {});
+        if (featureKeys.length > 0) {
+          let modRows = '';
+          featureKeys.forEach((mod, idx) => {
+            const st = featureStats[mod];
+            const isEven = idx % 2 === 0;
+            const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+            const modRate = st.total > 0 ? (((st.passed) / st.total) * 100).toFixed(0) : '0';
+            const isGood = Number(modRate) >= 80;
+            modRows += `
+              <tr style="background-color: ${bgRow};">
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; font-weight: 600; color: #172B4D;">📁 ${mod}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #172B4D;">${st.total}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #00875A; font-weight: 600;">${st.passed}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #DE350B; font-weight: 600;">${st.failed}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; color: #FFAB00; font-weight: 600;">${st.blocked}</td>
+                <td style="border: 1px solid #DFE1E6; padding: 7px 10px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'};">${modRate}%</td>
+              </tr>
+            `;
+          });
+
+          moduleSectionHtml = `
+            <div style="margin-bottom: 22px;">
+              <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                📂 Cobertura y Éxito por Módulo o Funcionalidad
+              </div>
+              <table width="100%" cellpadding="6" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
+                <thead>
+                  <tr style="background-color: #F4F5F7; color: #172B4D;">
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left;">Módulo</th>
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Total</th>
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Pasados</th>
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Fallidos</th>
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">Bloqueados</th>
+                    <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center;">% Éxito</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${modRows}
+                </tbody>
+              </table>
+            </div>
+          `;
+        }
+
+        // Verdict Text
+        let verdictText = '';
+        const numSuccess = Number(successRate);
+        if (numSuccess >= 90 && totalOpenBugs === 0) {
+          verdictText = '🟢 <strong>Estado Favorable (Aprobado):</strong> La suite de pruebas presenta una alta tasa de éxito y no se registran defectos bloqueantes abiertos. El ciclo se encuentra en condiciones óptimas para pase a producción o liberación.';
+        } else if (numSuccess >= 75) {
+          verdictText = `🟡 <strong>Estado con Observaciones (Riesgo Moderado):</strong> Se alcanzó una tasa de éxito del ${successRate}%, con ${totalOpenBugs} defecto(s) abierto(s) que requieren seguimiento antes del cierre final del ciclo.`;
+        } else {
+          verdictText = `🔴 <strong>Estado Crítico (Riesgo Alto):</strong> La tasa de éxito actual es del ${successRate}% con ${totalOpenBugs} defecto(s) abierto(s) y ${failed} caso(s) fallido(s). Se recomienda detener la liberación hasta estabilizar las incidencias reportadas.`;
+        }
 
         const htmlTemplate = `
-          <div style="font-family: Arial, sans-serif; color: #333;">
-            <h2>Resumen de Pruebas: ${reportSelectedCycles.length === 1 ? filteredCycles[0]?.summary : 'Todos los ciclos'}</h2>
-            <p><strong>Proyecto:</strong> ${projects.find(p => String(p.id) === String(selectedProjectId))?.name || currentProjectKey}</p>
-            <p><strong>Tasa de Éxito:</strong> ${successRate}% (${passed} Pasados de ${ejecutados} evaluados)</p>
-            <p><strong>Cobertura de Ejecución:</strong> ${coverageRate}% (${passed + failed + blocked} / ${allTotal})</p>
-            <p><strong>Defectos:</strong> ${totalAllBugs} totales (${totalOpenBugs} abiertos, ${totalClosedBugs} cerrados)</p>
-            <br/>
-            <h3>Defectos Vinculados</h3>
-            <table style="border-collapse: collapse; width: 100%;">
-              <thead>
-                <tr style="background-color: #f2f2f2;">
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Key</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Resumen</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Severidad</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Estado</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Responsable</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Resolución</th>
-                  <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Casos Impactados</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${tableRows || '<tr><td colspan="7" style="border: 1px solid #ddd; padding: 8px; text-align: center;">No hay defectos vinculados en esta ejecución.</td></tr>'}
-              </tbody>
+          <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #DFE1E6; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(9, 30, 66, 0.08);">
+            
+            <!-- Header Banner -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #0052CC 0%, #0747A6 100%); background-color: #0052CC; color: #ffffff; padding: 22px 26px;">
+              <tr>
+                <td style="vertical-align: middle;">
+                  <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #DEEBFF; margin-bottom: 4px;">
+                    ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO DE QA
+                  </div>
+                  <div style="font-size: 20px; font-weight: 700; color: #ffffff; margin: 0;">
+                    Resumen Ejecutivo de Calidad y Pruebas
+                  </div>
+                </td>
+                <td style="vertical-align: middle; text-align: right;">
+                  <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
+                    📅 ${dateFormatted}
+                  </span>
+                </td>
+              </tr>
             </table>
-            </ul>
 
-            <h3 style="margin-top: 20px;">Siguientes Pasos</h3>
-            <ul>
-              <li>[Ingresa aquí las siguientes acciones...]</li>
-            </ul>
+            <div style="padding: 24px 26px;">
+              
+              <!-- Project & Scope Meta Box -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border: 1px solid #EBECF0; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
+                <tr>
+                  <td style="padding: 4px 8px; font-size: 13px;">
+                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
+                    <span style="font-weight: 700; color: #172B4D; font-size: 14px;">${currentProjectName} (${currentProjectKey})</span>
+                  </td>
+                  <td style="padding: 4px 8px; font-size: 13px;">
+                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
+                    <span style="font-weight: 700; color: #0052CC; font-size: 14px;">🟢 QA</span>
+                  </td>
+                  <td style="padding: 4px 8px; font-size: 13px;">
+                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
+                    <span style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
+                  </td>
+                  <td style="padding: 4px 8px; font-size: 13px;">
+                    <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
+                    <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Executive KPI Grid (Cards) -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 22px;">
+                <tr>
+                  <!-- Card 1: Total Casos -->
+                  <td width="20%" style="padding: 0 4px 0 0;">
+                    <div style="background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #172B4D; line-height: 1.1;">${allTotal}</div>
+                      <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${ejecutados} evaluados</div>
+                    </div>
+                  </td>
+
+                  <!-- Card 2: Tasa de Éxito -->
+                  <td width="20%" style="padding: 0 4px;">
+                    <div style="background: #E3FCEF; border: 1px solid #ABF5D1; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #006644; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #00875A; line-height: 1.1;">${successRate}%</div>
+                      <div style="font-size: 11px; color: #006644; margin-top: 4px;">${passed} Pasados</div>
+                    </div>
+                  </td>
+
+                  <!-- Card 3: Cobertura -->
+                  <td width="20%" style="padding: 0 4px;">
+                    <div style="background: #DEEBFF; border: 1px solid #B3D4FF; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #0747A6; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #0052CC; line-height: 1.1;">${coverageRate}%</div>
+                      <div style="font-size: 11px; color: #0747A6; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
+                    </div>
+                  </td>
+
+                  <!-- Card 4: Defectos -->
+                  <td width="20%" style="padding: 0 4px;">
+                    <div style="background: #FFEBE6; border: 1px solid #FFBDAD; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #DE350B; line-height: 1.1;">${totalAllBugs}</div>
+                      <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${totalOpenBugs}</strong> abiertos (${totalClosedBugs} cerrados)</div>
+                    </div>
+                  </td>
+
+                  <!-- Card 5: MTTR -->
+                  <td width="20%" style="padding: 0 0 0 4px;">
+                    <div style="background: #EAE6FF; border: 1px solid #C0B6F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                      <div style="font-size: 11px; font-weight: 700; color: #403294; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
+                      <div style="font-size: 22px; font-weight: 800; color: #5243AA; line-height: 1.1;">${avgResolutionHours}h</div>
+                      <div style="font-size: 11px; color: #403294; margin-top: 4px;">Resolución</div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Desglose de Ejecución (Visual Bar) -->
+              <div style="margin-bottom: 22px;">
+                <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                  📊 Distribución de Ejecución
+                </div>
+                
+                <!-- Progress Multi-Segment Bar -->
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
+                  <tr>
+                    ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #36B37E;" title="Passed: ${passed}"></td>` : ''}
+                    ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #FF5630;" title="Failed: ${failed}"></td>` : ''}
+                    ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FFAB00;" title="Blocked: ${blocked}"></td>` : ''}
+                    ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #C1C7D0;" title="Not Run: ${notRun}"></td>` : ''}
+                  </tr>
+                </table>
+
+                <!-- Status Legend Grid -->
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px;">
+                  <tr>
+                    <td width="25%" style="color: #172B4D;">
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #36B37E; margin-right: 6px;"></span>
+                      <strong>Pasados:</strong> ${passed} (${pPct.toFixed(1)}%)
+                    </td>
+                    <td width="25%" style="color: #172B4D;">
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF5630; margin-right: 6px;"></span>
+                      <strong>Fallidos:</strong> ${failed} (${fPct.toFixed(1)}%)
+                    </td>
+                    <td width="25%" style="color: #172B4D;">
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FFAB00; margin-right: 6px;"></span>
+                      <strong>Bloqueados:</strong> ${blocked} (${bPct.toFixed(1)}%)
+                    </td>
+                    <td width="25%" style="color: #626F86;">
+                      <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #C1C7D0; margin-right: 6px;"></span>
+                      <strong>Sin Ejecutar:</strong> ${notRun} (${nPct.toFixed(1)}%)
+                    </td>
+                  </tr>
+                </table>
+              </div>
+
+              <!-- Defect Matrix Table -->
+              <div style="margin-bottom: 22px;">
+                <div style="font-size: 13px; font-weight: 700; color: #172B4D; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+                  🐞 Matriz de Defectos (${totalAllBugs})
+                </div>
+                <table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
+                  <thead>
+                    <tr style="background-color: #091E42; color: #ffffff;">
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Key</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Resumen</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Severidad</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Estado</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Responsable</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Resolución</th>
+                      <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: center; font-weight: 700;">Impacto</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${tableRows}
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Status by Module (if available) -->
+              ${moduleSectionHtml}
+
+              <!-- QA Assessment & Next Steps Box -->
+              <div style="background-color: #F4F5F7; border-left: 4px solid #0052CC; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
+                <div style="font-size: 13px; font-weight: 700; color: #0052CC; text-transform: uppercase; margin-bottom: 6px;">
+                  📌 Evaluación de Calidad & Próximos Pasos
+                </div>
+                <p style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
+                  ${verdictText}
+                </p>
+                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
+                  <li>Priorizar la atención y resolución de los <strong>${totalOpenBugs}</strong> defectos abiertos con el equipo de desarrollo.</li>
+                  <li>Realizar re-test de casos fallidos tras el despliegue del siguiente build o corrección.</li>
+                  ${notRun > 0 ? `<li>Completar la ejecución de los <strong>${notRun}</strong> casos pendientes para alcanzar la cobertura total.</li>` : '<li>Cierre formal y firma del ciclo de pruebas tras verificación de criterios de aceptación.</li>'}
+                </ul>
+              </div>
+
+            </div>
+
+            <!-- Footer -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
+              <tr>
+                <td style="font-size: 11px; color: #626F86;">
+                  Test Pulse Suite v2.0.0 • Jira Cloud Quality Management • El Puerto de Liverpool
+                </td>
+                <td style="font-size: 11px; color: #626F86; text-align: right;">
+                  Generado automáticamente
+                </td>
+              </tr>
+            </table>
+
           </div>
         `;
 
-        const el = document.createElement('div');
-        el.innerHTML = htmlTemplate;
-        el.style.position = 'absolute';
-        el.style.left = '-9999px';
-        document.body.appendChild(el);
-        
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        
-        const success = document.execCommand('copy');
-        
-        selection.removeAllRanges();
-        document.body.removeChild(el);
-        
-        if (!success) {
-           console.warn("execCommand returned false, possible permission issue.");
+        // Plain text fallback
+        const plainText = `TEST PULSE SUITE - Reporte Ejecutivo QA\nProyecto: ${currentProjectName} (${currentProjectKey})\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
+
+        // Copy rich HTML to clipboard
+        let copied = false;
+        try {
+          if (navigator.clipboard && window.ClipboardItem) {
+            const item = new ClipboardItem({
+              'text/html': new Blob([htmlTemplate], { type: 'text/html' }),
+              'text/plain': new Blob([plainText], { type: 'text/plain' })
+            });
+            await navigator.clipboard.write([item]);
+            copied = true;
+          }
+        } catch (clipErr) {
+          console.warn("navigator.clipboard.write failed, trying DOM fallback:", clipErr);
         }
 
-        const subject = encodeURIComponent(`Resumen de Pruebas: ${reportSelectedCycles.length === 1 ? filteredCycles[0]?.summary : 'Todos los ciclos'}`);
-        const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-        alert(`Plantilla copiada al portapapeles. Usa ${isMac ? 'Cmd + V' : 'Ctrl + V'} en el correo para pegar la tabla. Abriendo Gmail...`);
+        if (!copied) {
+          const el = document.createElement('div');
+          el.innerHTML = htmlTemplate;
+          el.style.position = 'fixed';
+          el.style.left = '-9999px';
+          el.style.top = '0';
+          document.body.appendChild(el);
+          
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          
+          document.execCommand('copy');
+          selection.removeAllRanges();
+          document.body.removeChild(el);
+        }
+
+        addNotification({
+          type: 'success',
+          title: '📋 Reporte Ejecutivo Copiado',
+          description: 'El reporte con diseño ejecutivo HTML está en tu portapapeles. Usa Ctrl+V o Cmd+V en Gmail para pegarlo.'
+        });
+
+        const subject = encodeURIComponent(`[Reporte Ejecutivo QA] ${currentProjectKey} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`);
         router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
       } catch(err) {
-        console.error('Error al copiar:', err);
-        alert("Error crítico al exportar reporte: " + err.message);
+        console.error('Error al generar reporte:', err);
+        addNotification({
+          type: 'error',
+          title: 'Error al exportar reporte',
+          description: err.message
+        });
       }
     };
-
-    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '13.6';
-    const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId));
-    const currentProjectKey = currentProjectObj?.key || selectedProjectId || 'POS-E2E-2025';
 
     const getInitials = (name) => {
       if (!name || name === 'Sin asignar') return 'QA';
@@ -6915,9 +7213,9 @@ const renderPlanningTab = () => {
                     fontWeight: 600,
                     borderRadius: '6px'
                   }}
-                  title="Copiar plantilla de reporte ejecutivo para correo"
+                  title="Copiar reporte ejecutivo HTML y redactar en Gmail"
                 >
-                  📋 Enviar reporte ejecutivo ˅
+                  📧 Enviar Reporte Ejecutivo
                 </button>
               </div>
             </div>
