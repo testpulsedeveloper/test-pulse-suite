@@ -270,6 +270,48 @@ body {
   border-left: 3px solid var(--jira-blue);
 }
 
+.folder-item.drag-over {
+  background-color: #FDF2F7 !important;
+  color: #E1007A !important;
+  border-left: 3px solid #E1007A !important;
+  outline: 2px dashed #E1007A;
+  outline-offset: -2px;
+  transform: scale(1.02);
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.modern-test-card.dragging {
+  opacity: 0.45;
+  border: 1px dashed #E1007A !important;
+  background-color: #FDF8FA !important;
+  transform: scale(0.99);
+}
+
+.drag-grip {
+  cursor: grab;
+  color: var(--jira-subtle, #626F86);
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.4;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.modern-test-card:hover .drag-grip {
+  opacity: 0.9;
+}
+
+.drag-grip:hover {
+  color: #E1007A;
+  background: #FDF2F7;
+}
+
+.drag-grip:active {
+  cursor: grabbing;
+}
+
 /* Main Content Area */
 .main-content {
   flex: 1;

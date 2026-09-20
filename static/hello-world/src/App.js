@@ -538,6 +538,8 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [folderSearchQuery, setFolderSearchQuery] = useState('');
   const [selectedDesignTestIds, setSelectedDesignTestIds] = useState(new Set());
+  const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const [designTypeFilter, setDesignTypeFilter] = useState('all'); // 'all' | 'automated' | 'manual'
   const [designSortOrder, setDesignSortOrder] = useState('recent'); // 'recent' | 'az'
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -1839,7 +1841,37 @@ Then el sistema valida la identidad.
         </div>
 
         <ul className="folder-list" style={{ padding: '0.5rem 0', margin: 0, listStyle: 'none', overflowY: 'auto', flex: 1 }}>
-          <li className={`folder-item ${activeFolder === null ? 'active' : ''}`} onClick={() => setActiveFolder(null)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.75rem', cursor: 'pointer', borderRadius: '4px', margin: '0 0.5rem 2px 0.5rem' }}>
+          <li 
+            className={`folder-item ${activeFolder === null ? 'active' : ''} ${dragOverFolderId === '__ROOT__' ? 'drag-over' : ''}`} 
+            onClick={() => setActiveFolder(null)} 
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
+            }}
+            onDragLeave={(e) => {
+              if (e.currentTarget.contains(e.relatedTarget)) return;
+              if (dragOverFolderId === '__ROOT__') setDragOverFolderId(null);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOverFolderId(null);
+              let idsToMove = draggedDesignTestIds;
+              try {
+                const dataStr = e.dataTransfer.getData('application/json');
+                if (dataStr) {
+                  const parsed = JSON.parse(dataStr);
+                  if (parsed?.testIds?.length) idsToMove = parsed.testIds;
+                }
+              } catch (err) {}
+              if (idsToMove && idsToMove.length > 0) {
+                handleBatchLinkTestsToFolder(idsToMove, null, 'Raíz (All Tests)');
+                setSelectedDesignTestIds(new Set());
+                setDraggedDesignTestIds(null);
+              }
+            }}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.75rem', cursor: 'pointer', borderRadius: '4px', margin: '0 0.5rem 2px 0.5rem' }}
+          >
             <div style={{ width: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); setIsAllTestsExpanded(prev => !prev); }}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--jira-subtle, #626F86)' }}>
                 {isAllTestsExpanded ? <polyline points="6 9 12 15 18 9"></polyline> : <polyline points="9 18 15 12 9 6"></polyline>}
@@ -1848,7 +1880,9 @@ Then el sistema valida la identidad.
             <svg width="16" height="16" viewBox="0 0 24 24" fill="#FFAB00" stroke="none" style={{ flexShrink: 0 }}>
               <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
             </svg>
-            <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>All Tests</span>
+            <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Raíz)' : 'All Tests'}
+            </span>
             <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{testCases.length}</span>
           </li>
           {isAllTestsExpanded && (() => {
@@ -1859,12 +1893,39 @@ Then el sistema valida la identidad.
                 .map(folder => {
                   const hasChildren = folders.some(f => f.parentId === folder.id);
                   const isExpanded = expandedFolders[folder.id] !== false;
+                  const isDragTarget = dragOverFolderId === folder.id;
                   
                   return (
                     <React.Fragment key={folder.id}>
                       <li 
-                        className={`folder-item ${activeFolder === folder.id ? 'active' : ''}`} 
+                        className={`folder-item ${activeFolder === folder.id ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`} 
                         onClick={() => setActiveFolder(folder.id)} 
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                          if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
+                        }}
+                        onDragLeave={(e) => {
+                          if (e.currentTarget.contains(e.relatedTarget)) return;
+                          if (dragOverFolderId === folder.id) setDragOverFolderId(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setDragOverFolderId(null);
+                          let idsToMove = draggedDesignTestIds;
+                          try {
+                            const dataStr = e.dataTransfer.getData('application/json');
+                            if (dataStr) {
+                              const parsed = JSON.parse(dataStr);
+                              if (parsed?.testIds?.length) idsToMove = parsed.testIds;
+                            }
+                          } catch (err) {}
+                          if (idsToMove && idsToMove.length > 0) {
+                            handleBatchLinkTestsToFolder(idsToMove, folder.id, `"${folder.name}"`);
+                            setSelectedDesignTestIds(new Set());
+                            setDraggedDesignTestIds(null);
+                          }
+                        }}
                         style={{
                           display: 'flex', 
                           justifyContent: 'space-between', 
@@ -1884,10 +1945,12 @@ Then el sistema valida la identidad.
                               </svg>
                             ) : null}
                           </div>
-                          <svg width="15" height="15" viewBox="0 0 24 24" fill="#FFAB00" stroke="none" style={{ flexShrink: 0 }}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill={isDragTarget ? '#E1007A' : '#FFAB00'} stroke="none" style={{ flexShrink: 0, transition: 'fill 0.15s ease' }}>
                             <path d="M2.5 5A2.5 2.5 0 015 2.5h5.5l1.65 2.5H20a2.5 2.5 0 012.5 2.5v12A2.5 2.5 0 0120 22H5a2.5 2.5 0 01-2.5-2.5V5z" />
                           </svg>
-                          <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={folder.name}>{folder.name}</span>
+                          <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isDragTarget ? 700 : 400 }} title={folder.name}>
+                            {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
+                          </span>
                           <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', marginLeft: 'auto', marginRight: '4px' }}>
                             {testCases.filter(t => t.folderId === folder.id).length}
                           </span>
@@ -2385,6 +2448,35 @@ Then el sistema valida la identidad.
           </div>
         </div>
 
+        {/* Dragging Active Banner Feedback */}
+        {draggedDesignTestIds && draggedDesignTestIds.length > 0 && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.6rem',
+            padding: '0.5rem 0.85rem',
+            backgroundColor: '#FDF2F7',
+            border: '1.5px dashed #E1007A',
+            borderRadius: '8px',
+            color: '#E1007A',
+            fontSize: '0.82rem',
+            fontWeight: 600,
+            marginBottom: '0.85rem'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Arrastrando <strong>{draggedDesignTestIds.length}</strong> caso(s) de prueba. Suelta sobre una carpeta en el panel izquierdo para moverlo(s).</span>
+            </div>
+            <span className="ads-lozenge ads-lozenge-brand" style={{ background: '#E1007A', color: '#FFFFFF', border: 'none', borderRadius: '9999px', fontSize: '11px', padding: '1px 8px' }}>
+              Mover activo
+            </span>
+          </div>
+        )}
+
         {loading ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '3rem', color: 'var(--jira-subtle, #626F86)', gap: '0.75rem' }}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--jira-blue, #0C66E4)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite' }}>
@@ -2418,10 +2510,40 @@ Then el sistema valida la identidad.
                 return (
                   <div 
                     key={test.id} 
-                    className={`modern-test-card ${isSelected ? 'selected' : ''}`}
+                    className={`modern-test-card ${isSelected ? 'selected' : ''} ${draggedDesignTestIds?.includes(test.id) ? 'dragging' : ''}`}
                     onClick={() => { setSelectedTestCase(test); setModalDetailTab('details'); loadTestCaseDetails(test.id); }}
-                    style={{ cursor: 'pointer' }}
+                    draggable={true}
+                    onDragStart={(e) => {
+                      let ids = [test.id];
+                      if (selectedDesignTestIds.has(test.id) && selectedDesignTestIds.size > 1) {
+                        ids = Array.from(selectedDesignTestIds);
+                      }
+                      setDraggedDesignTestIds(ids);
+                      e.dataTransfer.setData('application/json', JSON.stringify({ type: 'TEST_CASES', testIds: ids }));
+                      e.dataTransfer.effectAllowed = 'move';
+                    }}
+                    onDragEnd={() => {
+                      setDraggedDesignTestIds(null);
+                      setDragOverFolderId(null);
+                    }}
+                    style={{ cursor: 'grab' }}
                   >
+                    {/* Drag Grip Handle */}
+                    <div 
+                      className="drag-grip" 
+                      title="Arrastrar para mover a una carpeta"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="9" cy="5" r="1.5" />
+                        <circle cx="9" cy="12" r="1.5" />
+                        <circle cx="9" cy="19" r="1.5" />
+                        <circle cx="15" cy="5" r="1.5" />
+                        <circle cx="15" cy="12" r="1.5" />
+                        <circle cx="15" cy="19" r="1.5" />
+                      </svg>
+                    </div>
+
                     {/* Checkbox */}
                     <div style={{ display: 'flex', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
                       <input 
@@ -3350,6 +3472,30 @@ Then el sistema valida la identidad.
     setTestCases(prev => prev.map(t => t.id === testId ? { ...t, folderId: folderId === '' ? null : folderId } : t));
     
     await invoke('linkTestToFolder', { testId, folderId: folderId === '' ? null : folderId });
+  };
+
+  const handleBatchLinkTestsToFolder = async (testIds, folderId, folderName) => {
+    if (!testIds || testIds.length === 0 || !selectedProjectId) return;
+    const targetFolderId = (folderId === '' || folderId === '__ROOT__') ? null : folderId;
+    const idsArray = Array.from(testIds);
+
+    // Optimistic UI update
+    setTestCases(prev => prev.map(t => idsArray.includes(t.id) ? { ...t, folderId: targetFolderId } : t));
+
+    try {
+      await Promise.all(idsArray.map(id => invoke('linkTestToFolder', { testId: id, folderId: targetFolderId })));
+      addNotification({
+        type: 'success',
+        title: '📁 Casos reubicados',
+        description: `Se ${idsArray.length === 1 ? 'movió 1 caso' : `movieron ${idsArray.length} casos`} a ${folderName || (targetFolderId ? 'la carpeta' : 'All Tests (Sin carpeta)')}.`
+      });
+    } catch (err) {
+      addNotification({
+        type: 'error',
+        title: 'Error al mover casos',
+        description: err.message || String(err)
+      });
+    }
   };
 
   const handleUpdateTestStatus = async (testId, status, comment) => {
