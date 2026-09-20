@@ -17,6 +17,99 @@ const generateUUID = () => {
   return 'iter_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
 };
 
+const DEFAULT_DASHBOARD_WIDGETS = [
+  { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
+  { id: 'w_general_status', type: 'general_status', title: 'Estado General de Pruebas', width: 'half', visible: true },
+  { id: 'w_manual_vs_auto', type: 'manual_vs_auto', title: 'Ejecución: Manual vs Auto', width: 'half', visible: true },
+  { id: 'w_tester_stats', type: 'tester_stats', title: 'Estado por QA Tester', width: 'half', visible: true },
+  { id: 'w_module_stats', type: 'module_stats', title: 'Estado por Módulo / Funcionalidad', width: 'half', visible: true },
+  { id: 'w_cycles_progress', type: 'cycles_progress', title: 'Progreso por Ciclo de Pruebas', width: 'full', visible: true },
+];
+
+const AVAILABLE_WIDGET_CATALOG = [
+  {
+    type: 'kpi_scorecard',
+    title: 'Métricas Clave (Bento Grid)',
+    category: 'Métricas',
+    categoryColor: '#0C66E4',
+    icon: '📊',
+    defaultWidth: 'full',
+    description: 'Scorecard con 5 tarjetas ejecutivas: Total de Casos, Tasa de Éxito, Defectos Abiertos, MTTR y Cobertura.'
+  },
+  {
+    type: 'general_status',
+    title: 'Estado General de Pruebas',
+    category: 'Calidad',
+    categoryColor: '#36B37E',
+    icon: '🍩',
+    defaultWidth: 'half',
+    description: 'Gráfico Donut interactivo con desglose de casos Pasados, Fallados, Bloqueados y Sin Ejecutar.'
+  },
+  {
+    type: 'manual_vs_auto',
+    title: 'Ejecución: Manual vs Auto',
+    category: 'Automatización',
+    categoryColor: '#6554C0',
+    icon: '⚡',
+    defaultWidth: 'half',
+    description: 'Comparativa de volumen, tasas de aprobación y velocidad entre pruebas automatizadas y manuales.'
+  },
+  {
+    type: 'tester_stats',
+    title: 'Estado por QA Tester',
+    category: 'Equipo',
+    categoryColor: '#FFAB00',
+    icon: '👥',
+    defaultWidth: 'half',
+    description: 'Productividad, balance de carga y desglose de avance por cada tester asignado con avatares.'
+  },
+  {
+    type: 'module_stats',
+    title: 'Estado por Módulo / Funcionalidad',
+    category: 'Calidad',
+    categoryColor: '#36B37E',
+    icon: '🧱',
+    defaultWidth: 'half',
+    description: 'Cobertura funcional agrupada por carpetas/módulos con semáforo de nivel de riesgo (Alto, Medio, Estable).'
+  },
+  {
+    type: 'cycles_progress',
+    title: 'Progreso por Ciclo de Pruebas',
+    category: 'Métricas',
+    categoryColor: '#0C66E4',
+    icon: '🔄',
+    defaultWidth: 'full',
+    description: 'Barras apiladas de avance individual para cada Ciclo de Pruebas activo en el proyecto.'
+  },
+  {
+    type: 'severity_breakdown',
+    title: 'Distribución de Defectos por Severidad',
+    category: 'Defectos',
+    categoryColor: '#DE350B',
+    icon: '🐞',
+    defaultWidth: 'half',
+    description: 'Conteo y proporciones de bugs clasificados en Bloqueante, Crítico, Mayor, Menor y Sin Definir.'
+  },
+  {
+    type: 'top_defects',
+    title: 'Top Defectos Críticos & Bloqueantes',
+    category: 'Defectos',
+    categoryColor: '#DE350B',
+    icon: '🔥',
+    defaultWidth: 'half',
+    description: 'Mini-tablero de incidencias críticas abiertas que requieren atención inmediata, con enlaces directos a Jira.'
+  },
+  {
+    type: 'automation_health',
+    title: 'Salud de Automatización & CI/CD',
+    category: 'Automatización',
+    categoryColor: '#6554C0',
+    icon: '🚀',
+    defaultWidth: 'half',
+    description: 'Métricas de madurez de automatización, ratio de automatización y preparación de la suite para CI/CD.'
+  }
+];
+
 function textToAdf(text) {
   if (!text) return { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: ' ' }] }] };
   const lines = text.split('\n');
@@ -592,6 +685,147 @@ function App() {
   const isCircuitBroken = useCallback(() =>
     !!(circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current)
   , []);
+
+  // Dashboard Customizable Widgets State
+  const [dashboardWidgets, setDashboardWidgets] = useState(DEFAULT_DASHBOARD_WIDGETS);
+  const [isCustomizingDashboard, setIsCustomizingDashboard] = useState(false);
+  const [showAddWidgetModal, setShowAddWidgetModal] = useState(false);
+  const [draggedWidgetIndex, setDraggedWidgetIndex] = useState(null);
+
+  // Sync dashboardWidgets with projectConfig or localStorage
+  useEffect(() => {
+    if (projectConfig?.dashboardWidgets && Array.isArray(projectConfig.dashboardWidgets) && projectConfig.dashboardWidgets.length > 0) {
+      setDashboardWidgets(projectConfig.dashboardWidgets);
+    } else if (selectedProjectId) {
+      try {
+        const cached = localStorage.getItem(`testpulse_widgets_${selectedProjectId}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setDashboardWidgets(parsed);
+            return;
+          }
+        }
+      } catch (e) {}
+      setDashboardWidgets(DEFAULT_DASHBOARD_WIDGETS);
+    }
+  }, [projectConfig?.dashboardWidgets, selectedProjectId]);
+
+  const handleSaveDashboardLayout = (newWidgets) => {
+    setDashboardWidgets(newWidgets);
+    if (selectedProjectId) {
+      try {
+        localStorage.setItem(`testpulse_widgets_${selectedProjectId}`, JSON.stringify(newWidgets));
+      } catch (e) {}
+      const updatedConf = { ...projectConfig, dashboardWidgets: newWidgets };
+      setProjectConfig(updatedConf);
+      invoke('setConfig', { projectId: selectedProjectId, config: updatedConf }).catch(() => {});
+    }
+  };
+
+  const handleDragStart = (e, index) => {
+    setDraggedWidgetIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    try {
+      e.dataTransfer.setData('text/plain', String(index));
+    } catch (err) {}
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
+  };
+
+  const handleDrop = (e, targetIndex) => {
+    e.preventDefault();
+    if (draggedWidgetIndex === null || draggedWidgetIndex === targetIndex) {
+      setDraggedWidgetIndex(null);
+      return;
+    }
+    const updated = [...dashboardWidgets];
+    const [moved] = updated.splice(draggedWidgetIndex, 1);
+    updated.splice(targetIndex, 0, moved);
+    setDraggedWidgetIndex(null);
+    handleSaveDashboardLayout(updated);
+    addNotification({ type: 'info', title: 'Tablero Reorganizado', description: `Widget movido a la posición ${targetIndex + 1}`, duration: 2500 });
+  };
+
+  const handleMoveWidget = (index, direction) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= dashboardWidgets.length) return;
+    const updated = [...dashboardWidgets];
+    const temp = updated[index];
+    updated[index] = updated[targetIndex];
+    updated[targetIndex] = temp;
+    handleSaveDashboardLayout(updated);
+  };
+
+  const handleToggleWidgetWidth = (widgetId) => {
+    const updated = dashboardWidgets.map(w => {
+      if (w.id === widgetId || w.type === widgetId) {
+        return { ...w, width: w.width === 'full' ? 'half' : 'full' };
+      }
+      return w;
+    });
+    handleSaveDashboardLayout(updated);
+  };
+
+  const handleRemoveWidget = (widgetId) => {
+    const widgetToRemove = dashboardWidgets.find(w => w.id === widgetId || w.type === widgetId);
+    const updated = dashboardWidgets.filter(w => w.id !== widgetId && w.type !== widgetId);
+    handleSaveDashboardLayout(updated);
+    addNotification({
+      type: 'info',
+      title: 'Widget Ocultado',
+      description: `"${widgetToRemove?.title || widgetId}" quitado del tablero. Puedes volver a agregarlo desde "+ Agregar Widget".`,
+      duration: 3500
+    });
+  };
+
+  const handleRemoveWidgetByType = (type) => {
+    const updated = dashboardWidgets.filter(w => w.type !== type);
+    handleSaveDashboardLayout(updated);
+  };
+
+  const handleAddWidget = (widgetType) => {
+    const catalogItem = AVAILABLE_WIDGET_CATALOG.find(c => c.type === widgetType);
+    if (!catalogItem) return;
+    
+    if (dashboardWidgets.some(w => w.type === widgetType)) {
+      addNotification({ type: 'warning', title: 'Widget ya presente', description: `El widget "${catalogItem.title}" ya está en tu tablero.`, duration: 3000 });
+      return;
+    }
+
+    const newWidget = {
+      id: `w_${widgetType}_${Date.now()}`,
+      type: widgetType,
+      title: catalogItem.title,
+      width: catalogItem.defaultWidth || 'half',
+      visible: true
+    };
+
+    const updated = [...dashboardWidgets, newWidget];
+    handleSaveDashboardLayout(updated);
+    addNotification({
+      type: 'success',
+      title: 'Widget Agregado',
+      description: `"${catalogItem.title}" añadido exitosamente al Dashboard.`,
+      duration: 3000
+    });
+  };
+
+  const handleResetDashboardLayout = () => {
+    showConfirm(
+      'Restablecer diseño predeterminado',
+      '¿Deseas volver a la distribución original de widgets del Dashboard?',
+      () => {
+        handleSaveDashboardLayout(DEFAULT_DASHBOARD_WIDGETS);
+        addNotification({ type: 'success', title: 'Diseño Restablecido', description: 'Se ha restaurado el diseño original de widgets.', duration: 3000 });
+      }
+    );
+  };
 
   // Keyboard shortcut handler for Cmd+K / Ctrl+K
   useEffect(() => {
@@ -7767,6 +8001,29 @@ const renderPlanningTab = () => {
                   🔄 {reportLoading ? 'Sincronizando...' : 'Sincronizar Métricas'}
                 </button>
 
+                {dashboardSubView === 'runs' && (
+                  <button
+                    onClick={() => setIsCustomizingDashboard(!isCustomizingDashboard)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '6px 12px',
+                      background: isCustomizingDashboard ? '#E9F2FF' : '#FFFFFF',
+                      border: '1px solid',
+                      borderColor: isCustomizingDashboard ? '#0C66E4' : 'var(--jira-border, #DCDFE4)',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      color: isCustomizingDashboard ? '#0C66E4' : 'var(--jira-dark, #172B4D)',
+                      fontSize: '12px',
+                      fontWeight: 600
+                    }}
+                    title="Personalizar, reordenar y agregar widgets en el dashboard"
+                  >
+                    ⚙️ {isCustomizingDashboard ? 'Terminar Personalización' : 'Personalizar Widgets'}
+                  </button>
+                )}
+
                 <button 
                   className="btn-secondary" 
                   onClick={() => {
@@ -7904,396 +8161,713 @@ const renderPlanningTab = () => {
           </div>
 
           {/* ═══════════════════════════════════════════════════════ */}
-          {/* ─── SUBVIEW 1: RUNS ─── */}
+          {/* ─── SUBVIEW 1: RUNS (CUSTOMIZABLE WIDGETS) ─── */}
           {/* ═══════════════════════════════════════════════════════ */}
           {dashboardSubView === 'runs' && (
-            <>
-              {/* 1. Bento Grid: 5 KPI Cards */}
-              <div className="dashboard-kpi-grid">
-                {/* Card 1: Total Casos */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>📋 TOTAL CASOS</span>
-                    <span className="dashboard-kpi-pill blue">{allTotal} totales</span>
-                  </div>
-                  <div className="dashboard-kpi-value">{allTotal.toLocaleString()}</div>
-                  <div className="dashboard-kpi-footer">
-                    <span>● {execStats.auto.total} Auto ({allTotal > 0 ? Math.round((execStats.auto.total / allTotal) * 100) : 0}%)</span>
-                    <span>● {execStats.manual.total} Manual ({allTotal > 0 ? Math.round((execStats.manual.total / allTotal) * 100) : 0}%)</span>
-                  </div>
-                </div>
-
-                {/* Card 2: Tasa de Éxito */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#006644' }}>🟢 TASA DE ÉXITO</span>
-                    <span className="dashboard-kpi-pill green">▲ {successRate}%</span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#006644' }}>
-                    {successRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed} pasados</span>
-                  </div>
-                  <div className="dashboard-progress-mini">
-                    <div style={{ width: `${Math.min(100, Math.max(0, Number(successRate)))}%`, height: '100%', backgroundColor: '#36B37E', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>{passed} de {ejecutados} evaluados</span>
-                  </div>
-                </div>
-
-                {/* Card 3: Defectos & Bloqueos */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle, #626F86)' }}>🐞 DEFECTOS &amp; BLOQUEOS</span>
-                    <span className={`dashboard-kpi-pill ${totalOpenBugs > 0 ? 'red' : 'green'}`}>
-                      {totalOpenBugs} Abiertos
-                    </span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-dark, #172B4D)' }}>
-                    {totalAllBugs} <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>({totalOpenBugs} abiertos)</span>
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
-                    <span style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
-                      {totalOpenBugs} Abiertos
-                    </span>
-                  </div>
-                </div>
-
-                {/* Card 4: Tiempo de Resolución (MTTR) */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>⏱ RESOLUCIÓN (MTTR)</span>
-                    <span className="dashboard-kpi-pill neutral">SLA: 24h</span>
-                  </div>
-                  <div className="dashboard-kpi-value">
-                    {avgResolutionHours} <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--jira-subtle)' }}>hrs</span>
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span style={{ color: '#006644', fontWeight: 600 }}>Media en ciclo</span>
-                    <span>objetivo &lt; 24h</span>
-                  </div>
-                </div>
-
-                {/* Card 5: Cobertura de Ejecución */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>🎯 COBERTURA DE EJECUCIÓN</span>
-                    <span className="dashboard-kpi-pill blue">{coverageRate}%</span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
-                    {coverageRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed + failed + blocked} / {allTotal}</span>
-                  </div>
-                  <div className="dashboard-progress-mini">
-                    <div style={{ width: `${Math.min(100, Math.max(0, Number(coverageRate)))}%`, height: '100%', backgroundColor: '#0C66E4', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>{allTotal - (passed + failed + blocked)} casos pendientes</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* 2. Row 1: Donut General & Manual vs Auto */}
-              <div className="dashboard-grid-2col">
-                {/* Card: Estado General de Pruebas */}
-                <div className="dashboard-card">
-                  <div className="dashboard-card-header">
-                    <div className="dashboard-card-title">
-                      <span>🔄</span>
-                      <span>Estado General de Pruebas</span>
-                    </div>
-                    <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
-                      {allTotal.toLocaleString()} TOTAL
-                    </span>
-                  </div>
-
-                  <div className="dashboard-donut-wrapper">
-                    <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0 }}>
-                      <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
-                        <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#EBECF0" strokeWidth="3.4" />
-                        {allTotal > 0 && (
-                          <>
-                            {pPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#36B37E" strokeWidth="3.4" strokeDasharray={`${pPct} ${100 - pPct}`} strokeDashoffset="0" />}
-                            {fPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#DE350B" strokeWidth="3.4" strokeDasharray={`${fPct} ${100 - fPct}`} strokeDashoffset={`${-pPct}`} />}
-                            {bPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#FFAB00" strokeWidth="3.4" strokeDasharray={`${bPct} ${100 - bPct}`} strokeDashoffset={`${-(pPct + fPct)}`} />}
-                            {nPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#0C66E4" strokeWidth="3.4" strokeDasharray={`${nPct} ${100 - nPct}`} strokeDashoffset={`${-(pPct + fPct + bPct)}`} />}
-                          </>
-                        )}
-                      </svg>
-                      <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                        <span style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', lineHeight: 1 }}>{successRate}%</span>
-                        <span style={{ fontSize: '9px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', textTransform: 'uppercase', marginTop: '2px', letterSpacing: '0.04em' }}>ÉXITO EFEC.</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {/* Customizer Mode Banner */}
+              {isCustomizingDashboard && (
+                <div className="dashboard-customizer-banner">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '20px' }}>🎨</span>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--jira-dark, #172B4D)' }}>
+                        Modo de Personalización del Tablero
                       </div>
-                    </div>
-
-                    <div className="dashboard-status-list" style={{ flex: 1 }}>
-                      <div className="dashboard-status-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#36B37E' }} />
-                          <span style={{ fontWeight: 600 }}>Pasados</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 700 }}>{passed}</span>
-                          <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({pPct.toFixed(1)}%)</span>
-                        </div>
-                      </div>
-
-                      <div className="dashboard-status-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#DE350B' }} />
-                          <span style={{ fontWeight: 600 }}>Fallados</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 700 }}>{failed}</span>
-                          <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({fPct.toFixed(1)}%)</span>
-                        </div>
-                      </div>
-
-                      <div className="dashboard-status-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#FFAB00' }} />
-                          <span style={{ fontWeight: 600 }}>Bloqueados</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 700 }}>{blocked}</span>
-                          <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({bPct.toFixed(1)}%)</span>
-                        </div>
-                      </div>
-
-                      <div className="dashboard-status-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#0C66E4' }} />
-                          <span style={{ fontWeight: 600 }}>Sin Ejecutar</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 700 }}>{notRun}</span>
-                          <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({nPct.toFixed(1)}%)</span>
-                        </div>
+                      <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)' }}>
+                        Arrastra las tarjetas para reordenarlas (o usa ◀ ▶). Cambia su ancho (50% / 100%) u ocúltalas (✕).
                       </div>
                     </div>
                   </div>
-                </div>
-
-                {/* Card: Ejecución Manual vs Auto */}
-                <div className="dashboard-card">
-                  <div className="dashboard-card-header">
-                    <div className="dashboard-card-title">
-                      <span>⚡</span>
-                      <span>Ejecución: Manual vs Auto</span>
-                    </div>
-                    <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                      Velocidad &amp; Calidad
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '0.5rem 0' }}>
-                    {/* Automatizada */}
-                    <div className="dashboard-track-box">
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span>🤖 Automatizada</span>
-                          <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px' }}>{autoPassPct}% Pass</span>
-                        </div>
-                        <span style={{ color: 'var(--jira-subtle)' }}>{execStats.auto.total} pruebas</span>
-                      </div>
-                      <div className="dashboard-stacked-bar">
-                        {execStats.auto.total > 0 ? (
-                          <>
-                            {execStats.auto.passed > 0 && <div style={{ width: `${(execStats.auto.passed / execStats.auto.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.auto.passed}`} />}
-                            {execStats.auto.failed > 0 && <div style={{ width: `${(execStats.auto.failed / execStats.auto.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.auto.failed}`} />}
-                            {execStats.auto.blocked > 0 && <div style={{ width: `${(execStats.auto.blocked / execStats.auto.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.auto.blocked}`} />}
-                            {execStats.auto.notRun > 0 && <div style={{ width: `${(execStats.auto.notRun / execStats.auto.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.auto.notRun}`} />}
-                          </>
-                        ) : (
-                          <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
-                        <span>● {execStats.auto.passed} Pasadas</span>
-                        <span>● {execStats.auto.failed} Falladas</span>
-                        <span>● {execStats.auto.notRun} Pendientes</span>
-                      </div>
-                    </div>
-
-                    {/* Manual */}
-                    <div className="dashboard-track-box">
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span>👤 Manual (QA)</span>
-                          <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{manualPassPct}% Pass</span>
-                        </div>
-                        <span style={{ color: 'var(--jira-subtle)' }}>{execStats.manual.total} pruebas</span>
-                      </div>
-                      <div className="dashboard-stacked-bar">
-                        {execStats.manual.total > 0 ? (
-                          <>
-                            {execStats.manual.passed > 0 && <div style={{ width: `${(execStats.manual.passed / execStats.manual.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.manual.passed}`} />}
-                            {execStats.manual.failed > 0 && <div style={{ width: `${(execStats.manual.failed / execStats.manual.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.manual.failed}`} />}
-                            {execStats.manual.blocked > 0 && <div style={{ width: `${(execStats.manual.blocked / execStats.manual.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.manual.blocked}`} />}
-                            {execStats.manual.notRun > 0 && <div style={{ width: `${(execStats.manual.notRun / execStats.manual.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.manual.notRun}`} />}
-                          </>
-                        ) : (
-                          <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
-                        <span>● {execStats.manual.passed} Pasadas</span>
-                        <span>● {execStats.manual.failed} Falladas</span>
-                        <span>● {execStats.manual.notRun} Pendientes</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 3. Row 2: QA Testers & Módulos */}
-              <div className="dashboard-grid-2col">
-                {/* Card: Estado por QA Tester */}
-                <div className="dashboard-card">
-                  <div className="dashboard-card-header">
-                    <div className="dashboard-card-title">
-                      <span>👥</span>
-                      <span>Estado por QA Tester</span>
-                    </div>
-                    <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                      {Object.keys(testerStats).length} Asignados
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '0.4rem 0', maxHeight: '240px', overflowY: 'auto' }}>
-                    {Object.keys(testerStats).length > 0 ? (
-                      Object.entries(testerStats).map(([testerName, stats]) => {
-                        const tPassPct = stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0;
-                        return (
-                          <div key={testerName} className="dashboard-tester-row">
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <div className="dashboard-avatar-circle">
-                                  {getInitials(testerName)}
-                                </div>
-                                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>{testerName}</span>
-                              </div>
-                              <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle)' }}>
-                                {stats.passed}/{stats.total} ({tPassPct}%)
-                              </span>
-                            </div>
-                            <div className="dashboard-stacked-bar" style={{ height: '8px', margin: '2px 0' }}>
-                              {stats.passed > 0 && <div style={{ width: `${(stats.passed / stats.total) * 100}%`, backgroundColor: '#36B37E' }} />}
-                              {stats.failed > 0 && <div style={{ width: `${(stats.failed / stats.total) * 100}%`, backgroundColor: '#DE350B' }} />}
-                              {stats.blocked > 0 && <div style={{ width: `${(stats.blocked / stats.total) * 100}%`, backgroundColor: '#FFAB00' }} />}
-                              {stats.notRun > 0 && <div style={{ width: `${(stats.notRun / stats.total) * 100}%`, backgroundColor: '#0C66E4' }} />}
-                            </div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px' }}>
-                        Sin asignaciones de tester
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Card: Estado por Módulo / Funcionalidad */}
-                <div className="dashboard-card">
-                  <div className="dashboard-card-header">
-                    <div className="dashboard-card-title">
-                      <span>🧱</span>
-                      <span>Estado por Módulo / Funcionalidad</span>
-                    </div>
-                    <span style={{ fontSize: '11px', background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                      Tipo: Funcional
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.4rem 0', maxHeight: '240px', overflowY: 'auto' }}>
-                    {Object.keys(moduleStats).length > 0 ? (
-                      Object.entries(moduleStats).slice(0, 5).map(([modName, stats]) => {
-                        const mPassPct = stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0;
-                        const riskLevel = stats.failed > 3 ? 'high' : stats.failed > 0 ? 'med' : 'low';
-                        return (
-                          <div key={modName} className="dashboard-module-row">
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '3px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <span style={{ fontSize: '12px', fontWeight: 600 }}>{modName}</span>
-                                {riskLevel === 'high' && <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '9px' }}>Riesgo Alto</span>}
-                                {riskLevel === 'med' && <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '9px' }}>Riesgo Medio</span>}
-                                {riskLevel === 'low' && <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '9px' }}>Estable</span>}
-                              </div>
-                              <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>{stats.total} casos · {mPassPct}% Pass</span>
-                            </div>
-                            <div className="dashboard-stacked-bar" style={{ height: '8px', margin: '2px 0' }}>
-                              {stats.passed > 0 && <div style={{ width: `${(stats.passed / stats.total) * 100}%`, backgroundColor: '#36B37E' }} />}
-                              {stats.failed > 0 && <div style={{ width: `${(stats.failed / stats.total) * 100}%`, backgroundColor: '#DE350B' }} />}
-                              {stats.blocked > 0 && <div style={{ width: `${(stats.blocked / stats.total) * 100}%`, backgroundColor: '#FFAB00' }} />}
-                              {stats.notRun > 0 && <div style={{ width: `${(stats.notRun / stats.total) * 100}%`, backgroundColor: '#0C66E4' }} />}
-                            </div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px' }}>
-                        Sin pruebas funcionales registradas
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* 4. Progreso por Ciclo de Pruebas */}
-              {filteredCycles.length > 0 && (
-                <div className="dashboard-card">
-                  <div className="dashboard-card-header">
-                    <div className="dashboard-card-title">
-                      <span>🔄</span>
-                      <span>Progreso por Ciclo de Pruebas</span>
-                    </div>
-                    <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                      {filteredCycles.length} Ciclos Activos
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.85rem', padding: '0.5rem 0', maxHeight: '280px', overflowY: 'auto' }}>
-                    {filteredCycles.map(cycle => {
-                      let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
-                      if (cycle.execution && Array.isArray(cycle.execution)) {
-                        cycle.execution.forEach(ex => {
-                          if (ex.status === 'Passed') cPassed++;
-                          else if (ex.status === 'Failed') cFailed++;
-                          else if (ex.status === 'Blocked') cBlocked++;
-                          else cNotRun++;
-                        });
-                      }
-                      const cTotal = cPassed + cFailed + cBlocked + cNotRun;
-                      const cPassPct = cTotal > 0 ? Math.round((cPassed / cTotal) * 100) : 0;
-
-                      return (
-                        <div key={cycle.id} className="dashboard-track-box" style={{ margin: 0 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '180px' }} title={cycle.summary}>
-                              {cycle.summary}
-                            </span>
-                            <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>{cTotal} casos · {cPassPct}%</span>
-                          </div>
-                          <div className="dashboard-stacked-bar" style={{ height: '10px' }}>
-                            {cTotal > 0 ? (
-                              <>
-                                {cPassed > 0 && <div style={{ width: `${(cPassed / cTotal) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasados: ${cPassed}`} />}
-                                {cFailed > 0 && <div style={{ width: `${(cFailed / cTotal) * 100}%`, backgroundColor: '#DE350B' }} title={`Fallados: ${cFailed}`} />}
-                                {cBlocked > 0 && <div style={{ width: `${(cBlocked / cTotal) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueados: ${cBlocked}`} />}
-                                {cNotRun > 0 && <div style={{ width: `${(cNotRun / cTotal) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${cNotRun}`} />}
-                              </>
-                            ) : (
-                              <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      className="btn-primary"
+                      onClick={() => setShowAddWidgetModal(true)}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '5px 12px', fontSize: '12px' }}
+                    >
+                      ➕ Agregar Widget
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={handleResetDashboardLayout}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '5px 12px', fontSize: '12px' }}
+                      title="Restablecer disposición original"
+                    >
+                      ↺ Restablecer
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsCustomizingDashboard(false);
+                        handleSaveDashboardLayout(dashboardWidgets);
+                      }}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '5px 14px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        background: '#006644',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      ✓ Guardar y Salir
+                    </button>
                   </div>
                 </div>
               )}
 
-            </>
+              {/* Dynamic Grid of Configured Widgets */}
+              <div className="dashboard-widgets-grid">
+                {dashboardWidgets
+                  .filter(w => w.visible !== false)
+                  .map((widget, index) => {
+                    const isFull = widget.width === 'full';
+                    const isDragging = draggedWidgetIndex === index;
+
+                    return (
+                      <div
+                        key={widget.id || widget.type}
+                        className={`dashboard-widget-wrapper ${isFull ? 'dashboard-widget-full' : 'dashboard-widget-half'} ${isCustomizingDashboard ? 'is-customizing' : ''} ${isDragging ? 'is-dragging' : ''}`}
+                        draggable={isCustomizingDashboard}
+                        onDragStart={(e) => handleDragStart(e, index)}
+                        onDragOver={handleDragOver}
+                        onDrop={(e) => handleDrop(e, index)}
+                      >
+                        {/* Customizer Edit Toolbar on Top of Each Widget */}
+                        {isCustomizingDashboard && (
+                          <div className="dashboard-widget-toolbar">
+                            <div className="dashboard-widget-drag-handle" title="Arrastrar para reordenar">
+                              <span>⠿</span>
+                              <span style={{ fontWeight: 700, fontSize: '12px' }}>{widget.title || widget.type}</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <button
+                                className="widget-mini-btn"
+                                disabled={index === 0}
+                                onClick={() => handleMoveWidget(index, -1)}
+                                title="Mover arriba / izquierda"
+                              >
+                                ◀
+                              </button>
+                              <button
+                                className="widget-mini-btn"
+                                disabled={index === dashboardWidgets.length - 1}
+                                onClick={() => handleMoveWidget(index, 1)}
+                                title="Mover abajo / derecha"
+                              >
+                                ▶
+                              </button>
+                              <button
+                                className="widget-mini-btn"
+                                onClick={() => handleToggleWidgetWidth(widget.id)}
+                                title={isFull ? 'Cambiar a 1 Columna (50%)' : 'Cambiar a 2 Columnas (100%)'}
+                              >
+                                {isFull ? '◫ 50%' : '▭ 100%'}
+                              </button>
+                              <button
+                                className="widget-mini-btn delete"
+                                onClick={() => handleRemoveWidget(widget.id)}
+                                title="Quitar widget del tablero"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Widget Content Renderer */}
+                        {widget.type === 'kpi_scorecard' && (
+                          <div className="dashboard-kpi-grid">
+                            {/* Card 1: Total Casos */}
+                            <div className="dashboard-kpi-card">
+                              <div className="dashboard-kpi-header">
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>📋 TOTAL CASOS</span>
+                                <span className="dashboard-kpi-pill blue">{allTotal} totales</span>
+                              </div>
+                              <div className="dashboard-kpi-value">{allTotal.toLocaleString()}</div>
+                              <div className="dashboard-kpi-footer">
+                                <span>● {execStats.auto.total} Auto ({allTotal > 0 ? Math.round((execStats.auto.total / allTotal) * 100) : 0}%)</span>
+                                <span>● {execStats.manual.total} Manual ({allTotal > 0 ? Math.round((execStats.manual.total / allTotal) * 100) : 0}%)</span>
+                              </div>
+                            </div>
+
+                            {/* Card 2: Tasa de Éxito */}
+                            <div className="dashboard-kpi-card">
+                              <div className="dashboard-kpi-header">
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#006644' }}>🟢 TASA DE ÉXITO</span>
+                                <span className="dashboard-kpi-pill green">▲ {successRate}%</span>
+                              </div>
+                              <div className="dashboard-kpi-value" style={{ color: '#006644' }}>
+                                {successRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed} pasados</span>
+                              </div>
+                              <div className="dashboard-progress-mini">
+                                <div style={{ width: `${Math.min(100, Math.max(0, Number(successRate)))}%`, height: '100%', backgroundColor: '#36B37E', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                              </div>
+                              <div className="dashboard-kpi-footer">
+                                <span>{passed} de {ejecutados} evaluados</span>
+                              </div>
+                            </div>
+
+                            {/* Card 3: Defectos & Bloqueos */}
+                            <div className="dashboard-kpi-card">
+                              <div className="dashboard-kpi-header">
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle, #626F86)' }}>🐞 DEFECTOS &amp; BLOQUEOS</span>
+                                <span className={`dashboard-kpi-pill ${totalOpenBugs > 0 ? 'red' : 'green'}`}>
+                                  {totalOpenBugs} Abiertos
+                                </span>
+                              </div>
+                              <div className="dashboard-kpi-value" style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-dark, #172B4D)' }}>
+                                {totalAllBugs} <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>({totalOpenBugs} abiertos)</span>
+                              </div>
+                              <div className="dashboard-kpi-footer">
+                                <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
+                                <span style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
+                                  {totalOpenBugs} Abiertos
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Card 4: Tiempo de Resolución (MTTR) */}
+                            <div className="dashboard-kpi-card">
+                              <div className="dashboard-kpi-header">
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>⏱ RESOLUCIÓN (MTTR)</span>
+                                <span className="dashboard-kpi-pill neutral">SLA: 24h</span>
+                              </div>
+                              <div className="dashboard-kpi-value">
+                                {avgResolutionHours} <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--jira-subtle)' }}>hrs</span>
+                              </div>
+                              <div className="dashboard-kpi-footer">
+                                <span style={{ color: '#006644', fontWeight: 600 }}>Media en ciclo</span>
+                                <span>objetivo &lt; 24h</span>
+                              </div>
+                            </div>
+
+                            {/* Card 5: Cobertura de Ejecución */}
+                            <div className="dashboard-kpi-card">
+                              <div className="dashboard-kpi-header">
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>🎯 COBERTURA DE EJECUCIÓN</span>
+                                <span className="dashboard-kpi-pill blue">{coverageRate}%</span>
+                              </div>
+                              <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
+                                {coverageRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed + failed + blocked} / {allTotal}</span>
+                              </div>
+                              <div className="dashboard-progress-mini">
+                                <div style={{ width: `${Math.min(100, Math.max(0, Number(coverageRate)))}%`, height: '100%', backgroundColor: '#0C66E4', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                              </div>
+                              <div className="dashboard-kpi-footer">
+                                <span>{allTotal - (passed + failed + blocked)} casos pendientes</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'general_status' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>🔄</span>
+                                <span>Estado General de Pruebas</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                                {allTotal.toLocaleString()} TOTAL
+                              </span>
+                            </div>
+
+                            <div className="dashboard-donut-wrapper">
+                              <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0 }}>
+                                <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                                  <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#EBECF0" strokeWidth="3.4" />
+                                  {allTotal > 0 && (
+                                    <>
+                                      {pPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#36B37E" strokeWidth="3.4" strokeDasharray={`${pPct} ${100 - pPct}`} strokeDashoffset="0" />}
+                                      {fPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#DE350B" strokeWidth="3.4" strokeDasharray={`${fPct} ${100 - fPct}`} strokeDashoffset={`${-pPct}`} />}
+                                      {bPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#FFAB00" strokeWidth="3.4" strokeDasharray={`${bPct} ${100 - bPct}`} strokeDashoffset={`${-(pPct + fPct)}`} />}
+                                      {nPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#0C66E4" strokeWidth="3.4" strokeDasharray={`${nPct} ${100 - nPct}`} strokeDashoffset={`${-(pPct + fPct + bPct)}`} />}
+                                    </>
+                                  )}
+                                </svg>
+                                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                                  <span style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', lineHeight: 1 }}>{successRate}%</span>
+                                  <span style={{ fontSize: '9px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', textTransform: 'uppercase', marginTop: '2px', letterSpacing: '0.04em' }}>ÉXITO EFEC.</span>
+                                </div>
+                              </div>
+
+                              <div className="dashboard-status-list" style={{ flex: 1 }}>
+                                <div className="dashboard-status-row">
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#36B37E' }} />
+                                    <span style={{ fontWeight: 600 }}>Pasados</span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: 700 }}>{passed}</span>
+                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({pPct.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+
+                                <div className="dashboard-status-row">
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#DE350B' }} />
+                                    <span style={{ fontWeight: 600 }}>Fallados</span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: 700 }}>{failed}</span>
+                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({fPct.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+
+                                <div className="dashboard-status-row">
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#FFAB00' }} />
+                                    <span style={{ fontWeight: 600 }}>Bloqueados</span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: 700 }}>{blocked}</span>
+                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({bPct.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+
+                                <div className="dashboard-status-row">
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#0C66E4' }} />
+                                    <span style={{ fontWeight: 600 }}>Sin Ejecutar</span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontWeight: 700 }}>{notRun}</span>
+                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({nPct.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'manual_vs_auto' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>⚡</span>
+                                <span>Ejecución: Manual vs Auto</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                                Velocidad &amp; Calidad
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '0.5rem 0' }}>
+                              {/* Automatizada */}
+                              <div className="dashboard-track-box">
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span>🤖 Automatizada</span>
+                                    <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px' }}>{autoPassPct}% Pass</span>
+                                  </div>
+                                  <span style={{ color: 'var(--jira-subtle)' }}>{execStats.auto.total} pruebas</span>
+                                </div>
+                                <div className="dashboard-stacked-bar">
+                                  {execStats.auto.total > 0 ? (
+                                    <>
+                                      {execStats.auto.passed > 0 && <div style={{ width: `${(execStats.auto.passed / execStats.auto.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.auto.passed}`} />}
+                                      {execStats.auto.failed > 0 && <div style={{ width: `${(execStats.auto.failed / execStats.auto.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.auto.failed}`} />}
+                                      {execStats.auto.blocked > 0 && <div style={{ width: `${(execStats.auto.blocked / execStats.auto.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.auto.blocked}`} />}
+                                      {execStats.auto.notRun > 0 && <div style={{ width: `${(execStats.auto.notRun / execStats.auto.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.auto.notRun}`} />}
+                                    </>
+                                  ) : (
+                                    <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
+                                  <span>● {execStats.auto.passed} Pasadas</span>
+                                  <span>● {execStats.auto.failed} Falladas</span>
+                                  <span>● {execStats.auto.notRun} Pendientes</span>
+                                </div>
+                              </div>
+
+                              {/* Manual */}
+                              <div className="dashboard-track-box">
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span>👤 Manual (QA)</span>
+                                    <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{manualPassPct}% Pass</span>
+                                  </div>
+                                  <span style={{ color: 'var(--jira-subtle)' }}>{execStats.manual.total} pruebas</span>
+                                </div>
+                                <div className="dashboard-stacked-bar">
+                                  {execStats.manual.total > 0 ? (
+                                    <>
+                                      {execStats.manual.passed > 0 && <div style={{ width: `${(execStats.manual.passed / execStats.manual.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.manual.passed}`} />}
+                                      {execStats.manual.failed > 0 && <div style={{ width: `${(execStats.manual.failed / execStats.manual.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.manual.failed}`} />}
+                                      {execStats.manual.blocked > 0 && <div style={{ width: `${(execStats.manual.blocked / execStats.manual.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.manual.blocked}`} />}
+                                      {execStats.manual.notRun > 0 && <div style={{ width: `${(execStats.manual.notRun / execStats.manual.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.manual.notRun}`} />}
+                                    </>
+                                  ) : (
+                                    <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
+                                  <span>● {execStats.manual.passed} Pasadas</span>
+                                  <span>● {execStats.manual.failed} Falladas</span>
+                                  <span>● {execStats.manual.notRun} Pendientes</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'tester_stats' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>👥</span>
+                                <span>Estado por QA Tester</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                                {Object.keys(testerStats).length} Asignados
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '0.4rem 0', maxHeight: '240px', overflowY: 'auto' }}>
+                              {Object.keys(testerStats).length > 0 ? (
+                                Object.entries(testerStats).map(([testerName, stats]) => {
+                                  const tPassPct = stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0;
+                                  return (
+                                    <div key={testerName} className="dashboard-tester-row">
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <div className="dashboard-avatar-circle">
+                                            {getInitials(testerName)}
+                                          </div>
+                                          <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>{testerName}</span>
+                                        </div>
+                                        <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle)' }}>
+                                          {stats.passed}/{stats.total} ({tPassPct}%)
+                                        </span>
+                                      </div>
+                                      <div className="dashboard-stacked-bar" style={{ height: '8px', margin: '2px 0' }}>
+                                        {stats.passed > 0 && <div style={{ width: `${(stats.passed / stats.total) * 100}%`, backgroundColor: '#36B37E' }} />}
+                                        {stats.failed > 0 && <div style={{ width: `${(stats.failed / stats.total) * 100}%`, backgroundColor: '#DE350B' }} />}
+                                        {stats.blocked > 0 && <div style={{ width: `${(stats.blocked / stats.total) * 100}%`, backgroundColor: '#FFAB00' }} />}
+                                        {stats.notRun > 0 && <div style={{ width: `${(stats.notRun / stats.total) * 100}%`, backgroundColor: '#0C66E4' }} />}
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px' }}>
+                                  Sin asignaciones de tester
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'module_stats' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>🧱</span>
+                                <span>Estado por Módulo / Funcionalidad</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                                Tipo: Funcional
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.4rem 0', maxHeight: '240px', overflowY: 'auto' }}>
+                              {Object.keys(moduleStats).length > 0 ? (
+                                Object.entries(moduleStats).slice(0, 5).map(([modName, stats]) => {
+                                  const mPassPct = stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0;
+                                  const riskLevel = stats.failed > 3 ? 'high' : stats.failed > 0 ? 'med' : 'low';
+                                  return (
+                                    <div key={modName} className="dashboard-module-row">
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '3px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                          <span style={{ fontSize: '12px', fontWeight: 600 }}>{modName}</span>
+                                          {riskLevel === 'high' && <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '9px' }}>Riesgo Alto</span>}
+                                          {riskLevel === 'med' && <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '9px' }}>Riesgo Medio</span>}
+                                          {riskLevel === 'low' && <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '9px' }}>Estable</span>}
+                                        </div>
+                                        <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>{stats.total} casos · {mPassPct}% Pass</span>
+                                      </div>
+                                      <div className="dashboard-stacked-bar" style={{ height: '8px', margin: '2px 0' }}>
+                                        {stats.passed > 0 && <div style={{ width: `${(stats.passed / stats.total) * 100}%`, backgroundColor: '#36B37E' }} />}
+                                        {stats.failed > 0 && <div style={{ width: `${(stats.failed / stats.total) * 100}%`, backgroundColor: '#DE350B' }} />}
+                                        {stats.blocked > 0 && <div style={{ width: `${(stats.blocked / stats.total) * 100}%`, backgroundColor: '#FFAB00' }} />}
+                                        {stats.notRun > 0 && <div style={{ width: `${(stats.notRun / stats.total) * 100}%`, backgroundColor: '#0C66E4' }} />}
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px' }}>
+                                  Sin pruebas funcionales registradas
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'cycles_progress' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>🔄</span>
+                                <span>Progreso por Ciclo de Pruebas</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                                {filteredCycles.length} Ciclos Activos
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.85rem', padding: '0.5rem 0', maxHeight: '280px', overflowY: 'auto' }}>
+                              {filteredCycles.length > 0 ? (
+                                filteredCycles.map(cycle => {
+                                  let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
+                                  if (cycle.execution && Array.isArray(cycle.execution)) {
+                                    cycle.execution.forEach(ex => {
+                                      if (ex.status === 'Passed') cPassed++;
+                                      else if (ex.status === 'Failed') cFailed++;
+                                      else if (ex.status === 'Blocked') cBlocked++;
+                                      else cNotRun++;
+                                    });
+                                  }
+                                  const cTotal = cPassed + cFailed + cBlocked + cNotRun;
+                                  const cPassPct = cTotal > 0 ? Math.round((cPassed / cTotal) * 100) : 0;
+
+                                  return (
+                                    <div key={cycle.id} className="dashboard-track-box" style={{ margin: 0 }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
+                                        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '180px' }} title={cycle.summary}>
+                                          {cycle.summary}
+                                        </span>
+                                        <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>{cTotal} casos · {cPassPct}%</span>
+                                      </div>
+                                      <div className="dashboard-stacked-bar" style={{ height: '10px' }}>
+                                        {cTotal > 0 ? (
+                                          <>
+                                            {cPassed > 0 && <div style={{ width: `${(cPassed / cTotal) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasados: ${cPassed}`} />}
+                                            {cFailed > 0 && <div style={{ width: `${(cFailed / cTotal) * 100}%`, backgroundColor: '#DE350B' }} title={`Fallados: ${cFailed}`} />}
+                                            {cBlocked > 0 && <div style={{ width: `${(cBlocked / cTotal) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueados: ${cBlocked}`} />}
+                                            {cNotRun > 0 && <div style={{ width: `${(cNotRun / cTotal) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${cNotRun}`} />}
+                                          </>
+                                        ) : (
+                                          <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px', gridColumn: '1 / -1' }}>
+                                  No hay ciclos de prueba seleccionados
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {widget.type === 'severity_breakdown' && (() => {
+                          const sevCounts = { bloqueante: 0, critico: 0, mayor: 0, menor: 0, sinDefinir: 0 };
+                          const bugsList = Array.from(allBugsMap.values());
+                          bugsList.forEach(b => {
+                            const s = (b.severity || '').toLowerCase();
+                            if (s.includes('bloq')) sevCounts.bloqueante++;
+                            else if (s.includes('crit')) sevCounts.critico++;
+                            else if (s.includes('may')) sevCounts.mayor++;
+                            else if (s.includes('men') || s.includes('baj') || s.includes('triv')) sevCounts.menor++;
+                            else sevCounts.sinDefinir++;
+                          });
+                          const totalSevBugs = bugsList.length;
+
+                          return (
+                            <div className="dashboard-card" style={{ height: '100%' }}>
+                              <div className="dashboard-card-header">
+                                <div className="dashboard-card-title">
+                                  <span>🐞</span>
+                                  <span>Distribución de Defectos por Severidad</span>
+                                </div>
+                                <span style={{ fontSize: '11px', background: '#FFEBE6', color: '#DE350B', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                                  {totalSevBugs} Defectos Totales
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', padding: '0.4rem 0' }}>
+                                <div className="dashboard-stacked-bar" style={{ height: '12px' }}>
+                                  {totalSevBugs > 0 ? (
+                                    <>
+                                      {sevCounts.bloqueante > 0 && <div style={{ width: `${(sevCounts.bloqueante / totalSevBugs) * 100}%`, backgroundColor: '#DE350B' }} title={`Bloqueante: ${sevCounts.bloqueante}`} />}
+                                      {sevCounts.critico > 0 && <div style={{ width: `${(sevCounts.critico / totalSevBugs) * 100}%`, backgroundColor: '#FF5630' }} title={`Crítico: ${sevCounts.critico}`} />}
+                                      {sevCounts.mayor > 0 && <div style={{ width: `${(sevCounts.mayor / totalSevBugs) * 100}%`, backgroundColor: '#FFAB00' }} title={`Mayor: ${sevCounts.mayor}`} />}
+                                      {sevCounts.menor > 0 && <div style={{ width: `${(sevCounts.menor / totalSevBugs) * 100}%`, backgroundColor: '#36B37E' }} title={`Menor: ${sevCounts.menor}`} />}
+                                      {sevCounts.sinDefinir > 0 && <div style={{ width: `${(sevCounts.sinDefinir / totalSevBugs) * 100}%`, backgroundColor: '#626F86' }} title={`Sin Definir: ${sevCounts.sinDefinir}`} />}
+                                    </>
+                                  ) : (
+                                    <div style={{ width: '100%', height: '100%', backgroundColor: '#E3FCEF' }} title="Sin defectos" />
+                                  )}
+                                </div>
+
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(90px, 1fr))', gap: '6px' }}>
+                                  <div style={{ background: '#FFEBE6', border: '1px solid #FFBDAD', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
+                                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#DE350B' }}>{sevCounts.bloqueante}</div>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#BF2600', textTransform: 'uppercase' }}>Bloqueante</div>
+                                  </div>
+                                  <div style={{ background: '#FFF0ED', border: '1px solid #FFC4BA', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
+                                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#FF5630' }}>{sevCounts.critico}</div>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#DE350B', textTransform: 'uppercase' }}>Crítico</div>
+                                  </div>
+                                  <div style={{ background: '#FFFAE6', border: '1px solid #FFE380', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
+                                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#FF8B00' }}>{sevCounts.mayor}</div>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#974F00', textTransform: 'uppercase' }}>Mayor</div>
+                                  </div>
+                                  <div style={{ background: '#E3FCEF', border: '1px solid #ABF5D1', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
+                                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#006644' }}>{sevCounts.menor}</div>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#006644', textTransform: 'uppercase' }}>Menor</div>
+                                  </div>
+                                  <div style={{ background: '#F1F2F4', border: '1px solid #DCDFE4', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
+                                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#626F86' }}>{sevCounts.sinDefinir}</div>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Sin Definir</div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {widget.type === 'top_defects' && (() => {
+                          const openBugsList = Array.from(openBugsMap.values());
+                          const criticalDefects = openBugsList
+                            .filter(b => {
+                              const s = (b.severity || '').toLowerCase();
+                              return s.includes('bloq') || s.includes('crit') || s.includes('may');
+                            })
+                            .slice(0, 4);
+
+                          return (
+                            <div className="dashboard-card" style={{ height: '100%' }}>
+                              <div className="dashboard-card-header">
+                                <div className="dashboard-card-title">
+                                  <span>🔥</span>
+                                  <span>Top Defectos Críticos &amp; Bloqueantes</span>
+                                </div>
+                                <span style={{ fontSize: '11px', background: criticalDefects.length > 0 ? '#FFEBE6' : '#E3FCEF', color: criticalDefects.length > 0 ? '#DE350B' : '#006644', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                                  {criticalDefects.length} Urgentes
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.3rem 0', maxHeight: '240px', overflowY: 'auto' }}>
+                                {criticalDefects.length > 0 ? (
+                                  criticalDefects.map(bug => {
+                                    const sLow = (bug.severity || '').toLowerCase();
+                                    const sevClass = sLow.includes('bloq') ? 'bloqueante' : sLow.includes('crit') ? 'critico' : 'mayor';
+                                    return (
+                                      <div
+                                        key={bug.key}
+                                        style={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          padding: '6px 10px',
+                                          background: '#FAFBFC',
+                                          border: '1px solid #ECEEF0',
+                                          borderRadius: '6px',
+                                          gap: '8px'
+                                        }}
+                                      >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                                          <a
+                                            href={`/browse/${bug.key}`}
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              router.open(`/browse/${bug.key}`);
+                                            }}
+                                            style={{ fontWeight: 700, fontSize: '12px', color: '#0C66E4', textDecoration: 'none', flexShrink: 0 }}
+                                          >
+                                            {bug.key}
+                                          </a>
+                                          <span
+                                            style={{
+                                              fontSize: '12px',
+                                              color: 'var(--jira-dark, #172B4D)',
+                                              whiteSpace: 'nowrap',
+                                              overflow: 'hidden',
+                                              textOverflow: 'ellipsis'
+                                            }}
+                                            title={bug.summary}
+                                          >
+                                            {bug.summary}
+                                          </span>
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                          <span className={`dashboard-sev-badge ${sevClass}`}>
+                                            {bug.severity || 'Mayor'}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                ) : (
+                                  <div style={{ textAlign: 'center', padding: '1.5rem 1rem', color: '#006644', background: '#E3FCEF', borderRadius: '6px', fontSize: '12px', fontWeight: 600 }}>
+                                    🟢 ¡Excelente! No hay defectos críticos ni bloqueantes abiertos.
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {widget.type === 'automation_health' && (() => {
+                          const autoCasesCount = execStats.auto.total;
+                          const totalEvalCases = allTotal;
+                          const autoCoverageRatio = totalEvalCases > 0 ? Math.round((autoCasesCount / totalEvalCases) * 100) : 0;
+                          const autoSuccessRate = execStats.auto.total > 0 ? Math.round((execStats.auto.passed / execStats.auto.total) * 100) : 0;
+                          const isCiCdReady = autoSuccessRate >= 80 && autoCoverageRatio >= 30;
+
+                          return (
+                            <div className="dashboard-card" style={{ height: '100%' }}>
+                              <div className="dashboard-card-header">
+                                <div className="dashboard-card-title">
+                                  <span>🚀</span>
+                                  <span>Salud de Automatización &amp; CI/CD</span>
+                                </div>
+                                <span className={`ads-lozenge ${isCiCdReady ? 'ads-lozenge-success' : 'ads-lozenge-warning'}`} style={{ fontSize: '10px' }}>
+                                  {isCiCdReady ? '✅ CI/CD Ready' : '⚠️ En Estabilización'}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', padding: '0.5rem 0' }}>
+                                <div style={{ background: '#F8FAFD', border: '1px solid #DCDFE4', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                                  <div style={{ fontSize: '18px', fontWeight: 800, color: '#6554C0' }}>{autoCoverageRatio}%</div>
+                                  <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontWeight: 600 }}>Ratio de Auto</div>
+                                  <div style={{ fontSize: '10px', color: 'var(--jira-subtle)', marginTop: '2px' }}>{autoCasesCount} / {totalEvalCases} casos</div>
+                                </div>
+
+                                <div style={{ background: '#F8FAFD', border: '1px solid #DCDFE4', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                                  <div style={{ fontSize: '18px', fontWeight: 800, color: autoSuccessRate >= 80 ? '#006644' : '#DE350B' }}>{autoSuccessRate}%</div>
+                                  <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontWeight: 600 }}>Tasa Pass Auto</div>
+                                  <div style={{ fontSize: '10px', color: 'var(--jira-subtle)', marginTop: '2px' }}>{execStats.auto.passed} pasados</div>
+                                </div>
+
+                                <div style={{ background: '#F8FAFD', border: '1px solid #DCDFE4', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                                  <div style={{ fontSize: '18px', fontWeight: 800, color: '#0C66E4' }}>{execStats.auto.notRun}</div>
+                                  <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontWeight: 600 }}>Pendientes Auto</div>
+                                  <div style={{ fontSize: '10px', color: 'var(--jira-subtle)', marginTop: '2px' }}>Para pipeline</div>
+                                </div>
+                              </div>
+                              
+                              <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', borderTop: '1px solid #F1F2F4', paddingTop: '6px', marginTop: '4px' }}>
+                                💡 <strong>Recomendación:</strong> Mantén la tasa de aprobación superior al 90% para integrar las suites automáticas en el despliegue continuo de CI/CD.
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
           )}
 
           {/* ═══════════════════════════════════════════════════════ */}
@@ -8752,6 +9326,152 @@ const renderPlanningTab = () => {
                     {dashboardTraceabilitySearch ? '🔍 No se encontraron registros de trazabilidad con ese criterio de búsqueda.' : 'No hay datos de ejecución para trazar.'}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ─── Add Widget Catalog Modal ─── */}
+          {showAddWidgetModal && (
+            <div className="ads-modal-overlay" style={{ zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div
+                className="ads-modal-container"
+                style={{
+                  width: '750px',
+                  maxWidth: '92vw',
+                  maxHeight: '85vh',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: '10px',
+                  boxShadow: '0 12px 32px rgba(9, 30, 66, 0.25)',
+                  overflow: 'hidden'
+                }}
+              >
+                {/* Modal Header */}
+                <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>🧩</span> Catálogo de Widgets del Dashboard
+                    </h3>
+                    <div style={{ fontSize: '12px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
+                      Agrega nuevas tarjetas y paneles analíticos a tu tablero en tiempo real.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowAddWidgetModal(false)}
+                    style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--jira-subtle, #626F86)', padding: '4px' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Modal Body - Catalog Grid */}
+                <div style={{ padding: '1.5rem', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div className="widget-catalog-grid">
+                    {AVAILABLE_WIDGET_CATALOG.map(item => {
+                      const isAdded = dashboardWidgets.some(w => w.type === item.type);
+                      return (
+                        <div
+                          key={item.type}
+                          style={{
+                            border: isAdded ? '1.5px solid #ABF5D1' : '1px solid var(--jira-border, #DCDFE4)',
+                            borderRadius: '8px',
+                            padding: '1rem',
+                            backgroundColor: isAdded ? '#F3FBF7' : '#FFFFFF',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                            gap: '0.75rem',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                              <span style={{ fontSize: '20px' }}>{item.icon}</span>
+                              <span
+                                style={{
+                                  fontSize: '10px',
+                                  fontWeight: 700,
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  backgroundColor: isAdded ? '#E3FCEF' : '#F1F2F4',
+                                  color: isAdded ? '#006644' : item.categoryColor || '#626F86'
+                                }}
+                              >
+                                {item.category}
+                              </span>
+                            </div>
+                            <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--jira-dark, #172B4D)', marginBottom: '4px' }}>
+                              {item.title}
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--jira-subtle, #626F86)', lineHeight: 1.4 }}>
+                              {item.description}
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '6px', borderTop: '1px solid rgba(9, 30, 66, 0.06)' }}>
+                            <span style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)' }}>
+                              Tamaño: {item.defaultWidth === 'full' ? '100% (2 col)' : '50% (1 col)'}
+                            </span>
+                            {isAdded ? (
+                              <button
+                                onClick={() => handleRemoveWidgetByType(item.type)}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '4px 10px',
+                                  fontSize: '11px',
+                                  fontWeight: 600,
+                                  background: '#FFEBE6',
+                                  color: '#DE350B',
+                                  border: '1px solid #FFBDAD',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                ✕ Quitar
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleAddWidget(item.type)}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '4px 12px',
+                                  fontSize: '11px',
+                                  fontWeight: 600,
+                                  background: '#0C66E4',
+                                  color: '#FFFFFF',
+                                  border: 'none',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                ➕ Agregar
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Modal Footer */}
+                <div style={{ padding: '0.85rem 1.5rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#FAFBFC' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)' }}>
+                    {dashboardWidgets.length} de {AVAILABLE_WIDGET_CATALOG.length} widgets activos
+                  </span>
+                  <button
+                    className="btn-primary"
+                    onClick={() => setShowAddWidgetModal(false)}
+                    style={{ padding: '6px 16px', fontSize: '12px' }}
+                  >
+                    Listo
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -10678,7 +11398,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.9.1 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.10.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
