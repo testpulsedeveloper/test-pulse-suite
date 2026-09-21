@@ -534,8 +534,23 @@ function App() {
   const [cycleTests, setCycleTests] = useState([]);
   const deletedIdsRef = useRef(new Set()); // in-session deletions (current cycle)
   const perCycleDeletedRef = useRef({});   // { [cycleId]: Set<testId> } — persists across cycle switches
+  const perCycleCacheRef = useRef({});     // { [cycleId]: Array<TestCase> } — in-memory cache for 0ms transitions
+  const [isSyncingCycle, setIsSyncingCycle] = useState(false);
 
-  const safeSetCycleTests = useCallback((newExecutionData) => {
+  const getCycleAuthoritativeCount = useCallback((cycle) => {
+    if (!cycle) return 0;
+    const cId = String(cycle.id);
+    const cached = perCycleCacheRef.current[cId];
+    if (cached && Array.isArray(cached)) {
+      return cached.length;
+    }
+    if (selectedCycle && String(selectedCycle.id) === cId && cycleTests.length > 0) {
+      return cycleTests.length;
+    }
+    return cycle.testCount !== undefined ? cycle.testCount : (cycle.tests?.length || 0);
+  }, [selectedCycle, cycleTests.length]);
+
+  const safeSetCycleTests = useCallback((newExecutionData, targetCycleId = null) => {
       setCycleTests(prev => {
           if (!newExecutionData || !Array.isArray(newExecutionData)) { console.error('safeSetCycleTests got non-array:', newExecutionData); return prev; }
           
@@ -560,9 +575,14 @@ function App() {
               }
           });
           
+          const cId = targetCycleId ? String(targetCycleId) : (selectedCycle ? String(selectedCycle.id) : null);
+          if (cId) {
+            perCycleCacheRef.current[cId] = newArray;
+            setTestCycles(cycles => cycles.map(c => String(c.id) === cId ? { ...c, testCount: newArray.length } : c));
+          }
           return newArray;
       });
-  }, []);
+  }, [selectedCycle]);
 
   const [planningFolder, setPlanningFolder] = useState('');
   const [planningPriority, setPlanningPriority] = useState('');
@@ -3701,24 +3721,67 @@ Then el sistema valida la identidad.
     );
   };
 
-  const handleCycleSelect = async (cycle) => {
-    // Restore per-cycle deleted tracking into deletedIdsRef so safeSetCycleTests keeps filtering correctly
-    deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycle.id] || []);
+  const handleCycleSelect = async (cycle, forceRefresh = false) => {
+    if (!cycle) return;
+    const cycleId = String(cycle.id);
+    deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycleId] || []);
     setPlanningChecked(new Set()); // clear multi-select
     setSelectedCycle(cycle);
+
+    const cached = perCycleCacheRef.current[cycleId];
+    if (cached && Array.isArray(cached) && !forceRefresh) {
+      // ⚡ INSTANT 0 MS TRANSITION FROM MEMORY
+      setCycleTests(cached);
+      setIsLoadingCycleTests(false);
+      setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: cached.length } : c));
+      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: cached.length } : prev));
+      
+      // Silent background revalidation
+      setIsSyncingCycle(true);
+      try {
+        const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
+        if (Array.isArray(executionSummary)) {
+          const deletedForCycle = perCycleDeletedRef.current[cycleId] || new Set();
+          const enriched = executionSummary.map(ex => {
+            if (ex.key && ex.summary) return ex;
+            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
+          });
+          const filtered = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+          perCycleCacheRef.current[cycleId] = filtered;
+          setCycleTests(filtered);
+          setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filtered.length } : c));
+          setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: filtered.length } : prev));
+        }
+      } catch (err) {
+        console.warn('Silent revalidation error:', err);
+      } finally {
+        setIsSyncingCycle(false);
+      }
+      return;
+    }
+
     setIsLoadingCycleTests(true);
+    setIsSyncingCycle(true);
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
-      // Filter out any tests deleted this session (Jira eventual consistency may return stale data)
-      const deletedForCycle = perCycleDeletedRef.current[cycle.id] || new Set();
-      const filtered = (executionSummary || []).filter(t => !deletedForCycle.has(String(t.id)));
+      const deletedForCycle = perCycleDeletedRef.current[cycleId] || new Set();
+      const enriched = (executionSummary || []).map(ex => {
+        if (ex.key && ex.summary) return ex;
+        const tc = testCases.find(t => String(t.id) === String(ex.id));
+        return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
+      });
+      const filtered = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+      perCycleCacheRef.current[cycleId] = filtered;
       setCycleTests(filtered);
       // Synchronize exact deduplicated testCount in testCycles permanently
-      setTestCycles(prev => prev.map(c => String(c.id) === String(cycle.id) ? { ...c, testCount: filtered.length } : c));
+      setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filtered.length } : c));
+      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: filtered.length } : prev));
     } catch (err) {
       addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
     } finally {
       setIsLoadingCycleTests(false);
+      setIsSyncingCycle(false);
     }
   };
 
@@ -3779,7 +3842,7 @@ Then el sistema valida la identidad.
 
   const handleAddTestToCycle = async (testCase) => {
     if (!selectedCycle) return;
-    const cycleId = selectedCycle.id;
+    const cycleId = String(selectedCycle.id);
     const idStr = String(testCase.id);
 
     // Clear deleted tracking so re-added test is rendered immediately
@@ -3797,10 +3860,16 @@ Then el sistema valida la identidad.
         status: 'Not Run'
     };
     setCycleTests(prev => {
+        let updated;
         if (!prev.some(existing => String(existing.id) === idStr)) {
-            return [...prev, locallyAdded];
+            updated = [...prev, locallyAdded];
+        } else {
+            updated = prev;
         }
-        return prev;
+        perCycleCacheRef.current[cycleId] = updated;
+        setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: updated.length } : c));
+        setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: updated.length } : c));
+        return updated;
     });
     
     try {
@@ -3812,7 +3881,11 @@ Then el sistema valida la identidad.
           testCase 
         });
         if (addRes && addRes.addedTest) {
-            setCycleTests(prev => prev.map(t => String(t.id) === idStr ? { ...t, ...addRes.addedTest } : t));
+            setCycleTests(prev => {
+              const next = prev.map(t => String(t.id) === idStr ? { ...t, ...addRes.addedTest } : t);
+              perCycleCacheRef.current[cycleId] = next;
+              return next;
+            });
             if (addRes.addedTest.isRecovered) {
               addNotification({
                 type: 'success',
@@ -3827,7 +3900,7 @@ Then el sistema valida la identidad.
         setTimeout(async () => {
             const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
             if (execution) {
-                safeSetCycleTests(execution);
+                safeSetCycleTests(execution, cycleId);
             }
         }, reloadDelay);
     } catch(err) {
@@ -3835,7 +3908,7 @@ Then el sistema valida la identidad.
         addNotification({ type: 'error', title: 'Error al añadir caso', description: err.message });
         // revert optimistic on error by reloading
         const execution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-        safeSetCycleTests(execution || []);
+        safeSetCycleTests(execution || [], cycleId);
     }
   };
 
@@ -3843,14 +3916,16 @@ Then el sistema valida la identidad.
     if (!selectedCycle) return;
     const id = String(testId);
     // Optimistic: remove from UI immediately, track to prevent ghost reappear
-    const cycleId = selectedCycle.id;
+    const cycleId = String(selectedCycle.id);
     deletedIdsRef.current.add(id);
     if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
     perCycleDeletedRef.current[cycleId].add(id);
     setPlanningChecked(prev => { const s = new Set(prev); s.delete(id); return s; });
     setCycleTests(prev => {
       const next = prev.filter(t => String(t.id) !== id);
-      setTestCycles(cycles => cycles.map(c => String(c.id) === String(cycleId) ? { ...c, testCount: next.length } : c));
+      perCycleCacheRef.current[cycleId] = next;
+      setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
+      setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       return next;
     });
     try {
@@ -3868,14 +3943,16 @@ Then el sistema valida la identidad.
   const handleRemoveManyFromCycle = async (testIds) => {
     if (!selectedCycle || !testIds || testIds.length === 0) return;
     const ids = testIds.map(String);
-    const cycleId = selectedCycle.id;
+    const cycleId = String(selectedCycle.id);
     // Optimistic: remove all from UI and clear selection
     if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
     ids.forEach(id => { deletedIdsRef.current.add(id); perCycleDeletedRef.current[cycleId].add(id); });
     setPlanningChecked(new Set());
     setCycleTests(prev => {
       const next = prev.filter(t => !ids.includes(String(t.id)));
-      setTestCycles(cycles => cycles.map(c => String(c.id) === String(cycleId) ? { ...c, testCount: next.length } : c));
+      perCycleCacheRef.current[cycleId] = next;
+      setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
+      setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       return next;
     });
     try {
@@ -4568,15 +4645,54 @@ Then el sistema valida la identidad.
   const prevCycleIdRef = useRef(null);
   const prevRefreshRef = useRef(null);
 
+  // Auto-preload all cycles of selected test plan in background
+  useEffect(() => {
+    if (!selectedPlanId || !testCycles || testCycles.length === 0) return;
+    const planCycles = testCycles.filter(c => String(c.planId) === String(selectedPlanId));
+    if (planCycles.length === 0) return;
+
+    // If no cycle selected, auto-select first cycle
+    if (!selectedCycle || !planCycles.some(c => String(c.id) === String(selectedCycle.id))) {
+      handleCycleSelect(planCycles[0]);
+    }
+
+    // Preload remaining cycles in background silently
+    planCycles.forEach(async (c) => {
+      const cId = String(c.id);
+      if (!perCycleCacheRef.current[cId]) {
+        try {
+          const summary = await invoke('getCycleExecutionSummary', { cycleId: c.id });
+          if (Array.isArray(summary)) {
+            const deletedForCycle = perCycleDeletedRef.current[cId] || new Set();
+            const enriched = summary.map(ex => {
+              if (ex.key && ex.summary) return ex;
+              const tc = testCases.find(t => String(t.id) === String(ex.id));
+              return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
+            });
+            const filtered = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+            perCycleCacheRef.current[cId] = filtered;
+            setTestCycles(prev => prev.map(item => String(item.id) === cId ? { ...item, testCount: filtered.length } : item));
+          }
+        } catch (err) {
+          // Silent background error
+        }
+      }
+    });
+  }, [selectedPlanId, testCycles.length]);
+
   useEffect(() => {
     if ((activeTab === 'execution' || activeTab === 'planning') && selectedCycle) {
-      // Avoid double fetching if handleCycleSelect just loaded this cycle
-      // Only fetch if refreshTrigger changed or tab changed without data
-      if (
-        prevCycleIdRef.current === selectedCycle.id &&
-        prevRefreshRef.current === refreshTrigger &&
-        cycleTests.length > 0
-      ) {
+      const cycleId = String(selectedCycle.id);
+
+      // If we have cached tests and no explicit refresh requested, use cache immediately
+      const cached = perCycleCacheRef.current[cycleId];
+      if (cached && prevCycleIdRef.current === selectedCycle.id && prevRefreshRef.current === refreshTrigger) {
+        return;
+      }
+      if (cached && prevRefreshRef.current === refreshTrigger) {
+        prevCycleIdRef.current = selectedCycle.id;
+        setCycleTests(cached);
+        setIsLoadingCycleTests(false);
         return;
       }
       
@@ -4588,8 +4704,9 @@ Then el sistema valida la identidad.
       invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id })
         .then(async (executionSummary) => {
           if (!executionSummary || executionSummary.length === 0) {
+            perCycleCacheRef.current[cycleId] = [];
             setCycleTests([]); // direct set
-            setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: 0 } : c));
+            setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: 0 } : c));
             return;
           }
 
@@ -4622,8 +4739,9 @@ Then el sistema valida la identidad.
             return 0;
           });
           
+          perCycleCacheRef.current[cycleId] = filteredEnriched;
           setCycleTests(filteredEnriched);
-          setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: filteredEnriched.length } : c));
+          setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filteredEnriched.length } : c));
         })
         .finally(() => {
           setIsLoadingCycleTests(false);
@@ -4710,7 +4828,7 @@ Then el sistema valida la identidad.
 
 const renderPlanningTab = () => {
     const totalInProject = testCases.length;
-    const inCycleCount = isLoadingCycleTests && selectedCycle?.testCount !== undefined ? selectedCycle.testCount : cycleTests.length;
+    const inCycleCount = selectedCycle ? getCycleAuthoritativeCount(selectedCycle) : 0;
     const notInCycleCount = totalInProject > inCycleCount ? totalInProject - inCycleCount : 0;
     const missingPct = totalInProject > 0 ? Math.round((notInCycleCount / totalInProject) * 100) : 0;
     const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
@@ -4777,7 +4895,7 @@ const renderPlanningTab = () => {
                   <div>
                     {filteredTestCycles.filter(c => c.planId === selectedPlanId).map(cycle => {
                       const isActive = selectedCycle?.id === cycle.id;
-                      const count = (isActive && cycleTests.length > 0) ? cycleTests.length : (cycle.testCount || 0);
+                      const count = getCycleAuthoritativeCount(cycle);
                       return (
                         <div 
                           key={cycle.id} 
@@ -4849,7 +4967,7 @@ const renderPlanningTab = () => {
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
                           <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: '#F1F2F4', color: '#626F86' }}>
-                            {cycle.testCount || 0}
+                            {getCycleAuthoritativeCount(cycle)}
                           </span>
                           <button 
                             onClick={() => handleLinkCycleToPlan(cycle.id, selectedPlanId)} 
@@ -4888,7 +5006,7 @@ const renderPlanningTab = () => {
                 <div>
                   {filteredTestCycles.map(cycle => {
                     const isActive = selectedCycle?.id === cycle.id;
-                    const count = (isActive && cycleTests.length > 0) ? cycleTests.length : (cycle.testCount || 0);
+                    const count = getCycleAuthoritativeCount(cycle);
                     return (
                       <div 
                         key={cycle.id} 
@@ -4918,12 +5036,11 @@ const renderPlanningTab = () => {
           {/* Sidebar Footer Button */}
           <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC' }}>
             <button 
-              className="btn-primary" 
-              style={{ width: '100%', height: '36px', fontSize: '13px' }} 
-              onClick={handleCreateIssue}
+              onClick={() => setIsCreateCycleOpen(true)}
+              className="btn-secondary"
+              style={{ width: '100%', justifyContent: 'center', fontSize: '12px', height: '32px' }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 4v16m8-8H4"></path></svg>
-              <span>+ New Cycle/Plan</span>
+              + Nuevo Ciclo de Prueba
             </button>
           </div>
         </aside>
@@ -4954,8 +5071,14 @@ const renderPlanningTab = () => {
                         Planning: <span style={{ color: '#0C66E4' }}>{selectedCycle.summary}</span>
                       </h1>
                       <span style={{ fontSize: '11px', fontWeight: 600, background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '12px' }}>
-                        {isLoadingCycleTests ? 'Cargando casos...' : `${cycleTests.length} casos en ciclo`}
+                        {isLoadingCycleTests && cycleTests.length === 0 ? 'Cargando casos...' : `${getCycleAuthoritativeCount(selectedCycle)} casos en ciclo`}
                       </span>
+                      {isSyncingCycle && (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: 600, background: '#F4F5F7', color: '#626F86', padding: '2px 8px', borderRadius: '12px' }}>
+                          <span style={{ width: '7px', height: '7px', backgroundColor: '#0C66E4', borderRadius: '50%', display: 'inline-block' }}></span>
+                          Sincronizando con Jira...
+                        </span>
+                      )}
                     </div>
                     <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#626F86' }}>
                       Asigna, filtra y gestiona los casos que integran este ciclo de prueba para la versión actual.
@@ -4963,6 +5086,17 @@ const renderPlanningTab = () => {
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button 
+                      className="btn-secondary"
+                      onClick={() => handleCycleSelect(selectedCycle, true)}
+                      style={{ height: '32px', fontSize: '12px', fontWeight: 600, padding: '0 10px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      title="Forzar sincronización fresca desde Jira"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                      </svg>
+                      <span>Sincronizar</span>
+                    </button>
                     <button 
                       className="btn-primary"
                       style={{ background: '#10B981', borderColor: '#059669', height: '32px', fontSize: '12px', fontWeight: 600, padding: '0 12px' }}
@@ -5260,7 +5394,7 @@ const renderPlanningTab = () => {
                             
                           setIsAddingAll(true);
                           try {
-                            const cycleId = selectedCycle.id;
+                            const cycleId = String(selectedCycle.id);
                             testsToAdd.forEach(tc => {
                               const idStr = String(tc.id);
                               deletedIdsRef.current.delete(idStr);
@@ -5309,7 +5443,9 @@ const renderPlanningTab = () => {
                                         newArr.push(finalItem);
                                     }
                                 });
-                                setTestCycles(cycles => cycles.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: newArr.length } : c));
+                                perCycleCacheRef.current[cycleId] = newArr;
+                                setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: newArr.length } : c));
+                                setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: newArr.length } : c));
                                 return newArr;
                             });
                             
@@ -5327,8 +5463,7 @@ const renderPlanningTab = () => {
                             setTimeout(async () => {
                                 const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                                 if (finalExecution) {
-                                    safeSetCycleTests(finalExecution);
-                                    setTestCycles(cycles => cycles.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: finalExecution.length } : c));
+                                    safeSetCycleTests(finalExecution, cycleId);
                                 }
                             }, 2500);
                             
@@ -5639,10 +5774,7 @@ const renderPlanningTab = () => {
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
             {(selectedPlanId ? filteredTestCycles.filter(c => c.planId === selectedPlanId) : filteredTestCycles).map(cycle => {
               const isSelected = selectedCycle?.id === cycle.id;
-              const reportCycle = reportData?.cycles?.find(rc => String(rc.id) === String(cycle.id));
-              const testCount = (isSelected && cycleTests.length > 0)
-                ? cycleTests.length
-                : (cycle.testCount !== undefined ? cycle.testCount : (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
+              const testCount = getCycleAuthoritativeCount(cycle);
               return (
                 <div
                   key={cycle.id}
