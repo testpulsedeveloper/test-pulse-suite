@@ -7,6 +7,7 @@ import Button from '@atlaskit/button';
 import Spinner from '@atlaskit/spinner';
 import './index.css';
 import TestPulseLoader from './components/TestPulseLoader';
+import { LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 
 
 
@@ -7422,11 +7423,13 @@ const renderPlanningTab = () => {
       }
     });
 
-    // ── 2. Cycle-Level Runs & Open Bugs (Scoped to filteredCycles) ──
+    // ── 2. Cycle-Level Runs & Bugs (Scoped to filteredCycles) ──
     const cycleOpenBugsMap = new Map();
+    const cycleAllBugsMap = new Map();
 
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
+        const cycleName = cycle.summary || cycle.key || `Ciclo-${cycle.id}`;
         const seenTcInCycle = new Set();
         cycle.execution.forEach((ex, idx) => {
           const tcKey = ex.key || ex.testCaseKey || (testCases.find(t => String(t.id) === String(ex.id))?.key) || '';
@@ -7494,7 +7497,7 @@ const renderPlanningTab = () => {
             }
           }
 
-          // Bugs tracking (Open Bugs in selected cycle(s))
+          // Bugs tracking (Scoped to selected cycle(s))
           if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
             const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
@@ -7502,12 +7505,7 @@ const renderPlanningTab = () => {
             ex.linkedBugs.forEach(bug => {
               if (!bug || !bug.key || !isActualBug(bug)) return;
 
-              const statusStr = (bug.status || '').toLowerCase().trim();
-              const isDone = ['done', 'closed', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(statusStr) ||
-                             (bug.resolution && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver' && bug.resolution !== 'Done');
-
-              if (isDone) return; // Only open bugs for the cycle-specific list
-
+              const isDone = isBugDone(bug);
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
 
               let resName = 'Sin resolver';
@@ -7520,26 +7518,60 @@ const renderPlanningTab = () => {
               }
 
               const bugKey = bug.key;
-              if (!cycleOpenBugsMap.has(bugKey)) {
-                cycleOpenBugsMap.set(bugKey, {
+
+              // 1. Add to cycleAllBugsMap (All bugs found in the selected cycle runs)
+              if (!cycleAllBugsMap.has(bugKey)) {
+                cycleAllBugsMap.set(bugKey, {
                   key: bugKey,
                   summary: bug.summary || 'Defecto detectado en ciclo',
                   severity: finalSeverity,
                   assignee: (typeof bug.assignee === 'object' && bug.assignee !== null) ? (bug.assignee.displayName || bug.assignee.name || 'Sin asignar') : (bug.assignee || 'Sin asignar'),
-                  status: bug.status || 'Abierto',
+                  status: bug.status || (isDone ? 'Cerrado' : 'Abierto'),
                   resolution: resName,
-                  isDone: false,
+                  isDone: isDone,
+                  cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
+              } else {
+                cycleAllBugsMap.get(bugKey).cycles.add(cycleName);
               }
 
-              const entry = cycleOpenBugsMap.get(bugKey);
-              entry.affectedCases.set(String(ex.id), {
+              const allEntry = cycleAllBugsMap.get(bugKey);
+              allEntry.affectedCases.set(String(ex.id), {
                 id: ex.id,
                 key: tcKeyDisplay,
                 summary: tcSummary,
-                status: ex.status
+                status: ex.status,
+                cycleName: cycleName
               });
+
+              // 2. Add to cycleOpenBugsMap if not closed
+              if (!isDone) {
+                if (!cycleOpenBugsMap.has(bugKey)) {
+                  cycleOpenBugsMap.set(bugKey, {
+                    key: bugKey,
+                    summary: bug.summary || 'Defecto detectado en ciclo',
+                    severity: finalSeverity,
+                    assignee: (typeof bug.assignee === 'object' && bug.assignee !== null) ? (bug.assignee.displayName || bug.assignee.name || 'Sin asignar') : (bug.assignee || 'Sin asignar'),
+                    status: bug.status || 'Abierto',
+                    resolution: resName,
+                    isDone: false,
+                    cycles: new Set([cycleName]),
+                    affectedCases: new Map()
+                  });
+                } else {
+                  cycleOpenBugsMap.get(bugKey).cycles.add(cycleName);
+                }
+
+                const openEntry = cycleOpenBugsMap.get(bugKey);
+                openEntry.affectedCases.set(String(ex.id), {
+                  id: ex.id,
+                  key: tcKeyDisplay,
+                  summary: tcSummary,
+                  status: ex.status,
+                  cycleName: cycleName
+                });
+              }
             });
           }
         });
@@ -7759,19 +7791,25 @@ const renderPlanningTab = () => {
         scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
       }
 
-      // Generate Bug Rows from allBugsMap (6 well-proportioned columns to prevent cutoff)
-      const allBugsArray = Array.from(allBugsMap.values());
+      // Generate Bug Rows strictly for the selected cycle(s) (6 well-proportioned columns to prevent cutoff)
+      const selectedCycleNames = new Set(filteredCycles.map(c => c.summary || c.key || String(c.id)));
+      const cycleBugsArray = Array.from(allBugsMap.values()).filter(bug => {
+        if (cycleAllBugsMap && cycleAllBugsMap.has(bug.key)) return true;
+        if (bug.cycles && Array.from(bug.cycles).some(cName => selectedCycleNames.has(cName))) return true;
+        return false;
+      });
+
       let tableRows = '';
-      if (allBugsArray.length === 0) {
+      if (cycleBugsArray.length === 0) {
         tableRows = `
           <tr>
             <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
-              🟢 No se registraron defectos vinculados en las ejecuciones evaluadas.
+              🟢 No se registraron defectos vinculados en las ejecuciones del ciclo actual.
             </td>
           </tr>
         `;
       } else {
-        allBugsArray.forEach((bug, idx) => {
+        cycleBugsArray.forEach((bug, idx) => {
           const isEven = idx % 2 === 0;
           const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
           
@@ -7833,20 +7871,18 @@ const renderPlanningTab = () => {
       const featureKeys = Object.keys(featureStats || {});
       if (featureKeys.length > 0) {
         let modRows = '';
-        featureKeys.forEach((mod, idx) => {
-          const st = featureStats[mod];
+        featureKeys.forEach((fk, idx) => {
+          const mod = featureStats[fk];
+          const mRate = mod.total > 0 ? ((mod.passed / mod.total) * 100).toFixed(0) : '0';
           const isEven = idx % 2 === 0;
-          const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
-          const modRate = st.total > 0 ? (((st.passed) / st.total) * 100).toFixed(0) : '0';
-          const isGood = Number(modRate) >= 80;
           modRows += `
-            <tr style="background-color: ${bgRow};">
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D; width: 35%; word-break: break-word;">📁 ${mod}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #172B4D; width: 13%;">${st.total}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #00875A; font-weight: 600; width: 13%;">${st.passed}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #DE350B; font-weight: 600; width: 13%;">${st.failed}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; color: #FFAB00; font-weight: 600; width: 13%;">${st.blocked}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; text-align: center; font-weight: 700; color: ${isGood ? '#00875A' : '#DE350B'}; width: 13%;">${modRate}%</td>
+            <tr style="background-color: ${isEven ? '#FFFFFF' : '#FAFBFC'};">
+              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D;">${fk}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700;">${mod.total}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #006644; font-weight: 700;">${mod.passed}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #DE350B; font-weight: 700;">${mod.failed}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #FF8B00; font-weight: 700;">${mod.blocked}</td>
+              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700; color: ${Number(mRate) >= 80 ? '#006644' : '#DE350B'};">${mRate}%</td>
             </tr>
           `;
         });
@@ -7854,17 +7890,17 @@ const renderPlanningTab = () => {
         moduleSectionHtml = `
           <div style="margin-bottom: 22px;">
             <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-              📂 Cobertura y Éxito por Módulo (Pruebas Funcionales)
+              📁 Cobertura Funcional por Módulo / Funcionalidad
             </div>
-            <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
+            <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
               <thead>
-                <tr style="background-color: #002D62; color: #ffffff;">
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; width: 35%; font-weight: 700;">Módulo Funcional</th>
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Total</th>
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Pasados</th>
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Fallidos</th>
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">Bloqueados</th>
-                  <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; width: 13%; font-weight: 700;">% Éxito</th>
+                <tr style="background-color: #F4F5F7; color: #172B4D;">
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Módulo / Carpeta</th>
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">Total</th>
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #006644;">Pasados</th>
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #DE350B;">Fallidos</th>
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #FF8B00;">Bloqueados</th>
+                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">% Éxito</th>
                 </tr>
               </thead>
               <tbody>
@@ -7889,15 +7925,18 @@ const renderPlanningTab = () => {
       const htmlTemplate = `
         <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
           
-          <!-- Header Banner (Liverpool Gradient) -->
+          <!-- Header Banner (Liverpool Gradient & Logo) -->
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
             <tr>
               <td style="vertical-align: middle;">
                 <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 4px;">
                   ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO
                 </div>
-                <div style="font-size: 22px; font-weight: 700; color: #ffffff; margin: 0;">
-                  Reporte Ejecutivo
+                <div style="font-size: 20px; font-weight: 700; color: #ffffff; margin: 0 0 10px 0; letter-spacing: -0.2px;">
+                  TEST PULSE SUITE - REPORTE DE ESTATUS
+                </div>
+                <div style="margin-top: 6px;">
+                  <img src="${LIVERPOOL_LOGO_WHITE_B64}" alt="Liverpool" class="liverpool-animated-logo" style="height: 28px; width: auto; max-width: 140px; display: block; border: 0;" />
                 </div>
               </td>
               <td style="vertical-align: middle; text-align: right;">
@@ -8021,10 +8060,10 @@ const renderPlanningTab = () => {
               </table>
             </div>
 
-            <!-- Defect Matrix Table (Fixed Widths, No Clipping) -->
+            <!-- Defect Matrix Table (Scoped Strictly to Active Cycle) -->
             <div style="margin-bottom: 22px;">
               <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-                🐞 Matriz de Defectos (${totalAllBugs})
+                🐞 MATRIZ DE DEFECTOS (${cycleBugsArray.length}) CICLO ACTUAL
               </div>
               <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
                 <thead>
@@ -8079,8 +8118,8 @@ const renderPlanningTab = () => {
       `;
 
       // Plain text fallback
-      const plainText = `TEST PULSE SUITE - Reporte Ejecutivo\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos: ${totalAllBugs} (${totalOpenBugs} abiertos)\nAlcance: ${scopeCyclesText}`;
-      const emailSubject = `[Reporte Ejecutivo] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${totalOpenBugs} Defectos)`;
+      const plainText = `TEST PULSE SUITE - REPORTE DE ESTATUS\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos del Plan: ${totalAllBugs} (${totalOpenBugs} abiertos) | Defectos Ciclo Actual: ${cycleBugsArray.length}\nAlcance: ${scopeCyclesText}`;
+      const emailSubject = `[Reporte de Estatus] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${cycleBugsArray.filter(b => !b.isDone).length} Defectos Abiertos en Ciclo)`;
 
       return {
         htmlReport: htmlTemplate,
