@@ -646,6 +646,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [localLoading, setLocalLoading] = useState(false);
   const [isFetchingTests, setIsFetchingTests] = useState(true);
+  const [isLoadingCycleTests, setIsLoadingCycleTests] = useState(false);
 
   // Project Context & Config State
   const [projects, setProjects] = useState([]);
@@ -3701,19 +3702,23 @@ Then el sistema valida la identidad.
   };
 
   const handleCycleSelect = async (cycle) => {
-    setCycleTests([]); // clear old tests immediately
     // Restore per-cycle deleted tracking into deletedIdsRef so safeSetCycleTests keeps filtering correctly
     deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycle.id] || []);
     setPlanningChecked(new Set()); // clear multi-select
     setSelectedCycle(cycle);
+    setIsLoadingCycleTests(true);
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
       // Filter out any tests deleted this session (Jira eventual consistency may return stale data)
       const deletedForCycle = perCycleDeletedRef.current[cycle.id] || new Set();
       const filtered = (executionSummary || []).filter(t => !deletedForCycle.has(String(t.id)));
       setCycleTests(filtered);
+      // Synchronize exact deduplicated testCount in testCycles permanently
+      setTestCycles(prev => prev.map(c => String(c.id) === String(cycle.id) ? { ...c, testCount: filtered.length } : c));
     } catch (err) {
       addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
+    } finally {
+      setIsLoadingCycleTests(false);
     }
   };
 
@@ -4571,10 +4576,12 @@ Then el sistema valida la identidad.
       prevRefreshRef.current = refreshTrigger;
 
       // Use getCycleExecutionSummary instead of full getCycleExecution
+      setIsLoadingCycleTests(true);
       invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id })
         .then(async (executionSummary) => {
           if (!executionSummary || executionSummary.length === 0) {
             setCycleTests([]); // direct set
+            setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: 0 } : c));
             return;
           }
 
@@ -4608,6 +4615,10 @@ Then el sistema valida la identidad.
           });
           
           setCycleTests(filteredEnriched);
+          setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: filteredEnriched.length } : c));
+        })
+        .finally(() => {
+          setIsLoadingCycleTests(false);
         });
     } else if (activeTab === 'reports') {
       if (reportData.cycles.length === 0) {
@@ -4691,8 +4702,8 @@ Then el sistema valida la identidad.
 
 const renderPlanningTab = () => {
     const totalInProject = testCases.length;
-    const inCycleCount = cycleTests.length;
-    const notInCycleCount = testCases.filter(tc => !cycleTests.some(ct => String(ct.id) === String(tc.id))).length;
+    const inCycleCount = isLoadingCycleTests && selectedCycle?.testCount !== undefined ? selectedCycle.testCount : cycleTests.length;
+    const notInCycleCount = totalInProject > inCycleCount ? totalInProject - inCycleCount : 0;
     const missingPct = totalInProject > 0 ? Math.round((notInCycleCount / totalInProject) * 100) : 0;
     const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
     const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
@@ -4920,7 +4931,7 @@ const renderPlanningTab = () => {
                         Planning: <span style={{ color: '#0C66E4' }}>{selectedCycle.summary}</span>
                       </h1>
                       <span style={{ fontSize: '11px', fontWeight: 600, background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '12px' }}>
-                        {cycleTests.length} casos en ciclo
+                        {isLoadingCycleTests ? 'Cargando casos...' : `${cycleTests.length} casos en ciclo`}
                       </span>
                     </div>
                     <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#626F86' }}>
@@ -4948,7 +4959,7 @@ const renderPlanningTab = () => {
                   <div className="planning-panel-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D' }}>
-                        Tests in this Cycle ({cycleTests.length})
+                        Tests in this Cycle ({isLoadingCycleTests ? '...' : cycleTests.length})
                       </h2>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -5023,73 +5034,83 @@ const renderPlanningTab = () => {
 
                   {/* Cycle Tests List */}
                   <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {filteredCycleTests.map(test => {
-                      const isAuto = getExecVal(test).includes('auto');
-                      return (
-                        <div key={test.id} className="planning-row">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1, paddingRight: '1rem' }}>
-                            <input 
-                              type="checkbox"
-                              checked={planningChecked.has(String(test.id))}
-                              onChange={e => setPlanningChecked(prev => {
-                                const s = new Set(prev);
-                                if (e.target.checked) s.add(String(test.id)); else s.delete(String(test.id));
-                                return s;
-                              })}
-                              style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
-                            />
-                            <span 
-                              onClick={() => router.open('/browse/' + (test.testRunKey || test.key))}
-                              style={{ fontWeight: 700, fontSize: '13px', color: '#0C66E4', cursor: 'pointer', flexShrink: 0 }}
-                              title="Abrir en Jira"
-                            >
-                              {test.testRunKey || test.key}
-                            </span>
-                            {test.testCaseKey && test.testRunKey && test.testCaseKey !== test.testRunKey && (
-                              <span style={{ fontSize: '11px', color: '#626F86', flexShrink: 0 }}>
-                                (TC: <span onClick={() => router.open('/browse/' + test.testCaseKey)} style={{ cursor: 'pointer', textDecoration: 'underline' }}>{test.testCaseKey}</span>)
-                              </span>
-                            )}
-                            <span className={isAuto ? "planning-badge-auto" : "planning-badge-manual"}>
-                              {isAuto ? "⚡ Auto" : "Manual"}
-                            </span>
-                            <span 
-                              style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                              title={test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
-                            >
-                              {test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
-                            <AtlaskitStatusLozenge status={test.status} />
-                            <button 
-                              className="btn-secondary"
-                              style={{ color: '#CA3521', padding: '2px 6px', height: '26px' }}
-                              onClick={() => {
-                                const isExecuted = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
-                                if (isExecuted) {
-                                  showConfirm(
-                                    'Remover caso ejecutado',
-                                    `Este caso ya tiene resultados registrados (${test.status}). Al removerlo se desvinculará del ciclo, pero sus datos y evidencias se conservarán de forma segura en Jira. Si lo vuelves a agregar más adelante, se restaurará automáticamente.`,
-                                    () => handleRemoveTestFromCycle(test.id),
-                                    { danger: true, confirmLabel: 'Desvincular del ciclo' }
-                                  );
-                                } else {
-                                  handleRemoveTestFromCycle(test.id);
-                                }
-                              }}
-                              title="Quitar del ciclo"
-                            >
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {cycleTests.length === 0 && (
-                      <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
-                        No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
+                    {isLoadingCycleTests ? (
+                      <div style={{ padding: '3rem 2rem', textAlign: 'center', color: '#626F86', fontSize: '13px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #DCDFE4', borderTopColor: '#0C66E4', animation: 'spin 0.8s linear infinite' }}></div>
+                        <span style={{ fontWeight: 500, color: '#172B4D' }}>Cargando casos del ciclo...</span>
+                        <span style={{ fontSize: '12px', color: '#626F86' }}>Sincronizando casos desde Jira</span>
                       </div>
+                    ) : (
+                      <>
+                        {filteredCycleTests.map(test => {
+                          const isAuto = getExecVal(test).includes('auto');
+                          return (
+                            <div key={test.id} className="planning-row">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1, paddingRight: '1rem' }}>
+                                <input 
+                                  type="checkbox"
+                                  checked={planningChecked.has(String(test.id))}
+                                  onChange={e => setPlanningChecked(prev => {
+                                    const s = new Set(prev);
+                                    if (e.target.checked) s.add(String(test.id)); else s.delete(String(test.id));
+                                    return s;
+                                  })}
+                                  style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
+                                />
+                                <span 
+                                  onClick={() => router.open('/browse/' + (test.testRunKey || test.key))}
+                                  style={{ fontWeight: 700, fontSize: '13px', color: '#0C66E4', cursor: 'pointer', flexShrink: 0 }}
+                                  title="Abrir en Jira"
+                                >
+                                  {test.testRunKey || test.key}
+                                </span>
+                                {test.testCaseKey && test.testRunKey && test.testCaseKey !== test.testRunKey && (
+                                  <span style={{ fontSize: '11px', color: '#626F86', flexShrink: 0 }}>
+                                    (TC: <span onClick={() => router.open('/browse/' + test.testCaseKey)} style={{ cursor: 'pointer', textDecoration: 'underline' }}>{test.testCaseKey}</span>)
+                                  </span>
+                                )}
+                                <span className={isAuto ? "planning-badge-auto" : "planning-badge-manual"}>
+                                  {isAuto ? "⚡ Auto" : "Manual"}
+                                </span>
+                                <span 
+                                  style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                                >
+                                  {test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
+                                <AtlaskitStatusLozenge status={test.status} />
+                                <button 
+                                  className="btn-secondary"
+                                  style={{ color: '#CA3521', padding: '2px 6px', height: '26px' }}
+                                  onClick={() => {
+                                    const isExecuted = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
+                                    if (isExecuted) {
+                                      showConfirm(
+                                        'Remover caso ejecutado',
+                                        `Este caso ya tiene resultados registrados (${test.status}). Al removerlo se desvinculará del ciclo, pero sus datos y evidencias se conservarán de forma segura en Jira. Si lo vuelves a agregar más adelante, se restaurará automáticamente.`,
+                                        () => handleRemoveTestFromCycle(test.id),
+                                        { danger: true, confirmLabel: 'Desvincular del ciclo' }
+                                      );
+                                    } else {
+                                      handleRemoveTestFromCycle(test.id);
+                                    }
+                                  }}
+                                  title="Quitar del ciclo"
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {cycleTests.length === 0 && (
+                          <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
+                            No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -5596,7 +5617,7 @@ const renderPlanningTab = () => {
               const reportCycle = reportData?.cycles?.find(rc => String(rc.id) === String(cycle.id));
               const testCount = (isSelected && cycleTests.length > 0)
                 ? cycleTests.length
-                : (cycle.testCount || (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
+                : (cycle.testCount !== undefined ? cycle.testCount : (reportCycle?.execution ? reportCycle.execution.length : (cycle.tests?.length || 0)));
               return (
                 <div
                   key={cycle.id}
