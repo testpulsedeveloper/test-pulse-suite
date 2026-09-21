@@ -348,7 +348,7 @@ resolver.define('getTestPlans', async ({ payload }) => {
     const planType = config?.planIssueType || 'Test Set';
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const jql = `${projectJql}issuetype = "${planType}" ORDER BY created DESC`;
+    const jql = `${projectJql}issuetype in ("${planType}", "Test Plan", "Test Set", "Plan de pruebas") ORDER BY created DESC`;
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, null);
     return allIssues.map(issue => ({
       id: issue.id,
@@ -368,7 +368,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const cycleType = config?.testCycleType || 'Test Cycle';
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const jql = `${projectJql}issuetype = "${cycleType}" ORDER BY created DESC`;
+    const jql = `${projectJql}issuetype in ("${cycleType}", "Test Cycle", "Ciclo de prueba") ORDER BY created DESC`;
     // Pass at most 3 properties (Jira allows max 5)
     const propNames = ['testops-plan-link', 'execution', 'tests'];
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, propNames);

@@ -3848,7 +3848,11 @@ Then el sistema valida la identidad.
     if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
     perCycleDeletedRef.current[cycleId].add(id);
     setPlanningChecked(prev => { const s = new Set(prev); s.delete(id); return s; });
-    setCycleTests(prev => prev.filter(t => String(t.id) !== id));
+    setCycleTests(prev => {
+      const next = prev.filter(t => String(t.id) !== id);
+      setTestCycles(cycles => cycles.map(c => String(c.id) === String(cycleId) ? { ...c, testCount: next.length } : c));
+      return next;
+    });
     try {
       await invoke('removeTestFromCycle', { cycleId, testId: id });
     } catch (err) {
@@ -3857,7 +3861,7 @@ Then el sistema valida la identidad.
       perCycleDeletedRef.current[cycleId]?.delete(id);
       addNotification({ type: 'error', title: 'Error al eliminar caso', description: err.message });
       const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
-      if (execution) setCycleTests(execution);
+      if (execution) safeSetCycleTests(execution);
     }
   };
 
@@ -3869,7 +3873,11 @@ Then el sistema valida la identidad.
     if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
     ids.forEach(id => { deletedIdsRef.current.add(id); perCycleDeletedRef.current[cycleId].add(id); });
     setPlanningChecked(new Set());
-    setCycleTests(prev => prev.filter(t => !ids.includes(String(t.id))));
+    setCycleTests(prev => {
+      const next = prev.filter(t => !ids.includes(String(t.id)));
+      setTestCycles(cycles => cycles.map(c => String(c.id) === String(cycleId) ? { ...c, testCount: next.length } : c));
+      return next;
+    });
     try {
       await invoke('removeManyTestsFromCycle', { cycleId, testIds: ids });
       addNotification({ type: 'success', title: `${ids.length} caso${ids.length !== 1 ? 's' : ''} eliminado${ids.length !== 1 ? 's' : ''} del ciclo` });
@@ -3878,7 +3886,7 @@ Then el sistema valida la identidad.
       ids.forEach(id => { deletedIdsRef.current.delete(id); perCycleDeletedRef.current[cycleId]?.delete(id); });
       addNotification({ type: 'error', title: 'Error al eliminar casos', description: err.message });
       const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
-      if (execution) setCycleTests(execution);
+      if (execution) safeSetCycleTests(execution);
     }
   };
 
@@ -4769,11 +4777,13 @@ const renderPlanningTab = () => {
                   <div>
                     {filteredTestCycles.filter(c => c.planId === selectedPlanId).map(cycle => {
                       const isActive = selectedCycle?.id === cycle.id;
+                      const count = (isActive && cycleTests.length > 0) ? cycleTests.length : (cycle.testCount || 0);
                       return (
                         <div 
                           key={cycle.id} 
                           className={`planning-cycle-card ${isActive ? 'active' : ''}`}
                           onClick={() => handleCycleSelect(cycle)}
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -4783,23 +4793,27 @@ const renderPlanningTab = () => {
                               {cycle.summary}
                             </span>
                           </div>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); handleUnlinkCycleFromPlan(cycle.id); }} 
-                            style={{ 
-                              background: 'none', 
-                              border: 'none', 
-                              color: '#AE2A19', 
-                              fontSize: '11px', 
-                              fontWeight: 600, 
-                              cursor: 'pointer', 
-                              padding: '2px 4px', 
-                              borderRadius: '4px',
-                              flexShrink: 0
-                            }}
-                            title="Remover ciclo del plan"
-                          >
-                            - Remove
-                          </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                            <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: isActive ? '#CCE0FF' : '#F1F2F4', color: isActive ? '#0C66E4' : '#626F86' }}>
+                              {count}
+                            </span>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); handleUnlinkCycleFromPlan(cycle.id); }} 
+                              style={{ 
+                                background: 'none', 
+                                border: 'none', 
+                                color: '#AE2A19', 
+                                fontSize: '11px', 
+                                fontWeight: 600, 
+                                cursor: 'pointer', 
+                                padding: '2px 4px', 
+                                borderRadius: '4px'
+                              }}
+                              title="Remover ciclo del plan"
+                            >
+                              - Remove
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -4823,7 +4837,7 @@ const renderPlanningTab = () => {
                   </div>
                   <div>
                     {filteredTestCycles.filter(c => c.planId !== selectedPlanId).map(cycle => (
-                      <div key={cycle.id} className="planning-cycle-available-card">
+                      <div key={cycle.id} className="planning-cycle-available-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#626F86" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                             <circle cx="12" cy="12" r="9"></circle>
@@ -4833,22 +4847,26 @@ const renderPlanningTab = () => {
                             {cycle.summary}
                           </span>
                         </div>
-                        <button 
-                          onClick={() => handleLinkCycleToPlan(cycle.id, selectedPlanId)} 
-                          style={{ 
-                            background: 'none', 
-                            border: '1px solid #85B8FF', 
-                            color: '#0C66E4', 
-                            fontSize: '11px', 
-                            fontWeight: 600, 
-                            borderRadius: '4px', 
-                            padding: '2px 6px', 
-                            cursor: 'pointer',
-                            flexShrink: 0
-                          }}
-                        >
-                          + Add
-                        </button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                          <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: '#F1F2F4', color: '#626F86' }}>
+                            {cycle.testCount || 0}
+                          </span>
+                          <button 
+                            onClick={() => handleLinkCycleToPlan(cycle.id, selectedPlanId)} 
+                            style={{ 
+                              background: 'none', 
+                              border: '1px solid #85B8FF', 
+                              color: '#0C66E4', 
+                              fontSize: '11px', 
+                              fontWeight: 600, 
+                              borderRadius: '4px', 
+                              padding: '2px 6px', 
+                              cursor: 'pointer'
+                            }}
+                          >
+                            + Add
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {filteredTestCycles.filter(c => c.planId !== selectedPlanId).length === 0 && (
@@ -4870,11 +4888,13 @@ const renderPlanningTab = () => {
                 <div>
                   {filteredTestCycles.map(cycle => {
                     const isActive = selectedCycle?.id === cycle.id;
+                    const count = (isActive && cycleTests.length > 0) ? cycleTests.length : (cycle.testCount || 0);
                     return (
                       <div 
                         key={cycle.id} 
                         className={`planning-cycle-card ${isActive ? 'active' : ''}`}
                         onClick={() => handleCycleSelect(cycle)}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -4884,6 +4904,9 @@ const renderPlanningTab = () => {
                             {cycle.summary}
                           </span>
                         </div>
+                        <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: isActive ? '#CCE0FF' : '#F1F2F4', color: isActive ? '#0C66E4' : '#626F86', flexShrink: 0 }}>
+                          {count}
+                        </span>
                       </div>
                     );
                   })}
@@ -5272,21 +5295,22 @@ const renderPlanningTab = () => {
                             }));
                             
                             setCycleTests(prev => {
-                               const newArr = [...prev];
-                               locallyAdded.forEach(lt => {
-                                   let finalItem = lt;
-                                   if (allAddedTests && allAddedTests.length > 0) {
-                                       const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
-                                       if (matched) {
-                                           finalItem = { ...lt, ...matched };
-                                       }
-                                   }
-                                   
-                                   if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
-                                       newArr.push(finalItem);
-                                   }
-                               });
-                               return newArr;
+                                const newArr = [...prev];
+                                locallyAdded.forEach(lt => {
+                                    let finalItem = lt;
+                                    if (allAddedTests && allAddedTests.length > 0) {
+                                        const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
+                                        if (matched) {
+                                            finalItem = { ...lt, ...matched };
+                                        }
+                                    }
+                                    
+                                    if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
+                                        newArr.push(finalItem);
+                                    }
+                                });
+                                setTestCycles(cycles => cycles.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: newArr.length } : c));
+                                return newArr;
                             });
                             
                             const recoveredCount = (allAddedTests || []).filter(t => t.isRecovered).length;
@@ -5304,6 +5328,7 @@ const renderPlanningTab = () => {
                                 const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
                                 if (finalExecution) {
                                     safeSetCycleTests(finalExecution);
+                                    setTestCycles(cycles => cycles.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, testCount: finalExecution.length } : c));
                                 }
                             }, 2500);
                             
