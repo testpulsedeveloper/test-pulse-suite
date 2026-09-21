@@ -9062,13 +9062,14 @@ const renderPlanningTab = () => {
                         })()}
 
                         {widget.type === 'top_defects' && (() => {
-                          const openBugsList = Array.from(openBugsMap.values());
+                          const openBugsList = (planGeneralBugsList || []).filter(b => !b.isDone);
                           const criticalDefects = openBugsList
                             .filter(b => {
                               const s = (b.severity || '').toLowerCase();
                               return s.includes('bloq') || s.includes('crit') || s.includes('may');
                             })
-                            .slice(0, 4);
+                            .sort((a, b) => getSevRank(a.severity) - getSevRank(b.severity))
+                            .slice(0, 5);
 
                           return (
                             <div className="dashboard-card" style={{ height: '100%' }}>
