@@ -569,17 +569,41 @@ function App() {
           
           // 2. Add any items from backend that we DON'T have locally, UNLESS we just deleted them
           newExecutionData.forEach(item => {
-              if (!prev.some(pItem => pItem.id === item.id) && !deletedIdsRef.current.has(String(item.id))) {
+              const itemKey = item.testCaseKey || item.key;
+              const alreadyExists = newArray.some(pItem => 
+                String(pItem.id) === String(item.id) || 
+                (itemKey && (pItem.testCaseKey === itemKey || pItem.key === itemKey))
+              );
+              if (!alreadyExists && !deletedIdsRef.current.has(String(item.id))) {
                   newArray.push(item);
               }
           });
           
+          // 3. Deduplicate final array strictly by key and id
+          const dedupedMap = new Map();
+          for (const item of newArray) {
+            const tcKey = item.testCaseKey || item.key;
+            const tcId = String(item.testCaseId || item.id);
+            const dKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
+            if (!dedupedMap.has(dKey)) {
+              dedupedMap.set(dKey, item);
+            } else {
+              const existing = dedupedMap.get(dKey);
+              const hasExec = item.status && item.status !== 'Not Run' && item.status !== 'To Do';
+              const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+              if (hasExec && !existingHasExec) {
+                dedupedMap.set(dKey, item);
+              }
+            }
+          }
+          const finalDedupedArray = Array.from(dedupedMap.values());
+
           const cId = targetCycleId ? String(targetCycleId) : (selectedCycle ? String(selectedCycle.id) : null);
           if (cId) {
-            perCycleCacheRef.current[cId] = newArray;
-            setTestCycles(cycles => cycles.map(c => String(c.id) === cId ? { ...c, testCount: newArray.length } : c));
+            perCycleCacheRef.current[cId] = finalDedupedArray;
+            setTestCycles(cycles => cycles.map(c => String(c.id) === cId ? { ...c, testCount: finalDedupedArray.length } : c));
           }
-          return newArray;
+          return finalDedupedArray;
       });
   }, [selectedCycle]);
 
@@ -4795,18 +4819,41 @@ const renderPlanningTab = () => {
     const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
     const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
 
-    const filteredCycleTests = cycleTests.filter(test => 
+    // Deduplicate cycleTests strictly by test case key and ID
+    const uniqueCycleTestsMap = new Map();
+    for (const test of cycleTests) {
+      const tcKey = test.testCaseKey || test.key;
+      const tcId = String(test.testCaseId || test.id);
+      const dedupeKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
+      if (!uniqueCycleTestsMap.has(dedupeKey)) {
+        uniqueCycleTestsMap.set(dedupeKey, test);
+      } else {
+        const existing = uniqueCycleTestsMap.get(dedupeKey);
+        const hasExec = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
+        const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+        if (hasExec && !existingHasExec) {
+          uniqueCycleTestsMap.set(dedupeKey, test);
+        }
+      }
+    }
+    const deduplicatedCycleTests = Array.from(uniqueCycleTestsMap.values());
+
+    const filteredCycleTests = deduplicatedCycleTests.filter(test => 
       !searchQuery || 
       test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || 
       test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      (testCases.find(t => t.id === test.id)?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())
+      (testCases.find(t => String(t.id) === String(test.id))?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+    const cycleTestIds = new Set(deduplicatedCycleTests.map(ct => String(ct.id)));
+    const cycleTestKeys = new Set(deduplicatedCycleTests.map(ct => ct.testCaseKey || ct.key).filter(Boolean));
 
     const availableFilteredTestCases = testCases.filter(tc => 
       (planningFolder === '' || tc.folderId === planningFolder) &&
       (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
       (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) &&
-      !cycleTests.some(ct => String(ct.id) === String(tc.id)) &&
+      !cycleTestIds.has(String(tc.id)) &&
+      (!tc.key || !cycleTestKeys.has(tc.key)) &&
       (!searchQuery || tc.key?.toLowerCase().includes(searchQuery.toLowerCase()) || tc.summary?.toLowerCase().includes(searchQuery.toLowerCase()))
     );
 
@@ -4856,7 +4903,6 @@ const renderPlanningTab = () => {
                   <div>
                     {filteredTestCycles.filter(c => c.planId === selectedPlanId).map(cycle => {
                       const isActive = selectedCycle?.id === cycle.id;
-                      const count = getCycleAuthoritativeCount(cycle);
                       return (
                         <div 
                           key={cycle.id} 
@@ -4873,9 +4919,6 @@ const renderPlanningTab = () => {
                             </span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: isActive ? '#CCE0FF' : '#F1F2F4', color: isActive ? '#0C66E4' : '#626F86' }}>
-                              {count}
-                            </span>
                             <button 
                               onClick={(e) => { e.stopPropagation(); handleUnlinkCycleFromPlan(cycle.id); }} 
                               style={{ 
@@ -4927,9 +4970,6 @@ const renderPlanningTab = () => {
                           </span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                          <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: '#F1F2F4', color: '#626F86' }}>
-                            {getCycleAuthoritativeCount(cycle)}
-                          </span>
                           <button 
                             onClick={() => handleLinkCycleToPlan(cycle.id, selectedPlanId)} 
                             style={{ 
@@ -4967,7 +5007,6 @@ const renderPlanningTab = () => {
                 <div>
                   {filteredTestCycles.map(cycle => {
                     const isActive = selectedCycle?.id === cycle.id;
-                    const count = getCycleAuthoritativeCount(cycle);
                     return (
                       <div 
                         key={cycle.id} 
@@ -4983,9 +5022,6 @@ const renderPlanningTab = () => {
                             {cycle.summary}
                           </span>
                         </div>
-                        <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', fontWeight: 700, background: isActive ? '#CCE0FF' : '#F1F2F4', color: isActive ? '#0C66E4' : '#626F86', flexShrink: 0 }}>
-                          {count}
-                        </span>
                       </div>
                     );
                   })}
@@ -5113,15 +5149,15 @@ const renderPlanningTab = () => {
                   </div>
 
                   {/* Select All Sub-bar */}
-                  {cycleTests.length > 0 && (
+                  {deduplicatedCycleTests.length > 0 && (
                     <div className="planning-panel-subbar">
                       <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', userSelect: 'none' }}>
                         <input
                           type="checkbox"
-                          checked={planningChecked.size > 0 && planningChecked.size === cycleTests.length}
-                          ref={el => { if (el) el.indeterminate = planningChecked.size > 0 && planningChecked.size < cycleTests.length; }}
+                          checked={planningChecked.size > 0 && planningChecked.size === deduplicatedCycleTests.length}
+                          ref={el => { if (el) el.indeterminate = planningChecked.size > 0 && planningChecked.size < deduplicatedCycleTests.length; }}
                           onChange={e => {
-                            if (e.target.checked) setPlanningChecked(new Set(cycleTests.map(t => String(t.id))));
+                            if (e.target.checked) setPlanningChecked(new Set(deduplicatedCycleTests.map(t => String(t.id))));
                             else setPlanningChecked(new Set());
                           }}
                           style={{ borderRadius: '3px', cursor: 'pointer' }}
@@ -5206,7 +5242,7 @@ const renderPlanningTab = () => {
                             </div>
                           );
                         })}
-                        {cycleTests.length === 0 && (
+                        {deduplicatedCycleTests.length === 0 && (
                           <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
                             No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
                           </div>
@@ -5245,7 +5281,8 @@ const renderPlanningTab = () => {
                             (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual'
                               ? getExecVal(tc).includes('man')
                               : getExecVal(tc).includes('auto'))) &&
-                            !cycleTests.some(ct => String(ct.id) === String(tc.id))
+                            !cycleTestIds.has(String(tc.id)) &&
+                            (!tc.key || !cycleTestKeys.has(tc.key))
                           );
                           setSelectedTestsForCycle(available.map(tc => tc.id));
                         }}

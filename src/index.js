@@ -1213,44 +1213,63 @@ const getCycleExecutionSummary = async (cycleId) => {
           };
         });
 
-        // DEDUPLICATION: group by testCaseId, keep the best run per TC, unlink/delete blanks
-        const byTcId = new Map();
+        // DEDUPLICATION: group by testCaseId AND testCaseKey, keep best run per TC, unlink/delete duplicate blanks
+        const byKey = new Map();
         for (const entry of mappedRuns) {
-          const key = entry._tcIdStr;
-          if (!byTcId.has(key)) {
-            byTcId.set(key, entry);
+          const tcKey = entry.testCaseKey || entry.key;
+          const tcId = entry.testCaseId || entry.id;
+          let existingWinnerKey = null;
+          if (tcKey && byKey.has(`key_${tcKey}`)) {
+            existingWinnerKey = `key_${tcKey}`;
+          } else if (tcId && byKey.has(`id_${tcId}`)) {
+            existingWinnerKey = `id_${tcId}`;
+          }
+
+          if (!existingWinnerKey) {
+            if (tcKey) byKey.set(`key_${tcKey}`, entry);
+            if (tcId) byKey.set(`id_${tcId}`, entry);
           } else {
-            const existing = byTcId.get(key);
-            // Keep the one with execution data; if tied, keep the most recent
-            const existingWins = existing._hasExecution || (!entry._hasExecution && existing._createdAt >= entry._createdAt);
-            const winner = existingWins ? existing : entry;
-            const loser = existingWins ? entry : existing;
-            byTcId.set(key, winner);
-            // Silently unlink the duplicate blank run from the cycle in background
-            const loserRunId = loser._runIssue?.id;
-            if (loserRunId) {
-              const loserProp = loser._runIssue?.properties?.['testpulse-run-data'] || {};
-              const hasData = loser._hasExecution;
-              if (!hasData) {
-                // It's a blank duplicate — delete it from Jira
-                api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}`, { method: 'DELETE' }).catch(() => {});
-              } else {
-                // Has data — just mark as unlinked so it doesn't reappear
-                api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}/properties/testpulse-run-data`, {
-                  method: 'PUT',
-                  headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ ...loserProp, unlinkedFromCycle: true, unlinkedAt: Date.now() })
-                }).catch(() => {});
+            const existing = byKey.get(existingWinnerKey);
+            if (existing !== entry) {
+              const existingWins = existing._hasExecution || (!entry._hasExecution && existing._createdAt >= entry._createdAt);
+              const winner = existingWins ? existing : entry;
+              const loser = existingWins ? entry : existing;
+              if (tcKey) byKey.set(`key_${tcKey}`, winner);
+              if (tcId) byKey.set(`id_${tcId}`, winner);
+
+              // Silently unlink the duplicate blank run from the cycle in background
+              const loserRunId = loser._runIssue?.id;
+              if (loserRunId) {
+                const loserProp = loser._runIssue?.properties?.['testpulse-run-data'] || {};
+                const hasData = loser._hasExecution;
+                if (!hasData) {
+                  api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}`, { method: 'DELETE' }).catch(() => {});
+                } else {
+                  api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}/properties/testpulse-run-data`, {
+                    method: 'PUT',
+                    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...loserProp, unlinkedFromCycle: true, unlinkedAt: Date.now() })
+                  }).catch(() => {});
+                }
               }
             }
           }
         }
 
-        return Array.from(byTcId.values()).map(entry => {
-          // Strip internal helper fields
+        const uniqueEntries = Array.from(new Set(byKey.values()));
+        const cleanEntries = uniqueEntries.map(entry => {
           const { _runIssue, _tcIdStr, _normStatus, _hasExecution, _createdAt, ...clean } = entry;
           return clean;
         });
+
+        // Reconcile cycle property in background so getTestCycles matches native linked runs 100%
+        api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(cleanEntries.map(e => ({ id: e.id, key: e.key, status: e.status, executionType: e.executionType, testRunId: e.testRunId })))
+        }).catch(() => {});
+
+        return cleanEntries;
       }
     }
 
