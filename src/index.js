@@ -1355,13 +1355,16 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     const planId = properties['testops-plan-link']?.planId || null;
     let rawExecution = (await readCycleIndex(issue.id)) ?? [];
     
-    // Deduplicate by test case ID so count strictly matches getCycleExecutionSummary
+    // Deduplicate by test case key and ID so count strictly matches Planning & Execution
     const seenTc = new Set();
     const execution = [];
-    for (const item of rawExecution) {
+    for (let i = 0; i < rawExecution.length; i++) {
+      const item = rawExecution[i];
+      const tcKey = item.key || item.testCaseKey || '';
       const tcId = String(item.id || item.testCaseId || '');
-      if (!tcId || !seenTc.has(tcId)) {
-        if (tcId) seenTc.add(tcId);
+      const dKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${i}`);
+      if (!seenTc.has(dKey)) {
+        seenTc.add(dKey);
         const { _stub, ...rest } = item;
         execution.push(rest);
       }
@@ -2970,111 +2973,132 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
 });
 
 
-// ── Todos los bugs del espacio Jira accesibles por el usuario ──
+// ── Todos los bugs del espacio/proyecto Jira en el que se trabaja ──
 resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
-  const { projectId, linkedBugKeys = [], allProjectKeys = [], bugIssueTypes = [] } = payload;
+  const { projectId, projectKey, linkedBugKeys = [], bugIssueTypes = [] } = payload;
 
   const linkedSet = new Set(linkedBugKeys.map(String));
 
+  // Determine target project identifier
+  let targetProj = projectKey || projectId;
+  let resolvedProjectKey = projectKey || null;
+
   // Build issue type filter
-  const defaultBugTypes = ['Bug', 'Defect', 'Defecto', 'Falla', 'Error', 'Incident', 'Incidente', 'Issue', 'Problem', 'Problema'];
+  const defaultBugKeywords = ['bug', 'defect', 'defecto', 'falla', 'error', 'incident', 'incidente', 'issue', 'problem', 'problema', 'fallo', 'anomalia', 'anomalía'];
   let typeIds = [];
+  let allProjIssueTypes = [];
+
   try {
-    const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
-    if (projRes.ok) {
-      const projData = await projRes.json();
-      if (projData.issueTypes) {
-         typeIds = projData.issueTypes
-            .filter(t => bugIssueTypes.includes(t.name) || defaultBugTypes.includes(t.name))
-            .map(t => t.id);
+    if (targetProj) {
+      const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${targetProj}`);
+      if (projRes.ok) {
+        const projData = await projRes.json();
+        if (projData.key) {
+          resolvedProjectKey = projData.key;
+        }
+        allProjIssueTypes = projData.issueTypes || [];
+        console.log(`[getProjectUnlinkedBugs] Target: ${targetProj} (Key: ${resolvedProjectKey}), issueTypes found in project:`, allProjIssueTypes.map(t => `${t.name} (ID: ${t.id})`).join(', '));
+        
+        typeIds = allProjIssueTypes
+          .filter(t => {
+            const nameLow = (t.name || '').toLowerCase().trim();
+            const inConfig = bugIssueTypes.some(bt => (bt || '').toLowerCase().trim() === nameLow);
+            const isDefaultBug = defaultBugKeywords.some(kw => nameLow.includes(kw));
+            return inConfig || isDefaultBug;
+          })
+          .map(t => t.id);
       }
     }
   } catch(e) { console.warn("Failed to get project issue types for JQL", e); }
   
-  if (typeIds.length === 0) {
-     // Fallback to names if API failed
-     typeIds = bugIssueTypes.length > 0 ? bugIssueTypes.map(t => `"${t}"`) : defaultBugTypes.map(t => `"${t}"`);
-  }
-
+  const effectiveProject = resolvedProjectKey || targetProj || projectId;
   let projectJql = '';
-  if (allProjectKeys.length > 0) {
-    const keyList = allProjectKeys.map(k => `"${k}"`).join(', ');
-    projectJql = `project in (${keyList}) AND `;
-  } else if (projectId) {
-    projectJql = `project = ${projectId} AND `;
+  if (effectiveProject) {
+    projectJql = `project = "${effectiveProject}" AND `;
   }
 
-  const jql = `${projectJql}issuetype in (${typeIds.join(',')}) ORDER BY created DESC`;
-  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'reporter', 'issuetype', 'project', 'customfield_10238'];
+  let typeClause = '';
+  if (typeIds.length > 0) {
+    typeClause = `issuetype in (${typeIds.join(',')})`;
+  } else {
+    // Fallback to all standard bug names if typeIds couldn't be resolved
+    const fallbackTypes = ['Error', 'Bug', 'Defect', 'Defecto', 'Falla', 'Incident', 'Incidente', 'Problema', 'Problem'];
+    typeClause = `issuetype in (${fallbackTypes.map(t => `"${t}"`).join(',')})`;
+  }
 
-  let issues = [];
-  
+  const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
+  console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
+
+  let allIssues = [];
+  let token = null;
+  let isLast = false;
+  let pages = 0;
+
   try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        jql: jql,
-        maxResults: 200,
-        fields: fields
-      })
-    });
-
-    // --- PROBE QUERY TO DEBUG ISSUE TYPES ---
-    try {
-      const probeRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jql: projectJql.replace(' AND ', ''), maxResults: 100, fields: ['issuetype'] })
-      });
-      if (probeRes.ok) {
-        const probeData = await probeRes.json();
-        const foundTypes = [...new Set((probeData.issues || []).map(i => i.fields.issuetype?.name))];
-        console.log(`getProjectUnlinkedBugs: PROBE project issues. Total found: ${probeData.issues?.length}. Unique types: ${foundTypes.join(', ')}`);
-      } else {
-        console.warn(`PROBE failed ${probeRes.status}`);
+    while (!isLast && pages < 10) {
+      const page = await fetchJqlPage(jql, fields, null, null, token, 100);
+      if (page.error) {
+        console.warn(`[getProjectUnlinkedBugs] JQL search warning:`, page.error);
+        break;
       }
-    } catch (e) {
-      console.error('PROBE exception', e);
-    }
-    // --- END PROBE ---
-
-    if (res.ok) {
-      const data = await res.json();
-      console.log(`getProjectUnlinkedBugs: search SUCCESS! jql: ${jql}, issues length: ${data.issues ? data.issues.length : 'undefined'}`);
-      issues = data.issues || data.values || [];
-    } else {
-      const errText = await res.text();
-      console.warn(`getProjectUnlinkedBugs: search failed ${res.status} with jql: ${jql}. Body: ${errText}`);
-      // Fallback extremadament simple en caso de que project in () falle
-      const fallbackJql = projectId ? `project = ${projectId} AND issuetype in (${typeIds.join(',')}) ORDER BY created DESC` : `issuetype in (${typeIds.join(',')}) ORDER BY created DESC`;
-      const fallbackRes = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jql: fallbackJql, maxResults: 100, fields })
-      });
-      if (fallbackRes.ok) {
-        const fb = await fallbackRes.json();
-        issues = fb.issues || [];
-      } else {
-        const fbErr = await fallbackRes.text();
-        console.warn(`Fallback search also failed ${fallbackRes.status}. Body: ${fbErr}`);
-      }
+      allIssues = allIssues.concat(page.issues || []);
+      token = page.nextPageToken;
+      isLast = page.isLast !== undefined ? page.isLast : (token == null);
+      if (!token) break;
+      pages++;
     }
   } catch (e) {
     console.error("Exception in getProjectUnlinkedBugs:", e);
   }
 
-  // Return ALL bugs — mark linked ones instead of filtering them out
-  return issues.map(issue => {
+  console.log(`[getProjectUnlinkedBugs] Total bugs retrieved from Jira: ${allIssues.length}`);
+
+  // Return ALL bugs with explicit issuelinks detection
+  return allIssues.map(issue => {
     let sev = 'Sin definir';
     if (issue.fields?.customfield_10238) {
       const sf = issue.fields.customfield_10238;
       sev = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
     }
+
+    // Inspect Jira issuelinks on the bug to see if it is linked to any test entity
+    let isLinkedToTest = linkedSet.has(issue.key);
+    const linkedTests = [];
+
+    (issue.fields?.issuelinks || []).forEach(link => {
+      const other = link.outwardIssue || link.inwardIssue;
+      if (!other) return;
+      const typeName = (other.fields?.issuetype?.name || '').toLowerCase();
+      const summary = other.fields?.summary || '';
+      const otherKey = other.key || '';
+      
+      const isTestEntity = typeName.includes('run') || 
+                           typeName.includes('cycle') || 
+                           typeName.includes('case') || 
+                           typeName.includes('set') || 
+                           typeName.includes('plan') || 
+                           typeName.includes('prueba') || 
+                           typeName.includes('caso') || 
+                           typeName.includes('ejecución') ||
+                           typeName.includes('ejecucion') ||
+                           summary.startsWith('[Test') || 
+                           summary.startsWith('TC-') || 
+                           summary.startsWith('TR-');
+      
+      if (isTestEntity) {
+        isLinkedToTest = true;
+        linkedTests.push({
+          id: other.id,
+          key: otherKey,
+          summary: summary,
+          type: other.fields?.issuetype?.name || 'Test',
+          status: other.fields?.status?.name || '',
+          linkType: link.type?.name || 'Relates'
+        });
+      }
+    });
+
     return {
       key: issue.key,
       summary: issue.fields?.summary || '',
@@ -3088,7 +3112,8 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       created: issue.fields?.created || null,
       issuetype: issue.fields?.issuetype?.name || 'Bug',
       project: issue.fields?.project?.key || '',
-      isLinked: linkedSet.has(issue.key),
+      isLinked: isLinkedToTest,
+      linkedTests: linkedTests
     };
   });
 });

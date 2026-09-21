@@ -91,15 +91,6 @@ const AVAILABLE_WIDGET_CATALOG = [
     description: 'Conteo y proporciones de bugs clasificados en Bloqueante, Crítico, Mayor, Menor y Sin Definir.'
   },
   {
-    type: 'top_defects',
-    title: 'Top Defectos Críticos & Bloqueantes',
-    category: 'Defectos',
-    categoryColor: '#DE350B',
-    icon: '🔥',
-    defaultWidth: 'half',
-    description: 'Mini-tablero de incidencias críticas abiertas que requieren atención inmediata, con enlaces directos a Jira.'
-  },
-  {
     type: 'automation_health',
     title: 'Salud de Automatización & CI/CD',
     category: 'Automatización',
@@ -641,6 +632,11 @@ function App() {
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
+  const [showUnlinkedBugsModal, setShowUnlinkedBugsModal] = useState(false);
+  const [linkingUnlinkedBug, setLinkingUnlinkedBug] = useState(null);
+  const [targetCycleForBug, setTargetCycleForBug] = useState('');
+  const [targetTestForBug, setTargetTestForBug] = useState('');
+  const [isLinkingUnlinkedBugLoading, setIsLinkingUnlinkedBugLoading] = useState(false);
   
   // Modal State
   const [context, setContext] = useState(null);
@@ -4653,12 +4649,13 @@ Then el sistema valida la identidad.
           (ex.linkedBugs || []).forEach(bug => { if (bug.key) linkedBugKeys.push(bug.key); });
         });
       });
-      // Fetch bugs from ALL accessible projects (not just the selected one)
-      const allProjectKeys = projects.filter(p => p.key && p.key !== 'ERR' && p.key !== 'N/A').map(p => p.key);
+      // Fetch bugs strictly from the CURRENT project/workspace
+      const currentProj = projects.find(p => String(p.id) === String(projId) || String(p.key) === String(projId));
+      const targetProjectKey = currentProj?.key || (isNaN(projId) ? projId : null);
       invoke('getProjectUnlinkedBugs', {
         projectId: projId,
+        projectKey: targetProjectKey,
         linkedBugKeys,
-        allProjectKeys,
         bugIssueTypes: cfg?.bugIssueTypes || [],
       })
         .then(bugs => setUnlinkedBugs(bugs || []))
@@ -4800,6 +4797,79 @@ Then el sistema valida la identidad.
     });
   };
 
+  const handleConfirmLinkUnlinkedBug = async () => {
+    if (!linkingUnlinkedBug || !targetCycleForBug || !targetTestForBug) {
+      addNotification({
+        type: 'warning',
+        title: 'Selección incompleta',
+        description: 'Por favor selecciona un ciclo y un caso de prueba para vincular el defecto.'
+      });
+      return;
+    }
+
+    const bugKey = linkingUnlinkedBug.key;
+    const cycle = testCycles.find(c => String(c.id) === String(targetCycleForBug));
+    const targetTc = testCases.find(t => String(t.id) === String(targetTestForBug));
+
+    setIsLinkingUnlinkedBugLoading(true);
+    try {
+      // 1. Link in Jira Issue Link
+      await invoke('linkBugToTest', { testCaseId: targetTestForBug, bugKey });
+
+      // 2. Update cycle execution status with the linked bug
+      const reportCycle = (reportData.cycles || []).find(rc => String(rc.id) === String(targetCycleForBug));
+      const existingEx = reportCycle?.execution?.find(e => String(e.id) === String(targetTestForBug));
+      const currentLinkedBugs = existingEx?.linkedBugs || [];
+      const updatedLinkedBugs = currentLinkedBugs.some(b => b.key === bugKey)
+        ? currentLinkedBugs
+        : [...currentLinkedBugs, { key: bugKey, summary: linkingUnlinkedBug.summary, severity: linkingUnlinkedBug.severity, status: linkingUnlinkedBug.status }];
+
+      await invoke('updateTestStatus', {
+        cycleId: targetCycleForBug,
+        testId: targetTestForBug,
+        testRunId: existingEx?.testRunId || existingEx?.testRunKey,
+        linkedBugs: updatedLinkedBugs
+      });
+
+      // 3. Optimistic local update: mark as linked in unlinkedBugs state
+      setUnlinkedBugs(prev => prev.map(b => b.key === bugKey ? { ...b, isLinked: true } : b));
+
+      // 4. Update reportData state
+      setReportData(prev => {
+        const nextCycles = (prev.cycles || []).map(c => {
+          if (String(c.id) !== String(targetCycleForBug)) return c;
+          const nextExec = (c.execution || []).map(ex => {
+            if (String(ex.id) !== String(targetTestForBug)) return ex;
+            return {
+              ...ex,
+              linkedBugs: updatedLinkedBugs
+            };
+          });
+          return { ...c, execution: nextExec };
+        });
+        return { ...prev, cycles: nextCycles };
+      });
+
+      addNotification({
+        type: 'success',
+        title: '✅ Defecto Vinculado',
+        description: `El defecto ${bugKey} fue vinculado con éxito al caso ${targetTc?.key || targetTestForBug} en el ciclo ${cycle?.summary || targetCycleForBug}.`
+      });
+
+      setLinkingUnlinkedBug(null);
+      setTargetCycleForBug('');
+      setTargetTestForBug('');
+    } catch (err) {
+      console.error('Error linking unlinked bug:', err);
+      addNotification({
+        type: 'error',
+        title: 'Error al vincular defecto',
+        description: err.message || 'No se pudo completar la vinculación en Jira.'
+      });
+    } finally {
+      setIsLinkingUnlinkedBugLoading(false);
+    }
+  };
 
   const getStatusColor = (status) => {
     const s = status === 'To Do' ? 'Not Run' : status;
@@ -7171,7 +7241,7 @@ const renderPlanningTab = () => {
       // 4. Strict issue type verification (only bug, error, defecto, defect, falla, incidente, incident, problem)
       const rawType = (bug.issuetype || bug.issueType?.name || bug.issueType || bug.rawFields?.issuetype?.name || '').toLowerCase().trim();
       if (rawType) {
-        const validBugKeywords = ['bug', 'error', 'defecto', 'defect', 'falla', 'incidente', 'incident', 'problem'];
+        const validBugKeywords = ['bug', 'error', 'defecto', 'defect', 'falla', 'incidente', 'incident', 'problem', 'problema', 'fallo', 'anomalia', 'anomalía'];
         const isBug = validBugKeywords.some(kw => rawType.includes(kw));
         if (!isBug) return false;
       }
@@ -7198,10 +7268,18 @@ const renderPlanningTab = () => {
       return s;
     };
 
+    const isBugDone = (b) => {
+      if (!b) return false;
+      const statusStr = (typeof b === 'string' ? b : (b.status || '')).toLowerCase().trim();
+      const catKey = (b.statusCategory || b.rawFields?.status?.statusCategory?.key || '').toLowerCase().trim();
+      return ['done', 'closed', 'cerrada', 'cerrado', 'terminada', 'terminado', 'finalizada', 'finalizado'].includes(statusStr) ||
+             catKey === 'done';
+    };
+
     const renderBugStatusLozenge = (statusStr, isDone) => {
       const st = (statusStr || '').trim();
       const low = st.toLowerCase();
-      if (isDone || ['done', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(low)) {
+      if (isDone || ['done', 'closed', 'cerrada', 'cerrado', 'terminada', 'terminado', 'finalizada', 'finalizado'].includes(low)) {
         return <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Cerrado'}</span>;
       }
       if (low.includes('prog') || low.includes('curs') || low.includes('desarr') || low.includes('dev')) {
@@ -7269,22 +7347,22 @@ const renderPlanningTab = () => {
     planCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
-        cycle.execution.forEach(ex => {
+        cycle.execution.forEach((ex, idx) => {
+          const tcKey = ex.key || ex.testCaseKey || (testCases.find(t => String(t.id) === String(ex.id))?.key) || '';
           const tcId = String(ex.id || ex.testCaseId || '');
-          if (tcId && seenTcInCycle.has(tcId)) return;
-          if (tcId) seenTcInCycle.add(tcId);
+          const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
+          if (seenTcInCycle.has(dedupeKey)) return;
+          seenTcInCycle.add(dedupeKey);
 
           if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
             const tc = testCases.find(t => String(t.id) === String(ex.id));
-            const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
+            const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
 
             ex.linkedBugs.forEach(bug => {
               if (!bug || !bug.key || !isActualBug(bug)) return;
 
-              const statusStr = (bug.status || '').toLowerCase().trim();
-              const isDone = ['done', 'closed', 'cerrada', 'cerrado', 'terminado', 'resolved', 'resuelta', 'resuelto', 'finalizado'].includes(statusStr) ||
-                             (bug.resolution && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver' && bug.resolution !== 'Done');
+              const isDone = isBugDone(bug);
 
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
 
@@ -7333,7 +7411,7 @@ const renderPlanningTab = () => {
               const entry = planAllBugsMap.get(bugKey);
               entry.affectedCases.set(String(ex.id), {
                 id: ex.id,
-                key: tcKey,
+                key: tcKeyDisplay,
                 summary: tcSummary,
                 status: ex.status,
                 cycleName: cycleName
@@ -7344,23 +7422,18 @@ const renderPlanningTab = () => {
       }
     });
 
-    const planGeneralBugsList = Array.from(planAllBugsMap.values()).map(item => ({
-      ...item,
-      cycleList: Array.from(item.cycles).join(', '),
-      affectedCount: item.affectedCases.size,
-      affectedCasesList: Array.from(item.affectedCases.values())
-    }));
-
     // ── 2. Cycle-Level Runs & Open Bugs (Scoped to filteredCycles) ──
     const cycleOpenBugsMap = new Map();
 
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
-        cycle.execution.forEach(ex => {
+        cycle.execution.forEach((ex, idx) => {
+          const tcKey = ex.key || ex.testCaseKey || (testCases.find(t => String(t.id) === String(ex.id))?.key) || '';
           const tcId = String(ex.id || ex.testCaseId || '');
-          if (tcId && seenTcInCycle.has(tcId)) return;
-          if (tcId) seenTcInCycle.add(tcId);
+          const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
+          if (seenTcInCycle.has(dedupeKey)) return;
+          seenTcInCycle.add(dedupeKey);
 
           const tc = testCases.find(t => String(t.id) === String(ex.id));
 
@@ -7423,7 +7496,7 @@ const renderPlanningTab = () => {
 
           // Bugs tracking (Open Bugs in selected cycle(s))
           if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
-            const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
+            const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
 
             ex.linkedBugs.forEach(bug => {
@@ -7463,7 +7536,7 @@ const renderPlanningTab = () => {
               const entry = cycleOpenBugsMap.get(bugKey);
               entry.affectedCases.set(String(ex.id), {
                 id: ex.id,
-                key: tcKey,
+                key: tcKeyDisplay,
                 summary: tcSummary,
                 status: ex.status
               });
@@ -7473,17 +7546,140 @@ const renderPlanningTab = () => {
       }
     });
 
-    const allBugsMap = planAllBugsMap;
-    const totalAllBugs = planAllBugsMap.size;
-    const totalAllPlanBugs = planAllBugsMap.size;
+    // Filter and consolidate project bugs
+    const currentProjObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
+    const currentProjKey = currentProjObj?.key;
+
+    // Filter project bugs by workspace project and valid bug type
+    const relevantProjectBugs = unlinkedBugs.filter(b => {
+      if (!isActualBug(b)) return false;
+      if (b.project) {
+        const pKey = typeof b.project === 'object' ? (b.project.key || b.project.id) : String(b.project);
+        if (currentProjKey && pKey && pKey !== currentProjKey && !b.key.startsWith(currentProjKey + '-')) return false;
+      } else if (currentProjKey && b.key && !b.key.startsWith(currentProjKey + '-')) {
+        return false;
+      }
+      return true;
+    });
+
+    const allBugsMap = new Map(planAllBugsMap);
+    const projectUnlinkedBugs = [];
+
+    relevantProjectBugs.forEach(ub => {
+      const isDone = isBugDone(ub);
+      const finalSeverity = normalizeSeverity(ub.severity, ub.rawFields);
+      const isLinkedToAnyTest = ub.isLinked || (ub.linkedTests && ub.linkedTests.length > 0);
+
+      // Resolve origin cycles for any linked tests / runs
+      const foundCycles = new Set();
+      const affectedMap = new Map();
+
+      if (ub.linkedTests && ub.linkedTests.length > 0) {
+        ub.linkedTests.forEach(lt => {
+          const tcKey = lt.key || lt.id;
+          const tcSummary = lt.summary || '';
+          const tcId = String(lt.id || '');
+
+          if (tcKey) {
+            affectedMap.set(tcKey, {
+              key: lt.key,
+              summary: lt.summary,
+              status: lt.status || 'Ejecutado',
+              type: lt.type
+            });
+          }
+
+          // Search across planCycles to find which cycle executes or contains this test case / test run
+          (planCycles || []).forEach(c => {
+            const cName = c.summary || c.key || String(c.id);
+            const inCycleExecution = (c.execution || []).some(ex => {
+              const exKey = ex.key || ex.testCaseKey || '';
+              const exId = String(ex.id || ex.testCaseId || '');
+              const exSummary = ex.summary || '';
+              return (tcKey && (exKey === tcKey || exKey.includes(tcKey) || tcKey.includes(exKey))) ||
+                     (tcId && exId === tcId) ||
+                     (tcSummary && exSummary && (tcSummary === exSummary || tcSummary.includes(exKey) || exSummary.includes(tcKey)));
+            });
+            const inCycleTestCases = (c.testCases || []).some(tc => {
+              const k = typeof tc === 'string' ? tc : (tc?.key || tc?.id);
+              return k && tcKey && (String(k) === String(tcKey) || String(tcKey).includes(String(k)) || String(k).includes(String(tcKey)));
+            });
+
+            if (inCycleExecution || inCycleTestCases) {
+              foundCycles.add(cName);
+            }
+          });
+        });
+      }
+
+      if (allBugsMap.has(ub.key)) {
+        // Bug was already registered in a cycle execution of this plan — enrich its linked test details and cycles
+        const existing = allBugsMap.get(ub.key);
+        affectedMap.forEach((val, k) => {
+          if (!existing.affectedCases.has(k)) {
+            existing.affectedCases.set(k, val);
+          }
+        });
+        foundCycles.forEach(cName => {
+          existing.cycles.add(cName);
+        });
+      } else {
+        // Bug is in the project but wasn't part of planAllBugsMap
+        if (isLinkedToAnyTest) {
+          // It IS linked to a Test Run or Test Case in Jira
+          const resolvedCycles = foundCycles.size > 0 ? foundCycles : new Set(['Jira Link']);
+
+          allBugsMap.set(ub.key, {
+            key: ub.key,
+            summary: ub.summary || 'Defecto vinculado a prueba',
+            severity: finalSeverity,
+            assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
+            status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
+            resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
+            isDone: isDone,
+            isUnlinked: false,
+            cycles: resolvedCycles,
+            affectedCases: affectedMap
+          });
+        } else {
+          // Genuinely unlinked bug in Jira
+          allBugsMap.set(ub.key, {
+            key: ub.key,
+            summary: ub.summary || 'Defecto sin vincular',
+            severity: finalSeverity,
+            assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
+            status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
+            resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
+            isDone: isDone,
+            isUnlinked: true,
+            cycles: new Set(),
+            affectedCases: new Map()
+          });
+          projectUnlinkedBugs.push(ub);
+        }
+      }
+    });
+
+    const openUnlinkedBugs = projectUnlinkedBugs.filter(b => !isBugDone(b));
+    const closedUnlinkedBugs = projectUnlinkedBugs.filter(b => isBugDone(b));
+
+    const planGeneralBugsList = Array.from(allBugsMap.values()).map(item => ({
+      ...item,
+      cycleList: item.cycles && item.cycles.size > 0 ? Array.from(item.cycles).join(', ') : 'Sin vincular',
+      affectedCount: item.affectedCases ? item.affectedCases.size : 0,
+      affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
+    }));
+
+    const totalAllBugs = allBugsMap.size;
+    const totalAllPlanBugs = totalAllBugs;
     const criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
       affectedCount: item.affectedCases.size,
       affectedCasesList: Array.from(item.affectedCases.values())
     }));
-    const totalOpenBugs = criticalCycleBugs.length;
-    const totalClosedBugs = Array.from(planAllBugsMap.values()).filter(b => b.isDone).length;
-    const totalOpenPlanBugs = Array.from(planAllBugsMap.values()).filter(b => !b.isDone).length;
+    const totalOpenBugs = Array.from(allBugsMap.values()).filter(b => !b.isDone).length;
+    const totalClosedBugs = Array.from(allBugsMap.values()).filter(b => b.isDone).length;
+    const totalOpenPlanBugs = totalOpenBugs;
     const totalClosedPlanBugs = totalClosedBugs;
 
     const ejecutados = passed + failed;
@@ -8078,9 +8274,15 @@ const renderPlanningTab = () => {
     const traceabilityRows = [];
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
-        cycle.execution.forEach(ex => {
+        const seenTcInCycle = new Set();
+        cycle.execution.forEach((ex, idx) => {
           const tc = testCases.find(t => String(t.id) === String(ex.id));
           const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
+          const tcId = String(ex.id || ex.testCaseId || '');
+          const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
+          if (seenTcInCycle.has(dedupeKey)) return;
+          seenTcInCycle.add(dedupeKey);
+
           const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
           const folderObj = folders.find(f => String(f.id) === String(tc?.folderId || tc?.folder));
           const folderName = folderObj?.name || tc?.folderName || tc?.folder || 'General';
@@ -8545,7 +8747,54 @@ const renderPlanningTab = () => {
                 </div>
               )}
 
-              {/* Dynamic Grid of Configured Widgets */}
+            {/* ⚠️ Defectos de Jira sin vincular a pruebas Banner */}
+            {projectUnlinkedBugs.length > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '10px 16px',
+                  backgroundColor: '#FFF0ED',
+                  border: '1px solid #FFBDAD',
+                  borderRadius: '8px',
+                  marginBottom: '1rem',
+                  gap: '12px'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{ fontSize: '20px' }}>⚠️</span>
+                  <div>
+                    <div style={{ color: '#DE350B', fontSize: '13px', fontWeight: 700 }}>
+                      Defectos de Jira sin vincular a pruebas ({projectUnlinkedBugs.length})
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#44546F', marginTop: '2px' }}>
+                      Existen {projectUnlinkedBugs.length} {projectUnlinkedBugs.length === 1 ? 'incidencia tipo Bug en Jira que no está asociada' : 'incidencias tipo Bug en Jira que no están asociadas'} a ningún Test Run o caso de prueba.
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowUnlinkedBugsModal(true)}
+                  style={{
+                    backgroundColor: '#DE350B',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    whiteSpace: 'nowrap',
+                    cursor: 'pointer',
+                    boxShadow: '0 1px 3px rgba(222, 53, 11, 0.3)'
+                  }}
+                >
+                  🔍 Ver y Asociar ({projectUnlinkedBugs.length})
+                </button>
+              </div>
+            )}
+
+            {/* Dynamic Grid of Configured Widgets */}
               <div className="dashboard-widgets-grid">
                 {dashboardWidgets
                   .filter(w => w.visible !== false)
@@ -8703,22 +8952,18 @@ const renderPlanningTab = () => {
                             </div>
 
                             <div className="dashboard-donut-wrapper">
-                              <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0 }}>
-                                <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
-                                  <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#EBECF0" strokeWidth="3.4" />
+                              <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <svg viewBox="0 0 42 42" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                                  <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#EBECF0" strokeWidth="7.5" />
                                   {allTotal > 0 && (
                                     <>
-                                      {pPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#36B37E" strokeWidth="3.4" strokeDasharray={`${pPct} ${100 - pPct}`} strokeDashoffset="0" />}
-                                      {fPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#DE350B" strokeWidth="3.4" strokeDasharray={`${fPct} ${100 - fPct}`} strokeDashoffset={`${-pPct}`} />}
-                                      {bPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#FFAB00" strokeWidth="3.4" strokeDasharray={`${bPct} ${100 - bPct}`} strokeDashoffset={`${-(pPct + fPct)}`} />}
-                                      {nPct > 0 && <circle cx="18" cy="18" r="15.91549430918954" fill="transparent" stroke="#0C66E4" strokeWidth="3.4" strokeDasharray={`${nPct} ${100 - nPct}`} strokeDashoffset={`${-(pPct + fPct + bPct)}`} />}
+                                      {pPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#36B37E" strokeWidth="7.5" strokeDasharray={`${pPct} ${100 - pPct}`} strokeDashoffset="0" />}
+                                      {fPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#DE350B" strokeWidth="7.5" strokeDasharray={`${fPct} ${100 - fPct}`} strokeDashoffset={`${-pPct}`} />}
+                                      {bPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#FFAB00" strokeWidth="7.5" strokeDasharray={`${bPct} ${100 - bPct}`} strokeDashoffset={`${-(pPct + fPct)}`} />}
+                                      {nPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#0C66E4" strokeWidth="7.5" strokeDasharray={`${nPct} ${100 - nPct}`} strokeDashoffset={`${-(pPct + fPct + bPct)}`} />}
                                     </>
                                   )}
                                 </svg>
-                                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                                  <span style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', lineHeight: 1 }}>{successRate}%</span>
-                                  <span style={{ fontSize: '9px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', textTransform: 'uppercase', marginTop: '2px', letterSpacing: '0.04em' }}>ÉXITO EFEC.</span>
-                                </div>
                               </div>
 
                               <div className="dashboard-status-list" style={{ flex: 1 }}>
@@ -9061,88 +9306,6 @@ const renderPlanningTab = () => {
                           );
                         })()}
 
-                        {widget.type === 'top_defects' && (() => {
-                          const openBugsList = Array.from(openBugsMap.values());
-                          const criticalDefects = openBugsList
-                            .filter(b => {
-                              const s = (b.severity || '').toLowerCase();
-                              return s.includes('bloq') || s.includes('crit') || s.includes('may');
-                            })
-                            .slice(0, 4);
-
-                          return (
-                            <div className="dashboard-card" style={{ height: '100%' }}>
-                              <div className="dashboard-card-header">
-                                <div className="dashboard-card-title">
-                                  <span>🔥</span>
-                                  <span>Top Defectos Críticos &amp; Bloqueantes</span>
-                                </div>
-                                <span style={{ fontSize: '11px', background: criticalDefects.length > 0 ? '#FFEBE6' : '#E3FCEF', color: criticalDefects.length > 0 ? '#DE350B' : '#006644', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
-                                  {criticalDefects.length} Urgentes
-                                </span>
-                              </div>
-
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.3rem 0', maxHeight: '240px', overflowY: 'auto' }}>
-                                {criticalDefects.length > 0 ? (
-                                  criticalDefects.map(bug => {
-                                    const sLow = (bug.severity || '').toLowerCase();
-                                    const sevClass = sLow.includes('bloq') ? 'bloqueante' : sLow.includes('crit') ? 'critico' : 'mayor';
-                                    return (
-                                      <div
-                                        key={bug.key}
-                                        style={{
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          justifyContent: 'space-between',
-                                          padding: '6px 10px',
-                                          background: '#FAFBFC',
-                                          border: '1px solid #ECEEF0',
-                                          borderRadius: '6px',
-                                          gap: '8px'
-                                        }}
-                                      >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
-                                          <a
-                                            href={`/browse/${bug.key}`}
-                                            onClick={(e) => {
-                                              e.preventDefault();
-                                              router.open(`/browse/${bug.key}`);
-                                            }}
-                                            style={{ fontWeight: 700, fontSize: '12px', color: '#0C66E4', textDecoration: 'none', flexShrink: 0 }}
-                                          >
-                                            {bug.key}
-                                          </a>
-                                          <span
-                                            style={{
-                                              fontSize: '12px',
-                                              color: 'var(--jira-dark, #172B4D)',
-                                              whiteSpace: 'nowrap',
-                                              overflow: 'hidden',
-                                              textOverflow: 'ellipsis'
-                                            }}
-                                            title={bug.summary}
-                                          >
-                                            {bug.summary}
-                                          </span>
-                                        </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                                          <span className={`dashboard-sev-badge ${sevClass}`}>
-                                            {bug.severity || 'Mayor'}
-                                          </span>
-                                        </div>
-                                      </div>
-                                    );
-                                  })
-                                ) : (
-                                  <div style={{ textAlign: 'center', padding: '1.5rem 1rem', color: '#006644', background: '#E3FCEF', borderRadius: '6px', fontSize: '12px', fontWeight: 600 }}>
-                                    🟢 ¡Excelente! No hay defectos críticos ni bloqueantes abiertos.
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })()}
-
                         {widget.type === 'automation_health' && (() => {
                           const autoCasesCount = execStats.auto.total;
                           const totalEvalCases = allTotal;
@@ -9202,19 +9365,19 @@ const renderPlanningTab = () => {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               {/* Bugs KPI Scorecard (5 Cards) */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
-                {/* Card 1: Total Defectos (Plan) */}
+                {/* Card 1: Total Defectos */}
                 <div className="dashboard-kpi-card">
                   <div className="dashboard-kpi-header">
-                    <span style={{ color: 'var(--jira-dark, #172B4D)', fontWeight: 700 }}>🐞 TOTAL DEFECTOS (PLAN)</span>
-                    <span className="dashboard-kpi-pill blue">{totalAllPlanBugs} totales</span>
+                    <span style={{ color: 'var(--jira-dark, #172B4D)', fontWeight: 700 }}>🐞 TOTAL DEFECTOS</span>
+                    <span className="dashboard-kpi-pill blue">{totalAllBugs} totales</span>
                   </div>
                   <div className="dashboard-kpi-value" style={{ color: 'var(--jira-dark, #172B4D)' }}>
-                    {totalAllPlanBugs}
+                    {totalAllBugs}
                   </div>
                   <div className="dashboard-kpi-footer">
-                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedPlanBugs} Cerrados</span>
-                    <span style={{ color: totalOpenPlanBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
-                      {totalOpenPlanBugs} Abiertos
+                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
+                    <span style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
+                      {totalOpenBugs} Abiertos
                     </span>
                   </div>
                 </div>
@@ -9553,16 +9716,22 @@ const renderPlanningTab = () => {
                           {/* 3. Ciclo(s) origen */}
                           <td style={{ maxWidth: '200px' }}>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                              {Array.from(bug.cycles || []).map((cName, idx) => (
-                                <span
-                                  key={idx}
-                                  className="ads-lozenge ads-lozenge-subtle"
-                                  style={{ fontSize: '10px', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                                  title={cName}
-                                >
-                                  {cName}
+                              {bug.cycles && bug.cycles.size > 0 ? (
+                                Array.from(bug.cycles).map((cName, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="ads-lozenge ads-lozenge-subtle"
+                                    style={{ fontSize: '10px', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                    title={cName}
+                                  >
+                                    {cName}
+                                  </span>
+                                ))
+                              ) : (
+                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '11px' }}>
+                                  {bug.isUnlinked ? 'Sin vincular' : 'Jira Link'}
                                 </span>
-                              ))}
+                              )}
                             </div>
                           </td>
 
@@ -10005,6 +10174,241 @@ const renderPlanningTab = () => {
                     style={{ padding: '6px 16px', fontSize: '12px' }}
                   >
                     Listo
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Modal 1: Defectos de Jira sin vincular a pruebas ─── */}
+          {showUnlinkedBugsModal && (
+            <div className="ads-modal-overlay" style={{ zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div
+                className="ads-modal-container"
+                style={{
+                  width: '900px',
+                  maxWidth: '94vw',
+                  maxHeight: '85vh',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: '10px',
+                  boxShadow: '0 12px 32px rgba(9, 30, 66, 0.25)',
+                  overflow: 'hidden'
+                }}
+              >
+                {/* Modal Header */}
+                <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>⚠️</span> Defectos de Jira sin Vincular a Pruebas ({projectUnlinkedBugs.length})
+                    </h3>
+                    <div style={{ fontSize: '12px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
+                      Incidencias de tipo Bug en el proyecto que no están asociadas a ningún Test Run o caso de prueba.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowUnlinkedBugsModal(false)}
+                    style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--jira-subtle, #626F86)', padding: '4px' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Modal Content */}
+                <div style={{ padding: '1.25rem 1.5rem', overflowY: 'auto', flex: 1 }}>
+                  {projectUnlinkedBugs.length > 0 ? (
+                    <table className="dashboard-defects-table" style={{ width: '100%' }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: '15%' }}>Clave</th>
+                          <th style={{ width: '40%' }}>Resumen</th>
+                          <th style={{ width: '15%' }}>Severidad</th>
+                          <th style={{ width: '15%' }}>Estado</th>
+                          <th style={{ width: '15%', textAlign: 'center' }}>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectUnlinkedBugs.map((bug, idx) => (
+                          <tr key={bug.key || idx}>
+                            <td>
+                              <a
+                                href={`/browse/${bug.key}`}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  router.open(`/browse/${bug.key}`);
+                                }}
+                                style={{ fontWeight: 700, color: '#0C66E4', textDecoration: 'none' }}
+                              >
+                                {bug.key}
+                              </a>
+                            </td>
+                            <td style={{ fontSize: '12px', color: '#172B4D' }}>{bug.summary || 'Sin resumen'}</td>
+                            <td>
+                              <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px' }}>
+                                {bug.severity || bug.priority || 'Sin definir'}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`ads-lozenge ${isBugDone(bug) ? 'ads-lozenge-success' : 'ads-lozenge-inprogress'}`} style={{ fontSize: '11px' }}>
+                                {bug.status || 'Abierto'}
+                              </span>
+                            </td>
+                            <td style={{ textAlign: 'center' }}>
+                              <button
+                                className="btn-primary"
+                                onClick={() => {
+                                  setLinkingUnlinkedBug(bug);
+                                  setTargetCycleForBug(filteredCycles[0]?.id || testCycles[0]?.id || '');
+                                }}
+                                style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                <span>🔗</span> Asociar a Caso
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div style={{ textAlign: 'center', padding: '3rem 1rem', color: '#006644', background: '#E3FCEF', borderRadius: '8px' }}>
+                      <span style={{ fontSize: '24px' }}>🟢</span>
+                      <div style={{ fontWeight: 700, fontSize: '14px', marginTop: '8px' }}>¡Todos los defectos están vinculados a pruebas!</div>
+                      <div style={{ fontSize: '12px', color: '#006644', marginTop: '4px' }}>No hay incidencias tipo Bug huérfanas en el proyecto.</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Modal Footer */}
+                <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', justifyContent: 'flex-end', background: '#FAFBFC' }}>
+                  <button className="btn-secondary" onClick={() => setShowUnlinkedBugsModal(false)}>
+                    Cerrar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Modal 2: Formulario para Vincular Bug a Caso de Prueba ─── */}
+          {linkingUnlinkedBug && (
+            <div className="ads-modal-overlay" style={{ zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div
+                className="ads-modal-container"
+                style={{
+                  width: '560px',
+                  maxWidth: '92vw',
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: '10px',
+                  boxShadow: '0 16px 40px rgba(9, 30, 66, 0.3)',
+                  overflow: 'hidden'
+                }}
+              >
+                {/* Header */}
+                <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#172B4D', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span>🔗</span> Asociar Defecto {linkingUnlinkedBug.key} a Caso de Prueba
+                    </h3>
+                    <div style={{ fontSize: '12px', color: '#626F86', marginTop: '2px' }}>
+                      {linkingUnlinkedBug.summary}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setLinkingUnlinkedBug(null);
+                      setTargetCycleForBug('');
+                      setTargetTestForBug('');
+                    }}
+                    style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: '#626F86', padding: '4px' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Body */}
+                <div style={{ padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D', marginBottom: '6px', display: 'block' }}>
+                      1. Selecciona el Ciclo de Prueba:
+                    </label>
+                    <select
+                      className="form-control"
+                      value={targetCycleForBug}
+                      onChange={(e) => {
+                        setTargetCycleForBug(e.target.value);
+                        setTargetTestForBug('');
+                      }}
+                      style={{ width: '100%', padding: '6px 10px', fontSize: '13px' }}
+                    >
+                      <option value="">-- Selecciona un ciclo --</option>
+                      {testCycles.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.summary || c.key || `Ciclo ${c.id}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D', marginBottom: '6px', display: 'block' }}>
+                      2. Selecciona el Caso de Prueba / Ejecución:
+                    </label>
+                    {(() => {
+                      const cycleObj = (reportData.cycles || []).find(c => String(c.id) === String(targetCycleForBug));
+                      const availableExec = cycleObj?.execution || [];
+                      return (
+                        <select
+                          className="form-control"
+                          value={targetTestForBug}
+                          onChange={(e) => setTargetTestForBug(e.target.value)}
+                          disabled={!targetCycleForBug}
+                          style={{ width: '100%', padding: '6px 10px', fontSize: '13px' }}
+                        >
+                          <option value="">-- Selecciona un caso de prueba --</option>
+                          {availableExec.length > 0 ? (
+                            availableExec.map((ex) => {
+                              const tc = testCases.find(t => String(t.id) === String(ex.id));
+                              const tcKey = tc?.key || ex.key || `TC-${ex.id}`;
+                              const tcSummary = tc?.summary || ex.summary || 'Caso de prueba';
+                              return (
+                                <option key={ex.id} value={ex.id}>
+                                  {tcKey} - {tcSummary} ({ex.status || 'Not Run'})
+                                </option>
+                              );
+                            })
+                          ) : (
+                            testCases.map(tc => (
+                              <option key={tc.id} value={tc.id}>
+                                {tc.key || `TC-${tc.id}`} - {tc.summary}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', justifyContent: 'flex-end', gap: '8px', background: '#FAFBFC' }}>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => {
+                      setLinkingUnlinkedBug(null);
+                      setTargetCycleForBug('');
+                      setTargetTestForBug('');
+                    }}
+                    disabled={isLinkingUnlinkedBugLoading}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    className="btn-primary"
+                    onClick={handleConfirmLinkUnlinkedBug}
+                    disabled={!targetCycleForBug || !targetTestForBug || isLinkingUnlinkedBugLoading}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    {isLinkingUnlinkedBugLoading ? 'Vinculando...' : '🔗 Confirmar Vinculación'}
                   </button>
                 </div>
               </div>
