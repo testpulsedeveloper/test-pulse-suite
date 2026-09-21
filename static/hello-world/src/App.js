@@ -7263,6 +7263,7 @@ const renderPlanningTab = () => {
 
     const allBugsMap = planAllBugsMap;
     const totalAllBugs = planAllBugsMap.size;
+    const totalAllPlanBugs = planAllBugsMap.size;
     const criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
       affectedCount: item.affectedCases.size,
