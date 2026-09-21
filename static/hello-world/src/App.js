@@ -11876,7 +11876,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.10.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> v3.11.0 © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
