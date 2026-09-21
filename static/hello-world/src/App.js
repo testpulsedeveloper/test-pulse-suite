@@ -4812,13 +4812,6 @@ Then el sistema valida la identidad.
   };
 
 const renderPlanningTab = () => {
-    const totalInProject = testCases.length;
-    const inCycleCount = selectedCycle ? getCycleAuthoritativeCount(selectedCycle) : 0;
-    const notInCycleCount = totalInProject > inCycleCount ? totalInProject - inCycleCount : 0;
-    const missingPct = totalInProject > 0 ? Math.round((notInCycleCount / totalInProject) * 100) : 0;
-    const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
-    const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
-
     // Deduplicate cycleTests strictly by test case key and ID
     const uniqueCycleTestsMap = new Map();
     for (const test of cycleTests) {
@@ -4837,6 +4830,13 @@ const renderPlanningTab = () => {
       }
     }
     const deduplicatedCycleTests = Array.from(uniqueCycleTestsMap.values());
+
+    const totalInProject = testCases.length;
+    const inCycleCount = selectedCycle ? deduplicatedCycleTests.length : 0;
+    const notInCycleCount = totalInProject > inCycleCount ? totalInProject - inCycleCount : 0;
+    const missingPct = totalInProject > 0 ? Math.round((notInCycleCount / totalInProject) * 100) : 0;
+    const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
+    const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
 
     const filteredCycleTests = deduplicatedCycleTests.filter(test => 
       !searchQuery || 
@@ -5067,8 +5067,15 @@ const renderPlanningTab = () => {
                       <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', letterSpacing: '-0.01em' }}>
                         Planning: <span style={{ color: '#0C66E4' }}>{selectedCycle.summary}</span>
                       </h1>
-                      <span style={{ fontSize: '11px', fontWeight: 600, background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '12px' }}>
-                        {isLoadingCycleTests && cycleTests.length === 0 ? 'Cargando casos...' : `${getCycleAuthoritativeCount(selectedCycle)} casos en ciclo`}
+                      <span style={{ fontSize: '11px', fontWeight: 600, background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                        {isLoadingCycleTests ? (
+                          <>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
+                            <span>Sincronizando...</span>
+                          </>
+                        ) : (
+                          `${deduplicatedCycleTests.length} casos en ciclo`
+                        )}
                       </span>
                     </div>
                     <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#626F86' }}>
@@ -5095,8 +5102,13 @@ const renderPlanningTab = () => {
                 <div className="planning-card-panel">
                   <div className="planning-panel-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D' }}>
-                        Tests in this Cycle ({isLoadingCycleTests ? '...' : cycleTests.length})
+                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span>Tests in this Cycle</span>
+                        {isLoadingCycleTests ? (
+                          <span style={{ fontSize: '11px', fontWeight: 500, color: '#626F86' }}>(Sincronizando...)</span>
+                        ) : (
+                          <span style={{ fontSize: '12px', fontWeight: 600, color: '#626F86' }}>({deduplicatedCycleTests.length})</span>
+                        )}
                       </h2>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -5107,7 +5119,7 @@ const renderPlanningTab = () => {
                           onClick={() => {
                             const selectedIds = [...planningChecked];
                             const executedCount = selectedIds.filter(id => {
-                              const t = cycleTests.find(ct => String(ct.id) === String(id));
+                              const t = deduplicatedCycleTests.find(ct => String(ct.id) === String(id));
                               return t && t.status && t.status !== 'Not Run' && t.status !== 'To Do';
                             }).length;
                             const msg = executedCount > 0
@@ -5124,16 +5136,16 @@ const renderPlanningTab = () => {
                           🗑 Eliminar seleccionados ({planningChecked.size})
                         </button>
                       )}
-                      {cycleTests.length > 0 && (
+                      {deduplicatedCycleTests.length > 0 && (
                         <button 
                           className="btn-secondary" 
                           style={{ color: '#CA3521', height: '28px', fontSize: '11px', fontWeight: 600, padding: '0 8px' }}
                           onClick={() => {
-                            const allIds = cycleTests.map(t => t.id);
-                            const executedCount = cycleTests.filter(t => t.status && t.status !== 'Not Run' && t.status !== 'To Do').length;
+                            const allIds = deduplicatedCycleTests.map(t => t.id);
+                            const executedCount = deduplicatedCycleTests.filter(t => t.status && t.status !== 'Not Run' && t.status !== 'To Do').length;
                             const msg = executedCount > 0
-                              ? `¿Remover TODOS los ${cycleTests.length} casos del ciclo? (${executedCount} caso${executedCount !== 1 ? 's' : ''} cuentan con ejecuciones que quedarán preservadas de forma segura en Jira).`
-                              : `¿Eliminar TODOS los ${cycleTests.length} casos del ciclo?`;
+                              ? `¿Remover TODOS los ${deduplicatedCycleTests.length} casos del ciclo? (${executedCount} caso${executedCount !== 1 ? 's' : ''} cuentan con ejecuciones que quedarán preservadas de forma segura en Jira).`
+                              : `¿Eliminar TODOS los ${deduplicatedCycleTests.length} casos del ciclo?`;
                             showConfirm(
                               'Remover todos los casos',
                               msg,
@@ -5253,7 +5265,12 @@ const renderPlanningTab = () => {
                 </div>
 
                 {/* WARNING BANNER (Atlassian Yellow Banner) */}
-                {totalInProject > 0 && notInCycleCount > 0 && (
+                {isLoadingCycleTests ? (
+                  <div style={{ padding: '10px 14px', background: '#FAFBFC', border: '1px solid #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 1rem 0' }}>
+                    <div style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                    <span>Sincronizando casos de prueba del ciclo...</span>
+                  </div>
+                ) : (totalInProject > 0 && notInCycleCount > 0 ? (
                   <div className="planning-warning-banner">
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
                       <div style={{ color: '#D97706', marginTop: '2px', flexShrink: 0 }}>
@@ -5299,7 +5316,7 @@ const renderPlanningTab = () => {
                       </button>
                     </div>
                   </div>
-                )}
+                ) : null)}
 
                 {/* SECTION 2: Available Test Cases (Filtered Backlog) */}
                 <div className="planning-card-panel">
