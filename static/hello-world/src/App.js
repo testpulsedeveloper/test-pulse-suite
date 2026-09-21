@@ -8,8 +8,9 @@ import Spinner from '@atlaskit/spinner';
 import './index.css';
 import TestPulseLoader from './components/TestPulseLoader';
 import { LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
+import packageJson from '../package.json';
 
-
+const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
 
 const generateUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -7621,24 +7622,60 @@ const renderPlanningTab = () => {
             });
           }
 
-          // Search across planCycles to find which cycle executes or contains this test case / test run
+          // Search across planCycles to find which cycle executes or contains this test case / test run (exact match only)
           (planCycles || []).forEach(c => {
             const cName = c.summary || c.key || String(c.id);
             const inCycleExecution = (c.execution || []).some(ex => {
               const exKey = ex.key || ex.testCaseKey || '';
               const exId = String(ex.id || ex.testCaseId || '');
-              const exSummary = ex.summary || '';
-              return (tcKey && (exKey === tcKey || exKey.includes(tcKey) || tcKey.includes(exKey))) ||
-                     (tcId && exId === tcId) ||
-                     (tcSummary && exSummary && (tcSummary === exSummary || tcSummary.includes(exKey) || exSummary.includes(tcKey)));
+              return (tcKey && exKey && tcKey === exKey) ||
+                     (tcId && exId && tcId === exId);
             });
             const inCycleTestCases = (c.testCases || []).some(tc => {
               const k = typeof tc === 'string' ? tc : (tc?.key || tc?.id);
-              return k && tcKey && (String(k) === String(tcKey) || String(tcKey).includes(String(k)) || String(k).includes(String(tcKey)));
+              const tcItemId = typeof tc === 'object' ? String(tc?.id || '') : '';
+              return (k && tcKey && String(k) === String(tcKey)) ||
+                     (tcItemId && tcId && tcItemId === tcId);
             });
 
             if (inCycleExecution || inCycleTestCases) {
               foundCycles.add(cName);
+            }
+          });
+
+          // Also check if it belongs to filteredCycles to add to cycleAllBugsMap
+          (filteredCycles || []).forEach(fc => {
+            const fcName = fc.summary || fc.key || String(fc.id);
+            const inFcExecution = (fc.execution || []).some(ex => {
+              const exKey = ex.key || ex.testCaseKey || '';
+              const exId = String(ex.id || ex.testCaseId || '');
+              return (tcKey && exKey && tcKey === exKey) ||
+                     (tcId && exId && tcId === exId);
+            });
+            const inFcTestCases = (fc.testCases || []).some(tc => {
+              const k = typeof tc === 'string' ? tc : (tc?.key || tc?.id);
+              const tcItemId = typeof tc === 'object' ? String(tc?.id || '') : '';
+              return (k && tcKey && String(k) === String(tcKey)) ||
+                     (tcItemId && tcId && tcItemId === tcId);
+            });
+
+            if (inFcExecution || inFcTestCases) {
+              if (!cycleAllBugsMap.has(ub.key)) {
+                cycleAllBugsMap.set(ub.key, {
+                  key: ub.key,
+                  summary: ub.summary || 'Defecto vinculado a prueba',
+                  severity: finalSeverity,
+                  assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
+                  status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
+                  resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
+                  isDone: isDone,
+                  cycles: new Set([fcName]),
+                  affectedCases: new Map([[tcKey || tcId, { id: tcId, key: tcKey, summary: lt.summary, status: lt.status || 'Ejecutado', cycleName: fcName }]])
+                });
+              } else {
+                cycleAllBugsMap.get(ub.key).cycles.add(fcName);
+                cycleAllBugsMap.get(ub.key).affectedCases.set(tcKey || tcId, { id: tcId, key: tcKey, summary: lt.summary, status: lt.status || 'Ejecutado', cycleName: fcName });
+              }
             }
           });
         });
@@ -7792,12 +7829,7 @@ const renderPlanningTab = () => {
       }
 
       // Generate Bug Rows strictly for the selected cycle(s) (6 well-proportioned columns to prevent cutoff)
-      const selectedCycleNames = new Set(filteredCycles.map(c => c.summary || c.key || String(c.id)));
-      const cycleBugsArray = Array.from(allBugsMap.values()).filter(bug => {
-        if (cycleAllBugsMap && cycleAllBugsMap.has(bug.key)) return true;
-        if (bug.cycles && Array.from(bug.cycles).some(cName => selectedCycleNames.has(cName))) return true;
-        return false;
-      });
+      const cycleBugsArray = Array.from(cycleAllBugsMap.values());
 
       let tableRows = '';
       if (cycleBugsArray.length === 0) {
@@ -7929,13 +7961,10 @@ const renderPlanningTab = () => {
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
             <tr>
               <td style="vertical-align: middle;">
-                <div style="font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 4px;">
-                  ⚡ TEST PULSE SUITE • REPORTE EJECUTIVO
+                <div style="font-size: 13px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 8px;">
+                  ⚡ TEST PULSE SUITE • REPORTE DE ESTATUS
                 </div>
-                <div style="font-size: 20px; font-weight: 700; color: #ffffff; margin: 0 0 10px 0; letter-spacing: -0.2px;">
-                  TEST PULSE SUITE - REPORTE DE ESTATUS
-                </div>
-                <div style="margin-top: 6px;">
+                <div style="margin-top: 4px;">
                   <img src="${LIVERPOOL_LOGO_WHITE_B64}" alt="Liverpool" class="liverpool-animated-logo" style="height: 28px; width: auto; max-width: 140px; display: block; border: 0;" />
                 </div>
               </td>
@@ -8106,7 +8135,7 @@ const renderPlanningTab = () => {
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
             <tr>
               <td style="font-size: 11px; color: #626F86;">
-                Test Pulse Suite v2.1.0 • Jira Cloud Quality Management • El Puerto de Liverpool
+                Test Pulse Suite ${APP_VERSION} • Jira Cloud Quality Management • El Puerto de Liverpool
               </td>
               <td style="font-size: 11px; color: #626F86; text-align: right;">
                 Generado automáticamente
@@ -8221,7 +8250,7 @@ const renderPlanningTab = () => {
         const report = buildExecutiveReportData();
         const payload = {
           timestamp: new Date().toISOString(),
-          source: 'Test Pulse Suite v2.1.0 (Manual Test Dispatch)',
+          source: `Test Pulse Suite ${APP_VERSION} (Manual Test Dispatch)`,
           projectId: selectedProjectId,
           projectName: report.projectName,
           projectKey: report.projectKey,
@@ -10731,7 +10760,7 @@ const renderPlanningTab = () => {
                 )}
               </div>
               <p style={{ margin: 0, color: 'var(--text-secondary, #8b949e)', fontSize: '0.92rem', lineHeight: '1.4' }}>
-                Administra el mapeo de entidades nativas de Jira, trazabilidad de requerimientos, métricas visibles del tablero y permisos de acceso para Test Pulse Suite v2.1.0.
+                Administra el mapeo de entidades nativas de Jira, trazabilidad de requerimientos, métricas visibles del tablero y permisos de acceso para Test Pulse Suite {APP_VERSION}.
               </p>
             </div>
 
@@ -11495,7 +11524,7 @@ const renderPlanningTab = () => {
         },
         body: JSON.stringify({
           timestamp: new Date().toISOString(),
-          source: 'Test Pulse Suite v2.1.0',
+          source: `Test Pulse Suite ${APP_VERSION}`,
           projectId: targetId || 'N/A',
           projectName: projName,
           projectKey: projKey,
@@ -12351,7 +12380,7 @@ const renderPlanningTab = () => {
       )}
 
       <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> v3.11.0 © El Puerto de Liverpool
+        <strong>Test Pulse Suite</strong> {APP_VERSION} © El Puerto de Liverpool
       </div>
       {renderModals()}
     </div>
