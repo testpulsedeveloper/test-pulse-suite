@@ -9680,7 +9680,6 @@ const renderPlanningTab = () => {
                       <tr>
                         <th>ID</th>
                         <th>Resumen del bug</th>
-                        <th>Ciclo(s) origen</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -9707,35 +9706,13 @@ const renderPlanningTab = () => {
                           </td>
 
                           {/* 2. Resumen del bug */}
-                          <td style={{ maxWidth: '380px' }}>
+                          <td style={{ maxWidth: '420px' }}>
                             <div style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
                               {bug.summary}
                             </div>
                           </td>
 
-                          {/* 3. Ciclo(s) origen */}
-                          <td style={{ maxWidth: '200px' }}>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                              {bug.cycles && bug.cycles.size > 0 ? (
-                                Array.from(bug.cycles).map((cName, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="ads-lozenge ads-lozenge-subtle"
-                                    style={{ fontSize: '10px', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                                    title={cName}
-                                  >
-                                    {cName}
-                                  </span>
-                                ))
-                              ) : (
-                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '11px' }}>
-                                  {bug.isUnlinked ? 'Sin vincular' : 'Jira Link'}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-
-                          {/* 4. Severidad */}
+                          {/* 3. Severidad */}
                           <td style={{ whiteSpace: 'nowrap' }}>
                             <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
                               {getSeverityLabel(bug.severity)}
