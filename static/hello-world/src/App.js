@@ -3759,6 +3759,7 @@ Then el sistema valida la identidad.
     const cycleId = String(cycle.id);
     deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycleId] || []);
     setPlanningChecked(new Set()); // clear multi-select
+    setExecutionChecked(new Set()); // clear execution multi-select
     setSelectedCycle(cycle);
 
     const cached = perCycleCacheRef.current[cycleId];
@@ -3772,6 +3773,7 @@ Then el sistema valida la identidad.
     }
 
     setIsLoadingCycleTests(true);
+    setCycleTests([]); // Clear previous cycle items while fetching to avoid jump/mix
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
       const deletedForCycle = perCycleDeletedRef.current[cycleId] || new Set();
@@ -3781,11 +3783,31 @@ Then el sistema valida la identidad.
         return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
       });
       const filtered = enriched.filter(t => !deletedForCycle.has(String(t.id)));
-      perCycleCacheRef.current[cycleId] = filtered;
-      setCycleTests(filtered);
+
+      // Strict deduplication by testCaseKey / id
+      const dedupedMap = new Map();
+      filtered.forEach(item => {
+        const tcKey = item.testCaseKey || item.key;
+        const tcId = String(item.testCaseId || item.id);
+        const dKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
+        if (!dedupedMap.has(dKey)) {
+          dedupedMap.set(dKey, item);
+        } else {
+          const existing = dedupedMap.get(dKey);
+          const hasExec = item.status && item.status !== 'Not Run' && item.status !== 'To Do';
+          const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+          if (hasExec && !existingHasExec) {
+            dedupedMap.set(dKey, item);
+          }
+        }
+      });
+      const finalTests = Array.from(dedupedMap.values());
+
+      perCycleCacheRef.current[cycleId] = finalTests;
+      setCycleTests(finalTests);
       // Synchronize exact deduplicated testCount in testCycles permanently
-      setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filtered.length } : c));
-      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: filtered.length } : prev));
+      setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: finalTests.length } : c));
+      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: finalTests.length } : prev));
     } catch (err) {
       addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
     } finally {
@@ -5651,12 +5673,29 @@ const renderPlanningTab = () => {
     const isInProgress = s => ['In Progress'].includes(s);
     const isNotRun = s => !s || ['To Do', 'Not Run', 'None'].includes(s) || (!isPassed(s) && !isFailed(s) && !isBlocked(s) && !isInProgress(s));
 
-    const totalInCycle = cycleTests.length;
-    const passedCount = cycleTests.filter(t => isPassed(t.status)).length;
-    const failedCount = cycleTests.filter(t => isFailed(t.status)).length;
-    const blockedCount = cycleTests.filter(t => isBlocked(t.status)).length;
-    const inProgressCount = cycleTests.filter(t => isInProgress(t.status)).length;
-    const notRunCount = cycleTests.filter(t => isNotRun(t.status)).length;
+    // Deduplicate cycleTests strictly to guarantee zero duplicate artifacts
+    const uniqueCycleTestsMap = new Map();
+    cycleTests.forEach(test => {
+      const matchKey = test.key || test.testCaseKey || (testCases.find(t => String(t.id) === String(test.id))?.key) || String(test.id);
+      if (!uniqueCycleTestsMap.has(matchKey)) {
+        uniqueCycleTestsMap.set(matchKey, test);
+      } else {
+        const existing = uniqueCycleTestsMap.get(matchKey);
+        const hasExec = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
+        const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+        if (hasExec && !existingHasExec) {
+          uniqueCycleTestsMap.set(matchKey, test);
+        }
+      }
+    });
+    const deduplicatedCycleTests = Array.from(uniqueCycleTestsMap.values());
+
+    const totalInCycle = deduplicatedCycleTests.length;
+    const passedCount = deduplicatedCycleTests.filter(t => isPassed(t.status)).length;
+    const failedCount = deduplicatedCycleTests.filter(t => isFailed(t.status)).length;
+    const blockedCount = deduplicatedCycleTests.filter(t => isBlocked(t.status)).length;
+    const inProgressCount = deduplicatedCycleTests.filter(t => isInProgress(t.status)).length;
+    const notRunCount = deduplicatedCycleTests.filter(t => isNotRun(t.status)).length;
     const executedCount = passedCount + failedCount + blockedCount + inProgressCount;
     const completionRate = totalInCycle > 0 ? Math.round(((passedCount + failedCount + blockedCount) / totalInCycle) * 100) : 0;
 
@@ -5667,7 +5706,7 @@ const renderPlanningTab = () => {
     const notRunPct = totalInCycle > 0 ? ((notRunCount / totalInCycle) * 100).toFixed(1) : '0';
 
     // Filter tests
-    let filteredTests = cycleTests.filter(test => {
+    let filteredTests = deduplicatedCycleTests.filter(test => {
       if (executionStatusFilter === 'Passed' && !isPassed(test.status)) return false;
       if (executionStatusFilter === 'Failed' && !isFailed(test.status)) return false;
       if (executionStatusFilter === 'Blocked' && !isBlocked(test.status)) return false;
@@ -5772,7 +5811,6 @@ const renderPlanningTab = () => {
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
             {(selectedPlanId ? filteredTestCycles.filter(c => c.planId === selectedPlanId) : filteredTestCycles).map(cycle => {
               const isSelected = selectedCycle?.id === cycle.id;
-              const testCount = getCycleAuthoritativeCount(cycle);
               return (
                 <div
                   key={cycle.id}
@@ -5800,17 +5838,6 @@ const renderPlanningTab = () => {
                     </svg>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cycle.summary}</span>
                   </div>
-                  <span style={{
-                    fontSize: '10px',
-                    padding: '1px 6px',
-                    borderRadius: '4px',
-                    fontWeight: 700,
-                    background: isSelected ? '#CCE0FF' : '#F1F2F4',
-                    color: isSelected ? '#0C66E4' : '#626F86',
-                    flexShrink: 0
-                  }}>
-                    {testCount}
-                  </span>
                 </div>
               );
             })}
@@ -5875,8 +5902,15 @@ const renderPlanningTab = () => {
                         <h1 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', margin: 0, letterSpacing: '-0.01em' }}>
                           Execution: {selectedCycle.summary}
                         </h1>
-                        <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '12px', background: '#F1F2F4', color: '#44546F' }}>
-                          {totalInCycle} casos
+                        <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '12px', background: isLoadingCycleTests ? '#E9F2FF' : '#F1F2F4', color: isLoadingCycleTests ? '#0C66E4' : '#44546F', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                          {isLoadingCycleTests ? (
+                            <>
+                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
+                              <span>Sincronizando...</span>
+                            </>
+                          ) : (
+                            `${totalInCycle} casos`
+                          )}
                         </span>
                         <span style={{
                           fontSize: '10px',
@@ -5885,11 +5919,11 @@ const renderPlanningTab = () => {
                           textTransform: 'uppercase',
                           padding: '2px 8px',
                           borderRadius: '4px',
-                          background: completionRate === 100 ? '#DCFFF1' : '#E9F2FF',
-                          color: completionRate === 100 ? '#216E4E' : '#0C66E4',
-                          border: `1px solid ${completionRate === 100 ? '#7EE2B8' : '#B2D4FF'}`
+                          background: isLoadingCycleTests ? '#F1F2F4' : (completionRate === 100 ? '#DCFFF1' : '#E9F2FF'),
+                          color: isLoadingCycleTests ? '#626F86' : (completionRate === 100 ? '#216E4E' : '#0C66E4'),
+                          border: `1px solid ${isLoadingCycleTests ? '#DCDFE4' : (completionRate === 100 ? '#7EE2B8' : '#B2D4FF')}`
                         }}>
-                          {completionRate === 100 ? 'Completado' : 'En Ejecución'}
+                          {isLoadingCycleTests ? 'Sincronizando...' : (completionRate === 100 ? 'Completado' : 'En Ejecución')}
                         </span>
                       </div>
                       <p style={{ fontSize: '12px', color: '#626F86', margin: '4px 0 0 0' }}>
@@ -5900,85 +5934,94 @@ const renderPlanningTab = () => {
 
                   {/* Metrics & Progress Card */}
                   <div className="execution-metrics-card">
-                    {/* Top Row: Metrics Breakdown */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', fontSize: '12px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '1.25rem' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#36B37E', display: 'inline-block' }}></span>
-                          <span style={{ color: '#626F86' }}>Passed:</span>
-                          <strong style={{ color: '#172B4D' }}>{passedCount}</strong>
-                          <span style={{ fontSize: '11px', color: '#006644', fontWeight: 600 }}>({passedPct}%)</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FF5630', display: 'inline-block' }}></span>
-                          <span style={{ color: '#626F86' }}>Failed:</span>
-                          <strong style={{ color: '#172B4D' }}>{failedCount}</strong>
-                          <span style={{ fontSize: '11px', color: '#BF2600', fontWeight: 600 }}>({failedPct}%)</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FFAB00', display: 'inline-block' }}></span>
-                          <span style={{ color: '#626F86' }}>Blocked:</span>
-                          <strong style={{ color: '#172B4D' }}>{blockedCount}</strong>
-                          <span style={{ fontSize: '11px', color: '#974F00', fontWeight: 600 }}>({blockedPct}%)</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#0052CC', display: 'inline-block' }}></span>
-                          <span style={{ color: '#626F86' }}>In Progress:</span>
-                          <strong style={{ color: '#172B4D' }}>{inProgressCount}</strong>
-                          <span style={{ fontSize: '11px', color: '#0747A6', fontWeight: 600 }}>({inProgressPct}%)</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#DFE1E6', display: 'inline-block' }}></span>
-                          <span style={{ color: '#626F86' }}>Unexecuted:</span>
-                          <strong style={{ color: '#172B4D' }}>{notRunCount}</strong>
-                          <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>({notRunPct}%)</span>
-                        </div>
+                    {isLoadingCycleTests ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '0.8rem 0', color: '#0C66E4', fontSize: '12px', fontWeight: 600 }}>
+                        <span style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
+                        <span>Sincronizando métricas de ejecución con Jira...</span>
                       </div>
+                    ) : (
+                      <>
+                        {/* Top Row: Metrics Breakdown */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', fontSize: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '1.25rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#36B37E', display: 'inline-block' }}></span>
+                              <span style={{ color: '#626F86' }}>Passed:</span>
+                              <strong style={{ color: '#172B4D' }}>{passedCount}</strong>
+                              <span style={{ fontSize: '11px', color: '#006644', fontWeight: 600 }}>({passedPct}%)</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FF5630', display: 'inline-block' }}></span>
+                              <span style={{ color: '#626F86' }}>Failed:</span>
+                              <strong style={{ color: '#172B4D' }}>{failedCount}</strong>
+                              <span style={{ fontSize: '11px', color: '#BF2600', fontWeight: 600 }}>({failedPct}%)</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FFAB00', display: 'inline-block' }}></span>
+                              <span style={{ color: '#626F86' }}>Blocked:</span>
+                              <strong style={{ color: '#172B4D' }}>{blockedCount}</strong>
+                              <span style={{ fontSize: '11px', color: '#974F00', fontWeight: 600 }}>({blockedPct}%)</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#0052CC', display: 'inline-block' }}></span>
+                              <span style={{ color: '#626F86' }}>In Progress:</span>
+                              <strong style={{ color: '#172B4D' }}>{inProgressCount}</strong>
+                              <span style={{ fontSize: '11px', color: '#0747A6', fontWeight: 600 }}>({inProgressPct}%)</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#DFE1E6', display: 'inline-block' }}></span>
+                              <span style={{ color: '#626F86' }}>Unexecuted:</span>
+                              <strong style={{ color: '#172B4D' }}>{notRunCount}</strong>
+                              <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>({notRunPct}%)</span>
+                            </div>
+                          </div>
 
-                      <div style={{ fontSize: '12px', color: '#626F86' }}>
-                        <span>Tasa de finalización: </span>
-                        <strong style={{ color: '#172B4D', fontSize: '13px' }}>{completionRate}%</strong>
-                      </div>
-                    </div>
+                          <div style={{ fontSize: '12px', color: '#626F86' }}>
+                            <span>Tasa de finalización: </span>
+                            <strong style={{ color: '#172B4D', fontSize: '13px' }}>{completionRate}%</strong>
+                          </div>
+                        </div>
 
-                    {/* Segmented Progress Bar */}
-                    <div className="execution-progress-bar">
-                      {passedCount > 0 && (
-                        <div
-                          className="execution-progress-segment"
-                          style={{ width: `${passedPct}%`, background: '#36B37E' }}
-                          title={`Passed: ${passedCount} (${passedPct}%)`}
-                        />
-                      )}
-                      {failedCount > 0 && (
-                        <div
-                          className="execution-progress-segment"
-                          style={{ width: `${failedPct}%`, background: '#FF5630' }}
-                          title={`Failed: ${failedCount} (${failedPct}%)`}
-                        />
-                      )}
-                      {blockedCount > 0 && (
-                        <div
-                          className="execution-progress-segment"
-                          style={{ width: `${blockedPct}%`, background: '#FFAB00' }}
-                          title={`Blocked: ${blockedCount} (${blockedPct}%)`}
-                        />
-                      )}
-                      {inProgressCount > 0 && (
-                        <div
-                          className="execution-progress-segment"
-                          style={{ width: `${inProgressPct}%`, background: '#0052CC' }}
-                          title={`In Progress: ${inProgressCount} (${inProgressPct}%)`}
-                        />
-                      )}
-                      {notRunCount > 0 && (
-                        <div
-                          className="execution-progress-segment"
-                          style={{ width: `${notRunPct}%`, background: '#DFE1E6' }}
-                          title={`Unexecuted: ${notRunCount} (${notRunPct}%)`}
-                        />
-                      )}
-                    </div>
+                        {/* Segmented Progress Bar */}
+                        <div className="execution-progress-bar">
+                          {passedCount > 0 && (
+                            <div
+                              className="execution-progress-segment"
+                              style={{ width: `${passedPct}%`, background: '#36B37E' }}
+                              title={`Passed: ${passedCount} (${passedPct}%)`}
+                            />
+                          )}
+                          {failedCount > 0 && (
+                            <div
+                              className="execution-progress-segment"
+                              style={{ width: `${failedPct}%`, background: '#FF5630' }}
+                              title={`Failed: ${failedCount} (${failedPct}%)`}
+                            />
+                          )}
+                          {blockedCount > 0 && (
+                            <div
+                              className="execution-progress-segment"
+                              style={{ width: `${blockedPct}%`, background: '#FFAB00' }}
+                              title={`Blocked: ${blockedCount} (${blockedPct}%)`}
+                            />
+                          )}
+                          {inProgressCount > 0 && (
+                            <div
+                              className="execution-progress-segment"
+                              style={{ width: `${inProgressPct}%`, background: '#0052CC' }}
+                              title={`In Progress: ${inProgressCount} (${inProgressPct}%)`}
+                            />
+                          )}
+                          {notRunCount > 0 && (
+                            <div
+                              className="execution-progress-segment"
+                              style={{ width: `${notRunPct}%`, background: '#DFE1E6' }}
+                              title={`Unexecuted: ${notRunCount} (${notRunPct}%)`}
+                            />
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {/* Filter Toolbar */}
@@ -6015,41 +6058,41 @@ const renderPlanningTab = () => {
                           onClick={() => { setExecutionStatusFilter('ALL'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'ALL' ? 'active' : ''}`}
                         >
-                          Todos ({totalInCycle})
+                          Todos {isLoadingCycleTests ? '(...)' : `(${totalInCycle})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Passed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Passed' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Passed' ? { background: '#216E4E', color: '#FFFFFF' } : {}}
                         >
-                          Passed ({passedCount})
+                          Passed {isLoadingCycleTests ? '(...)' : `(${passedCount})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Failed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Failed' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Failed' ? { background: '#BF2600', color: '#FFFFFF' } : {}}
                         >
-                          Failed ({failedCount})
+                          Failed {isLoadingCycleTests ? '(...)' : `(${failedCount})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Blocked'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Blocked' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Blocked' ? { background: '#FFAB00', color: '#172B4D' } : {}}
                         >
-                          Blocked ({blockedCount})
+                          Blocked {isLoadingCycleTests ? '(...)' : `(${blockedCount})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('In Progress'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'In Progress' ? 'active' : ''}`}
                           style={executionStatusFilter === 'In Progress' ? { background: '#0747A6', color: '#FFFFFF' } : {}}
                         >
-                          In Progress ({inProgressCount})
+                          In Progress {isLoadingCycleTests ? '(...)' : `(${inProgressCount})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Not Run'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Not Run' ? 'active' : ''}`}
                         >
-                          Not Run ({notRunCount})
+                          Not Run {isLoadingCycleTests ? '(...)' : `(${notRunCount})`}
                         </button>
                       </div>
                     </div>
@@ -6080,18 +6123,26 @@ const renderPlanningTab = () => {
 
                   {/* Test Cases List */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {/* Table / List Header */}
-                    <div style={{
-                      padding: '0.35rem 1rem',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      color: '#626F86',
-                      letterSpacing: '0.04em',
-                      textTransform: 'uppercase'
-                    }}>
+                    {isLoadingCycleTests ? (
+                      <div style={{ textAlign: 'center', padding: '3.5rem 1.5rem', background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '8px', color: '#626F86' }}>
+                        <div style={{ display: 'inline-block', width: '32px', height: '32px', borderRadius: '50%', border: '3px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', marginBottom: '1rem' }} />
+                        <p style={{ fontWeight: 600, color: '#172B4D', margin: '0 0 0.4rem 0', fontSize: '14px' }}>Sincronizando casos de prueba del ciclo...</p>
+                        <p style={{ fontSize: '12px', color: '#626F86', margin: 0 }}>Obteniendo estados de ejecución oficiales desde Jira.</p>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Table / List Header */}
+                        <div style={{
+                          padding: '0.35rem 1rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          color: '#626F86',
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase'
+                        }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                         <input
                           type="checkbox"
@@ -6893,7 +6944,7 @@ const renderPlanningTab = () => {
 
                     {paginatedTests.length === 0 && (
                       <div style={{ textAlign: 'center', padding: '3rem 1.5rem', background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '8px', color: '#626F86' }}>
-                        {cycleTests.length === 0 ? (
+                        {deduplicatedCycleTests.length === 0 ? (
                           <>
                             <div style={{ fontSize: '1.75rem', marginBottom: '0.5rem' }}>📭</div>
                             <p style={{ fontWeight: 600, color: '#172B4D', margin: '0 0 0.5rem 0' }}>No hay casos asignados a este ciclo.</p>
@@ -6921,6 +6972,8 @@ const renderPlanningTab = () => {
                         )}
                       </div>
                     )}
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -6932,7 +6985,11 @@ const renderPlanningTab = () => {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#36B37E', display: 'inline-block' }}></span>
                     <span style={{ fontWeight: 600, color: '#172B4D' }}>Progreso del Ciclo:</span>
-                    <span><strong>{completionRate}%</strong> completado ({executedCount} de {totalInCycle} casos ejecutados)</span>
+                    {isLoadingCycleTests ? (
+                      <span style={{ color: '#0C66E4', fontSize: '11px', fontWeight: 600 }}>Sincronizando...</span>
+                    ) : (
+                      <span><strong>{completionRate}%</strong> completado ({executedCount} de {totalInCycle} casos ejecutados)</span>
+                    )}
                   </div>
                   <span style={{ color: '#DCDFE4' }}>|</span>
                   <span>Plan activo: <strong style={{ color: '#172B4D' }}>{currentPlan?.summary || (selectedPlanId ? 'Plan seleccionado' : 'Sin plan asignado')}</strong></span>
