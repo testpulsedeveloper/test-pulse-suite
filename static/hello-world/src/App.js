@@ -7,7 +7,7 @@ import Button from '@atlaskit/button';
 import Spinner from '@atlaskit/spinner';
 import './index.css';
 import TestPulseLoader from './components/TestPulseLoader';
-import { LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
+import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 import packageJson from '../package.json';
 
 const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
@@ -7213,13 +7213,13 @@ const renderPlanningTab = () => {
     // 1. Plan Cycles (all cycles within the selected plan(s), or all cycles if no plan filter)
     let planCycles = reportData.cycles || [];
     if (reportSelectedPlans && reportSelectedPlans.length > 0) {
-      planCycles = planCycles.filter(c => reportSelectedPlans.includes(c.planId));
+      planCycles = planCycles.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)));
     }
 
     // 2. Cycle-filtered Cycles (cycles filtered by specific cycle selection for Runs & Cycle Bugs)
     let filteredCycles = planCycles;
     if (reportSelectedCycles && reportSelectedCycles.length > 0) {
-      filteredCycles = filteredCycles.filter(c => reportSelectedCycles.includes(c.id));
+      filteredCycles = filteredCycles.filter(c => reportSelectedCycles.some(rcId => String(rcId) === String(c.id)));
     }
 
     // ── Bug & Field Extraction Helpers ──
@@ -7642,42 +7642,6 @@ const renderPlanningTab = () => {
               foundCycles.add(cName);
             }
           });
-
-          // Also check if it belongs to filteredCycles to add to cycleAllBugsMap
-          (filteredCycles || []).forEach(fc => {
-            const fcName = fc.summary || fc.key || String(fc.id);
-            const inFcExecution = (fc.execution || []).some(ex => {
-              const exKey = ex.key || ex.testCaseKey || '';
-              const exId = String(ex.id || ex.testCaseId || '');
-              return (tcKey && exKey && tcKey === exKey) ||
-                     (tcId && exId && tcId === exId);
-            });
-            const inFcTestCases = (fc.testCases || []).some(tc => {
-              const k = typeof tc === 'string' ? tc : (tc?.key || tc?.id);
-              const tcItemId = typeof tc === 'object' ? String(tc?.id || '') : '';
-              return (k && tcKey && String(k) === String(tcKey)) ||
-                     (tcItemId && tcId && tcItemId === tcId);
-            });
-
-            if (inFcExecution || inFcTestCases) {
-              if (!cycleAllBugsMap.has(ub.key)) {
-                cycleAllBugsMap.set(ub.key, {
-                  key: ub.key,
-                  summary: ub.summary || 'Defecto vinculado a prueba',
-                  severity: finalSeverity,
-                  assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
-                  status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
-                  resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
-                  isDone: isDone,
-                  cycles: new Set([fcName]),
-                  affectedCases: new Map([[tcKey || tcId, { id: tcId, key: tcKey, summary: lt.summary, status: lt.status || 'Ejecutado', cycleName: fcName }]])
-                });
-              } else {
-                cycleAllBugsMap.get(ub.key).cycles.add(fcName);
-                cycleAllBugsMap.get(ub.key).affectedCases.set(tcKey || tcId, { id: tcId, key: tcKey, summary: lt.summary, status: lt.status || 'Ejecutado', cycleName: fcName });
-              }
-            }
-          });
         });
       }
 
@@ -7956,6 +7920,31 @@ const renderPlanningTab = () => {
 
       const htmlTemplate = `
         <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
+          <style>
+            @keyframes liverpoolGlowPulse {
+              0% {
+                transform: scale(1);
+                filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.7)) brightness(1);
+              }
+              50% {
+                transform: scale(1.05);
+                filter: drop-shadow(0 0 10px #FFFFFF) drop-shadow(0 0 22px #FFE0F0) brightness(1.25);
+              }
+              100% {
+                transform: scale(1);
+                filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.7)) brightness(1);
+              }
+            }
+            .liverpool-animated-logo {
+              animation: liverpoolGlowPulse 2.4s ease-in-out infinite alternate !important;
+              display: inline-block !important;
+              transition: all 0.3s ease-in-out !important;
+            }
+            .liverpool-animated-logo:hover {
+              transform: scale(1.08) !important;
+              filter: drop-shadow(0 0 14px #FFFFFF) drop-shadow(0 0 26px #FFE0F0) brightness(1.3) !important;
+            }
+          </style>
           
           <!-- Header Banner (Liverpool Gradient & Logo) -->
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
@@ -7965,7 +7954,7 @@ const renderPlanningTab = () => {
                   ⚡ TEST PULSE SUITE • REPORTE DE ESTATUS
                 </div>
                 <div style="margin-top: 4px;">
-                  <img src="${LIVERPOOL_LOGO_WHITE_B64}" alt="Liverpool" class="liverpool-animated-logo" style="height: 28px; width: auto; max-width: 140px; display: block; border: 0;" />
+                  <img src="${LIVERPOOL_LOGO_WHITE_ANIMATED_B64 || LIVERPOOL_LOGO_WHITE_B64}" alt="Liverpool" class="liverpool-animated-logo" style="height: 30px; width: auto; max-width: 150px; display: block; border: 0;" />
                 </div>
               </td>
               <td style="vertical-align: middle; text-align: right;">
