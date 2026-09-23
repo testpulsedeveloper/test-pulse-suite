@@ -2088,6 +2088,16 @@ Then el sistema valida la identidad.
                     ]);
                     if (fetchedCases && !fetchedCases._isError) setTestCases(fetchedCases);
                     if (fetchedFolders && !fetchedFolders._isError) setFolders(fetchedFolders);
+                  } else if (activeTab === 'reports') {
+                    setLocalLoading(true);
+                    const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
+                    const [fetchedCycles, fetchedPlans] = await Promise.all([
+                      invoke('getTestCycles', { projectId: selectedProjectId, config }),
+                      invoke('getTestPlans', { projectId: selectedProjectId, config }),
+                      loadReportData(selectedProjectId, config)
+                    ]);
+                    if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
+                    if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
                   } else {
                     setLocalLoading(true);
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
@@ -4666,7 +4676,17 @@ Then el sistema valida la identidad.
     } catch(err) {
       console.error("loadReportData error:", err);
       if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
-      setReportData(prev => ({ ...prev, _loadError: true }));
+      setReportData(prev => {
+        if (!prev || !prev.cycles || prev.cycles.length === 0) {
+          return { ...prev, _loadError: true };
+        }
+        return prev;
+      });
+      addNotification({
+        type: 'warning',
+        title: 'Sincronización de métricas',
+        description: 'Jira tardó en responder. Mostrando los datos actuales disponibles.'
+      });
     } finally {
       setReportLoading(false);
     }
@@ -5497,7 +5517,7 @@ const renderPlanningTab = () => {
                               }
                             });
 
-                            const CHUNK_SIZE = 5;
+                            const CHUNK_SIZE = 10;
                             let allAddedTests = [];
                             for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                                 const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
@@ -5510,7 +5530,8 @@ const renderPlanningTab = () => {
                                       cycleKey: selectedCycle.key || selectedCycle.id,
                                       projectId: selectedProjectId,
                                       config: projectConfig,
-                                      testCases: chunk 
+                                      testCases: chunk,
+                                      skipIndexWrite: true
                                     });
                                     break;
                                   } catch (errChunk) {
@@ -5526,6 +5547,18 @@ const renderPlanningTab = () => {
                                     allAddedTests = allAddedTests.concat(bRes.addedTests);
                                 }
                                 setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
+                            }
+
+                            // Write unified cycle index once at the end
+                            if (allAddedTests.length > 0) {
+                              try {
+                                await invoke('syncCycleIndexWithRuns', {
+                                  cycleId: selectedCycle.id,
+                                  addedRuns: allAddedTests
+                                });
+                              } catch (errSync) {
+                                console.warn('[syncCycleIndexWithRuns] Index sync warning:', errSync);
+                              }
                             }
                             
                             // Optimistic UI update

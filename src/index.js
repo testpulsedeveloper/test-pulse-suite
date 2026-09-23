@@ -60,7 +60,7 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
   return allIssues;
 }
 
-async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100) {
+async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100, retries = 2) {
   try {
     let safeFields = fields;
     if (Array.isArray(fields) && fields.includes('*all')) {
@@ -90,6 +90,11 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+
+    if (response.status === 429 && retries > 0) {
+      await new Promise(r => setTimeout(r, 1200));
+      return await fetchJqlPage(jql, fields, expand, properties, nextPageToken, maxResults, retries - 1);
+    }
 
     if (!response.ok) {
        return { error: `JQL Search failed: ${response.status} ${await response.text()}` };
@@ -173,7 +178,7 @@ const ensureValidAdf = (desc, fallbackText = '') => {
 const getProjectFolders = async (projectId) => {
   try {
     const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`);
-    if (response.status === 404) return [];
+    if (response.status === 404 || !response.ok) return [];
     const data = await response.json();
     return data.value || [];
   } catch(e) {
@@ -245,19 +250,20 @@ resolver.define('deleteFolder', async ({ payload, context }) => {
 resolver.define('getProjects', async () => {
   try {
     let response = await api.asUser().requestJira(route`/rest/api/3/project`);
-    let data = await response.json();
-    let projects = Array.isArray(data) ? data : (data.values || []);
-
-    if (projects.length === 0) {
+    let data = null;
+    if (response.ok) {
+      data = await response.json();
+    } else {
       // Fallback to asApp() in case of user permission scheme quirks
       response = await api.asApp().requestJira(route`/rest/api/3/project`);
-      data = await response.json();
-      projects = Array.isArray(data) ? data : (data.values || []);
+      if (response.ok) {
+        data = await response.json();
+      }
     }
 
-    if (projects.length === 0) {
-      return [];
-    }
+    if (!data) return [];
+    let projects = Array.isArray(data) ? data : (data.values || []);
+    if (projects.length === 0) return [];
     
     return projects.map(p => ({ id: p.id, key: p.key, name: p.name }));
   } catch (err) {
@@ -285,6 +291,7 @@ resolver.define('getProjectIssueTypes', async ({ payload }) => {
 resolver.define('getIssueLinkTypes', async () => {
   try {
     const response = await api.asUser().requestJira(route`/rest/api/3/issueLinkType`);
+    if (!response.ok) return [];
     const data = await response.json();
     return data.issueLinkTypes || [];
   } catch(e) {
@@ -297,15 +304,13 @@ resolver.define('getConfig', async ({ payload }) => {
   try {
     const { projectId } = payload;
     const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
-    if (response.status === 404) {
-      console.log("Config not found, returning defaults");
+    if (response.status === 404 || !response.ok) {
       return { testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
     }
     const data = await response.json();
-    console.log("Fetched config:", data.value);
     
     // Ensure defaults
-    const config = data.value || {};
+    const config = data?.value || {};
     if (!config.requirementIssueTypes) config.requirementIssueTypes = [];
     if (!config.requirementLinkType) config.requirementLinkType = 'ANY';
     if (!config.testRunType) config.testRunType = 'Test Run';
@@ -851,7 +856,7 @@ const writeCycleIndex = async (cycleId, entries) => {
       }
     );
     if (res.status === 429) {
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1200));
       res = await api.asUser().requestJira(
         route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
           method: 'PUT',
@@ -861,6 +866,9 @@ const writeCycleIndex = async (cycleId, entries) => {
       );
     }
     if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
+    if (shard < shardCount - 1) {
+      await new Promise(r => setTimeout(r, 80));
+    }
   }
 };
 
@@ -1449,11 +1457,15 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   if (allBugKeys.size > 0) {
 const sevField = 'customfield_10238';
      const bugMap = {};
-     await Promise.all(Array.from(allBugKeys).map(async key => {
+     await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
          try {
             const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'issuetype', sevField].join(',');
-            const resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
-            if (resp.status === 200) {
+            let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
+            if (resp.status === 429) {
+               await new Promise(r => setTimeout(r, 1200));
+               resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
+            }
+            if (resp.ok) {
                const i = await resp.json();
                
                // MX Holidays
@@ -1554,7 +1566,7 @@ const sevField = 'customfield_10238';
           } catch (e) {
              console.error('Error fetching bug ' + key, e);
           }
-     }));
+     });
 
      cycles.forEach(c => {
        if (Array.isArray(c.execution)) c.execution.forEach(ex => {
@@ -1666,7 +1678,7 @@ resolver.define('getTestExecution', async ({ payload }) => {
 });
 
 resolver.define('addBulkTestsToCycle', async ({ payload }) => {
-  const { cycleId, testCases, config, projectId, cycleKey } = payload;
+  const { cycleId, testCases, config, projectId, cycleKey, skipIndexWrite } = payload;
 
   let lightWeightIndex = (await readCycleIndex(cycleId)) ?? [];
   // Only skip TCs that already have a tracked run in the lightweight index
@@ -1689,29 +1701,61 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
       allCreatedRuns.push(...created);
     }
 
-    const updatedIndex = [...lightWeightIndex];
-    allCreatedRuns.forEach(cr => {
-      const idx = updatedIndex.findIndex(t => String(t.id) === String(cr.id));
-      const entry = {
-        id: String(cr.id),
-        key: cr.testCaseKey || cr.key || '',
-        testCaseKey: cr.testCaseKey || cr.key || '',
-        testRunId: cr.testRunId,
-        testRunKey: cr.testRunKey,
-        summary: cr.summary || '',
-        status: cr.status || 'Not Run',
-        executionType: cr.executionType || 'Manual',
-        linkedBugs: cr.linkedBugs || []
-      };
-      if (idx > -1) updatedIndex[idx] = entry;
-      else updatedIndex.push(entry);
-    });
+    if (!skipIndexWrite) {
+      const updatedIndex = [...lightWeightIndex];
+      allCreatedRuns.forEach(cr => {
+        const idx = updatedIndex.findIndex(t => String(t.id) === String(cr.id));
+        const entry = {
+          id: String(cr.id),
+          key: cr.testCaseKey || cr.key || '',
+          testCaseKey: cr.testCaseKey || cr.key || '',
+          testRunId: cr.testRunId,
+          testRunKey: cr.testRunKey,
+          summary: cr.summary || '',
+          status: cr.status || 'Not Run',
+          executionType: cr.executionType || 'Manual',
+          linkedBugs: cr.linkedBugs || []
+        };
+        if (idx > -1) updatedIndex[idx] = entry;
+        else updatedIndex.push(entry);
+      });
 
-    await writeCycleIndex(cycleId, updatedIndex);
+      await writeCycleIndex(cycleId, updatedIndex);
+    }
+
     return { success: true, addedTests: allCreatedRuns };
   }
 
   return { success: true, addedTests: [] };
+});
+
+resolver.define('syncCycleIndexWithRuns', async ({ payload }) => {
+  const { cycleId, addedRuns } = payload;
+  if (!cycleId || !addedRuns || !Array.isArray(addedRuns) || addedRuns.length === 0) {
+    return { success: true };
+  }
+
+  const existingIndex = (await readCycleIndex(cycleId)) ?? [];
+  const updatedIndex = [...existingIndex];
+  addedRuns.forEach(cr => {
+    const idx = updatedIndex.findIndex(t => String(t.id) === String(cr.id) || (cr.testCaseKey && String(t.key) === String(cr.testCaseKey)));
+    const entry = {
+      id: String(cr.id || cr.testCaseId),
+      key: cr.testCaseKey || cr.key || '',
+      testCaseKey: cr.testCaseKey || cr.key || '',
+      testRunId: cr.testRunId,
+      testRunKey: cr.testRunKey,
+      summary: cr.summary || '',
+      status: cr.status || 'Not Run',
+      executionType: cr.executionType || 'Manual',
+      linkedBugs: cr.linkedBugs || []
+    };
+    if (idx > -1) updatedIndex[idx] = entry;
+    else updatedIndex.push(entry);
+  });
+
+  await writeCycleIndex(cycleId, updatedIndex);
+  return { success: true };
 });
 
 resolver.define('addTestToCycle', async ({ payload }) => {
