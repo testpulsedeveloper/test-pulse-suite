@@ -1025,12 +1025,10 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
   if (testCasesToCreate.length > 0) {
     const snapshots = await Promise.all(testCasesToCreate.map(tc => getTestCaseSnapshot(tc.id || tc.key)));
 
-    for (let idx = 0; idx < testCasesToCreate.length; idx++) {
-      const tc = testCasesToCreate[idx];
+    const issueUpdates = testCasesToCreate.map((tc, idx) => {
       const tcSnapshot = snapshots[idx];
       const adfDesc = ensureValidAdf(tcSnapshot?.description, `Snapshot del caso ${tc.key || tc.id}: ${tc.summary || ''}`);
-
-      const createIssuePayload = {
+      return {
         fields: {
           project: { id: String(targetProjectId) },
           summary: `[Run] ${tc.key || tc.id}: ${tc.summary || 'Test Case'}`.substring(0, 255),
@@ -1038,83 +1036,139 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
           description: adfDesc
         }
       };
+    });
 
-      try {
-        let runRes = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+    let bulkCreatedIssues = [];
+    try {
+      let bulkRes = await api.asUser().requestJira(route`/rest/api/3/issue/bulk`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issueUpdates })
+      });
+
+      if (!bulkRes.ok && testRunType !== 'Task') {
+        // Fallback to Task if testRunType fails
+        issueUpdates.forEach(u => { u.fields.issuetype = { name: 'Task' }; });
+        bulkRes = await api.asUser().requestJira(route`/rest/api/3/issue/bulk`, {
           method: 'POST',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(createIssuePayload)
+          body: JSON.stringify({ issueUpdates })
         });
+      }
 
-        if (!runRes.ok && testRunType !== 'Task') {
-          // Fallback to Task if testRunType fails
-          createIssuePayload.fields.issuetype = { name: 'Task' };
-          runRes = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+      if (bulkRes.ok) {
+        const bulkData = await bulkRes.json();
+        bulkCreatedIssues = bulkData.issues || [];
+      } else {
+        const errText = await bulkRes.text();
+        console.warn(`[createTestRunsInJiraForCycle] Bulk create failed: ${bulkRes.status} ${errText}, falling back to single creations`);
+      }
+    } catch (bulkErr) {
+      console.warn(`[createTestRunsInJiraForCycle] Bulk create exception:`, bulkErr.message);
+    }
+
+    // Process created issues (or fallback if bulk creation was incomplete)
+    const runProcessingPromises = testCasesToCreate.map(async (tc, idx) => {
+      const tcSnapshot = snapshots[idx];
+      let runIssue = bulkCreatedIssues[idx];
+
+      // Fallback if bulk create didn't return this issue
+      if (!runIssue || !runIssue.id) {
+        const adfDesc = ensureValidAdf(tcSnapshot?.description, `Snapshot del caso ${tc.key || tc.id}: ${tc.summary || ''}`);
+        const singlePayload = {
+          fields: {
+            project: { id: String(targetProjectId) },
+            summary: `[Run] ${tc.key || tc.id}: ${tc.summary || 'Test Case'}`.substring(0, 255),
+            issuetype: { name: testRunType },
+            description: adfDesc
+          }
+        };
+        try {
+          let sRes = await api.asUser().requestJira(route`/rest/api/3/issue`, {
             method: 'POST',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(createIssuePayload)
+            body: JSON.stringify(singlePayload)
           });
-        }
-
-        if (runRes.ok) {
-          const runIssue = await runRes.json();
-          const linkPromises = [
-            linkTwoIssues(runIssue.id, cycleId, 'Relates')
-          ];
-          if (tc.id) {
-            linkPromises.push(linkTwoIssues(runIssue.id, tc.id, 'Relates'));
+          if (!sRes.ok && testRunType !== 'Task') {
+            singlePayload.fields.issuetype = { name: 'Task' };
+            sRes = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+              method: 'POST',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify(singlePayload)
+            });
           }
-          await Promise.all(linkPromises);
+          if (sRes.ok) {
+            runIssue = await sRes.json();
+          }
+        } catch (sErr) {
+          console.warn(`[createTestRunsInJiraForCycle] Single fallback error for ${tc.id}:`, sErr.message);
+        }
+      }
 
-          const executionType = tcSnapshot?.executionType || tc.executionType || 'Manual';
-          const runData = {
-            testCaseId: String(tc.id),
-            testCaseKey: tc.key || '',
-            cycleId: String(cycleId),
-            cycleKey: cycleKey || String(cycleId),
+      if (!runIssue || !runIssue.id) return null;
+
+      try {
+        // Parallelize linking and property assignment
+        const executionType = tcSnapshot?.executionType || tc.executionType || 'Manual';
+        const runData = {
+          testCaseId: String(tc.id),
+          testCaseKey: tc.key || '',
+          cycleId: String(cycleId),
+          cycleKey: cycleKey || String(cycleId),
+          executionType: executionType,
+          status: 'Not Run',
+          iterations: [],
+          comment: '',
+          executedBy: null,
+          executedAt: null,
+          evidences: [],
+          snapshot: {
+            testCaseId: tc.id,
+            testCaseKey: tc.key,
+            testCaseSummary: tc.summary,
+            testCaseDescription: tcSnapshot?.renderedDescription || null,
             executionType: executionType,
-            status: 'Not Run',
-            iterations: [],
-            comment: '',
-            executedBy: null,
-            executedAt: null,
-            evidences: [],
-            snapshot: {
-              testCaseId: tc.id,
-              testCaseKey: tc.key,
-              testCaseSummary: tc.summary,
-              testCaseDescription: tcSnapshot?.renderedDescription || null,
-              executionType: executionType,
-              capturedAt: Date.now()
-            }
-          };
+            capturedAt: Date.now()
+          }
+        };
 
-          await api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
+        const postOperations = [
+          linkTwoIssues(runIssue.id, cycleId, 'Relates'),
+          api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
             body: JSON.stringify(runData)
-          });
+          })
+        ];
 
-          createdRuns.push({
-            id: String(tc.id),
-            key: runIssue.key,
-            testRunId: runIssue.id,
-            testRunKey: runIssue.key,
-            testCaseId: String(tc.id),
-            testCaseKey: tc.key,
-            summary: tc.summary,
-            description: tcSnapshot?.renderedDescription || null,
-            executionType: executionType,
-            status: 'Not Run'
-          });
-        } else {
-          const errText = await runRes.text();
-          console.error(`[createTestRunsInJiraForCycle] Create error for ${tc.id}: ${runRes.status} ${errText}`);
+        if (tc.id) {
+          postOperations.push(linkTwoIssues(runIssue.id, tc.id, 'Relates'));
         }
+
+        await Promise.all(postOperations);
+
+        return {
+          id: String(tc.id),
+          key: runIssue.key,
+          testRunId: runIssue.id,
+          testRunKey: runIssue.key,
+          testCaseId: String(tc.id),
+          testCaseKey: tc.key,
+          summary: tc.summary,
+          description: tcSnapshot?.renderedDescription || null,
+          executionType: executionType,
+          status: 'Not Run'
+        };
       } catch (errItem) {
-        console.warn(`[createTestRunsInJiraForCycle] Error creating/linking run for ${tc.id}:`, errItem.message);
+        console.warn(`[createTestRunsInJiraForCycle] Error linking/setting property for ${tc.id}:`, errItem.message);
+        return null;
       }
-    }
+    });
+
+    const settledRuns = await Promise.all(runProcessingPromises);
+    settledRuns.forEach(r => {
+      if (r) createdRuns.push(r);
+    });
   }
 
   // Stamp testpulse-v2 on cycle

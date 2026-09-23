@@ -610,6 +610,7 @@ function App() {
   const [runningTests, setRunningTests] = useState({});
   const [unlinkedBugs, setUnlinkedBugs] = useState([]);
   const [isAddingAll, setIsAddingAll] = useState(false);
+  const [addingProgress, setAddingProgress] = useState({ current: 0, total: 0 });
   const [previewImages, setPreviewImages] = useState({});
   const [previewModalData, setPreviewModalData] = useState(null);
   const [linkingBugTestId, setLinkingBugTestId] = useState(null); // id of test for which we show the bug-link input
@@ -1628,7 +1629,7 @@ Then el sistema valida la identidad.
 
     setBulkStatus('uploading');
 
-    const CHUNK = 20; // enviamos de 50 en 50 para no saturar la API
+    const CHUNK = 10; // enviamos en lotes de 10 para no saturar la API ni exceder 25s
     let done = 0;
     let errorCount = 0;
     const allErrors = [];
@@ -5485,6 +5486,7 @@ const renderPlanningTab = () => {
                             : allAvailable;
                             
                           setIsAddingAll(true);
+                          setAddingProgress({ current: 0, total: testsToAdd.length });
                           try {
                             const cycleId = String(selectedCycle.id);
                             testsToAdd.forEach(tc => {
@@ -5495,20 +5497,35 @@ const renderPlanningTab = () => {
                               }
                             });
 
-                            const CHUNK_SIZE = 20;
+                            const CHUNK_SIZE = 5;
                             let allAddedTests = [];
                             for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                                 const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
-                                const bRes = await invoke('addBulkTestsToCycle', { 
-                                  cycleId: selectedCycle.id,
-                                  cycleKey: selectedCycle.key || selectedCycle.id,
-                                  projectId: selectedProjectId,
-                                  config: projectConfig,
-                                  testCases: chunk 
-                                });
+                                let retries = 2;
+                                let bRes = null;
+                                while (retries >= 0) {
+                                  try {
+                                    bRes = await invoke('addBulkTestsToCycle', { 
+                                      cycleId: selectedCycle.id,
+                                      cycleKey: selectedCycle.key || selectedCycle.id,
+                                      projectId: selectedProjectId,
+                                      config: projectConfig,
+                                      testCases: chunk 
+                                    });
+                                    break;
+                                  } catch (errChunk) {
+                                    retries--;
+                                    if (retries < 0) {
+                                      console.warn('[addBulkTestsToCycle] Chunk error:', errChunk);
+                                    } else {
+                                      await new Promise(r => setTimeout(r, 600));
+                                    }
+                                  }
+                                }
                                 if (bRes && bRes.addedTests) {
                                     allAddedTests = allAddedTests.concat(bRes.addedTests);
                                 }
+                                setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
                             }
                             
                             // Optimistic UI update
@@ -5564,12 +5581,13 @@ const renderPlanningTab = () => {
                             alert("Error al añadir casos: " + err.message);
                           }
                           setIsAddingAll(false);
+                          setAddingProgress({ current: 0, total: 0 });
                         }}
                         disabled={loading || isAddingAll || availableFilteredTestCases.length === 0}
                         style={{ height: '32px', fontSize: '12px', fontWeight: 600 }}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 4v16m8-8H4"></path></svg>
-                        <span>{isAddingAll ? 'Añadiendo casos...' : (selectedTestsForCycle.length > 0 ? `+ Añadir (${selectedTestsForCycle.length})` : '+ Añadir todos')}</span>
+                        <span>{isAddingAll ? (addingProgress.total > 0 ? `Añadiendo (${addingProgress.current}/${addingProgress.total})...` : 'Añadiendo casos...') : (selectedTestsForCycle.length > 0 ? `+ Añadir (${selectedTestsForCycle.length})` : '+ Añadir todos')}</span>
                       </button>
                     </div>
                   </div>
