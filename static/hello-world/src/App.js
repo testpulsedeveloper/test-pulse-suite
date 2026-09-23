@@ -935,7 +935,7 @@ function App() {
   }, [folders]);
 
 
-  const fetchAllTestCases = async (args) => {
+  const fetchAllTestCases = async (args, retries = 2) => {
       let allIssues = [];
       let token = null;
       let isLast = false;
@@ -946,6 +946,10 @@ function App() {
           const res = await invoke('getTestCases', { ...args, nextPageToken: token });
           if (Array.isArray(res)) {
              if (res.length > 0 && res[0].id === '999999') {
+                 if (retries > 0) {
+                     await new Promise(r => setTimeout(r, 1200 + Math.random() * 500));
+                     return fetchAllTestCases(args, retries - 1);
+                 }
                  checkError(res, 'getTestCases');
              } else {
                  allIssues = allIssues.concat(res);
@@ -958,6 +962,10 @@ function App() {
               isLast = res.isLast;
               if (!token) break;
           } else {
+              if (retries > 0 && allIssues.length === 0) {
+                  await new Promise(r => setTimeout(r, 1200 + Math.random() * 500));
+                  return fetchAllTestCases(args, retries - 1);
+              }
               break;
           }
           pagesFetched++;
@@ -4596,28 +4604,48 @@ Then el sistema valida la identidad.
     if (!selectedProjectId) return;
     if (!testCases.length) setLoading(true);
     
-    // Check permissions
-    const admin = await invoke('checkAdminPermission', { projectId: selectedProjectId });
-    setIsAdmin(admin);
+    try {
+      // Check permissions
+      const admin = await invoke('checkAdminPermission', { projectId: selectedProjectId });
+      setIsAdmin(admin);
 
-    // Get config first
-    const config = await invoke('getConfig', { projectId: selectedProjectId });
-    setProjectConfig(config);
+      // Get config first
+      const config = await invoke('getConfig', { projectId: selectedProjectId });
+      if (config) {
+        setProjectConfig(config);
+      }
 
-    if (config) {
-      // Load tabs data in parallel
-      const [fetchedPlans, fetchedCycles, fetchedCases, fetchedFolders] = await Promise.all([
-        invoke('getTestPlans', { projectId: selectedProjectId, config }),
-        invoke('getTestCycles', { projectId: selectedProjectId, config }),
-        fetchAllTestCases({ projectId: selectedProjectId, config }),
-        invoke('getFolders', { projectId: selectedProjectId })
+      const cfg = config || projectConfig;
+
+      // Load folders, plans, and cycles
+      const [foldersRes, plansRes, cyclesRes] = await Promise.allSettled([
+        invoke('getFolders', { projectId: selectedProjectId }),
+        invoke('getTestPlans', { projectId: selectedProjectId, config: cfg }),
+        invoke('getTestCycles', { projectId: selectedProjectId, config: cfg })
       ]);
-      setTestPlans(fetchedPlans || []);
-      setTestCycles(fetchedCycles || []);
+
+      if (foldersRes.status === 'fulfilled') setFolders(foldersRes.value || []);
+      if (plansRes.status === 'fulfilled') {
+        const plans = Array.isArray(plansRes.value) ? plansRes.value : [];
+        setTestPlans(plans);
+        if (plans.length > 0) {
+          setSelectedPlanId(prev => (prev && plans.some(p => String(p.id) === String(prev))) ? prev : plans[0].id);
+        }
+      }
+      if (cyclesRes.status === 'fulfilled') {
+        setTestCycles(Array.isArray(cyclesRes.value) ? cyclesRes.value : []);
+      }
+
+      // Fetch test cases
+      setIsFetchingTests(true);
+      const fetchedCases = await fetchAllTestCases({ projectId: selectedProjectId, config: cfg });
       setTestCases(fetchedCases || []);
-      setFolders(fetchedFolders || []);
+    } catch (e) {
+      console.error("loadProjectData error:", e);
+    } finally {
+      setIsFetchingTests(false);
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const loadReportData = async (overrideProjectId = null, overrideConfig = null) => {

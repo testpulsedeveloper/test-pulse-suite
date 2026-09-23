@@ -92,7 +92,8 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
     });
 
     if (response.status === 429 && retries > 0) {
-      await new Promise(r => setTimeout(r, 1200));
+      const delay = (4 - retries) * 1200 + Math.floor(Math.random() * 800);
+      await new Promise(r => setTimeout(r, delay));
       return await fetchJqlPage(jql, fields, expand, properties, nextPageToken, maxResults, retries - 1);
     }
 
@@ -301,25 +302,48 @@ resolver.define('getIssueLinkTypes', async () => {
 });
 
 resolver.define('getConfig', async ({ payload }) => {
-  try {
-    const { projectId } = payload;
-    const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
-    if (response.status === 404 || !response.ok) {
-      return { testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
-    }
-    const data = await response.json();
-    
-    // Ensure defaults
-    const config = data?.value || {};
-    if (!config.requirementIssueTypes) config.requirementIssueTypes = [];
-    if (!config.requirementLinkType) config.requirementLinkType = 'ANY';
-    if (!config.testRunType) config.testRunType = 'Test Run';
-    
-    return config;
-  } catch(e) {
-    console.error("Error getConfig:", e);
-    return { testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
+  const { projectId } = payload;
+  if (!projectId) {
+    return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
   }
+
+  let retries = 3;
+  while (retries >= 0) {
+    try {
+      const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+      if (response.status === 429) {
+        retries--;
+        if (retries < 0) break;
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 600));
+        continue;
+      }
+      if (response.status === 404) {
+        return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
+      }
+      if (!response.ok) {
+        retries--;
+        if (retries < 0) break;
+        await new Promise(r => setTimeout(r, 600));
+        continue;
+      }
+      const data = await response.json();
+      const config = data?.value || {};
+      return {
+        testCaseType: config.testCaseType || 'Test Case',
+        testCycleType: config.testCycleType || 'Test Cycle',
+        planIssueType: config.planIssueType || 'Test Set',
+        testRunType: config.testRunType || 'Test Run',
+        requirementIssueTypes: Array.isArray(config.requirementIssueTypes) ? config.requirementIssueTypes : [],
+        requirementLinkType: config.requirementLinkType || 'ANY',
+        ...config
+      };
+    } catch (e) {
+      retries--;
+      if (retries < 0) break;
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
+  return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
 });
 
 resolver.define('setConfig', async ({ payload }) => {
@@ -350,10 +374,20 @@ resolver.define('checkAdminPermission', async ({ payload }) => {
 resolver.define('getTestPlans', async ({ payload }) => {
   try {
     const { projectId, config } = payload;
-    const planType = config?.planIssueType || 'Test Set';
+    const planType = config?.planIssueType;
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const jql = `${projectJql}issuetype in ("${planType}", "Test Plan", "Test Set", "Plan de pruebas") ORDER BY created DESC`;
+    const validPlanTypes = Array.from(new Set([
+      planType,
+      'Test Plan',
+      'Test Set',
+      'Plan de pruebas',
+      'Plan de Pruebas',
+      'TestPlan',
+      'TestSet'
+    ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+
+    const jql = `${projectJql}issuetype in (${validPlanTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, null);
     return allIssues.map(issue => ({
       id: issue.id,
@@ -370,10 +404,19 @@ resolver.define('getTestPlans', async ({ payload }) => {
 resolver.define('getTestCycles', async ({ payload }) => {
   try {
     const { projectId, config } = payload;
-    const cycleType = config?.testCycleType || 'Test Cycle';
+    const cycleType = config?.testCycleType;
     const projectJql = projectId ? `project = ${projectId} AND ` : '';
     
-    const jql = `${projectJql}issuetype in ("${cycleType}", "Test Cycle", "Ciclo de prueba") ORDER BY created DESC`;
+    const validCycleTypes = Array.from(new Set([
+      cycleType,
+      'Test Cycle',
+      'Ciclo de prueba',
+      'Ciclo de Prueba',
+      'Ciclo',
+      'TestCycle'
+    ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+
+    const jql = `${projectJql}issuetype in (${validCycleTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
     // Pass at most 3 properties (Jira allows max 5)
     const propNames = ['testops-plan-link', 'execution', 'tests'];
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, propNames);
@@ -510,11 +553,20 @@ resolver.define('getProjectIssueTypeFields', async ({ payload }) => {
 // === Test Case Management (Jira REST API) ===
 resolver.define('getTestCases', async ({ payload, context }) => {
   const { folderId, projectId, config, nextPageToken } = payload;
-  const testCaseType = config?.testCaseType || 'Test Case';
+  const tcType = config?.testCaseType;
   
   const projectJql = projectId ? `project = ${projectId} AND ` : '';
-  const typeJql = testCaseType ? `issuetype = "${testCaseType}"` : `issuetype IN ("Test Case", "Test")`;
-  const jql = `${projectJql}${typeJql} ORDER BY created DESC`;
+  const validTcTypes = Array.from(new Set([
+    tcType,
+    'Test Case',
+    'Caso de prueba',
+    'Caso de Prueba',
+    'Prueba',
+    'Test',
+    'TestCase'
+  ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+
+  const jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
   
   let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'reporter', 'creator', 'assignee'];
   if (payload?.executionTypeFieldId) {
