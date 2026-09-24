@@ -8830,27 +8830,6 @@ const renderPlanningTab = () => {
               </div>
               
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                <button
-                  onClick={loadReportData}
-                  disabled={reportLoading}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    padding: '6px 12px',
-                    background: '#FFFFFF',
-                    border: '1px solid var(--jira-border, #DCDFE4)',
-                    borderRadius: '6px',
-                    cursor: reportLoading ? 'not-allowed' : 'pointer',
-                    color: 'var(--jira-dark, #172B4D)',
-                    fontSize: '12px',
-                    fontWeight: 600
-                  }}
-                  title="Recargar datos de ejecución y Jira"
-                >
-                  🔄 {reportLoading ? 'Sincronizando...' : 'Sincronizar Métricas'}
-                </button>
-
                 {dashboardSubView === 'runs' && (
                   <button
                     onClick={() => setIsCustomizingDashboard(!isCustomizingDashboard)}
