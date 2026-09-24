@@ -1783,12 +1783,25 @@ resolver.define('getTestExecution', async ({ payload }) => {
   try {
     let targetRunId = testRunId;
     if (!targetRunId) {
+      try {
+        const cycleRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=testpulse-cycle-index`);
+        if (cycleRes.ok) {
+          const cData = await cycleRes.json();
+          const items = cData.properties?.['testpulse-cycle-index'] || [];
+          const matched = items.find(i => String(i.id) === String(testId) || i.key === String(testId) || (i.testCaseId && String(i.testCaseId) === String(testId)) || (i.testCaseKey && i.testCaseKey === String(testId)));
+          if (matched && matched.testRunId) {
+            targetRunId = matched.testRunId;
+          }
+        }
+      } catch (e) {}
+    }
+    if (!targetRunId) {
       const runIssues = await fetchAllIssues(
         `issue in linkedIssues("${cycleId}")`,
         ['summary', 'status', 'assignee', 'attachment', 'description', 'issuelinks'],
         null,
         ['testpulse-run-data'],
-        50
+        500
       );
       if (Array.isArray(runIssues)) {
         const found = runIssues.find(r => {
@@ -2169,12 +2182,25 @@ resolver.define('updateTestStatus', async ({ payload }) => {
   let targetRunId = testRunId;
   if (!targetRunId) {
     try {
+      const cycleRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=testpulse-cycle-index`);
+      if (cycleRes.ok) {
+        const cData = await cycleRes.json();
+        const items = cData.properties?.['testpulse-cycle-index'] || [];
+        const matched = items.find(i => String(i.id) === String(testId) || i.key === String(testId) || (i.testCaseId && String(i.testCaseId) === String(testId)) || (i.testCaseKey && i.testCaseKey === String(testId)));
+        if (matched && matched.testRunId) {
+          targetRunId = matched.testRunId;
+        }
+      }
+    } catch (e) {}
+  }
+  if (!targetRunId) {
+    try {
       const runIssues = await fetchAllIssues(
         `issue in linkedIssues("${cycleId}")`,
         ['summary', 'status', 'description', 'assignee', 'issuelinks'],
         null,
         ['testpulse-run-data'],
-        50
+        500
       );
       if (Array.isArray(runIssues)) {
         const found = runIssues.find(r => {

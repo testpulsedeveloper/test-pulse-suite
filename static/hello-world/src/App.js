@@ -589,8 +589,17 @@ function App() {
       const merged = existingCycleItems
         .filter(pItem => !deletedForCycle.has(String(pItem.id)))
         .map(pItem => {
-          if (backendMap[pItem.id]) {
-            return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
+          const backend = backendMap[pItem.id];
+          if (backend) {
+            return {
+              ...pItem,
+              ...backend,
+              description: pItem.description || backend.description,
+              iterations: (backend.iterations && backend.iterations.length > 0) ? backend.iterations : (pItem.iterations || []),
+              evidences: (backend.evidences && backend.evidences.length > 0) ? backend.evidences : (pItem.evidences || []),
+              linkedBugs: (backend.linkedBugs && backend.linkedBugs.length > 0) ? backend.linkedBugs : (pItem.linkedBugs || []),
+              _detailLoaded: pItem._detailLoaded || backend._detailLoaded || false
+            };
           }
           return pItem;
         });
@@ -4183,8 +4192,15 @@ Then el sistema valida la identidad.
 
     const newIterations = [...currentIterations, newIteration];
     const newStatus = calculateOverallStatus(newIterations);
+    const cycleIdStr = String(selectedCycle.id);
 
-    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
+    setCycleTests(prev => {
+      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
+      if (perCycleCacheRef.current[cycleIdStr]) {
+        perCycleCacheRef.current[cycleIdStr] = updated;
+      }
+      return updated;
+    });
 
     try {
       const res = await invoke('updateTestStatus', {
@@ -4194,9 +4210,17 @@ Then el sistema valida la identidad.
         iterations: newIterations,
         status: newStatus
       });
-      // If backend created a new run (no testRunId before), update local state with the new IDs
-      if (res?.test?.testRunId && !test.testRunId) {
-        setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, testRunId: res.test.testRunId, testRunKey: res.test.testRunKey } : t));
+      // If backend created/returned a run ID, update local state and cache immediately
+      if (res?.test?.testRunId) {
+        const newRunId = res.test.testRunId;
+        const newRunKey = res.test.testRunKey || test.testRunKey;
+        setCycleTests(prev => {
+          const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, testRunId: newRunId, testRunKey: newRunKey, _detailLoaded: true } : t);
+          if (perCycleCacheRef.current[cycleIdStr]) {
+            perCycleCacheRef.current[cycleIdStr] = updated;
+          }
+          return updated;
+        });
       }
     } catch (e) {
       console.error('Error adding iteration:', e);
@@ -4212,8 +4236,15 @@ Then el sistema valida la identidad.
 
     const newIterations = (test.iterations || []).filter(i => i.id !== iterId);
     const newStatus = calculateOverallStatus(newIterations);
+    const cycleIdStr = String(selectedCycle.id);
 
-    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
+    setCycleTests(prev => {
+      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
+      if (perCycleCacheRef.current[cycleIdStr]) {
+        perCycleCacheRef.current[cycleIdStr] = updated;
+      }
+      return updated;
+    });
 
     try {
       await invoke('updateTestStatus', {
@@ -4243,8 +4274,15 @@ Then el sistema valida la identidad.
     });
 
     const newStatus = calculateOverallStatus(newIterations);
+    const cycleIdStr = String(selectedCycle.id);
 
-    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus } : t));
+    setCycleTests(prev => {
+      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
+      if (perCycleCacheRef.current[cycleIdStr]) {
+        perCycleCacheRef.current[cycleIdStr] = updated;
+      }
+      return updated;
+    });
 
     try {
       await invoke('updateTestStatus', {
@@ -4324,6 +4362,7 @@ Then el sistema valida la identidad.
         }
         currentEvidences.push(newEvidence);
 
+        const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
         if (actualIterId) {
           const iters = [...(testItem?.iterations || [])];
           const iterIdx = iters.findIndex(i => i.id === actualIterId);
@@ -4332,7 +4371,13 @@ Then el sistema valida la identidad.
               ...iters[iterIdx],
               evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence]
             };
-            setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
+            setCycleTests(prev => {
+              const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+              if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+                perCycleCacheRef.current[cycleIdStr] = updated;
+              }
+              return updated;
+            });
             await invoke('updateTestStatus', {
               cycleId: selectedCycle.id,
               testId,
@@ -4341,7 +4386,13 @@ Then el sistema valida la identidad.
             });
           }
         } else {
-          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences } : t));
+          setCycleTests(prev => {
+            const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, _detailLoaded: true } : t);
+            if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+              perCycleCacheRef.current[cycleIdStr] = updated;
+            }
+            return updated;
+          });
           await invoke('updateTestStatus', {
             cycleId: selectedCycle.id,
             testId,
@@ -4361,11 +4412,9 @@ Then el sistema valida la identidad.
     const testItem = cycleTests.find(t => String(t.id) === String(testId));
     await invoke('deleteAttachment', { attachmentId });
     
-    let currentTest = await invoke('getTestExecution', { cycleId: selectedCycle.id, testId });
-    if (!currentTest) {
-        currentTest = cycleTests.find(t => String(t.id) === String(testId));
-    }
+    let currentTest = cycleTests.find(t => String(t.id) === String(testId));
     if (!currentTest) return;
+    const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
     
     if (iterId) {
        const iters = [...(currentTest.iterations || [])];
@@ -4373,13 +4422,19 @@ Then el sistema valida la identidad.
        if (iterIdx > -1) {
           const evs = (iters[iterIdx].evidences || []).filter(e => e.id !== attachmentId && e !== attachmentId);
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
+          setCycleTests(prev => {
+            const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+            if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+              perCycleCacheRef.current[cycleIdStr] = updated;
+            }
+            return updated;
+          });
           await invoke('updateTestStatus', {
             cycleId: selectedCycle.id,
             testId,
             testRunId: testItem?.testRunId || testItem?.testRunKey,
             iterations: iters
           });
-          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
        }
        return;
     }
@@ -4389,19 +4444,26 @@ Then el sistema valida la identidad.
       currentEvidences.push(currentTest.evidence);
     }
     currentEvidences = currentEvidences.filter(e => e.id !== attachmentId && e !== attachmentId);
+    setCycleTests(prev => {
+      const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, _detailLoaded: true } : t);
+      if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+        perCycleCacheRef.current[cycleIdStr] = updated;
+      }
+      return updated;
+    });
     await invoke('updateTestStatus', {
       cycleId: selectedCycle.id,
       testId,
       testRunId: testItem?.testRunId || testItem?.testRunKey,
       evidences: currentEvidences
     });
-    setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences } : t));
   };
 
   
   const handleRenameEvidence = async (testId, index, newName, iterId) => {
     const currentTest = cycleTests.find(t => String(t.id) === String(testId));
     if (!currentTest) return;
+    const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
     
     if (iterId) {
        const iters = [...(currentTest.iterations || [])];
@@ -4412,7 +4474,13 @@ Then el sistema valida la identidad.
              evs[index] = { ...evs[index], filename: newName };
           }
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
-          setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters } : t));
+          setCycleTests(prev => {
+            const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+            if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+              perCycleCacheRef.current[cycleIdStr] = updated;
+            }
+            return updated;
+          });
           await invoke('updateTestStatus', {
             cycleId: selectedCycle.id,
             testId,
@@ -4432,7 +4500,13 @@ Then el sistema valida la identidad.
       currentEvidences[index] = { ...currentEvidences[index], filename: newName };
     }
     
-    setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, evidence: null } : t));
+    setCycleTests(prev => {
+      const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, evidence: null, _detailLoaded: true } : t);
+      if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+        perCycleCacheRef.current[cycleIdStr] = updated;
+      }
+      return updated;
+    });
     await invoke('updateTestStatus', {
       cycleId: selectedCycle.id,
       testId,
@@ -5861,33 +5935,52 @@ const renderPlanningTab = () => {
         }
       }
 
-      // 2. Load description and execution details if not fully loaded or description missing
-      if (!test?.description || !test?._detailLoaded) {
+      // 2. Load description and execution details if not fully loaded
+      if (!test?._detailLoaded) {
         let desc = test?.description;
-        if (!desc) {
+        if (!desc && desc !== '') {
           desc = await invoke('getIssueDescription', { issueId: targetCaseKey || targetCaseId || targetRunKey || testId }).catch(() => null);
         }
 
-        let fullExec = null;
-        if (!test?._detailLoaded) {
-          fullExec = await invoke('getTestExecution', { 
-            cycleId: selectedCycle.id, 
-            testId,
-            testRunId: test?.testRunId || test?.testRunKey
-          }).catch(() => null);
-        }
+        const fullExec = await invoke('getTestExecution', { 
+          cycleId: selectedCycle.id, 
+          testId,
+          testRunId: test?.testRunId || test?.testRunKey
+        }).catch(() => null);
 
-        setCycleTests(prev => prev.map(t => {
-          if (String(t.id) === String(testId)) {
-            return {
-              ...t,
-              ...(fullExec || {}),
-              description: desc || fullExec?.description || t.description || null,
-              _detailLoaded: true
-            };
+        const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
+        setCycleTests(prev => {
+          const updated = prev.map(t => {
+            if (String(t.id) === String(testId)) {
+              const mergedIterations = (fullExec?.iterations && fullExec.iterations.length > 0)
+                ? fullExec.iterations
+                : (t.iterations && t.iterations.length > 0 ? t.iterations : (fullExec?.iterations || []));
+
+              const mergedEvidences = (fullExec?.evidences && fullExec.evidences.length > 0)
+                ? fullExec.evidences
+                : (t.evidences && t.evidences.length > 0 ? t.evidences : (fullExec?.evidences || []));
+
+              const mergedBugs = (fullExec?.linkedBugs && fullExec.linkedBugs.length > 0)
+                ? fullExec.linkedBugs
+                : (t.linkedBugs && t.linkedBugs.length > 0 ? t.linkedBugs : (fullExec?.linkedBugs || []));
+
+              return {
+                ...t,
+                ...(fullExec || {}),
+                iterations: mergedIterations,
+                evidences: mergedEvidences,
+                linkedBugs: mergedBugs,
+                description: desc || fullExec?.description || t.description || null,
+                _detailLoaded: true
+              };
+            }
+            return t;
+          });
+          if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+            perCycleCacheRef.current[cycleIdStr] = updated;
           }
-          return t;
-        }));
+          return updated;
+        });
       }
     }
   };
