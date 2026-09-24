@@ -1383,9 +1383,19 @@ const getCycleExecutionSummary = async (cycleId) => {
             ]),
             iterations: runData.iterations || [],
             comment: runData.comment || '',
-            linkedBugs: runData.linkedBugs || (run.fields?.issuelinks || [])
-              .filter(l => l.type?.name === 'Blocks' || l.outwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug'))
-              .map(l => ({ key: (l.outwardIssue || l.inwardIssue)?.key, summary: (l.outwardIssue || l.inwardIssue)?.fields?.summary })) || [],
+            linkedBugs: (runData.linkedBugs && runData.linkedBugs.length > 0)
+              ? runData.linkedBugs
+              : (run.fields?.issuelinks || [])
+                  .filter(l => l.type?.name === 'Blocks' || l.outwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug') || l.inwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug'))
+                  .map(l => {
+                    const linked = l.outwardIssue || l.inwardIssue;
+                    return {
+                      key: linked?.key,
+                      summary: linked?.fields?.summary,
+                      status: linked?.fields?.status?.name,
+                      priority: linked?.fields?.priority?.name
+                    };
+                  }).filter(b => !!b.key),
             lockedAt: runData.lockedAt || null,
             _detailLoaded: false
           };
@@ -1578,10 +1588,10 @@ resolver.define('getExecutionReport', async ({ payload }) => {
      });
   });
 
+  const bugMap = {};
   if (allBugKeys.size > 0) {
-const sevField = 'customfield_10238';
-     const bugMap = {};
-     await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
+    const sevField = 'customfield_10238';
+    await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
          try {
             const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'issuetype', sevField].join(',');
             let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
@@ -1667,7 +1677,7 @@ const sevField = 'customfield_10238';
                   for (const [fKey, fVal] of Object.entries(i.fields)) {
                     if (fKey.startsWith('customfield_') && fVal) {
                       const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-                      if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'blocker', 'critical', 'major', 'minor'].includes(String(vStr).toLowerCase())) {
+                      if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
                         sevVal = vStr;
                         break;
                       }
@@ -1676,6 +1686,7 @@ const sevField = 'customfield_10238';
                 }
 
                 bugMap[key] = {
+                  key,
                   summary: i.fields?.summary,
                   status: i.fields?.status?.name,
                   assignee: i.fields?.assignee?.displayName || 'Sin asignar',
@@ -1703,9 +1714,58 @@ const sevField = 'customfield_10238';
      });
   }
 
-  return { cycles };
+  return { cycles, bugMap };
 });
 
+resolver.define('getBugsBatch', async ({ payload }) => {
+  const { keys = [] } = payload;
+  const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
+  if (uniqueKeys.length === 0) return {};
+  const sevField = 'customfield_10238';
+  const bugMap = {};
+  await processInBatches(uniqueKeys, 8, 50, async key => {
+    try {
+      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'issuetype', sevField].join(',');
+      let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
+      if (resp.status === 429) {
+        await new Promise(r => setTimeout(r, 1200));
+        resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
+      }
+      if (resp.ok) {
+        const i = await resp.json();
+        let sevVal = 'Sin definir';
+        if (i.fields?.[sevField]) {
+          const sf = i.fields[sevField];
+          sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+        } else if (i.fields) {
+          for (const [fKey, fVal] of Object.entries(i.fields)) {
+            if (fKey.startsWith('customfield_') && fVal) {
+              const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+              if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+                sevVal = vStr;
+                break;
+              }
+            }
+          }
+        }
+        bugMap[key] = {
+          key,
+          summary: i.fields?.summary,
+          status: i.fields?.status?.name,
+          assignee: i.fields?.assignee?.displayName || 'Sin asignar',
+          resolution: i.fields?.resolution?.name || 'Unresolved',
+          priority: i.fields?.priority?.name || '',
+          issuetype: i.fields?.issuetype?.name || 'Bug',
+          severity: sevVal,
+          rawFields: i.fields
+        };
+      }
+    } catch (e) {
+      console.error('[getBugsBatch] Error fetching bug ' + key, e);
+    }
+  });
+  return bugMap;
+});
 
 resolver.define('getCycleExecution', async ({ payload }) => {
   const { cycleId } = payload;

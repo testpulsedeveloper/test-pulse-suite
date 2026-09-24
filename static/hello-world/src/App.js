@@ -4731,13 +4731,20 @@ Then el sistema valida la identidad.
         });
       }
 
-      // Collect all bug keys already linked through Test Pulse
-      const linkedBugKeys = [];
+      // Collect all bug keys already linked through Test Pulse (from reportData AND live cycle caches)
+      const linkedBugKeysSet = new Set();
       (data?.cycles || []).forEach(cycle => {
         (cycle.execution || []).forEach(ex => {
-          (ex.linkedBugs || []).forEach(bug => { if (bug.key) linkedBugKeys.push(bug.key); });
+          (ex.linkedBugs || []).forEach(bug => { if (bug?.key) linkedBugKeysSet.add(bug.key); });
         });
       });
+      Object.values(perCycleCacheRef.current || {}).forEach(cachedList => {
+        (cachedList || []).forEach(ex => {
+          (ex.linkedBugs || []).forEach(bug => { if (bug?.key) linkedBugKeysSet.add(bug.key); });
+        });
+      });
+      const linkedBugKeys = Array.from(linkedBugKeysSet);
+
       // Fetch bugs strictly from the CURRENT project/workspace
       const currentProj = projects.find(p => String(p.id) === String(projId) || String(p.key) === String(projId));
       const targetProjectKey = currentProj?.key || (isNaN(projId) ? projId : null);
@@ -4749,6 +4756,21 @@ Then el sistema valida la identidad.
       })
         .then(bugs => setUnlinkedBugs(bugs || []))
         .catch(console.warn);
+
+      // If any linked bugs are missing from data.bugMap, fetch their details in batch immediately
+      const missingBugKeys = linkedBugKeys.filter(k => !data?.bugMap?.[k]);
+      if (missingBugKeys.length > 0) {
+        invoke('getBugsBatch', { keys: missingBugKeys })
+          .then(batchBugs => {
+            if (batchBugs && Object.keys(batchBugs).length > 0) {
+              setReportData(prev => ({
+                ...prev,
+                bugMap: { ...(prev?.bugMap || {}), ...batchBugs }
+              }));
+            }
+          })
+          .catch(console.warn);
+      }
     } catch(err) {
       console.error("loadReportData error:", err);
       if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
@@ -7353,10 +7375,21 @@ const renderPlanningTab = () => {
           const k = item.testCaseKey || item.key || item.id;
           if (k) execMap.set(String(k), item);
         });
-        // Live in-memory execution from Planning/Execution takes precedence for completeness & latest status
+        // Live in-memory execution from Planning/Execution takes precedence for completeness & latest status, while preserving enriched bug details
         (cached || []).forEach(item => {
           const k = item.testCaseKey || item.key || item.id;
-          if (k) execMap.set(String(k), item);
+          if (k) {
+            const existing = execMap.get(String(k));
+            if (existing) {
+              const mergedBugs = (item.linkedBugs || existing.linkedBugs || []).map(b => {
+                const eb = (existing.linkedBugs || []).find(x => x.key === b.key) || reportData?.bugMap?.[b.key] || {};
+                return { ...eb, ...b, severity: eb.severity || b.severity, summary: eb.summary || b.summary };
+              });
+              execMap.set(String(k), { ...existing, ...item, linkedBugs: mergedBugs });
+            } else {
+              execMap.set(String(k), item);
+            }
+          }
         });
         return {
           ...c,
@@ -7420,13 +7453,24 @@ const renderPlanningTab = () => {
       return true;
     };
 
-    // Strict *Severity normalization: ignores standard Jira priority (Highest/High/Medium/Low)
+    // Strict *Severity normalization: checks customfield_10238, customfields holding severity, or explicit severity
     const normalizeSeverity = (rawSev, rawFields) => {
       let s = '';
       if (rawFields?.['customfield_10238']) {
         const sf = rawFields['customfield_10238'];
         s = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-      } else if (rawSev && rawSev !== 'N/A' && rawSev !== 'Sin definir') {
+      } else if (rawFields) {
+        for (const [fKey, fVal] of Object.entries(rawFields)) {
+          if (fKey.startsWith('customfield_') && fVal) {
+            const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+            if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+              s = vStr;
+              break;
+            }
+          }
+        }
+      }
+      if (!s && rawSev && rawSev !== 'N/A' && rawSev !== 'Sin definir') {
         s = String(rawSev).trim();
       }
 
@@ -7435,8 +7479,9 @@ const renderPlanningTab = () => {
       const low = s.toLowerCase();
       if (low.includes('bloq') || low.includes('blocker')) return 'Bloqueante';
       if (low.includes('crit') || low.includes('crític')) return 'Crítico';
-      if (low.includes('may') || low.includes('major')) return 'Mayor';
-      if (low.includes('men') || low.includes('minor') || low.includes('baja') || low.includes('trivial')) return 'Menor';
+      if (low.includes('may') || low.includes('major') || low.includes('alta') || low.includes('high')) return 'Mayor';
+      if (low.includes('med') || low.includes('medio') || low.includes('media')) return 'Medio';
+      if (low.includes('men') || low.includes('minor') || low.includes('baja') || low.includes('low') || low.includes('trivial')) return 'Menor';
       return s;
     };
 
@@ -7531,11 +7576,25 @@ const renderPlanningTab = () => {
             const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
 
-            ex.linkedBugs.forEach(bug => {
-              if (!bug || !bug.key || !isActualBug(bug)) return;
+            ex.linkedBugs.forEach(rawBug => {
+              if (!rawBug || !rawBug.key || !isActualBug(rawBug)) return;
+
+              const bugKey = rawBug.key;
+              const projectBug = (unlinkedBugs || []).find(ub => ub.key === bugKey);
+              const mapBug = reportData?.bugMap?.[bugKey];
+              const bug = {
+                ...rawBug,
+                ...(mapBug || {}),
+                ...(projectBug || {}),
+                summary: (rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : (mapBug?.summary || projectBug?.summary || rawBug.summary || 'Defecto detectado en ciclo'),
+                severity: (rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : (mapBug?.severity || projectBug?.severity || rawBug.severity),
+                assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
+                status: rawBug.status || mapBug?.status || projectBug?.status,
+                resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
+                rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
+              };
 
               const isDone = isBugDone(bug);
-
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
 
               let resName = 'Sin resolver';
@@ -7547,7 +7606,6 @@ const renderPlanningTab = () => {
                 resName = bug.resolution.name;
               }
 
-              const bugKey = bug.key;
               const cycleName = cycle.summary || cycle.key || String(cycle.id);
 
               if (!planAllBugsMap.has(bugKey)) {
@@ -7674,8 +7732,23 @@ const renderPlanningTab = () => {
             const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
 
-            ex.linkedBugs.forEach(bug => {
-              if (!bug || !bug.key || !isActualBug(bug)) return;
+            ex.linkedBugs.forEach(rawBug => {
+              if (!rawBug || !rawBug.key || !isActualBug(rawBug)) return;
+
+              const bugKey = rawBug.key;
+              const projectBug = (unlinkedBugs || []).find(ub => ub.key === bugKey);
+              const mapBug = reportData?.bugMap?.[bugKey];
+              const bug = {
+                ...rawBug,
+                ...(mapBug || {}),
+                ...(projectBug || {}),
+                summary: (rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : (mapBug?.summary || projectBug?.summary || rawBug.summary || 'Defecto detectado en ciclo'),
+                severity: (rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : (mapBug?.severity || projectBug?.severity || rawBug.severity),
+                assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
+                status: rawBug.status || mapBug?.status || projectBug?.status,
+                resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
+                rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
+              };
 
               const isDone = isBugDone(bug);
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
@@ -7688,8 +7761,6 @@ const renderPlanningTab = () => {
               } else if (typeof bug.resolution === 'object' && bug.resolution?.name) {
                 resName = bug.resolution.name;
               }
-
-              const bugKey = bug.key;
 
               // 1. Add to cycleAllBugsMap (All bugs found in the selected cycle runs)
               if (!cycleAllBugsMap.has(bugKey)) {
