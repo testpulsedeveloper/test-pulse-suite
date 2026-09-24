@@ -19,6 +19,34 @@ const generateUUID = () => {
   return 'iter_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
 };
 
+export const normalizeUiStatus = (status) => {
+  if (!status) return 'Not Run';
+  const s = String(status).trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if ([
+    'passed', 'pass', 'listo', 'done', 'aprobado', 'aprobada', 'exito', 'exitoso', 'exitosa',
+    'finalizado', 'finalizada', 'completado', 'completada', 'terminado', 'terminada',
+    'resuelto', 'resuelta', 'resolved', 'closed', 'cerrado', 'cerrada', 'ok',
+    'satisfactorio', 'satisfactoria', 'superado', 'superada', 'conforme', 'validated',
+    'validado', 'validada', 'accepted', 'aceptado', 'aceptada', 'success', 'successful'
+  ].includes(s)) return 'Passed';
+  if ([
+    'failed', 'fail', 'fallido', 'fallida', 'fallo', 'rechazado', 'rechazada',
+    'error', 'defectuoso', 'defectuosa', 'no superado', 'no superada', 'no conforme',
+    'no paso', 'rejected', 'failing', 'bug', 'descartado', 'descartada'
+  ].includes(s)) return 'Failed';
+  if ([
+    'blocked', 'block', 'bloqueado', 'bloqueada', 'bloqueo', 'impedido', 'impedida',
+    'detenido', 'detenida', 'pausado', 'pausada', 'on hold', 'hold', 'detener', 'bloq'
+  ].includes(s)) return 'Blocked';
+  if ([
+    'in progress', 'en curso', 'en progreso', 'running', 'en desarrollo', 'en pruebas',
+    'en ejecucion', 'en revision', 'testing', 'qa', 'in review', 'ejecutando',
+    'en proceso', 'work in progress', 'wip'
+  ].includes(s)) return 'In Progress';
+  return 'Not Run';
+};
+
 const DEFAULT_DASHBOARD_WIDGETS = [
   { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
   { id: 'w_general_status', type: 'general_status', title: 'Estado General de Pruebas', width: 'half', visible: true },
@@ -464,23 +492,23 @@ function TextInputModal({ isOpen, title, label, defaultValue = '', placeholder =
 
 
 const AtlaskitStatusLozenge = ({ status, isBold = true }) => {
-  const norm = (status || 'Not Run').trim().toLowerCase();
+  const norm = normalizeUiStatus(status);
   let appearance = 'default';
   let label = status || 'Not Run';
 
-  if (norm === 'passed' || norm === 'pass') {
+  if (norm === 'Passed') {
     appearance = 'success';
     label = 'PASSED';
-  } else if (norm === 'failed' || norm === 'fail') {
+  } else if (norm === 'Failed') {
     appearance = 'removed';
     label = 'FAILED';
-  } else if (norm === 'blocked') {
+  } else if (norm === 'Blocked') {
     appearance = 'moved';
     label = 'BLOCKED';
-  } else if (norm === 'in progress' || norm === 'running') {
+  } else if (norm === 'In Progress') {
     appearance = 'inprogress';
     label = 'IN PROGRESS';
-  } else if (norm === 'not run' || norm === 'to do') {
+  } else {
     appearance = 'default';
     label = 'NOT RUN';
   }
@@ -525,6 +553,7 @@ function App() {
   const [selectedCycle, setSelectedCycle] = useState(null);
   
   const [cycleTests, setCycleTests] = useState([]);
+  const activeCycleIdRef = useRef(null);   // currently selected / active cycle ID
   const deletedIdsRef = useRef(new Set()); // in-session deletions (current cycle)
   const perCycleDeletedRef = useRef({});   // { [cycleId]: Set<testId> } — persists across cycle switches
   const perCycleCacheRef = useRef({});     // { [cycleId]: Array<TestCase> } — in-memory cache for 0ms transitions
@@ -536,68 +565,77 @@ function App() {
     if (cached && Array.isArray(cached)) {
       return cached.length;
     }
-    if (selectedCycle && String(selectedCycle.id) === cId && cycleTests.length > 0) {
+    if (selectedCycle && String(selectedCycle.id) === cId && activeCycleIdRef.current === cId && cycleTests.length > 0) {
       return cycleTests.length;
     }
     return cycle.testCount !== undefined ? cycle.testCount : (cycle.tests?.length || 0);
   }, [selectedCycle, cycleTests.length]);
 
   const safeSetCycleTests = useCallback((newExecutionData, targetCycleId = null) => {
-      setCycleTests(prev => {
-          if (!newExecutionData || !Array.isArray(newExecutionData)) { console.error('safeSetCycleTests got non-array:', newExecutionData); return prev; }
-          
-          const backendMap = {};
-          newExecutionData.forEach(item => backendMap[item.id] = item);
-          
-          // 1. Keep items we have locally (avoids them disappearing due to backend read-replica delay)
-          //    BUT exclude any IDs that were explicitly deleted
-          const newArray = prev
-            .filter(pItem => !deletedIdsRef.current.has(String(pItem.id)))
-            .map(pItem => {
-                if (backendMap[pItem.id]) {
-                    return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
-                }
-                return pItem;
-            });
-          
-          // 2. Add any items from backend that we DON'T have locally, UNLESS we just deleted them
-          newExecutionData.forEach(item => {
-              const itemKey = item.testCaseKey || item.key;
-              const alreadyExists = newArray.some(pItem => 
-                String(pItem.id) === String(item.id) || 
-                (itemKey && (pItem.testCaseKey === itemKey || pItem.key === itemKey))
-              );
-              if (!alreadyExists && !deletedIdsRef.current.has(String(item.id))) {
-                  newArray.push(item);
-              }
-          });
-          
-          // 3. Deduplicate final array strictly by key and id
-          const dedupedMap = new Map();
-          for (const item of newArray) {
-            const tcKey = item.testCaseKey || item.key;
-            const tcId = String(item.testCaseId || item.id);
-            const dKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
-            if (!dedupedMap.has(dKey)) {
-              dedupedMap.set(dKey, item);
-            } else {
-              const existing = dedupedMap.get(dKey);
-              const hasExec = item.status && item.status !== 'Not Run' && item.status !== 'To Do';
-              const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
-              if (hasExec && !existingHasExec) {
-                dedupedMap.set(dKey, item);
-              }
-            }
-          }
-          const finalDedupedArray = Array.from(dedupedMap.values());
+      const cId = targetCycleId ? String(targetCycleId) : (selectedCycle ? String(selectedCycle.id) : null);
+      if (!cId) return [];
+      if (!newExecutionData || !Array.isArray(newExecutionData)) { 
+        console.error('safeSetCycleTests got non-array:', newExecutionData); 
+        return []; 
+      }
 
-          const cId = targetCycleId ? String(targetCycleId) : (selectedCycle ? String(selectedCycle.id) : null);
-          if (cId) {
-            perCycleCacheRef.current[cId] = finalDedupedArray;
-            setTestCycles(cycles => cycles.map(c => String(c.id) === cId ? { ...c, testCount: finalDedupedArray.length } : c));
+      const deletedForCycle = perCycleDeletedRef.current[cId] || new Set();
+      // CRITICAL FIX: Base local merge on THAT specific cycle's cached tests, NOT the previous active cycle tests!
+      const existingCycleItems = perCycleCacheRef.current[cId] || [];
+      const backendMap = {};
+      newExecutionData.forEach(item => { backendMap[item.id] = item; });
+
+      // 1. Keep items from existing cycle state
+      const merged = existingCycleItems
+        .filter(pItem => !deletedForCycle.has(String(pItem.id)))
+        .map(pItem => {
+          if (backendMap[pItem.id]) {
+            return { ...pItem, ...backendMap[pItem.id], description: pItem.description || backendMap[pItem.id].description };
           }
-          return finalDedupedArray;
+          return pItem;
+        });
+
+      // 2. Add any items from backend that we don't have locally
+      newExecutionData.forEach(item => {
+        const itemKey = item.testCaseKey || item.key;
+        const alreadyExists = merged.some(pItem =>
+          String(pItem.id) === String(item.id) ||
+          (itemKey && (pItem.testCaseKey === itemKey || pItem.key === itemKey))
+        );
+        if (!alreadyExists && !deletedForCycle.has(String(item.id))) {
+          merged.push(item);
+        }
       });
+
+      // 3. Deduplicate final array strictly by key and id
+      const dedupedMap = new Map();
+      for (const item of merged) {
+        const tcKey = item.testCaseKey || item.key;
+        const tcId = String(item.testCaseId || item.id);
+        const dKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
+        if (!dedupedMap.has(dKey)) {
+          dedupedMap.set(dKey, item);
+        } else {
+          const existing = dedupedMap.get(dKey);
+          const hasExec = item.status && normalizeUiStatus(item.status) !== 'Not Run';
+          const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
+          if (hasExec && !existingHasExec) {
+            dedupedMap.set(dKey, item);
+          }
+        }
+      }
+      const finalDedupedArray = Array.from(dedupedMap.values());
+
+      perCycleCacheRef.current[cId] = finalDedupedArray;
+      setTestCycles(cycles => cycles.map(c => String(c.id) === cId ? { ...c, testCount: finalDedupedArray.length } : c));
+
+      // Only update active cycleTests if this target cycle is currently active
+      if (activeCycleIdRef.current === cId) {
+        setCycleTests(finalDedupedArray);
+        setSelectedCycle(prev => (prev && String(prev.id) === cId ? { ...prev, testCount: finalDedupedArray.length } : prev));
+      }
+
+      return finalDedupedArray;
   }, [selectedCycle]);
 
   const [planningFolder, setPlanningFolder] = useState('');
@@ -3774,10 +3812,12 @@ Then el sistema valida la identidad.
   const handleCycleSelect = async (cycle, forceRefresh = false) => {
     if (!cycle) return;
     const cycleId = String(cycle.id);
+    activeCycleIdRef.current = cycleId;
+    prevCycleIdRef.current = cycle.id;
+    prevRefreshRef.current = refreshTrigger;
     deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycleId] || []);
     setPlanningChecked(new Set()); // clear multi-select
     setExecutionChecked(new Set()); // clear execution multi-select
-    setSelectedCycle(cycle);
 
     const cached = perCycleCacheRef.current[cycleId];
     if (cached && Array.isArray(cached) && !forceRefresh) {
@@ -3785,14 +3825,17 @@ Then el sistema valida la identidad.
       setCycleTests(cached);
       setIsLoadingCycleTests(false);
       setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: cached.length } : c));
-      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: cached.length } : prev));
+      setSelectedCycle({ ...cycle, testCount: cached.length });
       return;
     }
 
+    setSelectedCycle(cycle);
     setIsLoadingCycleTests(true);
     setCycleTests([]); // Clear previous cycle items while fetching to avoid jump/mix
     try {
       const executionSummary = await invoke('getCycleExecutionSummary', { cycleId: cycle.id });
+      if (activeCycleIdRef.current !== cycleId) return;
+
       const deletedForCycle = perCycleDeletedRef.current[cycleId] || new Set();
       const enriched = (executionSummary || []).map(ex => {
         if (ex.key && ex.summary) return ex;
@@ -3811,8 +3854,8 @@ Then el sistema valida la identidad.
           dedupedMap.set(dKey, item);
         } else {
           const existing = dedupedMap.get(dKey);
-          const hasExec = item.status && item.status !== 'Not Run' && item.status !== 'To Do';
-          const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+          const hasExec = item.status && normalizeUiStatus(item.status) !== 'Not Run';
+          const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
           if (hasExec && !existingHasExec) {
             dedupedMap.set(dKey, item);
           }
@@ -3821,14 +3864,19 @@ Then el sistema valida la identidad.
       const finalTests = Array.from(dedupedMap.values());
 
       perCycleCacheRef.current[cycleId] = finalTests;
-      setCycleTests(finalTests);
-      // Synchronize exact deduplicated testCount in testCycles permanently
+      if (activeCycleIdRef.current === cycleId) {
+        setCycleTests(finalTests);
+        setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: finalTests.length } : prev));
+      }
       setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: finalTests.length } : c));
-      setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: finalTests.length } : prev));
     } catch (err) {
-      addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
+      if (activeCycleIdRef.current === cycleId) {
+        addNotification({ type: 'error', title: 'Error cargando casos', description: err.message });
+      }
     } finally {
-      setIsLoadingCycleTests(false);
+      if (activeCycleIdRef.current === cycleId) {
+        setIsLoadingCycleTests(false);
+      }
     }
   };
 
@@ -4758,6 +4806,8 @@ Then el sistema valida la identidad.
       setIsLoadingCycleTests(true);
       invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id })
         .then(async (executionSummary) => {
+          if (activeCycleIdRef.current !== cycleId) return;
+
           if (!executionSummary || executionSummary.length === 0) {
             perCycleCacheRef.current[cycleId] = [];
             setCycleTests([]); // direct set
@@ -4795,19 +4845,18 @@ Then el sistema valida la identidad.
           });
           
           perCycleCacheRef.current[cycleId] = filteredEnriched;
-          setCycleTests(filteredEnriched);
+          if (activeCycleIdRef.current === cycleId) {
+            setCycleTests(filteredEnriched);
+          }
           setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filteredEnriched.length } : c));
         })
         .finally(() => {
-          setIsLoadingCycleTests(false);
+          if (activeCycleIdRef.current === cycleId) {
+            setIsLoadingCycleTests(false);
+          }
         });
     } else if (activeTab === 'reports') {
-      if (reportData.cycles.length === 0) {
-        loadReportData();
-      } else if (prevRefreshRef.current !== refreshTrigger && refreshTrigger > 0) {
-        prevRefreshRef.current = refreshTrigger;
-        loadReportData();
-      }
+      loadReportData();
     }
   }, [activeTab, selectedCycle, refreshTrigger]);
 
@@ -4923,24 +4972,26 @@ Then el sistema valida la identidad.
   };
 
   const getStatusColor = (status) => {
-    const s = status === 'To Do' ? 'Not Run' : status;
+    const s = normalizeUiStatus(status);
     switch(s) {
-      case 'Passed': return 'var(--success-bg)';
-      case 'Failed': return 'var(--danger-bg)';
-      case 'Blocked': return '#fff0b3';
+      case 'Passed': return 'var(--success-bg, #DCFFF1)';
+      case 'Failed': return 'var(--danger-bg, #FFEBE6)';
+      case 'Blocked': return '#FFF0B3';
+      case 'In Progress': return '#DEEBFF';
       case 'Not Run':
-      default: return '#deebff';
+      default: return '#F1F2F4';
     }
   };
 
   const getStatusTextColor = (status) => {
-    const s = status === 'To Do' ? 'Not Run' : status;
+    const s = normalizeUiStatus(status);
     switch(s) {
-      case 'Passed': return 'var(--success-color)';
-      case 'Failed': return 'var(--danger-color)';
-      case 'Blocked': return '#ff8b00'; 
+      case 'Passed': return 'var(--success-color, #216E4E)';
+      case 'Failed': return 'var(--danger-color, #BF2600)';
+      case 'Blocked': return '#172B4D'; 
+      case 'In Progress': return '#0747A6';
       case 'Not Run':
-      default: return '#0052cc'; 
+      default: return '#44546F'; 
     }
   };
 
@@ -4965,8 +5016,8 @@ const renderPlanningTab = () => {
         uniqueCycleTestsMap.set(dedupeKey, test);
       } else {
         const existing = uniqueCycleTestsMap.get(dedupeKey);
-        const hasExec = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
-        const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+        const hasExec = test.status && normalizeUiStatus(test.status) !== 'Not Run';
+        const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
         if (hasExec && !existingHasExec) {
           uniqueCycleTestsMap.set(dedupeKey, test);
         }
@@ -5263,7 +5314,7 @@ const renderPlanningTab = () => {
                             const selectedIds = [...planningChecked];
                             const executedCount = selectedIds.filter(id => {
                               const t = deduplicatedCycleTests.find(ct => String(ct.id) === String(id));
-                              return t && t.status && t.status !== 'Not Run' && t.status !== 'To Do';
+                              return t && t.status && normalizeUiStatus(t.status) !== 'Not Run';
                             }).length;
                             const msg = executedCount > 0
                               ? `¿Remover ${selectedIds.length} caso${selectedIds.length !== 1 ? 's' : ''} del ciclo? (${executedCount} de ellos ya cuentan con ejecución registrada y sus datos quedarán preservados en Jira).`
@@ -5285,7 +5336,7 @@ const renderPlanningTab = () => {
                           style={{ color: '#CA3521', height: '28px', fontSize: '11px', fontWeight: 600, padding: '0 8px' }}
                           onClick={() => {
                             const allIds = deduplicatedCycleTests.map(t => t.id);
-                            const executedCount = deduplicatedCycleTests.filter(t => t.status && t.status !== 'Not Run' && t.status !== 'To Do').length;
+                            const executedCount = deduplicatedCycleTests.filter(t => t.status && normalizeUiStatus(t.status) !== 'Not Run').length;
                             const msg = executedCount > 0
                               ? `¿Remover TODOS los ${deduplicatedCycleTests.length} casos del ciclo? (${executedCount} caso${executedCount !== 1 ? 's' : ''} cuentan con ejecuciones que quedarán preservadas de forma segura en Jira).`
                               : `¿Eliminar TODOS los ${deduplicatedCycleTests.length} casos del ciclo?`;
@@ -5377,7 +5428,7 @@ const renderPlanningTab = () => {
                                   className="btn-secondary"
                                   style={{ color: '#CA3521', padding: '2px 6px', height: '26px' }}
                                   onClick={() => {
-                                    const isExecuted = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
+                                    const isExecuted = test.status && normalizeUiStatus(test.status) !== 'Not Run';
                                     if (isExecuted) {
                                       showConfirm(
                                         'Remover caso ejecutado',
@@ -5598,26 +5649,28 @@ const renderPlanningTab = () => {
                                status: 'Not Run'
                             }));
                             
-                            setCycleTests(prev => {
-                                const newArr = [...prev];
-                                locallyAdded.forEach(lt => {
-                                    let finalItem = lt;
-                                    if (allAddedTests && allAddedTests.length > 0) {
-                                        const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
-                                        if (matched) {
-                                            finalItem = { ...lt, ...matched };
-                                        }
+                            const cycleIdStr = String(cycleId);
+                            const existingBase = perCycleCacheRef.current[cycleIdStr] || [];
+                            const newArr = [...existingBase];
+                            locallyAdded.forEach(lt => {
+                                let finalItem = lt;
+                                if (allAddedTests && allAddedTests.length > 0) {
+                                    const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
+                                    if (matched) {
+                                        finalItem = { ...lt, ...matched };
                                     }
-                                    
-                                    if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
-                                        newArr.push(finalItem);
-                                    }
-                                });
-                                perCycleCacheRef.current[cycleId] = newArr;
-                                setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: newArr.length } : c));
-                                setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: newArr.length } : c));
-                                return newArr;
+                                }
+                                
+                                if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
+                                    newArr.push(finalItem);
+                                }
                             });
+                            perCycleCacheRef.current[cycleIdStr] = newArr;
+                            setTestCycles(cycles => cycles.map(c => String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
+                            if (activeCycleIdRef.current === cycleIdStr) {
+                              setCycleTests(newArr);
+                              setSelectedCycle(c => (c && String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
+                            }
                             
                             const recoveredCount = (allAddedTests || []).filter(t => t.isRecovered).length;
                             if (recoveredCount > 0) {
@@ -5818,11 +5871,11 @@ const renderPlanningTab = () => {
   };
 
   const renderExecutionTab = () => {
-    const isPassed = s => ['Pass', 'Passed'].includes(s);
-    const isFailed = s => ['Fail', 'Failed'].includes(s);
-    const isBlocked = s => ['Block', 'Blocked'].includes(s);
-    const isInProgress = s => ['In Progress'].includes(s);
-    const isNotRun = s => !s || ['To Do', 'Not Run', 'None'].includes(s) || (!isPassed(s) && !isFailed(s) && !isBlocked(s) && !isInProgress(s));
+    const isPassed = s => normalizeUiStatus(s) === 'Passed';
+    const isFailed = s => normalizeUiStatus(s) === 'Failed';
+    const isBlocked = s => normalizeUiStatus(s) === 'Blocked';
+    const isInProgress = s => normalizeUiStatus(s) === 'In Progress';
+    const isNotRun = s => normalizeUiStatus(s) === 'Not Run';
 
     // Deduplicate cycleTests strictly to guarantee zero duplicate artifacts
     const uniqueCycleTestsMap = new Map();
@@ -5832,8 +5885,8 @@ const renderPlanningTab = () => {
         uniqueCycleTestsMap.set(matchKey, test);
       } else {
         const existing = uniqueCycleTestsMap.get(matchKey);
-        const hasExec = test.status && test.status !== 'Not Run' && test.status !== 'To Do';
-        const existingHasExec = existing.status && existing.status !== 'Not Run' && existing.status !== 'To Do';
+        const hasExec = test.status && normalizeUiStatus(test.status) !== 'Not Run';
+        const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
         if (hasExec && !existingHasExec) {
           uniqueCycleTestsMap.set(matchKey, test);
         }
@@ -7084,7 +7137,7 @@ const renderPlanningTab = () => {
                                     }
                                   }}
                                 >
-                                  {runningTests[test.id] ? '⏹ Detener Ejecución' : (test.status && test.status !== 'Not Run' ? '🔄 Reanudar este Caso' : '▶ Iniciar Ejecución')}
+                                  {runningTests[test.id] ? '⏹ Detener Ejecución' : (test.status && normalizeUiStatus(test.status) !== 'Not Run' ? '🔄 Reanudar este Caso' : '▶ Iniciar Ejecución')}
                                 </button>
                               </div>
                             </div>
@@ -7290,7 +7343,45 @@ const renderPlanningTab = () => {
     }
 
     // 1. Plan Cycles (all cycles within the selected plan(s), or all cycles if no plan filter)
-    let planCycles = reportData.cycles || [];
+    const baseReportCycles = reportData.cycles || [];
+    let planCycles = baseReportCycles.map(c => {
+      const cIdStr = String(c.id);
+      const cached = perCycleCacheRef.current[cIdStr];
+      if (cached && Array.isArray(cached) && cached.length > 0) {
+        const execMap = new Map();
+        (c.execution || []).forEach(item => {
+          const k = item.testCaseKey || item.key || item.id;
+          if (k) execMap.set(String(k), item);
+        });
+        // Live in-memory execution from Planning/Execution takes precedence for completeness & latest status
+        (cached || []).forEach(item => {
+          const k = item.testCaseKey || item.key || item.id;
+          if (k) execMap.set(String(k), item);
+        });
+        return {
+          ...c,
+          execution: Array.from(execMap.values())
+        };
+      }
+      return c;
+    });
+
+    // Also include any cycles from testCycles that might belong to the plan but aren't yet in reportData
+    (testCycles || []).forEach(tcCycle => {
+      const exists = planCycles.some(pc => String(pc.id) === String(tcCycle.id));
+      if (!exists) {
+        const cIdStr = String(tcCycle.id);
+        const cached = perCycleCacheRef.current[cIdStr] || [];
+        planCycles.push({
+          id: tcCycle.id,
+          key: tcCycle.key,
+          summary: tcCycle.summary,
+          planId: tcCycle.planId,
+          execution: cached
+        });
+      }
+    });
+
     if (reportSelectedPlans && reportSelectedPlans.length > 0) {
       planCycles = planCycles.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)));
     }
@@ -7520,10 +7611,11 @@ const renderPlanningTab = () => {
 
           const tc = testCases.find(t => String(t.id) === String(ex.id));
 
+          const normExStatus = normalizeUiStatus(ex.status);
           totalCases++;
-          if (ex.status === 'Passed') passed++;
-          else if (ex.status === 'Failed') failed++;
-          else if (ex.status === 'Blocked') blocked++;
+          if (normExStatus === 'Passed') passed++;
+          else if (normExStatus === 'Failed') failed++;
+          else if (normExStatus === 'Blocked') blocked++;
           else notRun++;
           
           // Exec Type
@@ -7536,18 +7628,18 @@ const renderPlanningTab = () => {
           }
           const stats = isAuto ? execStats.auto : execStats.manual;
           stats.total++;
-          if (ex.status === 'Passed') stats.passed++;
-          else if (ex.status === 'Failed') stats.failed++;
-          else if (ex.status === 'Blocked') stats.blocked++;
+          if (normExStatus === 'Passed') stats.passed++;
+          else if (normExStatus === 'Failed') stats.failed++;
+          else if (normExStatus === 'Blocked') stats.blocked++;
           else stats.notRun++;
 
           // Tester
           const tester = (ex.executedBy && typeof ex.executedBy === 'object') ? (ex.executedBy.displayName || ex.executedBy.name || 'Sin asignar') : (ex.executedBy || 'Sin asignar');
           if (!testerStats[tester]) testerStats[tester] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
           testerStats[tester].total++;
-          if (ex.status === 'Passed') testerStats[tester].passed++;
-          else if (ex.status === 'Failed') testerStats[tester].failed++;
-          else if (ex.status === 'Blocked') testerStats[tester].blocked++;
+          if (normExStatus === 'Passed') testerStats[tester].passed++;
+          else if (normExStatus === 'Failed') testerStats[tester].failed++;
+          else if (normExStatus === 'Blocked') testerStats[tester].blocked++;
           else testerStats[tester].notRun++;
 
           // Module / Folder Stats (Only Functional Tests)
@@ -7556,9 +7648,9 @@ const renderPlanningTab = () => {
             const folderName = folderObj?.name || tc?.folderName || tc?.folder || 'General';
             if (!moduleStats[folderName]) moduleStats[folderName] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
             moduleStats[folderName].total++;
-            if (ex.status === 'Passed') moduleStats[folderName].passed++;
-            else if (ex.status === 'Failed') moduleStats[folderName].failed++;
-            else if (ex.status === 'Blocked') moduleStats[folderName].blocked++;
+            if (normExStatus === 'Passed') moduleStats[folderName].passed++;
+            else if (normExStatus === 'Failed') moduleStats[folderName].failed++;
+            else if (normExStatus === 'Blocked') moduleStats[folderName].blocked++;
             else moduleStats[folderName].notRun++;
           }
 
@@ -7570,9 +7662,9 @@ const renderPlanningTab = () => {
               const folderPath = fObj.path;
               if (!featureStats[folderPath]) featureStats[folderPath] = { passed: 0, failed: 0, blocked: 0, notRun: 0, total: 0 };
               featureStats[folderPath].total++;
-              if (ex.status === 'Passed') featureStats[folderPath].passed++;
-              else if (ex.status === 'Failed') featureStats[folderPath].failed++;
-              else if (ex.status === 'Blocked') featureStats[folderPath].blocked++;
+              if (normExStatus === 'Passed') featureStats[folderPath].passed++;
+              else if (normExStatus === 'Failed') featureStats[folderPath].failed++;
+              else if (normExStatus === 'Blocked') featureStats[folderPath].blocked++;
               else featureStats[folderPath].notRun++;
             }
           }
@@ -9334,9 +9426,10 @@ const renderPlanningTab = () => {
                                   let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
                                   if (cycle.execution && Array.isArray(cycle.execution)) {
                                     cycle.execution.forEach(ex => {
-                                      if (ex.status === 'Passed') cPassed++;
-                                      else if (ex.status === 'Failed') cFailed++;
-                                      else if (ex.status === 'Blocked') cBlocked++;
+                                      const normS = normalizeUiStatus(ex.status);
+                                      if (normS === 'Passed') cPassed++;
+                                      else if (normS === 'Failed') cFailed++;
+                                      else if (normS === 'Blocked') cBlocked++;
                                       else cNotRun++;
                                     });
                                   }
@@ -10072,13 +10165,11 @@ const renderPlanningTab = () => {
 
                           {/* 5. Estado Ejecución */}
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            {row.status === 'Passed' && <span className="ads-lozenge ads-lozenge-success" style={{ fontWeight: 700 }}>Passed</span>}
-                            {row.status === 'Failed' && <span className="ads-lozenge ads-lozenge-danger" style={{ fontWeight: 700 }}>Failed</span>}
-                            {row.status === 'Blocked' && <span className="ads-lozenge ads-lozenge-warning" style={{ fontWeight: 700 }}>Blocked</span>}
-                            {row.status === 'NOT_RUN' && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontWeight: 700 }}>Not Run</span>}
-                            {!['Passed', 'Failed', 'Blocked', 'NOT_RUN'].includes(row.status) && (
-                              <span className="ads-lozenge ads-lozenge-subtle">{row.status}</span>
-                            )}
+                            {normalizeUiStatus(row.status) === 'Passed' && <span className="ads-lozenge ads-lozenge-success" style={{ fontWeight: 700 }}>Passed</span>}
+                            {normalizeUiStatus(row.status) === 'Failed' && <span className="ads-lozenge ads-lozenge-danger" style={{ fontWeight: 700 }}>Failed</span>}
+                            {normalizeUiStatus(row.status) === 'Blocked' && <span className="ads-lozenge ads-lozenge-warning" style={{ fontWeight: 700 }}>Blocked</span>}
+                            {normalizeUiStatus(row.status) === 'In Progress' && <span className="ads-lozenge ads-lozenge-inprogress" style={{ fontWeight: 700, backgroundColor: '#DEEBFF', color: '#0747A6' }}>In Progress</span>}
+                            {normalizeUiStatus(row.status) === 'Not Run' && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontWeight: 700 }}>Not Run</span>}
                           </td>
 
                           {/* 6. Defectos Vinculados */}

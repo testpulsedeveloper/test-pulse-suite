@@ -870,7 +870,7 @@ const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 //   [...] → tests in the index
 const readCycleIndex = async (cycleId) => {
   const allEntries = [];
-  for (let shard = 0; shard <= 10; shard++) {          // max 10 shards = 2000 tests
+  for (let shard = 0; shard <= 25; shard++) {          // max 25 shards = 2500+ tests
     const propName = _shardProp(shard);
     const res = await api.asUser().requestJira(
       route`/rest/api/3/issue/${cycleId}/properties/${propName}?t=${Date.now()}`
@@ -882,12 +882,14 @@ const readCycleIndex = async (cycleId) => {
     if (!res.ok) break;
     const data = await res.json();
     const raw = data.value || [];
-    if (raw.length === 0) break;     // Empty shard → explicitly cleared or end of data
+    if (!Array.isArray(raw) || raw.length === 0) {
+      if (shard === 0) return [];
+      break;
+    }
     const normalized = (typeof raw[0] === 'string')
       ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
       : raw;
     allEntries.push(...normalized);
-    if (normalized.length < SHARD_SIZE) break;          // last (partial) shard → done
   }
   return allEntries; // [] = explicitly cleared, [...] = has tests
 };
@@ -922,6 +924,14 @@ const writeCycleIndex = async (cycleId, entries) => {
       await new Promise(r => setTimeout(r, 80));
     }
   }
+
+  // Clean up any remaining trailing shards
+  for (let oldShard = shardCount; oldShard <= 25; oldShard++) {
+    const propName = _shardProp(oldShard);
+    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
+      method: 'DELETE'
+    }).catch(() => {});
+  }
 };
 
 const deleteCycleIndex = async (cycleId) => {
@@ -937,12 +947,45 @@ const deleteCycleIndex = async (cycleId) => {
 
 function normalizeJiraStatus(status) {
   if (!status) return 'Not Run';
-  const s = String(status).trim().toLowerCase();
-  if (s === 'passed' || s === 'pass' || s === 'listo' || s === 'done' || s === 'aprobado' || s === 'éxito' || s === 'exito') return 'Passed';
-  if (s === 'failed' || s === 'fail' || s === 'fallido' || s === 'rechazado' || s === 'error') return 'Failed';
-  if (s === 'blocked' || s === 'bloqueado') return 'Blocked';
-  if (s === 'in progress' || s === 'en curso' || s === 'en progreso' || s === 'running') return 'In Progress';
-  if (s === 'not run' || s === 'to do' || s === 'por hacer' || s === 'pendiente') return 'Not Run';
+  const s = String(status).trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // removes accents: éxito -> exito, ejecución -> ejecucion
+    
+  // 1. PASSED / LISTO / ÉXITO / APROBADO / RESUELTO / FINALIZADO
+  if ([
+    'passed', 'pass', 'listo', 'done', 'aprobado', 'aprobada', 'exito', 'exitoso', 'exitosa',
+    'finalizado', 'finalizada', 'completado', 'completada', 'terminado', 'terminada',
+    'resuelto', 'resuelta', 'resolved', 'closed', 'cerrado', 'cerrada', 'ok',
+    'satisfactorio', 'satisfactoria', 'superado', 'superada', 'conforme', 'validated',
+    'validado', 'validada', 'accepted', 'aceptado', 'aceptada', 'success', 'successful'
+  ].includes(s)) return 'Passed';
+
+  // 2. FAILED / FALLIDO / RECHAZADO / ERROR
+  if ([
+    'failed', 'fail', 'fallido', 'fallida', 'fallo', 'rechazado', 'rechazada',
+    'error', 'defectuoso', 'defectuosa', 'no superado', 'no superada', 'no conforme',
+    'no paso', 'rejected', 'failing', 'bug', 'descartado', 'descartada'
+  ].includes(s)) return 'Failed';
+
+  // 3. BLOCKED / BLOQUEADO / IMPEDIDO
+  if ([
+    'blocked', 'block', 'bloqueado', 'bloqueada', 'bloqueo', 'impedido', 'impedida',
+    'detenido', 'detenida', 'pausado', 'pausada', 'on hold', 'hold', 'detener', 'bloq'
+  ].includes(s)) return 'Blocked';
+
+  // 4. IN PROGRESS / EN CURSO / EN PROGRESO / TESTING
+  if ([
+    'in progress', 'en curso', 'en progreso', 'running', 'en desarrollo', 'en pruebas',
+    'en ejecucion', 'en revision', 'testing', 'qa', 'in review', 'ejecutando',
+    'en proceso', 'work in progress', 'wip'
+  ].includes(s)) return 'In Progress';
+
+  // 5. NOT RUN / TO DO / POR HACER / PENDIENTE / ABIERTO
+  if ([
+    'not run', 'to do', 'por hacer', 'pendiente', 'abierto', 'open', 'backlog',
+    'nuevo', 'new', 'sin ejecutar', 'none', 'unexecuted', 'draft', 'borrador',
+    'por probar', 'to test', 'untested'
+  ].includes(s)) return 'Not Run';
+
   return status;
 }
 
@@ -1259,34 +1302,55 @@ const getCycleExecutionSummary = async (cycleId) => {
         const prop = run.properties?.['testpulse-run-data'];
         const type = run.fields?.issuetype?.name || '';
         const isRunType = ['Test Run', 'TestRun', 'Ejecución de prueba', 'Ejecución', 'Test Execution'].some(t => type.toLowerCase().includes(t.toLowerCase()));
-        return prop || summary.startsWith('[Run]') || isRunType;
+        const isTcType = ['Test Case', 'TestCase', 'Caso de prueba', 'Caso de Prueba', 'Prueba', 'Test', 'Tarea', 'Task'].some(t => type.toLowerCase().includes(t.toLowerCase()));
+        return prop || summary.startsWith('[Run]') || isRunType || isTcType;
       });
 
       if (validRuns.length > 0) {
         // Map each run to its resolved tcId/tcKey and full data object
         const mappedRuns = validRuns.map(run => {
           const runData = run.properties?.['testpulse-run-data'] || {};
-          let tcKey = runData.testCaseKey || (run.fields?.issuelinks || [])
-            .map(l => l.outwardIssue || l.inwardIssue)
-            .filter(Boolean)
-            .find(i => String(i.id) !== String(cycleId))?.key || '';
+          const type = run.fields?.issuetype?.name || '';
+          const isDirectTc = ['Test Case', 'TestCase', 'Caso de prueba', 'Caso de Prueba', 'Prueba'].some(t => type.toLowerCase().includes(t.toLowerCase()));
+
+          let tcKey = runData.testCaseKey || (isDirectTc ? run.key : '');
+          if (!tcKey) {
+            tcKey = (run.fields?.issuelinks || [])
+              .map(l => l.outwardIssue || l.inwardIssue)
+              .filter(Boolean)
+              .find(i => String(i.id) !== String(cycleId))?.key || '';
+          }
           if (!tcKey && run.fields?.summary) {
             const match = run.fields.summary.match(/\[Run\]\s*([A-Z0-9_-]+):/i);
             if (match && match[1]) tcKey = match[1];
           }
-          const tcId = runData.testCaseId || (run.fields?.issuelinks || [])
-            .map(l => l.outwardIssue || l.inwardIssue)
-            .filter(Boolean)
-            .find(i => String(i.id) !== String(cycleId))?.id || (tcKey || run.id);
+          let tcId = runData.testCaseId || (isDirectTc ? String(run.id) : '');
+          if (!tcId) {
+            tcId = (run.fields?.issuelinks || [])
+              .map(l => l.outwardIssue || l.inwardIssue)
+              .filter(Boolean)
+              .find(i => String(i.id) !== String(cycleId))?.id || (tcKey || run.id);
+          }
 
           const nativeStatusName = run.fields?.status?.name || '';
           const normNativeStatus = normalizeJiraStatus(nativeStatusName);
           const runDataStatus = runData.status ? normalizeJiraStatus(runData.status) : null;
+          
+          // Status Resolution:
+          // 1. If explicit execution in Test Pulse, preserve TP status
+          // 2. If TP is Not Run or unexecuted, fallback to live Jira native status
           let normStatus = 'Not Run';
-          if (normNativeStatus && normNativeStatus !== 'Not Run') normStatus = normNativeStatus;
-          else if (runDataStatus && runDataStatus !== 'Not Run') normStatus = runDataStatus;
-          else if (normNativeStatus) normStatus = normNativeStatus;
-          else if (runDataStatus) normStatus = runDataStatus;
+          const hasTpExplicitExec = runDataStatus && runDataStatus !== 'Not Run' && (runData.executedBy || (runData.evidences && runData.evidences.length > 0) || (runData.iterations && runData.iterations.length > 0) || ['Passed', 'Failed', 'Blocked'].includes(runDataStatus));
+
+          if (hasTpExplicitExec) {
+            normStatus = runDataStatus;
+          } else if (normNativeStatus && normNativeStatus !== 'Not Run') {
+            normStatus = normNativeStatus;
+          } else if (runDataStatus) {
+            normStatus = runDataStatus;
+          } else if (normNativeStatus) {
+            normStatus = normNativeStatus;
+          }
 
           const runDesc = run.fields?.description;
           const isGenericDesc = typeof runDesc === 'string' && runDesc.includes('Test Run execution for test case');
@@ -1376,12 +1440,19 @@ const getCycleExecutionSummary = async (cycleId) => {
           return clean;
         });
 
-        // Reconcile cycle property in background so getTestCycles matches native linked runs 100%
-        api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution`, {
-          method: 'PUT',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(cleanEntries.map(e => ({ id: e.id, key: e.key, status: e.status, executionType: e.executionType, testRunId: e.testRunId })))
-        }).catch(() => {});
+        // Reconcile cycle sharded index in background so getTestCycles and Dashboard match live Jira runs
+        writeCycleIndex(cycleId, cleanEntries.map(e => ({
+          id: String(e.id),
+          key: e.key,
+          testCaseKey: e.testCaseKey || e.key,
+          testRunId: e.testRunId,
+          testRunKey: e.testRunKey,
+          summary: e.summary,
+          status: e.status,
+          nativeStatus: e.nativeStatus || e.status,
+          executionType: e.executionType || 'Manual',
+          linkedBugs: e.linkedBugs || []
+        }))).catch(() => {});
 
         return cleanEntries;
       }
@@ -1480,6 +1551,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       if (!seenTc.has(dKey)) {
         seenTc.add(dKey);
         const { _stub, ...rest } = item;
+        rest.status = normalizeJiraStatus(rest.status);
         execution.push(rest);
       }
     }
@@ -1686,14 +1758,16 @@ resolver.define('getTestExecution', async ({ payload }) => {
         const runDataStatus = prop.status ? normalizeJiraStatus(prop.status) : null;
         
         let normStatus = 'Not Run';
-        if (normNativeStatus && normNativeStatus !== 'Not Run') {
-          normStatus = normNativeStatus;
-        } else if (runDataStatus && runDataStatus !== 'Not Run') {
+        const hasTpExplicitExec = runDataStatus && runDataStatus !== 'Not Run' && (prop.executedBy || (prop.evidences && prop.evidences.length > 0) || (prop.iterations && prop.iterations.length > 0) || ['Passed', 'Failed', 'Blocked'].includes(runDataStatus));
+
+        if (hasTpExplicitExec) {
           normStatus = runDataStatus;
-        } else if (normNativeStatus) {
+        } else if (normNativeStatus && normNativeStatus !== 'Not Run') {
           normStatus = normNativeStatus;
         } else if (runDataStatus) {
           normStatus = runDataStatus;
+        } else if (normNativeStatus) {
+          normStatus = normNativeStatus;
         }
 
         return {
@@ -2994,38 +3068,50 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
     const prop = run.properties?.['testpulse-run-data'];
     const type = run.fields?.issuetype?.name || '';
     const isRunType = ['Test Run', 'TestRun', 'Ejecución de prueba', 'Ejecución', 'Test Execution'].some(t => type.toLowerCase().includes(t.toLowerCase()));
-    return prop || summary.startsWith('[Run]') || isRunType;
+    const isTcType = ['Test Case', 'TestCase', 'Caso de prueba', 'Caso de Prueba', 'Prueba', 'Test', 'Tarea', 'Task'].some(t => type.toLowerCase().includes(t.toLowerCase()));
+    return prop || summary.startsWith('[Run]') || isRunType || isTcType;
   });
 
   const indexEntries = validRuns.map(run => {
     const runData = run.properties?.['testpulse-run-data'] || {};
-    let tcKey = runData.testCaseKey || (run.fields?.issuelinks || [])
-      .map(l => l.outwardIssue || l.inwardIssue)
-      .filter(Boolean)
-      .find(i => String(i.id) !== String(cycleId))?.key || '';
+    const type = run.fields?.issuetype?.name || '';
+    const isDirectTc = ['Test Case', 'TestCase', 'Caso de prueba', 'Caso de Prueba', 'Prueba'].some(t => type.toLowerCase().includes(t.toLowerCase()));
+
+    let tcKey = runData.testCaseKey || (isDirectTc ? run.key : '');
+    if (!tcKey) {
+      tcKey = (run.fields?.issuelinks || [])
+        .map(l => l.outwardIssue || l.inwardIssue)
+        .filter(Boolean)
+        .find(i => String(i.id) !== String(cycleId))?.key || '';
+    }
     if (!tcKey && run.fields?.summary) {
       const match = run.fields.summary.match(/\[Run\]\s*([A-Z0-9_-]+):/i);
       if (match && match[1]) {
         tcKey = match[1];
       }
     }
-    const tcId = runData.testCaseId || (run.fields?.issuelinks || [])
-      .map(l => l.outwardIssue || l.inwardIssue)
-      .filter(Boolean)
-      .find(i => String(i.id) !== String(cycleId))?.id || (tcKey || run.id);
+    let tcId = runData.testCaseId || (isDirectTc ? String(run.id) : '');
+    if (!tcId) {
+      tcId = (run.fields?.issuelinks || [])
+        .map(l => l.outwardIssue || l.inwardIssue)
+        .filter(Boolean)
+        .find(i => String(i.id) !== String(cycleId))?.id || (tcKey || run.id);
+    }
     
     const nativeStatusName = run.fields?.status?.name || '';
     const normNativeStatus = normalizeJiraStatus(nativeStatusName);
     const runDataStatus = runData.status ? normalizeJiraStatus(runData.status) : null;
     let normStatus = 'Not Run';
-    if (normNativeStatus && normNativeStatus !== 'Not Run') {
-      normStatus = normNativeStatus;
-    } else if (runDataStatus && runDataStatus !== 'Not Run') {
+    const hasTpExplicitExec = runDataStatus && runDataStatus !== 'Not Run' && (runData.executedBy || (runData.evidences && runData.evidences.length > 0) || (runData.iterations && runData.iterations.length > 0) || ['Passed', 'Failed', 'Blocked'].includes(runDataStatus));
+
+    if (hasTpExplicitExec) {
       normStatus = runDataStatus;
-    } else if (normNativeStatus) {
+    } else if (normNativeStatus && normNativeStatus !== 'Not Run') {
       normStatus = normNativeStatus;
     } else if (runDataStatus) {
       normStatus = runDataStatus;
+    } else if (normNativeStatus) {
+      normStatus = normNativeStatus;
     }
 
     return {
