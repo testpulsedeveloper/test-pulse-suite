@@ -130,7 +130,28 @@ resolver.define('probeAPI', async () => {
 });
 
 
-// === Evidences Deduplication Helper ===
+// === Evidences Deduplication & Isolation Helpers ===
+const getIterationEvidenceKeys = (iterations) => {
+  const keys = new Set();
+  if (Array.isArray(iterations)) {
+    for (const iter of iterations) {
+      if (Array.isArray(iter?.evidences)) {
+        for (const ev of iter.evidences) {
+          if (!ev) continue;
+          if (typeof ev === 'object') {
+            if (ev.id) keys.add(String(ev.id));
+            if (ev.filename) keys.add(String(ev.filename));
+            if (ev.url) keys.add(String(ev.url));
+          } else {
+            keys.add(String(ev));
+          }
+        }
+      }
+    }
+  }
+  return keys;
+};
+
 const dedupeEvidences = (list) => {
   if (!Array.isArray(list)) return [];
   const seen = new Set();
@@ -148,6 +169,22 @@ const dedupeEvidences = (list) => {
     }
   }
   return result;
+};
+
+const filterNonIterationEvidences = (evidencesList, iterationKeys) => {
+  if (!Array.isArray(evidencesList)) return [];
+  const deduped = dedupeEvidences(evidencesList);
+  if (!iterationKeys || iterationKeys.size === 0) return deduped;
+  return deduped.filter(ev => {
+    if (!ev) return false;
+    const evId = typeof ev === 'object' ? (ev.id ? String(ev.id) : null) : String(ev);
+    const evUrl = typeof ev === 'object' && ev.url ? String(ev.url) : null;
+    const evName = typeof ev === 'object' && ev.filename ? String(ev.filename) : (typeof ev === 'string' ? ev : null);
+    if (evId && iterationKeys.has(evId)) return false;
+    if (evUrl && iterationKeys.has(evUrl)) return false;
+    if (evName && iterationKeys.has(evName)) return false;
+    return true;
+  });
 };
 
 // === Atlassian Document Format (ADF) Helper ===
@@ -1102,10 +1139,10 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
             assignee: existingRun.fields?.assignee || null,
             executedBy: existingProp.executedBy || (existingRun.fields?.assignee ? { displayName: existingRun.fields.assignee.displayName, accountId: existingRun.fields.assignee.accountId } : null),
             executedAt: existingProp.executedAt || null,
-            evidences: dedupeEvidences([
+            evidences: filterNonIterationEvidences([
               ...(existingRun.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
               ...(existingProp.evidences || [])
-            ]),
+            ], getIterationEvidenceKeys(existingProp.iterations)),
             iterations: existingProp.iterations || [],
             comment: existingProp.comment || '',
             linkedBugs: existingProp.linkedBugs || [],
@@ -1378,10 +1415,10 @@ const getCycleExecutionSummary = async (cycleId) => {
             assignee: run.fields?.assignee || null,
             executedBy: runData.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
             executedAt: runData.executedAt || null,
-            evidences: dedupeEvidences([
+            evidences: filterNonIterationEvidences([
               ...(run.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
               ...(runData.evidences || [])
-            ]),
+            ], getIterationEvidenceKeys(runData.iterations)),
             iterations: runData.iterations || [],
             comment: runData.comment || '',
             linkedBugs: (runData.linkedBugs && runData.linkedBugs.length > 0)
@@ -1487,7 +1524,7 @@ const getCycleExecutionSummary = async (cycleId) => {
       executedAt: entry.executedAt || null,
       comment: entry.comment || '',
       iterations: entry.iterations || [],
-      evidences: entry.evidences || [],
+      evidences: filterNonIterationEvidences(entry.evidences || [], getIterationEvidenceKeys(entry.iterations)),
       linkedBugs: entry.linkedBugs || [],
       lockedAt: entry.lockedAt || null,
       _detailLoaded: true
@@ -1511,7 +1548,7 @@ const getCycleExecutionSummary = async (cycleId) => {
       executedAt: entry.executedAt || null,
       comment: entry.comment || '',
       iterations: entry.iterations || [],
-      evidences: entry.evidences || [],
+      evidences: filterNonIterationEvidences(entry.evidences || [], getIterationEvidenceKeys(entry.iterations)),
       linkedBugs: entry.linkedBugs || [],
       lockedAt: entry.lockedAt || null,
       _detailLoaded: true
@@ -1875,10 +1912,10 @@ resolver.define('getTestExecution', async ({ payload }) => {
           nativeStatus: nativeStatusName || normStatus,
           comment: prop.comment || '',
           iterations: prop.iterations || [],
-          evidences: dedupeEvidences([
+          evidences: filterNonIterationEvidences([
             ...(runIssue.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
             ...(prop.evidences || [])
-          ]),
+          ], getIterationEvidenceKeys(prop.iterations)),
           executedBy: prop.executedBy || (runIssue.fields?.assignee ? { displayName: runIssue.fields.assignee.displayName, accountId: runIssue.fields.assignee.accountId } : null),
           executedAt: prop.executedAt,
           executionType: prop.executionType || 'Manual',
@@ -2271,16 +2308,18 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       url: a.content
     }));
 
+    const newIterations = iterations !== undefined ? iterations : (currentProp.iterations || []);
+    const iterKeys = getIterationEvidenceKeys(newIterations);
+
     let newEvidences;
     if (evidences !== undefined) {
-      newEvidences = dedupeEvidences(evidences);
+      newEvidences = filterNonIterationEvidences(evidences, iterKeys);
     } else {
-      newEvidences = dedupeEvidences([...(currentProp.evidences || []), ...jiraAttachments]);
+      newEvidences = filterNonIterationEvidences([...(currentProp.evidences || []), ...jiraAttachments], iterKeys);
     }
     if (evidence) {
-      newEvidences = dedupeEvidences([...newEvidences, evidence]);
+      newEvidences = filterNonIterationEvidences([...newEvidences, evidence], iterKeys);
     }
-    const newIterations = iterations !== undefined ? iterations : (currentProp.iterations || []);
     const newLinkedBugs = linkedBugs !== undefined ? linkedBugs : (currentProp.linkedBugs || []);
     const newExecutedBy = executorInfo !== undefined ? executorInfo : currentExecutedBy;
     const newLockedAt = TERMINAL.includes(newStatus) ? (currentProp.lockedAt || Date.now()) : (newStatus === 'Not Run' ? null : currentProp.lockedAt);
@@ -2441,6 +2480,8 @@ resolver.define('updateTestStatus', async ({ payload }) => {
             linkPromises.push(linkTwoIssues(createdRunId, testId, 'Relates'));
           }
           await Promise.all(linkPromises);
+          const fallbackIterKeys = getIterationEvidenceKeys(iterations || []);
+          const cleanFallbackEvidences = filterNonIterationEvidences(evidences || [], fallbackIterKeys);
           // Save run data
           const runDataProp = {
             cycleId: String(cycleId),
@@ -2448,7 +2489,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
             status: newStatus,
             comment: comment || '',
             iterations: iterations || [],
-            evidences: evidences || [],
+            evidences: cleanFallbackEvidences,
             linkedBugs: linkedBugs || [],
             executedBy: executorInfo || null,
             executedAt: Date.now(),
@@ -2465,13 +2506,15 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       console.warn('[updateTestStatus] Could not create fallback Test Run:', createErr.message);
     }
 
+    const fallbackIterKeys = getIterationEvidenceKeys(iterations || []);
+    const cleanFallbackEvidences = filterNonIterationEvidences(evidences || [], fallbackIterKeys);
     updatedTest = {
       id: String(testId),
       testRunId: createdRunId,
       testRunKey: createdRunKey,
       status: newStatus,
       comment: comment || '',
-      evidences: evidences || [],
+      evidences: cleanFallbackEvidences,
       iterations: iterations || [],
       linkedBugs: linkedBugs || [],
       executedBy: executorInfo || null,
@@ -3969,7 +4012,10 @@ resolver.define('getCycleTestRuns', async ({ payload }) => {
         executedAt: runData.executedAt,
         comment: runData.comment || '',
         iterations: runData.iterations || [],
-        evidences: issue.fields.attachment || runData.evidences || [],
+        evidences: filterNonIterationEvidences(
+          (issue.fields.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })).concat(runData.evidences || []),
+          getIterationEvidenceKeys(runData.iterations)
+        ),
         linkedBugs: linkedBugs.length > 0 ? linkedBugs : (runData.linkedBugs || [])
       };
     });
@@ -4011,12 +4057,17 @@ resolver.define('updateTestRunExecution', async ({ payload }) => {
     };
   }
 
+  const targetIterations = iterations !== undefined ? iterations : (currentRunData.iterations || []);
+  const iterKeys = getIterationEvidenceKeys(targetIterations);
+  const targetEvidences = evidences !== undefined ? evidences : (currentRunData.evidences || []);
+  const cleanEvidences = filterNonIterationEvidences(targetEvidences, iterKeys);
+
   const updatedRunData = {
     ...currentRunData,
     status: status !== undefined ? status : currentRunData.status,
-    iterations: iterations !== undefined ? iterations : (currentRunData.iterations || []),
+    iterations: targetIterations,
     comment: comment !== undefined ? comment : (currentRunData.comment || ''),
-    evidences: evidences !== undefined ? evidences : (currentRunData.evidences || []),
+    evidences: cleanEvidences,
     linkedBugs: linkedBugs !== undefined ? linkedBugs : (currentRunData.linkedBugs || []),
     executedBy: executorInfo,
     executedAt: status && status !== 'Not Run' ? (currentRunData.executedAt || Date.now()) : currentRunData.executedAt

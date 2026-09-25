@@ -5679,12 +5679,6 @@ Then el sistema valida la identidad.
           url: uploaded.content
         };
 
-        const currentEvidences = testItem?.evidences ? [...testItem.evidences] : [];
-        if (testItem?.evidence && currentEvidences.length === 0) {
-          currentEvidences.push(testItem.evidence);
-        }
-        currentEvidences.push(newEvidence);
-
         const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
         if (actualIterId) {
           const iters = [...(testItem?.iterations || [])];
@@ -5694,8 +5688,13 @@ Then el sistema valida la identidad.
               ...iters[iterIdx],
               evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence]
             };
+            const cleanEvidences = (testItem?.evidences || []).filter(e => {
+              const id = typeof e === 'object' ? String(e.id || '') : String(e || '');
+              const name = typeof e === 'object' ? String(e.filename || '') : '';
+              return id !== String(newEvidence.id) && (!name || name !== String(newEvidence.filename));
+            });
             setCycleTests(prev => {
-              const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+              const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: cleanEvidences, iterations: iters, _detailLoaded: true } : t);
               if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
                 perCycleCacheRef.current[cycleIdStr] = updated;
               }
@@ -5705,10 +5704,17 @@ Then el sistema valida la identidad.
               cycleId: selectedCycle.id,
               testId,
               testRunId: testItem?.testRunId || testItem?.testRunKey,
-              iterations: iters
+              iterations: iters,
+              evidences: cleanEvidences
             });
           }
         } else {
+          const currentEvidences = testItem?.evidences ? [...testItem.evidences] : [];
+          if (testItem?.evidence && currentEvidences.length === 0) {
+            currentEvidences.push(testItem.evidence);
+          }
+          currentEvidences.push(newEvidence);
+
           setCycleTests(prev => {
             const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, _detailLoaded: true } : t);
             if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
@@ -5743,7 +5749,10 @@ Then el sistema valida la identidad.
        const iters = [...(currentTest.iterations || [])];
        const iterIdx = iters.findIndex(i => i.id === iterId);
        if (iterIdx > -1) {
-          const evs = (iters[iterIdx].evidences || []).filter(e => e.id !== attachmentId && e !== attachmentId);
+          const evs = (iters[iterIdx].evidences || []).filter(e => {
+            const eId = typeof e === 'object' ? (e.id || e.url) : e;
+            return String(eId) !== String(attachmentId);
+          });
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
           setCycleTests(prev => {
             const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
@@ -5966,8 +5975,13 @@ Then el sistema valida la identidad.
                 ...iters[iterIdx],
                 evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence]
               };
+              const cleanEvidences = (testItem?.evidences || []).filter(e => {
+                const id = typeof e === 'object' ? String(e.id || '') : String(e || '');
+                const name = typeof e === 'object' ? String(e.filename || '') : '';
+                return id !== String(newEvidence.id) && (!name || name !== String(newEvidence.filename));
+              });
               setCycleTests(prev => {
-                const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+                const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: cleanEvidences, iterations: iters, _detailLoaded: true } : t);
                 if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
                   perCycleCacheRef.current[cycleIdStr] = updated;
                 }
@@ -5977,7 +5991,8 @@ Then el sistema valida la identidad.
                 cycleId: selectedCycle?.id,
                 testId,
                 testRunId: testItem?.testRunId || testItem?.testRunKey,
-                iterations: iters
+                iterations: iters,
+                evidences: cleanEvidences
               });
             }
           } else {
@@ -8651,55 +8666,81 @@ const renderPlanningTab = () => {
                                   </div>
                                 </div>
 
-                                {((test.evidences && test.evidences.length > 0) || test.evidence) ? (
-                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                                    {(test.evidences || (test.evidence ? [test.evidence] : [])).map((ev, idx) => {
-                                      const evId = typeof ev === 'string' ? ev : ev.id;
-                                      const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
-                                      return (
-                                        <div
-                                          key={idx}
-                                          className="execution-evidence-pill"
-                                          onClick={() => handlePreviewEvidence(ev)}
-                                          title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
-                                          style={{ cursor: 'pointer' }}
-                                        >
-                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                          <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
-                                            {evName}
-                                          </span>
-                                          {ev.note && (
-                                            <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 5px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                                              💬 Nota
+                                {(() => {
+                                  const iterEvKeys = new Set();
+                                  (test.iterations || []).forEach(it => {
+                                    (it.evidences || []).forEach(e => {
+                                      if (e) {
+                                        const id = typeof e === 'object' ? (e.id ? String(e.id) : '') : String(e);
+                                        const name = typeof e === 'object' ? (e.filename ? String(e.filename) : '') : '';
+                                        const url = typeof e === 'object' ? (e.url ? String(e.url) : '') : '';
+                                        if (id) iterEvKeys.add(id);
+                                        if (name) iterEvKeys.add(name);
+                                        if (url) iterEvKeys.add(url);
+                                      }
+                                    });
+                                  });
+                                  const rawEvs = (test.evidences || (test.evidence ? [test.evidence] : [])).filter(ev => {
+                                    if (!ev) return false;
+                                    const id = typeof ev === 'object' ? (ev.id ? String(ev.id) : '') : String(ev);
+                                    const name = typeof ev === 'object' ? (ev.filename ? String(ev.filename) : '') : '';
+                                    const url = typeof ev === 'object' ? (ev.url ? String(ev.url) : '') : '';
+                                    if (id && iterEvKeys.has(id)) return false;
+                                    if (name && iterEvKeys.has(name)) return false;
+                                    if (url && iterEvKeys.has(url)) return false;
+                                    return true;
+                                  });
+
+                                  return rawEvs.length > 0 ? (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                                      {rawEvs.map((ev, idx) => {
+                                        const evId = typeof ev === 'string' ? ev : ev.id;
+                                        const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
+                                        return (
+                                          <div
+                                            key={idx}
+                                            className="execution-evidence-pill"
+                                            onClick={() => handlePreviewEvidence(ev)}
+                                            title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
+                                            style={{ cursor: 'pointer' }}
+                                          >
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                            <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
+                                              {evName}
                                             </span>
-                                          )}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              const newName = prompt("Nuevo nombre para la evidencia:", evName);
-                                              if (newName && newName !== evName) {
-                                                handleRenameEvidence(test.id, idx, newName, undefined);
-                                              }
-                                            }}
-                                            title="Renombrar evidencia"
-                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#626F86', fontSize: '11px', padding: '0 2px' }}
-                                          >✏️</button>
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleDeleteEvidence(test.id, evId, idx, undefined);
-                                            }}
-                                            title="Quitar evidencia"
-                                            disabled={!runningTests[test.id]}
-                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '11px', padding: '0 2px' }}
-                                          >✕</button>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                ) : (
-                                  <div style={{ fontSize: '11px', color: '#626F86', fontStyle: 'italic' }}>Sin evidencias adjuntas en esta ejecución.</div>
-                                )}
+                                            {ev.note && (
+                                              <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 5px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                                💬 Nota
+                                              </span>
+                                            )}
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                const newName = prompt("Nuevo nombre para la evidencia:", evName);
+                                                if (newName && newName !== evName) {
+                                                  handleRenameEvidence(test.id, idx, newName, undefined);
+                                                }
+                                              }}
+                                              title="Renombrar evidencia"
+                                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#626F86', fontSize: '11px', padding: '0 2px' }}
+                                            >✏️</button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteEvidence(test.id, evId, idx, undefined);
+                                              }}
+                                              title="Quitar evidencia"
+                                              disabled={!runningTests[test.id]}
+                                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '11px', padding: '0 2px' }}
+                                            >✕</button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: '11px', color: '#626F86', fontStyle: 'italic' }}>Sin evidencias adjuntas en esta ejecución.</div>
+                                  );
+                                })()}
                               </div>
 
                               {/* 5. Iteraciones (Data-Driven) */}
@@ -13235,9 +13276,33 @@ const renderPlanningTab = () => {
   const transferEvidencesForTestRun = async (testExec, targetRunKeyOrId) => {
     if (!testExec || !targetRunKeyOrId) return testExec;
 
-    // 1. General evidences
-    const generalEvs = [...(testExec.evidences || [])];
-    if (testExec.evidence && generalEvs.length === 0) generalEvs.push(testExec.evidence);
+    // 1. General evidences (filter out any that belong to iterations)
+    const iterEvKeys = new Set();
+    (testExec.iterations || []).forEach(it => {
+      (it.evidences || []).forEach(e => {
+        if (e) {
+          const id = typeof e === 'object' ? (e.id ? String(e.id) : '') : String(e);
+          const name = typeof e === 'object' ? (e.filename ? String(e.filename) : '') : '';
+          const url = typeof e === 'object' ? (e.url ? String(e.url) : '') : '';
+          if (id) iterEvKeys.add(id);
+          if (name) iterEvKeys.add(name);
+          if (url) iterEvKeys.add(url);
+        }
+      });
+    });
+
+    const rawGeneral = [...(testExec.evidences || [])];
+    if (testExec.evidence && rawGeneral.length === 0) rawGeneral.push(testExec.evidence);
+    const generalEvs = rawGeneral.filter(ev => {
+      if (!ev) return false;
+      const id = typeof ev === 'object' ? (ev.id ? String(ev.id) : '') : String(ev);
+      const name = typeof ev === 'object' ? (ev.filename ? String(ev.filename) : '') : '';
+      const url = typeof ev === 'object' ? (ev.url ? String(ev.url) : '') : '';
+      if (id && iterEvKeys.has(id)) return false;
+      if (name && iterEvKeys.has(name)) return false;
+      if (url && iterEvKeys.has(url)) return false;
+      return true;
+    });
 
     const transferredGeneral = [];
     for (const ev of generalEvs) {
