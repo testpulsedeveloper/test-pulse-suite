@@ -272,6 +272,111 @@ function adfToHtml(adf) {
   return renderNode(adf);
 }
 
+const MX_HOLIDAYS_SET = new Set([
+  '2024-01-01', '2024-02-05', '2024-03-18', '2024-05-01', '2024-09-16', '2024-10-01', '2024-11-18', '2024-12-25',
+  '2025-01-01', '2025-02-03', '2025-03-17', '2025-05-01', '2025-09-16', '2025-11-17', '2025-12-25',
+  '2026-01-01', '2026-02-02', '2026-03-16', '2026-05-01', '2026-09-16', '2026-11-16', '2026-12-25',
+  '2027-01-01', '2027-02-01', '2027-03-15', '2027-05-01', '2027-09-16', '2027-11-15', '2027-12-25'
+]);
+
+function getBusinessHoursBetween(startMs, endMs) {
+  if (!startMs || !endMs || startMs >= endMs) return 0;
+  let current = new Date(startMs);
+  const end = new Date(endMs);
+  let businessMinutes = 0;
+  const mxOffset = -6 * 60 * 60 * 1000;
+
+  while (current < end) {
+    const mxTime = new Date(current.getTime() + mxOffset);
+    const day = mxTime.getUTCDay();
+    const hour = mxTime.getUTCHours();
+    const dateString = mxTime.toISOString().split('T')[0];
+
+    let isBusiness = false;
+    if (!MX_HOLIDAYS_SET.has(dateString)) {
+      if (day >= 1 && day <= 4) {
+        if (hour >= 7 && hour < 18) isBusiness = true;
+      } else if (day === 5) {
+        if (hour >= 7 && hour < 13) isBusiness = true;
+      }
+    }
+    if (isBusiness) businessMinutes++;
+    current.setTime(current.getTime() + 60000);
+  }
+  return businessMinutes / 60;
+}
+
+function formatBugCreatedDate(createdStr) {
+  if (!createdStr) return { dateStr: 'Sin fecha', timeStr: '' };
+  try {
+    const d = new Date(createdStr);
+    if (isNaN(d.getTime())) return { dateStr: 'Sin fecha', timeStr: '' };
+    const dateStr = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+    return { dateStr, timeStr };
+  } catch (e) {
+    return { dateStr: 'Sin fecha', timeStr: '' };
+  }
+}
+
+function formatBugAge(createdStr, resolutionDateStr, isDone) {
+  if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+  try {
+    const created = new Date(createdStr).getTime();
+    if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+
+    let end = Date.now();
+    if (isDone && resolutionDateStr) {
+      const resTime = new Date(resolutionDateStr).getTime();
+      if (!isNaN(resTime) && resTime >= created) {
+        end = resTime;
+      }
+    }
+
+    const businessHours = getBusinessHoursBetween(created, end);
+    const bHoursFormatted = businessHours.toFixed(1);
+    const bDays = Math.floor(businessHours / 10);
+
+    let label = '';
+    let tone = 'neutral';
+
+    if (isDone) {
+      if (businessHours < 1) {
+        const mins = Math.max(1, Math.round(businessHours * 60));
+        label = `Resuelto en ${mins}m hábiles`;
+      } else if (businessHours < 10) {
+        label = `Resuelto en ${bHoursFormatted}h hábiles`;
+      } else {
+        const days = Math.round(businessHours / 10);
+        label = `Resuelto en ${days}d hábiles (${bHoursFormatted}h)`;
+      }
+      tone = 'done';
+    } else {
+      if (businessHours < 1) {
+        const mins = Math.max(1, Math.round(businessHours * 60));
+        label = `Abierto hace ${mins}m hábiles`;
+        tone = 'green';
+      } else if (businessHours <= 20) {
+        const days = Math.floor(businessHours / 10);
+        label = days > 0 ? `Abierto hace ${days}d hábil (${bHoursFormatted}h)` : `Abierto hace ${bHoursFormatted}h hábiles`;
+        tone = 'green';
+      } else if (businessHours <= 50) {
+        const days = Math.floor(businessHours / 10);
+        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+        tone = 'orange';
+      } else {
+        const days = Math.floor(businessHours / 10);
+        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+        tone = 'red';
+      }
+    }
+
+    return { label, tone, hours: businessHours, days: bDays, bHoursFormatted };
+  } catch (e) {
+    return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+  }
+}
+
 const RichTextEditor = ({ value, onChange, disabled }) => {
   const editorRef = React.useRef(null);
 
@@ -735,6 +840,32 @@ function App() {
   const [testCaseDetailsLoading, setTestCaseDetailsLoading] = useState(false);
   const [testCaseHistory, setTestCaseHistory] = useState([]);
   const [modalDetailTab, setModalDetailTab] = useState('details');
+
+  // Bug Details Modal / Drawer State (Lazy Loading)
+  const [selectedBug, setSelectedBug] = useState(null);
+  const [selectedBugDetails, setSelectedBugDetails] = useState(null);
+  const [selectedBugLoading, setSelectedBugLoading] = useState(false);
+  const [selectedMediaModal, setSelectedMediaModal] = useState(null);
+
+  useEffect(() => {
+    if (selectedBug) {
+      setSelectedBugLoading(true);
+      setSelectedBugDetails(null);
+      const bugKeyOrId = selectedBug.key || selectedBug.id;
+      invoke('getBugFullDetails', { issueIdOrKey: bugKeyOrId })
+        .then(details => {
+          setSelectedBugDetails(details);
+          setSelectedBugLoading(false);
+        })
+        .catch(err => {
+          console.error('Error fetching bug full details:', err);
+          setSelectedBugLoading(false);
+        });
+    } else {
+      setSelectedBugDetails(null);
+      setSelectedBugLoading(false);
+    }
+  }, [selectedBug]);
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
@@ -3886,6 +4017,762 @@ Then el sistema valida la identidad.
     );
   };
 
+  const formatFileSize = (bytes) => {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  const renderMediaModal = () => {
+    if (!selectedMediaModal) return null;
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.85)',
+          zIndex: 2000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '2rem'
+        }}
+        onClick={() => setSelectedMediaModal(null)}
+      >
+        <div
+          style={{
+            position: 'relative',
+            maxWidth: '90vw',
+            maxHeight: '90vh',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            backgroundColor: '#1E1F21',
+            borderRadius: '8px',
+            overflow: 'hidden',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.6)'
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div style={{ width: '100%', padding: '0.75rem 1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#141517', borderBottom: '1px solid #333', color: '#FFF' }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '80%' }}>
+              📷 {selectedMediaModal.name || 'Evidencia adjunta'}
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {selectedMediaModal.url && (
+                <a
+                  href={selectedMediaModal.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
+                  style={{ color: '#579DFF', fontSize: '12px', textDecoration: 'none', fontWeight: 600 }}
+                >
+                  Descargar ↗
+                </a>
+              )}
+              <button
+                onClick={() => setSelectedMediaModal(null)}
+                style={{ background: 'transparent', border: 'none', color: '#FFF', fontSize: '18px', cursor: 'pointer', lineHeight: 1 }}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Media Body */}
+          <div style={{ padding: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', maxHeight: 'calc(90vh - 60px)' }}>
+            {selectedMediaModal.type === 'video' ? (
+              <video
+                controls
+                autoPlay
+                src={selectedMediaModal.url}
+                style={{ maxWidth: '85vw', maxHeight: '75vh', borderRadius: '4px' }}
+              />
+            ) : (
+              <img
+                src={selectedMediaModal.url}
+                alt={selectedMediaModal.name}
+                style={{ maxWidth: '85vw', maxHeight: '75vh', objectFit: 'contain', borderRadius: '4px' }}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderBugSlidePanel = () => {
+    if (!selectedBug) return null;
+
+    const b = selectedBugDetails || selectedBug;
+    const bugKey = b.key || selectedBug.key || 'BUG';
+    const summary = b.summary || selectedBug.summary || 'Sin título';
+    const rawStatus = b.status || selectedBug.status || 'Abierto';
+    const isDone = ['done', 'closed', 'cerrada', 'cerrado', 'terminada', 'terminado', 'finalizada', 'finalizado'].includes(String(rawStatus).toLowerCase()) ||
+      b.statusCategory === 'done' || b.rawFields?.status?.statusCategory?.key === 'done';
+
+    // Severities
+    const rawSev = b.rawSeverity || b.severity || selectedBug.severity || 'Sin definir';
+    const sevNormalized = typeof rawSev === 'string' ? rawSev : (rawSev.value || rawSev.name || 'Sin definir');
+    const sevLow = sevNormalized.toLowerCase();
+
+    let sevBg = '#F1F2F4';
+    let sevColor = '#626F86';
+    let sevBorder = '#DCDFE4';
+
+    if (sevLow.includes('bloq') || sevLow.includes('blocker')) {
+      sevBg = '#FFEBE6';
+      sevColor = '#BF2600';
+      sevBorder = '#FF8F73';
+    } else if (sevLow.includes('crit') || sevLow.includes('crít')) {
+      sevBg = '#FFF0ED';
+      sevColor = '#DE350B';
+      sevBorder = '#FFBDAD';
+    } else if (sevLow.includes('may') || sevLow.includes('major') || sevLow.includes('alta') || sevLow.includes('high')) {
+      sevBg = '#FFFAE6';
+      sevColor = '#974F00';
+      sevBorder = '#FFE380';
+    } else if (sevLow.includes('men') || sevLow.includes('minor') || sevLow.includes('baja') || sevLow.includes('low') || sevLow.includes('trivial')) {
+      sevBg = '#E3FCEF';
+      sevColor = '#006644';
+      sevBorder = '#ABF5D1';
+    }
+
+    // Dates & Aging
+    const createdDate = b.created || selectedBug.created;
+    const resDate = b.resolutiondate || selectedBug.resolutiondate;
+    const { dateStr, timeStr } = formatBugCreatedDate(createdDate);
+    const age = formatBugAge(createdDate, resDate, isDone);
+
+    const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
+    const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+
+    // Due Date
+    const dueDateStr = b.duedate || selectedBug.duedate || null;
+    let formattedDueDate = null;
+    let isDueDateFlagged = false;
+
+    if (dueDateStr) {
+      try {
+        const d = new Date(dueDateStr);
+        if (!isNaN(d.getTime())) {
+          formattedDueDate = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+          const statusLower = String(rawStatus).toLowerCase();
+          const isInProgress = statusLower.includes('curso') || statusLower.includes('progress') || statusLower.includes('progreso') || statusLower.includes('desarrollo') || statusLower.includes('testing') || statusLower.includes('atención');
+          const isOverdue = d.getTime() < Date.now() && !isDone;
+          if (isInProgress || isOverdue) {
+            isDueDateFlagged = true;
+          }
+        }
+      } catch (e) {}
+    }
+
+    // Versions
+    let versionsList = [];
+    if (Array.isArray(b.versions) && b.versions.length > 0) versionsList = b.versions;
+    else if (b.version) versionsList = [b.version];
+    else if (Array.isArray(b.fixVersions) && b.fixVersions.length > 0) versionsList = b.fixVersions;
+
+    // Attachments
+    const attachments = b.attachments || [];
+    const imageAttachments = attachments.filter(a => a.isImage);
+    const videoAttachments = attachments.filter(a => a.isVideo);
+    const otherAttachments = attachments.filter(a => !a.isImage && !a.isVideo);
+
+    // Comments
+    const comments = b.comments || [];
+
+    // Description HTML
+    let descHtml = '';
+    if (b.descriptionRendered) {
+      descHtml = b.descriptionRendered;
+    } else if (b.descriptionRaw) {
+      descHtml = adfToHtml(b.descriptionRaw);
+    } else if (selectedBug.description) {
+      descHtml = adfToHtml(selectedBug.description);
+    }
+
+    return (
+      <div 
+        className="jira-modal-overlay"
+        onClick={() => setSelectedBug(null)}
+        style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(9, 30, 66, 0.54)',
+          backdropFilter: 'blur(2px)',
+          zIndex: 1050,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          animation: 'fadeIn 0.15s ease-out'
+        }}
+      >
+        <div 
+          className="jira-modal-content"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            maxWidth: '1080px',
+            width: '92%',
+            height: '88vh',
+            minHeight: '620px',
+            maxHeight: '880px',
+            backgroundColor: '#FFFFFF',
+            borderRadius: '10px',
+            display: 'flex',
+            flexDirection: 'column',
+            boxShadow: '0 20px 32px -8px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31)',
+            overflow: 'hidden'
+          }}
+        >
+          {/* Header */}
+          <div style={{
+            padding: '1rem 1.5rem',
+            borderBottom: '1px solid #DCDFE4',
+            backgroundColor: '#FFFFFF',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexShrink: 0
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ 
+                backgroundColor: '#FFEBE6', 
+                color: '#DE350B', 
+                padding: '3px 8px', 
+                borderRadius: '4px', 
+                fontSize: '11px', 
+                fontWeight: 700, 
+                display: 'inline-flex', 
+                alignItems: 'center', 
+                gap: '4px',
+                border: '1px solid #FFBDAD'
+              }}>
+                🐞 DEFECTO / BUG
+              </span>
+              <span style={{ fontSize: '15px', fontWeight: 700, color: '#0C66E4' }}>
+                {bugKey}
+              </span>
+              <span className={`ads-lozenge ${isDone ? 'ads-lozenge-success' : 'ads-lozenge-current'}`} style={{ fontSize: '11px', fontWeight: 600 }}>
+                {rawStatus}
+              </span>
+              {selectedBugLoading && (
+                <span style={{ fontSize: '11px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span className="spinner-border spinner-border-sm" style={{ width: '12px', height: '12px', border: '2px solid #0C66E4', borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} />
+                  Cargando detalles...
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                className="btn-primary"
+                onClick={() => router.open('/browse/' + bugKey)}
+                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+                title="Abrir este defecto directamente en la vista nativa de Jira"
+              >
+                <span>Abrir en Jira</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+              </button>
+              <button
+                className="btn-icon"
+                onClick={() => setSelectedBug(null)}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '6px', borderRadius: '4px', color: '#626F86', fontSize: '16px', lineHeight: 1 }}
+                title="Cerrar modal"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Modal Main Body (2 Columns) */}
+          <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+            {/* Columna Izquierda / Principal (65%) */}
+            <div style={{ flex: 1, minWidth: 0, padding: '1.5rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Resumen / Título */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                  Resumen del Bug
+                </div>
+                <h2 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', margin: 0, lineHeight: 1.35 }}>
+                  {summary}
+                </h2>
+              </div>
+
+              {/* Detalle o Descripción del Bug */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    📝 Descripción &amp; Pasos de Reproducción
+                  </span>
+                </div>
+
+                {selectedBugLoading && !descHtml ? (
+                  <div style={{ padding: '1.5rem', background: '#F8FAFD', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ height: '14px', width: '85%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                    <div style={{ height: '14px', width: '60%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                    <div style={{ height: '14px', width: '75%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                  </div>
+                ) : descHtml ? (
+                  <div 
+                    style={{ 
+                      padding: '1rem', 
+                      background: '#FAFBFC', 
+                      border: '1px solid #EBECF0', 
+                      borderRadius: '6px', 
+                      fontSize: '13px', 
+                      lineHeight: '1.6', 
+                      color: 'var(--jira-dark, #172B4D)',
+                      overflowX: 'auto'
+                    }}
+                    dangerouslySetInnerHTML={{ __html: descHtml }}
+                  />
+                ) : (
+                  <div style={{ padding: '1.25rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic', textAlign: 'center' }}>
+                    Este defecto no cuenta con descripción de texto registrada en Jira.
+                  </div>
+                )}
+              </div>
+
+              {/* Imágenes, Videos & Evidencias Adjuntas */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    🖼️ Evidencias &amp; Archivos Adjuntos ({attachments.length})
+                  </span>
+                </div>
+
+                {attachments.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    {/* Galería de Imágenes */}
+                    {imageAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Imágenes ({imageAttachments.length}):
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px' }}>
+                          {imageAttachments.map(att => (
+                            <div
+                              key={att.id}
+                              onClick={() => setSelectedMediaModal({ url: att.content, name: att.filename, type: 'image' })}
+                              style={{
+                                border: '1px solid #DCDFE4',
+                                borderRadius: '6px',
+                                overflow: 'hidden',
+                                background: '#FFFFFF',
+                                cursor: 'pointer',
+                                transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+                                display: 'flex',
+                                flexDirection: 'column'
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 8px rgba(9,30,66,0.12)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
+                              title="Clic para ver en pantalla completa"
+                            >
+                              <div style={{ height: '110px', backgroundColor: '#F4F5F7', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderBottom: '1px solid #EBECF0' }}>
+                                <img
+                                  src={att.thumbnail || att.content}
+                                  alt={att.filename}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  loading="lazy"
+                                />
+                              </div>
+                              <div style={{ padding: '6px 8px', fontSize: '11px' }}>
+                                <div style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={att.filename}>
+                                  {att.filename}
+                                </div>
+                                <div style={{ color: '#626F86', fontSize: '10px', marginTop: '2px' }}>
+                                  {formatFileSize(att.size)}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Videos Adjuntos */}
+                    {videoAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Videos &amp; Grabaciones ({videoAttachments.length}):
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '10px' }}>
+                          {videoAttachments.map(att => (
+                            <div
+                              key={att.id}
+                              style={{
+                                border: '1px solid #DCDFE4',
+                                borderRadius: '6px',
+                                overflow: 'hidden',
+                                background: '#FFFFFF',
+                                padding: '8px'
+                              }}
+                            >
+                              <video
+                                controls
+                                src={att.content}
+                                style={{ width: '100%', height: '140px', backgroundColor: '#000', borderRadius: '4px' }}
+                              />
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px', fontSize: '11px' }}>
+                                <span style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '170px' }} title={att.filename}>
+                                  🎥 {att.filename}
+                                </span>
+                                <span style={{ color: '#626F86', fontSize: '10px' }}>
+                                  {formatFileSize(att.size)}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Otros Documentos / Logs */}
+                    {otherAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Otros Archivos &amp; Logs ({otherAttachments.length}):
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                          {otherAttachments.map(att => (
+                            <a
+                              key={att.id}
+                              href={att.content}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              download
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '6px 10px',
+                                background: '#F4F5F7',
+                                border: '1px solid #DCDFE4',
+                                borderRadius: '6px',
+                                textDecoration: 'none',
+                                color: '#0C66E4',
+                                fontSize: '12px',
+                                fontWeight: 600
+                              }}
+                            >
+                              <span>📄</span>
+                              <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.filename}</span>
+                              <span style={{ color: '#626F86', fontSize: '10px', fontWeight: 400 }}>({formatFileSize(att.size)})</span>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ padding: '0.85rem 1rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                    Sin evidencias ni archivos adjuntos registrados.
+                  </div>
+                )}
+              </div>
+
+              {/* Historial de Comentarios (Último Primero) */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    💬 Historial de Comentarios ({comments.length})
+                  </span>
+                  <span style={{ fontSize: '11px', color: '#626F86' }}>
+                    Ordenado por el más reciente
+                  </span>
+                </div>
+
+                {comments.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {comments.map((comm) => {
+                      const commDate = formatBugCreatedDate(comm.created);
+                      const commBodyHtml = comm.bodyRendered || adfToHtml(comm.bodyRaw);
+
+                      return (
+                        <div
+                          key={comm.id}
+                          style={{
+                            border: '1px solid #EBECF0',
+                            borderRadius: '8px',
+                            padding: '10px 14px',
+                            backgroundColor: '#FFFFFF',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                          }}
+                        >
+                          {/* Comment Header */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              {comm.author.avatarUrl ? (
+                                <img
+                                  src={comm.author.avatarUrl}
+                                  alt={comm.author.displayName}
+                                  style={{ width: '22px', height: '22px', borderRadius: '50%' }}
+                                />
+                              ) : (
+                                <div style={{ width: '22px', height: '22px', borderRadius: '50%', backgroundColor: '#0C66E4', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 700 }}>
+                                  {(comm.author.displayName || 'U').charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              <span style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D' }}>
+                                {comm.author.displayName}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '11px', color: '#626F86' }}>
+                              📅 {commDate.dateStr} {commDate.timeStr && `a las ${commDate.timeStr}`}
+                            </span>
+                          </div>
+
+                          {/* Comment Body */}
+                          <div
+                            style={{ fontSize: '12.5px', lineHeight: '1.5', color: '#172B4D', paddingLeft: '30px' }}
+                            dangerouslySetInnerHTML={{ __html: commBodyHtml }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ padding: '1rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic', textAlign: 'center' }}>
+                    No hay comentarios registrados en este defecto.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Columna Derecha / Panel Lateral de Metadatos (35%) */}
+            <div style={{ width: '320px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+              <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px' }}>
+                Detalles &amp; Metadatos
+              </div>
+
+              {/* 1. Persona Asignada */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  👤 PERSONA ASIGNADA
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                  {b.assignee?.avatarUrl ? (
+                    <img src={b.assignee.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
+                  ) : (
+                    <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: b.assignee ? '#0C66E4' : '#626F86', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
+                      {(b.assignee?.displayName || '?').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {b.assignee?.displayName || 'Sin asignar'}
+                    </span>
+                    {b.assignee?.email && (
+                      <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {b.assignee.email}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. Informador (Reporter) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  📣 INFORMADOR / REPORTER
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                  {b.reporter?.avatarUrl ? (
+                    <img src={b.reporter.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
+                  ) : (
+                    <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: '#6554C0', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
+                      {(b.reporter?.displayName || 'R').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {b.reporter?.displayName || 'Sin especificar'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 3. Severidad (en colores) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  🚨 SEVERIDAD
+                </div>
+                <div>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      background: sevBg,
+                      color: sevColor,
+                      border: `1px solid ${sevBorder}`,
+                      padding: '4px 10px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      textTransform: 'uppercase'
+                    }}
+                  >
+                    <span>●</span> {sevNormalized}
+                  </span>
+                </div>
+              </div>
+
+              {/* 4. Versiones Afectadas */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  🏷️ VERSIONES AFECTADAS
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {versionsList.length > 0 ? (
+                    versionsList.map((ver, idx) => (
+                      <span
+                        key={idx}
+                        className="ads-lozenge ads-lozenge-subtle"
+                        style={{ fontSize: '11px', fontWeight: 600 }}
+                      >
+                        🏷️ {ver}
+                      </span>
+                    ))
+                  ) : (
+                    <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                      Sin versión asignada
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 5. Tiempo Abierto / Transcurrido (Aging laboral con semáforo) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  ⏱️ TIEMPO TRANSCURRIDO (AGING LABORAL)
+                </div>
+                <div
+                  style={{
+                    background: badgeColor,
+                    color: textColor,
+                    padding: '6px 10px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    border: `1px solid ${textColor}30`
+                  }}
+                >
+                  <span>⏱️</span>
+                  <span>{age.label}</span>
+                </div>
+              </div>
+
+              {/* 6. Fecha de Solución Estimada (DueDate) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  📅 FECHA ESTIMADA DE SOLUCIÓN
+                </div>
+                {formattedDueDate ? (
+                  isDueDateFlagged ? (
+                    <div
+                      style={{
+                        background: '#FFEBE6',
+                        border: '1px solid #FF8F73',
+                        color: '#BF2600',
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <span style={{ fontSize: '14px' }}>🚩</span>
+                      <div>
+                        <div>{formattedDueDate}</div>
+                        <div style={{ fontSize: '9.5px', textTransform: 'uppercase', opacity: 0.9 }}>
+                          {rawStatus.toUpperCase()} • EN ATENCIÓN
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#172B4D', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <span>📅</span> <span>{formattedDueDate}</span>
+                    </div>
+                  )
+                ) : (
+                  <div style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                    No definida en Jira
+                  </div>
+                )}
+              </div>
+
+              {/* 7. Ambiente (Environment) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  🌐 AMBIENTE / ENTORNO
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {b.environment ? (
+                    <span
+                      style={{
+                        background: '#E9F2FF',
+                        color: '#0C66E4',
+                        border: '1px solid #85B8FF',
+                        padding: '4px 8px',
+                        borderRadius: '4px',
+                        fontSize: '11px',
+                        fontWeight: 700
+                      }}
+                      dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : adfToHtml(b.environment) }}
+                    />
+                  ) : (
+                    <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                      No especificado
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 8. Fecha de Creación & Resolución */}
+              <div style={{ borderTop: '1px solid #EBECF0', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px', color: '#626F86' }}>
+                <div><strong>Registrado:</strong> {dateStr} {timeStr}</div>
+                {resDate && <div><strong>Resuelto:</strong> {formatBugCreatedDate(resDate).dateStr}</div>}
+                {b.resolution && <div><strong>Resolución:</strong> {b.resolution}</div>}
+              </div>
+            </div>
+          </div>
+
+          {/* Modal Footer */}
+          <div style={{ padding: '0.75rem 1.5rem', borderTop: '1px solid #DCDFE4', backgroundColor: '#FFFFFF', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+            <span style={{ fontSize: '11px', color: '#626F86' }}>
+              Test Pulse QA Engine • Incidencia {bugKey}
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button 
+                className="btn-secondary"
+                onClick={() => setSelectedBug(null)}
+                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem' }}
+              >
+                Cerrar
+              </button>
+              <button 
+                className="btn-primary"
+                onClick={() => router.open('/browse/' + bugKey)}
+                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
+              >
+                <span>Abrir en Jira</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const handleCycleSelect = async (cycle, forceRefresh = false) => {
     if (!cycle) return;
     const cycleId = String(cycle.id);
@@ -7007,7 +7894,7 @@ const renderPlanningTab = () => {
                                           fontWeight: 700
                                         }}
                                       >
-                                        <span onClick={() => router.open(`/browse/${bug.key}`)} style={{ cursor: 'pointer' }} className="hover:underline">
+                                        <span onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }} className="hover:underline" title="Ver detalle del bug en Test Pulse">
                                           🔴 {bug.key}
                                         </span>
                                         <button
@@ -10545,25 +11432,35 @@ const renderPlanningTab = () => {
                         const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
                         return (
-                          <tr key={bug.key}>
+                          <tr key={bug.key} onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }}>
                             {/* 1. ID */}
                             <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <span className="dashboard-bug-icon">B</span>
-                                <a
-                                  href={`/browse/${bug.key}`}
-                                  onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
-                                  style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
-                                  title="Abrir incidencia en Jira"
+                                <span
+                                  onClick={(e) => { e.stopPropagation(); setSelectedBug(bug); }}
+                                  style={{ color: '#0C66E4', fontWeight: 700, cursor: 'pointer' }}
+                                  className="hover:underline"
+                                  title="Ver detalle del bug en Test Pulse"
                                 >
                                   {bug.key}
-                                </a>
+                                </span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); router.open('/browse/' + bug.key); }}
+                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px', color: '#626F86', display: 'inline-flex', alignItems: 'center' }}
+                                  title="Abrir directamente en Jira"
+                                >
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                </button>
                               </div>
                             </td>
 
                             {/* 2. Resumen del bug */}
                             <td style={{ maxWidth: '380px' }}>
-                              <div style={{ fontWeight: 600, color: 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
+                              <div 
+                                style={{ fontWeight: 600, color: 'var(--jira-dark, #172B4D)', fontSize: '13px' }} 
+                                title={bug.summary}
+                              >
                                 {bug.summary}
                               </div>
                             </td>
@@ -10785,25 +11682,35 @@ const renderPlanningTab = () => {
                         const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
                         return (
-                          <tr key={bug.key} style={{ opacity: bug.isDone ? 0.85 : 1 }}>
+                          <tr key={bug.key} onClick={() => setSelectedBug(bug)} style={{ opacity: bug.isDone ? 0.85 : 1, cursor: 'pointer' }}>
                             {/* 1. ID */}
                             <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <span className={`dashboard-bug-icon ${bug.isDone ? 'done' : ''}`}>B</span>
-                                <a
-                                  href={`/browse/${bug.key}`}
-                                  onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
-                                  style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
-                                  title="Abrir incidencia en Jira"
+                                <span
+                                  onClick={(e) => { e.stopPropagation(); setSelectedBug(bug); }}
+                                  style={{ color: '#0C66E4', fontWeight: 700, cursor: 'pointer' }}
+                                  className="hover:underline"
+                                  title="Ver detalle del bug en Test Pulse"
                                 >
                                   {bug.key}
-                                </a>
+                                </span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); router.open('/browse/' + bug.key); }}
+                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px', color: '#626F86', display: 'inline-flex', alignItems: 'center' }}
+                                  title="Abrir directamente en Jira"
+                                >
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                </button>
                               </div>
                             </td>
 
                             {/* 2. Resumen del bug */}
                             <td style={{ maxWidth: '380px' }}>
-                              <div style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
+                              <div 
+                                style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} 
+                                title={bug.summary}
+                              >
                                 {bug.summary}
                               </div>
                             </td>
@@ -11349,18 +12256,25 @@ const renderPlanningTab = () => {
                           const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
                           return (
-                            <tr key={bug.key || idx}>
+                            <tr key={bug.key || idx} onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }}>
                               <td>
-                                <a
-                                  href={`/browse/${bug.key}`}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    router.open(`/browse/${bug.key}`);
-                                  }}
-                                  style={{ fontWeight: 700, color: '#0C66E4', textDecoration: 'none' }}
-                                >
-                                  {bug.key}
-                                </a>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <span
+                                    onClick={(e) => { e.stopPropagation(); setSelectedBug(bug); }}
+                                    style={{ fontWeight: 700, color: '#0C66E4', cursor: 'pointer' }}
+                                    className="hover:underline"
+                                    title="Ver detalle del bug en Test Pulse"
+                                  >
+                                    {bug.key}
+                                  </span>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); router.open(`/browse/${bug.key}`); }}
+                                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px', color: '#626F86', display: 'inline-flex', alignItems: 'center' }}
+                                    title="Abrir directamente en Jira"
+                                  >
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                  </button>
+                                </div>
                               </td>
                               <td style={{ fontSize: '12px', color: '#172B4D' }}>{bug.summary || 'Sin resumen'}</td>
                               <td style={{ whiteSpace: 'nowrap' }}>
@@ -13365,6 +14279,8 @@ const renderPlanningTab = () => {
         onCancel={() => setTextInputModal(prev => ({ ...prev, isOpen: false }))}
       />
       {renderReportAutomationModal()}
+      {renderBugSlidePanel()}
+      {renderMediaModal()}
     </>
   );
 

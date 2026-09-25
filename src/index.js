@@ -3239,6 +3239,117 @@ resolver.define('getIssueDescription', async ({ payload }) => {
   }
 });
 
+resolver.define('getBugFullDetails', async ({ payload }) => {
+  try {
+    const { issueIdOrKey } = payload;
+    if (!issueIdOrKey) return null;
+
+    const fields = [
+      'summary', 'description', 'attachment', 'comment', 'assignee', 'reporter',
+      'creator', 'priority', 'status', 'resolution', 'created', 'updated',
+      'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions',
+      'issuetype', 'customfield_10238', 'labels', 'issuelinks'
+    ].join(',');
+
+    const response = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${issueIdOrKey}?fields=${fields}&expand=renderedFields`
+    );
+    if (!response.ok) {
+      console.warn(`[getBugFullDetails] Failed to fetch bug ${issueIdOrKey}:`, response.status);
+      return null;
+    }
+    const data = await response.json();
+    const f = data.fields || {};
+    const rf = data.renderedFields || {};
+
+    // 1. Description: rendered HTML or raw ADF
+    const descriptionRendered = rf.description || null;
+    const descriptionRaw = f.description || null;
+
+    // 2. Attachments (categorized)
+    const attachments = (f.attachment || []).map(att => ({
+      id: att.id,
+      filename: att.filename,
+      size: att.size,
+      mimeType: att.mimeType,
+      created: att.created,
+      author: att.author?.displayName || 'Usuario',
+      content: att.content,
+      thumbnail: att.thumbnail || null,
+      isImage: (att.mimeType || '').startsWith('image/'),
+      isVideo: (att.mimeType || '').startsWith('video/') || /\.(mp4|mov|webm|avi|mkv)$/i.test(att.filename)
+    }));
+
+    // 3. Comments (ordered newest first)
+    const rawComments = f.comment?.comments || [];
+    const renderedComments = rf.comment?.comments || [];
+    const comments = rawComments.map((c, i) => {
+      const rend = renderedComments[i] || {};
+      return {
+        id: c.id,
+        author: {
+          displayName: c.author?.displayName || 'Usuario',
+          name: c.author?.name || '',
+          avatarUrl: c.author?.avatarUrls?.['32x32'] || c.author?.avatarUrls?.['24x24'] || null
+        },
+        created: c.created,
+        updated: c.updated,
+        bodyRaw: c.body,
+        bodyRendered: rend.body || null
+      };
+    }).reverse(); // Newest first!
+
+    // 4. Versions
+    const affectsVersions = (f.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const fixVersions = (f.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+
+    // 5. Environment
+    let environmentText = null;
+    if (rf.environment) environmentText = rf.environment;
+    else if (typeof f.environment === 'string') environmentText = f.environment;
+    else if (f.environment && typeof f.environment === 'object') environmentText = f.environment;
+
+    return {
+      id: data.id,
+      key: data.key,
+      summary: f.summary || '',
+      descriptionRendered,
+      descriptionRaw,
+      attachments,
+      comments,
+      assignee: f.assignee ? {
+        displayName: f.assignee.displayName || f.assignee.name || 'Sin asignar',
+        avatarUrl: f.assignee.avatarUrls?.['32x32'] || f.assignee.avatarUrls?.['24x24'] || null,
+        email: f.assignee.emailAddress || ''
+      } : null,
+      reporter: f.reporter ? {
+        displayName: f.reporter.displayName || f.reporter.name || 'Sin especificar',
+        avatarUrl: f.reporter.avatarUrls?.['32x32'] || f.reporter.avatarUrls?.['24x24'] || null,
+        email: f.reporter.emailAddress || ''
+      } : null,
+      status: f.status?.name || 'Abierto',
+      statusCategory: f.status?.statusCategory?.key || '',
+      resolution: f.resolution?.name || 'Sin resolver',
+      priority: f.priority?.name || 'Media',
+      priorityIcon: f.priority?.iconUrl || null,
+      severity: f.customfield_10238 || f.priority?.name || 'Sin definir',
+      rawSeverity: f.customfield_10238 || null,
+      versions: affectsVersions,
+      fixVersions: fixVersions,
+      created: f.created,
+      updated: f.updated,
+      resolutiondate: f.resolutiondate || null,
+      duedate: f.duedate || null,
+      environment: environmentText,
+      labels: f.labels || [],
+      rawFields: f
+    };
+  } catch (e) {
+    console.error("Error in getBugFullDetails:", e);
+    return null;
+  }
+});
+
 // Rebuilds the execution index directly from native Jira Test Run issues
 resolver.define('rebuildCycleIndex', async ({ payload }) => {
   const { cycleId } = payload;
