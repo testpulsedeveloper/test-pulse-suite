@@ -9,7 +9,7 @@ import './index.css';
 import TestPulseLoader from './components/TestPulseLoader';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 import packageJson from '../package.json';
-import { generateQrSvg } from './utils/qrCodeGenerator';
+import { generateQrSvg, generateQrDataUrl } from './utils/qrCodeGenerator';
 
 const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
 
@@ -770,7 +770,7 @@ function App() {
   const [bugKeyInput, setBugKeyInput] = useState('');
   const [executionStatusFilter, setExecutionStatusFilter] = useState('ALL');
   const [executionSearchQuery, setExecutionSearchQuery] = useState('');
-  const [executionSortBy, setExecutionSortBy] = useState('key-asc');
+  const [executionSortBy, setExecutionSortBy] = useState('none');
   const [executionCurrentPage, setExecutionCurrentPage] = useState(1);
   const [executionPageSize, setExecutionPageSize] = useState(20);
   const [executionChecked, setExecutionChecked] = useState(new Set());
@@ -4182,6 +4182,27 @@ Then el sistema valida la identidad.
                 <Spinner size="large" />
                 <div style={{ fontSize: '13px', fontWeight: 600, color: '#626F86' }}>Generando enlace seguro para cámara...</div>
               </div>
+            ) : qrModalSession?.dataUrl ? (
+              <div
+                style={{
+                  padding: '12px',
+                  background: '#FFFFFF',
+                  borderRadius: '16px',
+                  border: '2px solid #0C66E4',
+                  boxShadow: '0 8px 24px rgba(12, 102, 224, 0.12)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+              >
+                <img
+                  src={qrModalSession.dataUrl}
+                  alt="Código QR para escaneo móvil"
+                  width={280}
+                  height={280}
+                  style={{ display: 'block', borderRadius: '8px', imageRendering: 'pixelated' }}
+                />
+              </div>
             ) : qrModalSession?.svg ? (
               <div
                 style={{
@@ -5817,7 +5838,10 @@ Then el sistema valida la identidad.
         throw new Error("No se pudo generar la sesión de carga móvil.");
       }
 
-      const svg = generateQrSvg(res.uploadUrl, { size: 280, margin: 4, darkColor: '#000000', lightColor: '#FFFFFF' });
+      const [svg, dataUrl] = await Promise.all([
+        generateQrSvg(res.uploadUrl, { size: 280, margin: 4, darkColor: '#000000', lightColor: '#FFFFFF' }),
+        generateQrDataUrl(res.uploadUrl, { size: 280, margin: 4, darkColor: '#000000', lightColor: '#FFFFFF' })
+      ]);
 
       setQrModalSession({
         sessionId: res.sessionId,
@@ -5829,7 +5853,8 @@ Then el sistema valida la identidad.
         testSummary,
         iterId: iterId || null,
         iterName: iterName || null,
-        svg
+        svg,
+        dataUrl
       });
     } catch (err) {
       console.error('Error opening QR capture:', err);
@@ -6302,23 +6327,7 @@ Then el sistema valida la identidad.
           const deletedForCycle = perCycleDeletedRef.current[selectedCycle.id] || new Set();
           const filteredEnriched = enriched.filter(t => !deletedForCycle.has(String(t.id)));
           
-          filteredEnriched.sort((a, b) => {
-            const sA = (a.status || 'not run').toLowerCase();
-            const sB = (b.status || 'not run').toLowerCase();
-            const getRank = (s) => {
-              if (s === 'not run') return 1;
-              if (s === 'in progress') return 1; // Group with not run
-              if (s === 'fail' || s === 'failed') return 2;
-              if (s === 'blocked') return 3;
-              if (s === 'pass' || s === 'passed') return 4;
-              return 5;
-            };
-            const rankA = getRank(sA);
-            const rankB = getRank(sB);
-            if (rankA !== rankB) return rankA - rankB;
-            return 0;
-          });
-          
+          // Preserve exact order as added / linked
           perCycleCacheRef.current[cycleId] = filteredEnriched;
           if (activeCycleIdRef.current === cycleId) {
             setCycleTests(filteredEnriched);
@@ -7539,29 +7548,31 @@ const renderPlanningTab = () => {
       return true;
     });
 
-    // Sort tests
-    filteredTests = [...filteredTests].sort((a, b) => {
-      if (executionSortBy === 'key-asc') {
-        const keyA = a.testCaseKey || a.key || '';
-        const keyB = b.testCaseKey || b.key || '';
-        return keyA.localeCompare(keyB, undefined, { numeric: true });
-      }
-      if (executionSortBy === 'key-desc') {
-        const keyA = a.testCaseKey || a.key || '';
-        const keyB = b.testCaseKey || b.key || '';
-        return keyB.localeCompare(keyA, undefined, { numeric: true });
-      }
-      if (executionSortBy === 'status') {
-        const getRank = s => isFailed(s) ? 1 : (isBlocked(s) ? 2 : (isInProgress(s) ? 3 : (isNotRun(s) ? 4 : 5)));
-        return getRank(a.status) - getRank(b.status);
-      }
-      if (executionSortBy === 'summary') {
-        const sumA = a.summary || (testCases.find(t => t.id === a.id)?.summary) || '';
-        const sumB = b.summary || (testCases.find(t => t.id === b.id)?.summary) || '';
-        return sumA.localeCompare(sumB);
-      }
-      return 0;
-    });
+    // Sort tests (only if explicitly requested by user)
+    if (executionSortBy && executionSortBy !== 'none') {
+      filteredTests = [...filteredTests].sort((a, b) => {
+        if (executionSortBy === 'key-asc') {
+          const keyA = a.testCaseKey || a.key || '';
+          const keyB = b.testCaseKey || b.key || '';
+          return keyA.localeCompare(keyB, undefined, { numeric: true });
+        }
+        if (executionSortBy === 'key-desc') {
+          const keyA = a.testCaseKey || a.key || '';
+          const keyB = b.testCaseKey || b.key || '';
+          return keyB.localeCompare(keyA, undefined, { numeric: true });
+        }
+        if (executionSortBy === 'status') {
+          const getRank = s => isFailed(s) ? 1 : (isBlocked(s) ? 2 : (isInProgress(s) ? 3 : (isNotRun(s) ? 4 : 5)));
+          return getRank(a.status) - getRank(b.status);
+        }
+        if (executionSortBy === 'summary') {
+          const sumA = a.summary || (testCases.find(t => t.id === a.id)?.summary) || '';
+          const sumB = b.summary || (testCases.find(t => t.id === b.id)?.summary) || '';
+          return sumA.localeCompare(sumB);
+        }
+        return 0;
+      });
+    }
 
     // Pagination calculations
     const pageSize = executionPageSize === 'ALL' ? filteredTests.length : Number(executionPageSize);
@@ -7979,6 +7990,7 @@ const renderPlanningTab = () => {
                           cursor: 'pointer'
                         }}
                       >
+                        <option value="none">Orden: Como se agregaron (Predeterminado)</option>
                         <option value="key-asc">Ordenar por: Identificador (Asc)</option>
                         <option value="key-desc">Ordenar por: Identificador (Desc)</option>
                         <option value="status">Ordenar por: Estatus de Ejecución</option>
