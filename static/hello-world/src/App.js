@@ -597,29 +597,67 @@ function TextInputModal({ isOpen, title, label, defaultValue = '', placeholder =
 }
 
 
-const AtlaskitStatusLozenge = ({ status, isBold = true }) => {
+const AtlaskitStatusLozenge = ({ status, style = {} }) => {
   const norm = normalizeUiStatus(status);
-  let appearance = 'default';
-  let label = status || 'Not Run';
+  let label = 'NOT RUN';
+  let bg = '#F1F2F4';
+  let color = '#44546F';
+  let border = '#DCDFE4';
 
   if (norm === 'Passed') {
-    appearance = 'success';
     label = 'PASSED';
+    bg = '#DCFFF1';
+    color = '#216E4E';
+    border = '#A3FAD0';
   } else if (norm === 'Failed') {
-    appearance = 'removed';
     label = 'FAILED';
+    bg = '#FFEBE6';
+    color = '#BF2600';
+    border = '#FFBDAD';
   } else if (norm === 'Blocked') {
-    appearance = 'moved';
     label = 'BLOCKED';
+    bg = '#FFF0B3';
+    color = '#172B4D';
+    border = '#FFE380';
   } else if (norm === 'In Progress') {
-    appearance = 'inprogress';
     label = 'IN PROGRESS';
+    bg = '#DEEBFF';
+    color = '#0747A6';
+    border = '#B2D4FF';
   } else {
-    appearance = 'default';
     label = 'NOT RUN';
+    bg = '#F1F2F4';
+    color = '#44546F';
+    border = '#DCDFE4';
   }
 
-  return <Lozenge appearance={appearance} isBold={isBold}>{label}</Lozenge>;
+  return (
+    <span
+      className="status-badge"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: bg,
+        color: color,
+        border: `1px solid ${border}`,
+        width: '110px',
+        height: '28px',
+        boxSizing: 'border-box',
+        fontSize: '11px',
+        fontWeight: 700,
+        borderRadius: '4px',
+        letterSpacing: '0.3px',
+        textAlign: 'center',
+        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+        userSelect: 'none',
+        flexShrink: 0,
+        ...style
+      }}
+    >
+      {label}
+    </span>
+  );
 };
 
 
@@ -3945,20 +3983,7 @@ Then el sistema valida la identidad.
                                   {h.cycleSummary && <div style={{ fontSize: '0.78rem', color: '#626F86', marginTop: '2px' }}>{h.cycleSummary}</div>}
                                 </td>
                                 <td>
-                                  <span 
-                                    className="status-badge" 
-                                    style={{
-                                      background: getStatusColor(statusVal), 
-                                      color: getStatusTextColor(statusVal),
-                                      display: 'inline-block',
-                                      padding: '0.2rem 0.5rem',
-                                      borderRadius: '4px',
-                                      fontWeight: 600,
-                                      fontSize: '0.75rem'
-                                    }}
-                                  >
-                                    {statusVal}
-                                  </span>
+                                  <AtlaskitStatusLozenge status={statusVal} />
                                 </td>
                                 <td>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -7069,7 +7094,21 @@ const renderPlanningTab = () => {
                                 <AtlaskitStatusLozenge status={test.status} />
                                 <button 
                                   className="btn-secondary"
-                                  style={{ color: '#CA3521', padding: '2px 6px', height: '26px' }}
+                                  style={{ 
+                                    color: '#CA3521', 
+                                    borderColor: '#FFD2CC',
+                                    backgroundColor: '#FFF5F5',
+                                    padding: '0 8px', 
+                                    height: '28px',
+                                    borderRadius: '4px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s ease'
+                                  }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#FFEBE6'; e.currentTarget.style.borderColor = '#FFBDAD'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#FFF5F5'; e.currentTarget.style.borderColor = '#FFD2CC'; }}
                                   onClick={() => {
                                     const isExecuted = test.status && normalizeUiStatus(test.status) !== 'Not Run';
                                     if (isExecuted) {
@@ -12464,11 +12503,7 @@ const renderPlanningTab = () => {
 
                           {/* 5. Estado Ejecución */}
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            {normalizeUiStatus(row.status) === 'Passed' && <span className="ads-lozenge ads-lozenge-success" style={{ fontWeight: 700 }}>Passed</span>}
-                            {normalizeUiStatus(row.status) === 'Failed' && <span className="ads-lozenge ads-lozenge-danger" style={{ fontWeight: 700 }}>Failed</span>}
-                            {normalizeUiStatus(row.status) === 'Blocked' && <span className="ads-lozenge ads-lozenge-warning" style={{ fontWeight: 700 }}>Blocked</span>}
-                            {normalizeUiStatus(row.status) === 'In Progress' && <span className="ads-lozenge ads-lozenge-inprogress" style={{ fontWeight: 700, backgroundColor: '#DEEBFF', color: '#0747A6' }}>In Progress</span>}
-                            {normalizeUiStatus(row.status) === 'Not Run' && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontWeight: 700 }}>Not Run</span>}
+                            <AtlaskitStatusLozenge status={row.status} />
                           </td>
 
                           {/* 6. Defectos Vinculados */}
