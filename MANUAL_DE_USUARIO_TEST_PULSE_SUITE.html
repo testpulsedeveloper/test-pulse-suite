@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manual de Usuario — Test Pulse Suite</title>
+    <style>
+        :root {
+            --jira-blue: #0C66E4;
+            --jira-dark: #172B4D;
+            --jira-bg: #F7F8F9;
+            --jira-border: #DCDFE4;
+            --jira-card: #FFFFFF;
+            --text-main: #172B4D;
+            --text-subtle: #626F86;
+            --green: #22A06B;
+            --red: #E34935;
+            --orange: #D97008;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--jira-bg);
+            color: var(--text-main);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            background: var(--jira-card);
+            padding: 50px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+            border: 1px solid var(--jira-border);
+        }
+        .header-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 25px;
+            gap: 12px;
+        }
+        .btn {
+            background: var(--jira-blue);
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.2s;
+        }
+        .btn:hover {
+            background: #0055CC;
+        }
+        h1 {
+            color: var(--jira-dark);
+            border-bottom: 3px solid var(--jira-blue);
+            padding-bottom: 12px;
+            margin-top: 0;
+            font-size: 28px;
+        }
+        h2 {
+            color: var(--jira-blue);
+            border-bottom: 1px solid var(--jira-border);
+            padding-bottom: 8px;
+            margin-top: 35px;
+            font-size: 20px;
+        }
+        h3 {
+            color: var(--jira-dark);
+            margin-top: 25px;
+            font-size: 16px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 12px 14px;
+            border: 1px solid var(--jira-border);
+            text-align: left;
+        }
+        th {
+            background-color: #F1F2F4;
+            color: var(--jira-dark);
+            font-weight: 600;
+        }
+        tr:nth-child(even) {
+            background-color: #FAFBFC;
+        }
+        code {
+            background: #F1F2F4;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: SFMono-Medium, Consolas, "Courier New", monospace;
+            font-size: 13px;
+            color: #C9372C;
+        }
+        pre {
+            background: #091E420F;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--jira-border);
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: var(--jira-dark);
+        }
+        .alert {
+            border-left: 4px solid var(--jira-blue);
+            margin: 20px 0;
+            padding: 14px 20px;
+            background: #E9F2FF;
+            border-radius: 0 8px 8px 0;
+            color: var(--jira-dark);
+        }
+        .alert-TIP {
+            border-left-color: #22A06B;
+            background: #E3FCEF;
+        }
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+                border: none;
+                padding: 0;
+                max-width: 100%;
+            }
+            .header-actions {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-actions">
+            <button class="btn" onclick="window.print()">🖨️ Imprimir / Guardar como PDF</button>
+        </div>
+        <h1>📘 Manual de Usuario — Test Pulse Suite</h1>
+<strong>Versión de la Suite:</strong> 5.36.0  
+<strong>Entorno:</strong> Atlassian Jira Cloud (Forge Native)  
+<strong>Audiencia:</strong> QA Engineers, Testers, Scrum Masters, Product Owners y Líderes de Proyecto.
+<p>---</p>
+<h2>📑 Tabla de Contenido</h2>
+1. [Introducción y Navegación General](#1-introducción-y-navegación-general)
+2. [Módulo 1: Repositorio y Diseño de Casos de Prueba (Design)](#2-módulo-1-repositorio-y-diseño-de-casos-de-prueba-design)
+3. [Módulo 2: Planificación de Pruebas (Planning)](#3-módulo-2-planificación-de-pruebas-planning)
+4. [Módulo 3: Ejecución de Pruebas (Execution)](#4-módulo-3-ejecución-de-pruebas-execution)
+5. [Módulo 4: Informes, Métricas y Dashboard Ejecutivo (Reports)](#5-módulo-4-informes-métricas-y-dashboard-ejecutivo-reports)
+6. [Módulo 5: Automatización e Integración CI/CD (Test Automation)](#6-módulo-5-automatización-e-integración-cicd-test-automation)
+7. [Buenas Prácticas para el Equipo de QA](#7-buenas-prácticas-para-el-equipo-de-qa)
+<p>---</p>
+<h2>1. Introducción y Navegación General</h2>
+<h3>1.1 Barra Superior y Selector de Proyecto</h3>
+En la parte superior de la aplicación encontrarás la barra de navegación principal:
+<ul><li><strong>Selector de Proyecto:</strong> Permite alternar entre los diferentes proyectos de Jira en los que tienes acceso. Al cambiar de proyecto, todas las carpetas, casos de prueba, planes, ciclos y métricas se adaptarán inmediatamente.</li>
+<li><strong>Pestañas Principales:</strong></li>
+<li>🎨 <strong>Diseño (Design):</strong> Repositorio maestro de casos de prueba, árbol de carpetas, importación/exportación y autoría de pruebas.</li>
+<li>📅 <strong>Planificación (Planning):</strong> Definición de Planes de Prueba (<em>Test Plans</em>) y Ciclos de Prueba (<em>Test Cycles</em>), con asignación de casos y testers.</li>
+<li>⚡ <strong>Ejecución (Execution):</strong> Panel de pruebas en tiempo real, registro de iteraciones, evidencias multimedia, cambios de estado y gestión de bugs vinculados.</li>
+<li>📊 <strong>Informes (Reports):</strong> Dashboard ejecutivo, métricas de calidad, gráficos de distribución, matriz de trazabilidad y reporte de defectos.</li>
+<li><strong>Indicador de Sincronización:</strong> Muestra el estado de conexión activa con el entorno Forge de Atlassian.</li>
+</ul>
+---
+<h2>2. Módulo 1: Repositorio y Diseño de Casos de Prueba (Design)</h2>
+<p>El módulo de <strong>Diseño</strong> es la biblioteca centralizada donde reside todo el patrimonio de pruebas de tu proyecto.</p>
+<pre><code class="language-">📁 Repositorio de Pruebas
+├── 📂 01. Autenticación y Seguridad
+│   ├── 📄 TC-101: Login exitoso con MFA
+│   └── 📄 TC-102: Bloqueo de cuenta tras 3 intentos
+├── 📂 02. Pagos y Facturación
+│   ├── 📄 TC-201: Pago con Tarjeta de Crédito (Visa/Mastercard)
+│   └── 📄 TC-202: Aplicación de cupón de descuento
+└── 📂 03. Notificaciones Push
+</code></pre>
+<p>---</p>
+<h3>2.1 Árbol Jerárquico de Carpetas</h3>
+El panel izquierdo permite organizar tus casos de prueba en estructuras lógicas (módulos, componentes, épicas o sprints):
+<ul><li><strong>Crear Carpeta:</strong> Haz clic en el botón <code>+ Nueva Carpeta</code> o en el icono <code>+</code> junto a una carpeta existente para crear una subcarpeta.</li>
+<li><strong>Renombrar Carpeta:</strong> Haz clic en los tres puntos <code>•••</code> de la carpeta y selecciona <em>Renombrar</em>.</li>
+<li><strong>Mover Carpetas:</strong> Arrastra y suelta (<em>Drag & Drop</em>) carpetas para reordenar la jerarquía.</li>
+<li><strong>Eliminar Carpeta:</strong> Haz clic en los tres puntos <code>•••</code> y selecciona <em>Eliminar</em>. <em>(Los casos contenidos pueden moverse a la raíz o eliminarse según tu confirmación)</em>.</li>
+<li><strong>Filtrado por Carpeta:</strong> Al hacer clic en cualquier carpeta, la tabla principal mostrará únicamente los casos de prueba contenidos en ella y en sus subcarpetas.</li>
+</ul>
+---
+<h3>2.2 Creación de Casos de Prueba</h3>
+Haz clic en el botón azul <strong><code>+ Crear Caso de Prueba</code></strong> en la esquina superior derecha. Se abrirá el formulario de creación:
+<p>#### A. Campos Principales y Metadatos
+<table><tbody><tr><th>Campo</th><th>Descripción</th><th>Opciones / Ejemplos</th></tr></p>
+<p><tr><td><strong>Título / Resumen</strong></td><td>Nombre claro y conciso del objetivo de la prueba.</td><td><em>Validar checkout con saldo insuficiente</em></td></tr></tbody></table>
+<table><tbody><tr><th><strong>Carpeta Destino</strong></th><th>Carpeta del árbol donde se almacenará el caso.</th><th><em>/Pagos/Checkout</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Tipo de Prueba</strong></th><th>Categoría funcional o técnica.</th><th><em>Funcional</em>, <em>No Funcional</em>, <em>Regresión</em>, <em>Humo</em>, <em>Integración</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Prioridad</strong></th><th>Nivel de criticidad del caso.</th><th>🔴 <em>Bloqueante (Blocker)</em>, 🟠 <em>Alta (High)</em>, 🟡 <em>Media (Medium)</em>, 🟢 <em>Baja (Low)</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Estado del Caso</strong></th><th>Ciclo de vida de diseño del caso.</th><th><em>Draft (Borrador)</em>, <em>Ready (Listo para ejecutar)</em>, <em>Deprecated (Obsoleto)</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Componente</strong></th><th>Componente de Jira asociado.</th><th><em>Frontend</em>, <em>Backend API</em>, <em>Mobile App</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Etiquetas (Tags)</strong></th><th>Palabras clave para filtros rápidos.</th><th><code>#smoke</code>, <code>#sprint-24</code>, <code>#p1-release</code></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Tiempo Estimado</strong></th><th>Duración estimada de ejecución manual.</th><th><em>5m</em>, <em>15m</em>, <em>1h</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Precondiciones</strong></th><th>Estado previo requerido antes de ejecutar.</th><th><em>El usuario debe tener una cuenta activa con tarjeta registrada.</em></th></tr></tbody></table>
+<table><tbody><tr><th><strong>Descripción</strong></th><th>Contexto detallado de la prueba.</th><th>Formato enriquecido (negrita, listas, código).</th></tr></tbody></table></p>
+<p>---</p>
+<p>#### B. Modos de Especificación de Pasos
+Test Pulse soporta dos modalidades de diseño:</p>
+<p>##### 1. Modo Tradicional (Paso a Paso)
+Permite desglosar la prueba en una secuencia ordenada de pasos tabulares:
+<ul><li><strong>Paso / Acción:</strong> ¿Qué debe hacer el tester? <em>(Ej: "Hacer clic en el botón Pagar")</em>.</li>
+<li><strong>Datos de Prueba:</strong> Parámetros o credenciales a utilizar <em>(Ej: "Tarjeta: 4532... CVV: 123")</em>.</li>
+<li><strong>Resultado Esperado:</strong> Comportamiento esperado del sistema <em>(Ej: "Se muestra el modal de confirmación con el ID de transacción")</em>.</li>
+</ul>
+##### 2. Modo BDD / Gherkin
+Ideal para equipos ágiles que trabajan con desarrollo guiado por comportamiento (<em>Behavior-Driven Development</em>):
+<pre><code class="language-gherkin">Scenario: Pago exitoso con tarjeta de crédito
+  Given que el usuario tiene productos en el carrito por un total de $150.00
+  And se encuentra autenticado en la plataforma
+  When selecciona el método de pago "Tarjeta de Crédito"
+  And ingresa los datos válidos de su tarjeta
+  And presiona el botón "Confirmar Pedido"
+  Then el sistema procesa el pago exitosamente
+  And genera la orden de compra con estado "Aprobado"
+</code></pre></p>
+<p>---</p>
+<h3>2.3 Operaciones sobre Casos de Prueba</h3>
+En la tabla de casos de prueba dispones de las siguientes acciones directas:
+<ul><li><strong>Búsqueda en Tiempo Real:</strong> Barra de búsqueda que filtra instantáneamente por ID (<code>TC-101</code>), clave de Jira, título o descripción.</li>
+<li><strong>Filtros Avanzados:</strong> Filtra por prioridad, estado, componente, tipo de prueba o etiquetas.</li>
+<li><strong>Vistas de Visualización:</strong></li>
+<li>📋 <strong>Vista Tabla:</strong> Máxima densidad de datos, ideal para auditorías y revisiones masivas.</li>
+<li>🗂️ <strong>Vista Cuadrícula / Tarjetas:</strong> Visualización gráfica con tarjetas informativas.</li>
+<li><strong>Clonar Caso de Prueba:</strong> Crea una copia exacta de un caso existente para acelerar la creación de variantes.</li>
+<li>*<em>Acciones Masivas (</em>Bulk Operations<em>):<strong> Selecciona múltiples casos mediante las casillas de verificación para moverlos de carpeta o eliminarlos en bloque.</li>
+</ul>
+---
+<h3>2.4 Importación y Exportación de Casos</h3>
+<ul><li></strong>📥 Importar desde CSV / Excel:<strong></li>
+  </ul>1. Haz clic en el botón <code>Importar</code>.
+  2. Selecciona tu archivo <code>.csv</code> o <code>.xlsx</code>.
+  3. Mapea las columnas de tu archivo con los campos de Test Pulse (Título, Pasos, Resultado Esperado, Prioridad, etc.).
+  4. Confirma la importación.
+<ul><li></strong>📤 Exportar a CSV / Excel:<strong></li>
+<li>Descarga el repositorio completo o la selección filtrada para compartir con clientes o generar copias de seguridad locales.</li>
+</ul>
+---
+<h2>3. Módulo 2: Planificación de Pruebas (Planning)</h2>
+<p>El módulo de </strong>Planificación<strong> permite estructurar las fases de prueba en </strong>Planes de Prueba<strong> y </strong>Ciclos de Prueba</em><em>, asignando casos y recursos antes de comenzar la ejecución.</p>
+<pre><code class="language-">🎯 Test Plan: "Release v3.5 - Pagos y Checkout"
+│
+├── 🔄 Ciclo 1: "Smoke Test - Ambiente QA" (50 casos) -&gt; Asignado a: QA Team
+├── 🔄 Ciclo 2: "Regresión Completa - Staging" (320 casos) -&gt; Asignado a: Gustavo B.
+└── 🔄 Ciclo 3: "Pruebas de Rendimiento y Carga" (30 casos) -&gt; Asignado a: Performance Team
+</code></pre>
+<p>---</p>
+<h3>3.1 Planes de Prueba (</em>Test Plans<em>)</h3>
+Un <strong>Test Plan</strong> agrupa los objetivos generales de calidad para una versión, hito (</em>Milestone<em>) o entrega importante:
+<ul><li><strong>Crear Plan:</strong> Haz clic en <code>+ Crear Plan de Prueba</code>, asigna un nombre (</em>Ej: "Sprint 42 - Core Banking"<em>), objetivo, versión de Jira vinculada (</em>Fix Version<em>) y fechas estimadas.</li>
+<li><strong>Visualización de Planes:</strong> Panel lateral izquierdo con listado de planes activos y archivados.</li>
+</ul>
+---
+<h3>3.2 Ciclos de Prueba (</em>Test Cycles<em>)</h3>
+Un <strong>Ciclo de Prueba</strong> representa una iteración de pruebas concreta ejecutada en un entorno específico:
+<ul><li><strong>Crear Ciclo:</strong> Haz clic en <code>+ Crear Ciclo de Prueba</code>.</li>
+<li><strong>Campos del Ciclo:</strong></li>
+<li><strong>Nombre del Ciclo:</strong> </em>Ej: "Regresión Sprint 42 - Build 1.0.8"<em>.</li>
+<li><strong>Plan Asociado:</strong> Selecciona el Test Plan al que pertenece (opcional).</li>
+<li><strong>Entorno / Ambiente:</strong> </em>Desarrollo<em>, </em>QA<em>, </em>Staging<em>, </em>UAT<em>, </em>Producción<em>.</li>
+<li><strong>Fechas:</strong> Fecha de inicio y fecha fin planificada.</li>
+</ul>
+---
+<h3>3.3 Asignación de Casos a un Ciclo</h3>
+1. Selecciona el Ciclo en el panel izquierdo.
+2. En el panel principal, haz clic en <strong><code>+ Asignar Casos de Prueba</code></strong>.
+3. Utiliza el selector con árbol de carpetas y filtros para elegir los casos de prueba del repositorio.
+4. Puedes asignar un <strong>Tester Responsable</strong> a cada caso individualmente o a toda la selección en masa.
+5. Haz clic en <strong><code>Guardar Asignación</code></strong>. La barra inferior de progreso del ciclo actualizará el total de casos planificados en tiempo real.
+<p>---</p>
+<h2>4. Módulo 3: Ejecución de Pruebas (Execution)</h2>
+<p>El módulo de <strong>Ejecución</strong> es el espacio de trabajo diario del tester, donde se registran los resultados, se documentan iteraciones, se adjuntan evidencias y se reportan defectos en Jira.</p>
+<p>---</p>
+<h3>4.1 Estados de Ejecución</h3>
+Cada caso de prueba y cada iteración puede tener uno de los siguientes estados:
+<table><tbody><tr><th>Estado</th><th>Color / Badge</th><th>Significado</th></tr>
+<p><tr><td><strong>Passed (Aprobado)</strong></td><td>🟢 Verde</td><td>La prueba se ejecutó y cumplió con todos los resultados esperados.</td></tr></tbody></table>
+<table><tbody><tr><th><strong>Failed (Fallido)</strong></th><th>🔴 Rojo</th><th>Se detectó una discrepancia, fallo funcional o error en el sistema.</th></tr></tbody></table>
+<table><tbody><tr><th><strong>Blocked (Bloqueado)</strong></th><th>🟠 Naranja</th><th>La prueba no puede completarse debido a un bloqueo externo (ej. caída de servicio, falta de datos).</th></tr></tbody></table>
+<table><tbody><tr><th><strong>In Progress (En Progreso)</strong></th><th>🔵 Azul</th><th>El tester se encuentra ejecutando activamente la prueba.</th></tr></tbody></table>
+<table><tbody><tr><th><strong>Not Run (No Ejecutado)</strong></th><th>⚪ Gris</th><th>La prueba está asignada pero aún no ha iniciado su ejecución.</th></tr></tbody></table></p>
+<p>---</p>
+<h3>4.2 Ejecución por Iteraciones (Paso a Paso / Multi-iteración)</h3>
+Test Pulse permite ejecutar múltiples iteraciones sobre un mismo caso de prueba (por ejemplo, probando con diferentes conjuntos de datos o ejecutando pasos secuenciales):
+<pre><code class="language-">┌─────────────────────────────────────────────────────────────────────────────────┐
+│ TC-101: Login exitoso con MFA                                   [ Estado: Failed ]│
+├─────────────────────────────────────────────────────────────────────────────────┤
+│ Iteración 1: Usuario estándar con SMS Token                                     │
+│   • Datos Esperados: SMS recibido en &lt; 30 seg     • Estado: Passed 🟢            │
+│   • Resultado Real: Login correcto con token SMS.                               │
+│                                                                                 │
+│ Iteración 2: Usuario corporativo con Google Authenticator                       │
+│   • Datos Esperados: Token TOTP de 6 dígitos      • Estado: Failed 🔴            │
+│   • Resultado Real: Error 500 "Invalid TOTP Secret Key".                        │
+│   • Evidencias: 📎 error_totp.png, 📎 server_log.txt                             │
+│   • Bugs Vinculados: 🐛 BUG-849: Fallo en validación TOTP [Mayor]               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>#### Cómo utilizar las Iteraciones:
+1. Haz clic sobre el caso de prueba para expandir su panel de ejecución.
+2. Haz clic en el botón <strong><code>+ Agregar Iteración</code></strong>.
+3. Completa los campos:
+<ul><li><strong>Datos Esperados / Procedimiento:</strong> Datos ingresados en esta corrida.</li>
+<li></em><em>Resultado Obtenido (</em>Actual Result<em>):<strong> Comportamiento observado del sistema.</li>
+<li></strong>Estado de la Iteración:<strong> Selecciona <code>Passed</code>, <code>Failed</code>, <code>Blocked</code>, <code>In Progress</code> o <code>Not Run</code>.</li>
+</ul>4. </strong>Cálculo Inteligente del Estado Global:<strong>
+<ul><li>Si </strong>cualquier iteración<strong> tiene estado <code>Failed</code>, el estado global del caso de prueba cambiará automáticamente a </strong>Failed<strong>.</li>
+<li>Si </strong>cualquier iteración<strong> tiene estado <code>Blocked</code> (y ninguna fallida), el estado global será </strong>Blocked<strong>.</li>
+<li>Si </strong>todas las iteraciones<strong> tienen estado <code>Passed</code>, el caso global se marcará como </strong>Passed<strong>.</li>
+</ul>
+---</p>
+<h3>4.3 Gestión de Evidencias y Archivos Adjuntos</h3>
+Es fundamental respaldar los resultados de prueba con evidencias multimedia:
+<ul><li></strong>Subir Evidencia:<strong> Haz clic en el icono de clip <code>📎 Adjuntar Evidencia</code> o arrastra archivos directamente al panel.</li>
+<li></strong>Tipos de archivo soportados:<strong> Imágenes (<code>PNG</code>, <code>JPG</code>, <code>GIF</code>), Documentos (<code>PDF</code>, <code>TXT</code>, <code>LOG</code>, <code>JSON</code>) y Videos (<code>MP4</code>, <code>WEBM</code>).</li>
+<li></strong>Nivel de Evidencia:<strong> Puedes adjuntar evidencias a nivel global del caso de prueba o dentro de una iteración específica.</li>
+<li></strong>Renombrar y Eliminar:<strong> Puedes cambiar el nombre del archivo adjunto para facilitar su lectura o eliminarlo haciendo clic en el icono de papelera.</li>
+</ul>
+---
+<h3>4.4 Gestión y Vinculación de Defectos (Bugs)</h3>
+Cuando una prueba falla, puedes gestionar los defectos directamente sin salir de la pantalla de ejecución:
+<p>#### A. Crear un Nuevo Bug en Jira
+1. Haz clic en el botón </strong><code>+ Crear Defecto (Bug)</code><strong> dentro del caso de prueba o iteración.
+2. Completa el resumen, descripción (se precarga automáticamente con los pasos e iteración actual) y severidad.
+3. El bug se creará nativamente en Jira y quedará enlazado al caso de prueba y al ciclo actual de forma bidireccional.</p>
+<p>#### B. Vincular un Bug Existente
+1. Haz clic en </strong><code>Vincular Bug</code><strong>.
+2. Escribe la clave (<code>PROJ-123</code>) o texto del resumen para buscar en Jira.
+3. Selecciónalo para vincularlo.</p>
+<p>#### C. Visualización de Severidad de Defectos
+Cada bug vinculado muestra su etiqueta de severidad estandarizada con color identificativo:
+<ul><li>🔴 </strong>Bloqueante / Crítico:<strong> Defecto que impide la continuidad operativa.</li>
+<li>🟠 </strong>Mayor / Alta:<strong> Defecto grave en una funcionalidad principal sin solución alternativa inmediata.</li>
+<li>🟡 </strong>Medio:<strong> Defecto funcional con solución alternativa temporal.</li>
+<li>🟢 </strong>Menor / Baja:</em><em> Defecto visual, cosmético o de baja prioridad.</li>
+</ul>
+---</p>
+<h3>4.5 Control de Sesión y Asignación (</em>Takeover<em>)</h3>
+Para proteger la integridad de los datos, Test Pulse registra la identidad del tester que ejecutó la prueba y la fecha/hora exacta.
+<ul><li>Si otro tester necesita continuar o modificar una prueba iniciada por un compañero, la aplicación mostrará la opción </em><em>"Tomar el control" (</em>Takeover<em>)<strong>, actualizando la autoría de forma transparente.</li>
+</ul>
+---
+<h2>5. Módulo 4: Informes, Métricas y Dashboard Ejecutivo (Reports)</h2>
+<p>El módulo de </strong>Informes<strong> consolida en tiempo real la información de todas las ejecuciones, ciclos y defectos, ofreciendo tableros ejecutivos y analíticos para la toma de decisiones.</p>
+<pre><code class="language-">┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ 📊 DASHBOARD EJECUTIVO DE CALIDAD                                                      │
+├───────────────────┬───────────────────┬───────────────────┬────────────────────────────┤
+│ Total Casos: 974  │ Aprobados: 812    │ Fallidos: 98      │ Bloqueados: 21  (Sin Run: 43)│
+│ Cobertura: 95.6%  │ % Éxito: 83.4%    │ Bugs Abiertos: 34 │ Tiempo Promedio: 4.2h      │
+└───────────────────┴───────────────────┴───────────────────┴────────────────────────────┘
+</code></pre>
+<p>---</p>
+<h3>5.1 Filtros del Dashboard</h3>
+En la parte superior del módulo de reportes puedes segmentar los datos:
+<ul><li></strong>Filtro por Plan de Prueba:<strong> Visualiza las métricas acumuladas de uno o más planes específicos.</li>
+<li></strong>Filtro por Ciclos de Prueba:<strong> Selecciona ciclos individuales para análisis granular.</li>
+<li></strong>Filtro por Tipo de Prueba:</em><em> Alterna entre pruebas </em>Funcionales<em> y </em>No Funcionales<em>.</li>
+</ul>
+---
+<h3>5.2 Secciones y Tableros Analíticos</h3>
+<p>#### 1. Resumen Ejecutivo de Métricas (KPI Cards)
+<ul><li><strong>Total de Pruebas Ejecutadas:</strong> Volumen de casos planificados vs. ejecutados.</li>
+<li></em><em>Tasa de Aprobación (</em>Pass Rate<em>):<strong> Porcentaje de pruebas en estado <code>Passed</code>.</li>
+<li></strong>Tasa de Fallos (</em>Fail Rate<em>):<strong> Porcentaje de pruebas fallidas sobre el total.</li>
+<li></strong>Pruebas Bloqueadas:<strong> Alerta temprana de dependencias e impedimentos técnicos.</li>
+</ul>
+#### 2. Gráficos de Distribución de Estado
+<ul><li></strong>Gráfico de Dona (</em>Donut Chart<em>):<strong> Proporción visual de <code>Passed</code>, <code>Failed</code>, <code>Blocked</code>, <code>In Progress</code> y <code>Not Run</code>.</li>
+<li></strong>Progreso Temporal (</em>Execution Velocity<em>):</em><em> Curva de casos ejecutados a lo largo de los días del ciclo.</li>
+</ul>
+#### 3. Panel de Control de Defectos (</em>Bugs Analytics<em>)
+<ul><li><strong>Defectos por Severidad:</strong> Gráfica de barras dividida en </em>Bloqueante, Crítico, Mayor, Medio y Menor<em>.</li>
+<li><strong>Defectos Abiertos vs. Resueltos:</strong> Seguimiento del ritmo de corrección del equipo de desarrollo.</li>
+<li><strong>Listado de Defectos Críticos de Ciclo:</strong> Tabla interactiva con enlace directo a Jira, tester asignado, casos afectados y estado de resolución.</li>
+<li><strong>Defectos Huérfanos / Sin Vincular:</strong> Detección de bugs reportados en el proyecto de Jira que no están asociados a ningún caso de prueba formal.</li>
+</ul>
+#### 4. Estadísticas por Tester y Componente
+<ul><li><strong>Productividad del Equipo:</strong> Número de ejecuciones y defectos reportados por cada tester.</li>
+<li><strong>Calidad por Componente:</strong> Identificación de los módulos de software con mayor tasa de defectos (</em>Hotspots<em> de riesgo).</li>
+</ul>
+#### 5. Matriz de Trazabilidad Requisitos - Pruebas - Defectos
+Permite auditar la cobertura de extremo a extremo:
+$$\text{Requisito / Historia de Usuario} \longrightarrow \text{Casos de Prueba} \longrightarrow \text{Ejecuciones} \longrightarrow \text{Bugs Encontrados}$$</p>
+<p>---</p>
+<h3>5.3 Exportación de Reportes</h3>
+Puedes compartir el estado de la calidad con stakeholders mediante los botones de exportación:
+<ul><li><strong>📄 Exportar a PDF:</strong> Genera un informe ejecutivo con membrete, gráficos y tablas formateadas.</li>
+<li><strong>📊 Exportar a Excel / CSV:</strong> Descarga la data cruda con todas las métricas para análisis personalizados en BI o auditorías externas.</li>
+</ul>
+---
+<h2>6. Módulo 5: Automatización e Integración CI/CD (Test Automation)</h2>
+<p>Test Pulse Suite permite consolidar los resultados de pruebas manuales y automatizadas en una única fuente de verdad.</p>
+<h3>6.1 Frameworks Soportados</h3>
+La suite puede recibir resultados de los frameworks más populares del mercado:
+<ul><li><strong>Java / JVM:</strong> JUnit 4/5, TestNG, Cucumber-JVM.</li>
+<li><strong>JavaScript / TypeScript:</strong> Cypress, Playwright, Jest, Mocha.</li>
+<li><strong>Python:</strong> PyTest, Robot Framework, Behave.</li>
+<li><strong>C# / .NET:</strong> NUnit, xUnit, SpecFlow.</li>
+</ul>
+<h3>6.2 Consulta de Historial Automatizado</h3>
+Dentro de la pestaña de Automatización puedes:
+<ul><li>Consultar las corridas de pruebas enviadas por tus pipelines de integración continua (<strong>GitHub Actions, GitLab CI, Jenkins, Azure DevOps, Bitbucket Pipelines</strong>).</li>
+<li>Ver la correspondencia automática entre los métodos de prueba del código y los casos de prueba de Test Pulse.</li>
+</ul>
+---
+<h2>7. Buenas Prácticas para el Equipo de QA</h2>
+<p>1. <strong>Estandarización de Títulos:</strong> Inicia los títulos con verbos en infinitivo que describan claramente el objetivo </em>(ej. "Validar recuperación de contraseña con correo inválido")<em>.
+2. </em><em>Uso de Iteraciones para Pruebas de Datos (</em>Data-Driven<em>):<strong> En lugar de crear 10 casos de prueba idénticos para 10 valores de entrada distintos, crea 1 caso de prueba con 10 </strong>iteraciones<strong>.
+3. </strong>Evidencias Claras en Fallos:<strong> Adjunta siempre una captura de pantalla del mensaje de error y el archivo de log correspondiente antes de marcar una iteración como <code>Failed</code>.
+4. </strong>Vincular siempre los Bugs al Caso:<strong> No reportes bugs aislados en Jira; créalos o vincúlalos directamente desde la ejecución de Test Pulse para que se reflejen en la Matriz de Trazabilidad.
+5. </strong>Cierre de Ciclos:</em>* Al finalizar un sprint o release, verifica que ningún caso permanezca en estado <code>In Progress</code> o <code>Not Run</code>.</p>
+    </div>
+</body>
+</html>

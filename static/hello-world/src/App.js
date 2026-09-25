@@ -672,6 +672,24 @@ function App() {
   // Reports State
   const [reportData, setReportData] = useState({ cycles: [] });
   const [reportLoading, setReportLoading] = useState(false);
+  const [isRefreshingReport, setIsRefreshingReport] = useState(false);
+  const [isFolderSidebarVisible, setIsFolderSidebarVisible] = useState(() => {
+    try {
+      return localStorage.getItem('tp_folders_sidebar_visible') !== 'false';
+    } catch (e) {
+      return true;
+    }
+  });
+
+  const toggleFolderSidebar = () => {
+    setIsFolderSidebarVisible(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('tp_folders_sidebar_visible', String(next));
+      } catch (e) {}
+      return next;
+    });
+  };
   const [reportSelectedPlans, setReportSelectedPlans] = useState([]);
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycles, setReportSelectedCycles] = useState([]);
@@ -1381,15 +1399,15 @@ function App() {
     return () => clearInterval(id);
   }, [activeTab, selectedCycle?.id]);
 
-  // Reports: auto-refresh when entering tab only if data is older than 15 min, and poll every 15 min
+  // Reports: load on entering tab only if not loaded yet, and poll quietly in the background
   useEffect(() => {
     if (activeTab !== 'reports') return;
-    const age = reportData._loadedAt ? Date.now() - reportData._loadedAt : Infinity;
-    if (reportData.cycles.length === 0 || age > 900_000) {
-      loadReportData();
+    if (!reportData.cycles || reportData.cycles.length === 0 || !reportData._loadedAt) {
+      loadReportData(null, null, false);
     }
     const intervalId = setInterval(() => {
-      loadReportData();
+      if (document.hidden) return;
+      loadReportData(null, null, true); // Silent background auto-sync
     }, 900_000);
     return () => clearInterval(intervalId);
   }, [activeTab]);
@@ -2280,32 +2298,57 @@ Then el sistema valida la identidad.
   const renderDesignTab = () => (
     <div className="tab-layout">
       {/* Sidebar Navigation (Folders) */}
-      <aside className="sidebar glass" style={{ width: sidebarWidth, flexShrink: 0 }}>
-        {/* Modern Folders & Suites Header */}
-        <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Folders &amp; Suites</span>
-            <span className="ads-lozenge ads-lozenge-subtle" style={{ borderRadius: '9999px', fontSize: '10px' }}>{folders.length + 1}</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <button 
-              onClick={() => {
-                const nextState = !isAllTestsExpanded;
-                setIsAllTestsExpanded(nextState);
-                const nextExp = {};
-                folders.forEach(f => { nextExp[f.id] = nextState; });
-                setExpandedFolders(nextExp);
-              }} 
-              title="Expandir / Contraer todo"
-              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '3px', borderRadius: '4px', color: 'var(--jira-subtle, #626F86)' }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="8 9 12 5 16 9"></polyline>
-                <polyline points="16 15 12 19 8 15"></polyline>
-              </svg>
-            </button>
-          </div>
-        </div>
+      {isFolderSidebarVisible && (
+        <>
+          <aside className="sidebar glass" style={{ width: sidebarWidth, flexShrink: 0 }}>
+            {/* Modern Folders & Suites Header */}
+            <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Folders &amp; Suites</span>
+                <span className="ads-lozenge ads-lozenge-subtle" style={{ borderRadius: '9999px', fontSize: '10px' }}>{folders.length + 1}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <button 
+                  onClick={() => {
+                    const nextState = !isAllTestsExpanded;
+                    setIsAllTestsExpanded(nextState);
+                    const nextExp = {};
+                    folders.forEach(f => { nextExp[f.id] = nextState; });
+                    setExpandedFolders(nextExp);
+                  }} 
+                  title="Expandir / Contraer todo"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '3px', borderRadius: '4px', color: 'var(--jira-subtle, #626F86)' }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="8 9 12 5 16 9"></polyline>
+                    <polyline points="16 15 12 19 8 15"></polyline>
+                  </svg>
+                </button>
+                <button
+                  onClick={toggleFolderSidebar}
+                  title="Ocultar panel de carpetas (Sidebar)"
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: '3px',
+                    borderRadius: '4px',
+                    color: 'var(--jira-subtle, #626F86)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <line x1="9" y1="3" x2="9" y2="21" />
+                    <path d="M15 15l-3-3 3-3" />
+                  </svg>
+                </button>
+              </div>
+            </div>
 
         {/* Quick Folder Filter */}
         <div style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--jira-bg-subtle, #F1F2F4)' }}>
@@ -2508,10 +2551,35 @@ Then el sistema valida la identidad.
           marginLeft: '-1px'
         }}
       />
+      </>
+      )}
       <main className="main-content" style={{ padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', flex: 1, overflowY: 'auto' }}>
         <div className="header" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              {!isFolderSidebarVisible && (
+                <button
+                  onClick={toggleFolderSidebar}
+                  className="btn-secondary"
+                  title="Mostrar panel de carpetas (Sidebar)"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    fontSize: '0.78rem',
+                    padding: '0.35rem 0.65rem',
+                    borderRadius: '6px',
+                    marginRight: '2px'
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <line x1="9" y1="3" x2="9" y2="21" />
+                    <path d="M13 9l3 3-3 3" />
+                  </svg>
+                  <span>Carpetas</span>
+                </button>
+              )}
               <span style={{ fontSize: '18px', lineHeight: 1, flexShrink: 0 }}>📁</span>
               <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
                 {activeFolder === null ? 'Sin Carpeta (Raíz)' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta')}
@@ -4770,15 +4838,24 @@ Then el sistema valida la identidad.
     }
   };
 
-  const loadReportData = async (overrideProjectId = null, overrideConfig = null) => {
+  const loadReportData = async (overrideProjectId = null, overrideConfig = null, isSilent = false) => {
     const projId = overrideProjectId || selectedProjectId;
     const cfg = overrideConfig || projectConfig;
     if (!projId) return;
     if (isCircuitBroken()) {
-      addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
+      if (!isSilent) {
+        addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
+      }
       return;
     }
-    setReportLoading(true);
+
+    const hasExistingData = reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0 && reportData._loadedAt;
+    if (!hasExistingData && !isSilent) {
+      setReportLoading(true);
+    } else {
+      setIsRefreshingReport(true);
+    }
+
     try {
       const data = await invoke('getExecutionReport', { projectId: projId, config: cfg });
       setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
@@ -4854,13 +4931,16 @@ Then el sistema valida la identidad.
         }
         return prev;
       });
-      addNotification({
-        type: 'warning',
-        title: 'Sincronización de métricas',
-        description: 'Jira tardó en responder. Mostrando los datos actuales disponibles.'
-      });
+      if (!isSilent) {
+        addNotification({
+          type: 'warning',
+          title: 'Sincronización de métricas',
+          description: 'Jira tardó en responder. Mostrando los datos actuales disponibles.'
+        });
+      }
     } finally {
       setReportLoading(false);
+      setIsRefreshingReport(false);
     }
   };
 
@@ -4952,7 +5032,9 @@ Then el sistema valida la identidad.
           }
         });
     } else if (activeTab === 'reports') {
-      loadReportData();
+      if (!reportData._loadedAt || !reportData.cycles || reportData.cycles.length === 0) {
+        loadReportData(null, null, false);
+      }
     }
   }, [activeTab, selectedCycle, refreshTrigger]);
 
@@ -4968,29 +5050,54 @@ Then el sistema valida la identidad.
   };
 
   const doLinkBug = async (test, bugKey) => {
-    // 1. Create Jira Issue Link via backend (fire and forget)
-    invoke('linkBugToTest', { testCaseId: test.id, bugKey });
+    const cleanKey = (bugKey || '').trim().toUpperCase();
+    if (!cleanKey) return;
 
-    // 2. Avoid duplicates
+    // 1. Avoid duplicates
     const currentBugs = test.linkedBugs || [];
-    if (currentBugs.some(b => b.key === bugKey)) return;
-    const updatedBugs = [...currentBugs, { key: bugKey }];
+    if (currentBugs.some(b => b.key === cleanKey)) return;
 
-    // 3. Optimistic UI: show badge immediately
-    setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
+    // 2. Validate against Jira and create Issue Link
+    try {
+      const res = await invoke('linkBugToTest', { testCaseId: test.id, bugKey: cleanKey });
+      if (res && res.success === false) {
+        addNotification({
+          type: 'error',
+          title: 'Incidencia no válida',
+          description: res.error || `La clave "${cleanKey}" no existe en Jira.`
+        });
+        return;
+      }
 
-    // 4. Save in background
-    invoke('updateTestStatus', {
-      cycleId: selectedCycle.id,
-      testId: test.id,
-      testRunId: test?.testRunId || test?.testRunKey,
-      linkedBugs: updatedBugs
-    }).catch(err => {
+      const verifiedBug = res?.bug || { key: cleanKey };
+      const updatedBugs = [...currentBugs, verifiedBug];
+
+      // 3. Update UI
+      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
+
+      // 4. Save in background
+      await invoke('updateTestStatus', {
+        cycleId: selectedCycle.id,
+        testId: test.id,
+        testRunId: test?.testRunId || test?.testRunKey,
+        linkedBugs: updatedBugs
+      });
+
+      addNotification({
+        type: 'success',
+        title: '✅ Defecto Vinculado',
+        description: `Incidencia ${cleanKey} vinculada correctamente.`
+      });
+    } catch (err) {
       console.error('Error linking bug:', err);
       // Rollback on error
       setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: currentBugs } : t));
-      alert('Error al vincular el bug: ' + (err.message || err));
-    });
+      addNotification({
+        type: 'error',
+        title: 'Error al vincular defecto',
+        description: err.message || 'No se pudo vincular la incidencia.'
+      });
+    }
   };
 
   const handleConfirmLinkUnlinkedBug = async () => {
@@ -5010,7 +5117,18 @@ Then el sistema valida la identidad.
     setIsLinkingUnlinkedBugLoading(true);
     try {
       // 1. Link in Jira Issue Link
-      await invoke('linkBugToTest', { testCaseId: targetTestForBug, bugKey });
+      const res = await invoke('linkBugToTest', { testCaseId: targetTestForBug, bugKey });
+      if (res && res.success === false) {
+        addNotification({
+          type: 'error',
+          title: 'Incidencia no encontrada',
+          description: res.error || `La clave "${bugKey}" no existe en Jira.`
+        });
+        setIsLinkingUnlinkedBugLoading(false);
+        return;
+      }
+
+      const bugData = res?.bug || linkingUnlinkedBug;
 
       // 2. Update cycle execution status with the linked bug
       const reportCycle = (reportData.cycles || []).find(rc => String(rc.id) === String(targetCycleForBug));
@@ -5018,7 +5136,17 @@ Then el sistema valida la identidad.
       const currentLinkedBugs = existingEx?.linkedBugs || [];
       const updatedLinkedBugs = currentLinkedBugs.some(b => b.key === bugKey)
         ? currentLinkedBugs
-        : [...currentLinkedBugs, { key: bugKey, summary: linkingUnlinkedBug.summary, severity: linkingUnlinkedBug.severity, status: linkingUnlinkedBug.status }];
+        : [...currentLinkedBugs, { 
+            key: bugKey, 
+            summary: bugData.summary || linkingUnlinkedBug.summary, 
+            severity: bugData.severity || linkingUnlinkedBug.severity, 
+            status: bugData.status || linkingUnlinkedBug.status,
+            version: bugData.version || linkingUnlinkedBug.version || 'Sin versión',
+            versions: bugData.versions || linkingUnlinkedBug.versions || [],
+            fixVersions: bugData.fixVersions || linkingUnlinkedBug.fixVersions || [],
+            created: bugData.created || linkingUnlinkedBug.created,
+            resolutiondate: bugData.resolutiondate || linkingUnlinkedBug.resolutiondate
+          }];
 
       await invoke('updateTestStatus', {
         cycleId: targetCycleForBug,
@@ -5028,7 +5156,7 @@ Then el sistema valida la identidad.
       });
 
       // 3. Optimistic local update: mark as linked in unlinkedBugs state
-      setUnlinkedBugs(prev => prev.map(b => b.key === bugKey ? { ...b, isLinked: true } : b));
+      setUnlinkedBugs(prev => (prev || []).map(b => b.key === bugKey ? { ...b, isLinked: true } : b));
 
       // 4. Update reportData state
       setReportData(prev => {
@@ -5043,7 +5171,14 @@ Then el sistema valida la identidad.
           });
           return { ...c, execution: nextExec };
         });
-        return { ...prev, cycles: nextCycles };
+        const nextBugMap = {
+          ...(prev.bugMap || {}),
+          [bugKey]: {
+            ...bugData,
+            key: bugKey
+          }
+        };
+        return { ...prev, cycles: nextCycles, bugMap: nextBugMap };
       });
 
       addNotification({
@@ -5150,33 +5285,60 @@ const renderPlanningTab = () => {
     return (
       <div className="tab-layout" style={{ height: '100%', overflow: 'hidden' }}>
         {/* Left Planning Sidebar (Test Plans & Cycles) */}
-        <aside className="planning-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
-          <div className="planning-sidebar-header">
-            <div className="planning-section-title">
-              <span>TEST PLANS</span>
-              <button 
-                onClick={handleCreateIssue}
-                style={{ background: 'none', border: 'none', color: 'var(--jira-blue, #0C66E4)', fontSize: '11px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
-              >
-                + Nuevo
-              </button>
-            </div>
-            <select 
-              value={selectedPlanId || ''} 
-              onChange={e => { 
-                setSelectedPlanId(e.target.value); 
-                setSelectedCycle(null); 
-                setSelectedTestsForCycle([]); 
-              }}
-              className="planning-plan-dropdown"
-              style={{ outline: 'none' }}
-            >
-              <option value="">Seleccionar un Test Plan...</option>
-              {testPlans.map(plan => (
-                <option key={plan.id} value={plan.id}>{plan.summary}</option>
-              ))}
-            </select>
-          </div>
+        {isFolderSidebarVisible && (
+          <>
+            <aside className="planning-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
+              <div className="planning-sidebar-header">
+                <div className="planning-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>TEST PLANS</span>
+                    <button 
+                      onClick={handleCreateIssue}
+                      style={{ background: 'none', border: 'none', color: 'var(--jira-blue, #0C66E4)', fontSize: '11px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                    >
+                      + Nuevo
+                    </button>
+                  </div>
+                  <button
+                    onClick={toggleFolderSidebar}
+                    title="Ocultar panel lateral (Sidebar)"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '3px',
+                      borderRadius: '4px',
+                      color: 'var(--jira-subtle, #626F86)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
+                      <path d="M15 15l-3-3 3-3" />
+                    </svg>
+                  </button>
+                </div>
+                <select 
+                  value={selectedPlanId || ''} 
+                  onChange={e => { 
+                    setSelectedPlanId(e.target.value); 
+                    setSelectedCycle(null); 
+                    setSelectedTestsForCycle([]); 
+                  }}
+                  className="planning-plan-dropdown"
+                  style={{ outline: 'none' }}
+                >
+                  <option value="">Seleccionar un Test Plan...</option>
+                  {testPlans.map(plan => (
+                    <option key={plan.id} value={plan.id}>{plan.summary}</option>
+                  ))}
+                </select>
+              </div>
 
           {/* Sidebar scrollable cycles */}
           <div className="planning-sidebar-content">
@@ -5344,6 +5506,8 @@ const renderPlanningTab = () => {
             marginLeft: '-1px'
           }}
         />
+        </>
+        )}
 
         {/* Main Workspace */}
         <main className="planning-workspace">
@@ -5353,7 +5517,29 @@ const renderPlanningTab = () => {
                 {/* Workspace Header & Action */}
                 <div className="planning-workspace-header">
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                      {!isFolderSidebarVisible && (
+                        <button
+                          onClick={toggleFolderSidebar}
+                          className="btn-secondary"
+                          title="Mostrar panel de planes y ciclos"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            fontSize: '0.78rem',
+                            padding: '0.35rem 0.65rem',
+                            borderRadius: '6px'
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                            <line x1="9" y1="3" x2="9" y2="21" />
+                            <path d="M13 9l3 3-3 3" />
+                          </svg>
+                          <span>Planes &amp; Ciclos</span>
+                        </button>
+                      )}
                       <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', letterSpacing: '-0.01em' }}>
                         Planning: <span style={{ color: '#0C66E4' }}>{selectedCycle.summary}</span>
                       </h1>
@@ -5878,13 +6064,24 @@ const renderPlanningTab = () => {
                 <p style={{ margin: 0, fontSize: '13px', maxWidth: '400px' }}>
                   Elige un Test Plan o Ciclo del panel lateral izquierdo para planificar, asignar o gestionar sus casos de prueba.
                 </p>
-                <button 
-                  className="btn-primary" 
-                  style={{ marginTop: '1.25rem', height: '36px', fontSize: '13px' }}
-                  onClick={handleCreateIssue}
-                >
-                  + Crear Nuevo Ciclo / Plan
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '1.25rem' }}>
+                  {!isFolderSidebarVisible && (
+                    <button
+                      onClick={toggleFolderSidebar}
+                      className="btn-secondary"
+                      style={{ height: '36px', fontSize: '13px' }}
+                    >
+                      📂 Ver Planes y Ciclos
+                    </button>
+                  )}
+                  <button 
+                    className="btn-primary" 
+                    style={{ height: '36px', fontSize: '13px' }}
+                    onClick={handleCreateIssue}
+                  >
+                    + Crear Nuevo Ciclo / Plan
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -6080,41 +6277,68 @@ const renderPlanningTab = () => {
     return (
       <div className="tab-layout" style={{ height: '100%', overflow: 'hidden' }}>
         {/* Left Sidebar: Plans & Cycles */}
-        <aside className="execution-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
-          {/* Test Plans Selector Header */}
-          <div style={{ padding: '1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-              <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', letterSpacing: '0.04em', textTransform: 'uppercase' }}>TEST PLANS</span>
-              <button
-                onClick={() => setIsCreatePlanOpen(true)}
-                style={{ fontSize: '11px', fontWeight: 600, color: '#0C66E4', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-                className="hover:underline"
-              >
-                + Nuevo
-              </button>
-            </div>
-            <select
-              value={selectedPlanId || ''}
-              onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); setExecutionCurrentPage(1); }}
-              style={{
-                width: '100%',
-                padding: '0.5rem 0.6rem',
-                fontSize: '12px',
-                fontWeight: 600,
-                color: '#172B4D',
-                background: '#FAFBFC',
-                border: '1px solid #DCDFE4',
-                borderRadius: '6px',
-                outline: 'none',
-                cursor: 'pointer'
-              }}
-            >
-              <option value="">Seleccionar un Plan de Pruebas...</option>
-              {testPlans.map(plan => (
-                <option key={plan.id} value={plan.id}>{plan.summary}</option>
-              ))}
-            </select>
-          </div>
+        {isFolderSidebarVisible && (
+          <>
+            <aside className="execution-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
+              {/* Test Plans Selector Header */}
+              <div style={{ padding: '1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', letterSpacing: '0.04em', textTransform: 'uppercase' }}>TEST PLANS</span>
+                    <button
+                      onClick={() => setIsCreatePlanOpen(true)}
+                      style={{ fontSize: '11px', fontWeight: 600, color: '#0C66E4', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                      className="hover:underline"
+                    >
+                      + Nuevo
+                    </button>
+                  </div>
+                  <button
+                    onClick={toggleFolderSidebar}
+                    title="Ocultar panel lateral (Sidebar)"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '3px',
+                      borderRadius: '4px',
+                      color: 'var(--jira-subtle, #626F86)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
+                      <path d="M15 15l-3-3 3-3" />
+                    </svg>
+                  </button>
+                </div>
+                <select
+                  value={selectedPlanId || ''}
+                  onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); setExecutionCurrentPage(1); }}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.6rem',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    color: '#172B4D',
+                    background: '#FAFBFC',
+                    border: '1px solid #DCDFE4',
+                    borderRadius: '6px',
+                    outline: 'none',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <option value="">Seleccionar un Plan de Pruebas...</option>
+                  {testPlans.map(plan => (
+                    <option key={plan.id} value={plan.id}>{plan.summary}</option>
+                  ))}
+                </select>
+              </div>
 
           {/* Active Cycles Header */}
           <div style={{ padding: '0.85rem 1rem 0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -6206,6 +6430,8 @@ const renderPlanningTab = () => {
             marginLeft: '-1px'
           }}
         />
+        </>
+        )}
 
         {/* Workspace Area */}
         <main className="execution-workspace">
@@ -6218,6 +6444,28 @@ const renderPlanningTab = () => {
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
                     <div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        {!isFolderSidebarVisible && (
+                          <button
+                            onClick={toggleFolderSidebar}
+                            className="btn-secondary"
+                            title="Mostrar panel de planes y ciclos"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              fontSize: '0.78rem',
+                              padding: '0.35rem 0.65rem',
+                              borderRadius: '6px'
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                              <line x1="9" y1="3" x2="9" y2="21" />
+                              <path d="M13 9l3 3-3 3" />
+                            </svg>
+                            <span>Planes &amp; Ciclos</span>
+                          </button>
+                        )}
                         <h1 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', margin: 0, letterSpacing: '-0.01em' }}>
                           Execution: {selectedCycle.summary}
                         </h1>
@@ -7402,6 +7650,15 @@ const renderPlanningTab = () => {
               <p style={{ fontSize: '12px', margin: 0, textAlign: 'center', maxWidth: '360px' }}>
                 Elige un ciclo en la barra lateral izquierda para ver las métricas de ejecución, correr pruebas y registrar evidencias.
               </p>
+              {!isFolderSidebarVisible && (
+                <button
+                  onClick={toggleFolderSidebar}
+                  className="btn-primary"
+                  style={{ marginTop: '0.5rem', fontSize: '12px' }}
+                >
+                  📂 Ver Planes y Ciclos
+                </button>
+              )}
             </div>
           )}
         </main>
@@ -7434,8 +7691,8 @@ const renderPlanningTab = () => {
   };
 
   const renderReportsTab = () => {
-    // Show TestPulseLoader while loading — consistent with initial load experience
-    if (reportLoading) {
+    // Show TestPulseLoader only on initial load if no reportData is available yet
+    if (reportLoading && (!reportData.cycles || reportData.cycles.length === 0)) {
       return (
         <TestPulseLoader
           size={110}
@@ -7543,6 +7800,12 @@ const renderPlanningTab = () => {
         const isBug = validBugKeywords.some(kw => rawType.includes(kw));
         if (!isBug) return false;
       }
+      // 5. If it is only a raw stub from linkedBugs without matching real Jira issue in bugMap, unlinkedBugs, or rawFields
+      const mapBug = reportData?.bugMap?.[bug.key];
+      const projBug = (unlinkedBugs || []).find(ub => ub.key === bug.key);
+      if (!mapBug && !projBug && !bug.rawFields && (!bug.summary || bug.summary === 'Defecto detectado en ciclo')) {
+        return false;
+      }
       return true;
     };
 
@@ -7584,6 +7847,112 @@ const renderPlanningTab = () => {
       const catKey = (b.statusCategory || b.rawFields?.status?.statusCategory?.key || '').toLowerCase().trim();
       return ['done', 'closed', 'cerrada', 'cerrado', 'terminada', 'terminado', 'finalizada', 'finalizado'].includes(statusStr) ||
              catKey === 'done';
+    };
+
+    // Business calendar calculation (Mexico: Mon-Thu 7-18h, Fri 7-13h, Sat/Sun/Holidays excluded)
+    const MX_HOLIDAYS_SET = new Set([
+      '2024-01-01', '2024-02-05', '2024-03-18', '2024-05-01', '2024-09-16', '2024-10-01', '2024-11-18', '2024-12-25',
+      '2025-01-01', '2025-02-03', '2025-03-17', '2025-05-01', '2025-09-16', '2025-11-17', '2025-12-25',
+      '2026-01-01', '2026-02-02', '2026-03-16', '2026-05-01', '2026-09-16', '2026-11-16', '2026-12-25',
+      '2027-01-01', '2027-02-01', '2027-03-15', '2027-05-01', '2027-09-16', '2027-11-15', '2027-12-25'
+    ]);
+
+    const getBusinessHoursBetween = (startMs, endMs) => {
+      if (!startMs || !endMs || startMs >= endMs) return 0;
+      let current = new Date(startMs);
+      const end = new Date(endMs);
+      let businessMinutes = 0;
+      const mxOffset = -6 * 60 * 60 * 1000;
+
+      while (current < end) {
+        const mxTime = new Date(current.getTime() + mxOffset);
+        const day = mxTime.getUTCDay();
+        const hour = mxTime.getUTCHours();
+        const dateString = mxTime.toISOString().split('T')[0];
+
+        let isBusiness = false;
+        if (!MX_HOLIDAYS_SET.has(dateString)) {
+          if (day >= 1 && day <= 4) {
+            if (hour >= 7 && hour < 18) isBusiness = true;
+          } else if (day === 5) {
+            if (hour >= 7 && hour < 13) isBusiness = true;
+          }
+        }
+        if (isBusiness) businessMinutes++;
+        current.setTime(current.getTime() + 60000);
+      }
+      return businessMinutes / 60;
+    };
+
+    const formatBugCreatedDate = (createdStr) => {
+      if (!createdStr) return { dateStr: 'Sin fecha', timeStr: '' };
+      try {
+        const d = new Date(createdStr);
+        if (isNaN(d.getTime())) return { dateStr: 'Sin fecha', timeStr: '' };
+        const dateStr = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+        return { dateStr, timeStr };
+      } catch (e) {
+        return { dateStr: 'Sin fecha', timeStr: '' };
+      }
+    };
+
+    const formatBugAge = (createdStr, resolutionDateStr, isDone) => {
+      if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+      try {
+        const created = new Date(createdStr).getTime();
+        if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+
+        let end = Date.now();
+        if (isDone && resolutionDateStr) {
+          const resTime = new Date(resolutionDateStr).getTime();
+          if (!isNaN(resTime) && resTime >= created) {
+            end = resTime;
+          }
+        }
+
+        const businessHours = getBusinessHoursBetween(created, end);
+        const bHoursFormatted = businessHours.toFixed(1);
+        const bDays = Math.floor(businessHours / 10);
+
+        let label = '';
+        let tone = 'neutral';
+
+        if (isDone) {
+          if (businessHours < 1) {
+            const mins = Math.max(1, Math.round(businessHours * 60));
+            label = `Resuelto en ${mins}m hábiles`;
+          } else if (businessHours < 10) {
+            label = `Resuelto en ${bHoursFormatted}h hábiles`;
+          } else {
+            const days = Math.round(businessHours / 10);
+            label = `Resuelto en ${days}d hábiles (${bHoursFormatted}h)`;
+          }
+          tone = 'done';
+        } else {
+          if (businessHours < 1) {
+            const mins = Math.max(1, Math.round(businessHours * 60));
+            label = `Abierto hace ${mins}m hábiles`;
+            tone = 'green';
+          } else if (businessHours <= 20) {
+            const days = Math.floor(businessHours / 10);
+            label = days > 0 ? `Abierto hace ${days}d hábil (${bHoursFormatted}h)` : `Abierto hace ${bHoursFormatted}h hábiles`;
+            tone = 'green';
+          } else if (businessHours <= 50) {
+            const days = Math.floor(businessHours / 10);
+            label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+            tone = 'orange';
+          } else {
+            const days = Math.floor(businessHours / 10);
+            label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+            tone = 'red';
+          }
+        }
+
+        return { label, tone, hours: businessHours, days: bDays, bHoursFormatted };
+      } catch (e) {
+        return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+      }
     };
 
     const renderBugStatusLozenge = (statusStr, isDone) => {
@@ -7684,6 +8053,11 @@ const renderPlanningTab = () => {
                 assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
                 status: rawBug.status || mapBug?.status || projectBug?.status,
                 resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
+                created: rawBug.created || mapBug?.created || projectBug?.created || rawBug.rawFields?.created || null,
+                resolutiondate: rawBug.resolutiondate || mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.rawFields?.resolutiondate || null,
+                version: rawBug.version || mapBug?.version || projectBug?.version || 'Sin versión',
+                versions: rawBug.versions || mapBug?.versions || projectBug?.versions || [],
+                fixVersions: rawBug.fixVersions || mapBug?.fixVersions || projectBug?.fixVersions || [],
                 rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
               };
 
@@ -7699,6 +8073,14 @@ const renderPlanningTab = () => {
                 resName = bug.resolution.name;
               }
 
+              const rawAff = bug.versions || bug.rawFields?.versions || [];
+              const rawFix = bug.fixVersions || bug.rawFields?.fixVersions || [];
+              const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+              const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+              const versionDisplay = (bug.version && bug.version !== 'Sin versión')
+                ? bug.version 
+                : (affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión'));
+
               const cycleName = cycle.summary || cycle.key || String(cycle.id);
 
               if (!planAllBugsMap.has(bugKey)) {
@@ -7710,6 +8092,11 @@ const renderPlanningTab = () => {
                   status: bug.status || (isDone ? 'Cerrado' : 'Abierto'),
                   resolution: resName,
                   isDone: isDone,
+                  version: versionDisplay,
+                  versions: affectsVersions,
+                  fixVersions: fixVersions,
+                  created: bug.created || bug.rawFields?.created || null,
+                  resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -7840,6 +8227,11 @@ const renderPlanningTab = () => {
                 assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
                 status: rawBug.status || mapBug?.status || projectBug?.status,
                 resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
+                created: rawBug.created || mapBug?.created || projectBug?.created || rawBug.rawFields?.created || null,
+                resolutiondate: rawBug.resolutiondate || mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.rawFields?.resolutiondate || null,
+                version: rawBug.version || mapBug?.version || projectBug?.version || 'Sin versión',
+                versions: rawBug.versions || mapBug?.versions || projectBug?.versions || [],
+                fixVersions: rawBug.fixVersions || mapBug?.fixVersions || projectBug?.fixVersions || [],
                 rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
               };
 
@@ -7855,6 +8247,14 @@ const renderPlanningTab = () => {
                 resName = bug.resolution.name;
               }
 
+              const rawAff = bug.versions || bug.rawFields?.versions || [];
+              const rawFix = bug.fixVersions || bug.rawFields?.fixVersions || [];
+              const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+              const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+              const versionDisplay = (bug.version && bug.version !== 'Sin versión')
+                ? bug.version 
+                : (affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión'));
+
               // 1. Add to cycleAllBugsMap (All bugs found in the selected cycle runs)
               if (!cycleAllBugsMap.has(bugKey)) {
                 cycleAllBugsMap.set(bugKey, {
@@ -7865,6 +8265,11 @@ const renderPlanningTab = () => {
                   status: bug.status || (isDone ? 'Cerrado' : 'Abierto'),
                   resolution: resName,
                   isDone: isDone,
+                  version: versionDisplay,
+                  versions: affectsVersions,
+                  fixVersions: fixVersions,
+                  created: bug.created || bug.rawFields?.created || null,
+                  resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -7892,6 +8297,11 @@ const renderPlanningTab = () => {
                     status: bug.status || 'Abierto',
                     resolution: resName,
                     isDone: false,
+                    version: versionDisplay,
+                    versions: affectsVersions,
+                    fixVersions: fixVersions,
+                    created: bug.created || bug.rawFields?.created || null,
+                    resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                     cycles: new Set([cycleName]),
                     affectedCases: new Map()
                   });
@@ -7937,6 +8347,14 @@ const renderPlanningTab = () => {
       const isDone = isBugDone(ub);
       const finalSeverity = normalizeSeverity(ub.severity, ub.rawFields);
       const isLinkedToAnyTest = ub.isLinked || (ub.linkedTests && ub.linkedTests.length > 0);
+
+      const rawAff = ub.versions || ub.rawFields?.versions || [];
+      const rawFix = ub.fixVersions || ub.rawFields?.fixVersions || [];
+      const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const versionDisplay = (ub.version && ub.version !== 'Sin versión')
+        ? ub.version 
+        : (affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión'));
 
       // Resolve origin cycles for any linked tests / runs
       const foundCycles = new Set();
@@ -7991,6 +8409,15 @@ const renderPlanningTab = () => {
         foundCycles.forEach(cName => {
           existing.cycles.add(cName);
         });
+        if (!existing.version || existing.version === 'Sin versión') {
+          existing.version = versionDisplay;
+        }
+        if (!existing.created) {
+          existing.created = ub.created || ub.rawFields?.created || null;
+        }
+        if (!existing.resolutiondate) {
+          existing.resolutiondate = ub.resolutiondate || ub.rawFields?.resolutiondate || null;
+        }
       } else {
         // Bug is in the project but wasn't part of planAllBugsMap
         if (isLinkedToAnyTest) {
@@ -8006,6 +8433,11 @@ const renderPlanningTab = () => {
             resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
             isDone: isDone,
             isUnlinked: false,
+            version: versionDisplay,
+            versions: affectsVersions,
+            fixVersions: fixVersions,
+            created: ub.created || ub.rawFields?.created || null,
+            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
             cycles: resolvedCycles,
             affectedCases: affectedMap
           });
@@ -8020,13 +8452,39 @@ const renderPlanningTab = () => {
             resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
             isDone: isDone,
             isUnlinked: true,
+            version: versionDisplay,
+            versions: affectsVersions,
+            fixVersions: fixVersions,
+            created: ub.created || ub.rawFields?.created || null,
+            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
             cycles: new Set(),
             affectedCases: new Map()
           });
-          projectUnlinkedBugs.push(ub);
+          projectUnlinkedBugs.push({
+            ...ub,
+            version: versionDisplay,
+            versions: affectsVersions,
+            fixVersions: fixVersions,
+            created: ub.created || ub.rawFields?.created || null,
+            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null
+          });
         }
       }
     });
+
+    const sortBugsByCreatedDesc = (a, b) => {
+      const timeA = a && a.created ? new Date(a.created).getTime() : 0;
+      const timeB = b && b.created ? new Date(b.created).getTime() : 0;
+      const validA = isNaN(timeA) ? 0 : timeA;
+      const validB = isNaN(timeB) ? 0 : timeB;
+      if (validA !== validB) return validB - validA;
+      const numA = parseInt((a?.key || '').split('-')[1] || '0', 10);
+      const numB = parseInt((b?.key || '').split('-')[1] || '0', 10);
+      if (numA !== numB) return numB - numA;
+      return (b?.key || '').localeCompare(a?.key || '');
+    };
+
+    projectUnlinkedBugs.sort(sortBugsByCreatedDesc);
 
     const openUnlinkedBugs = projectUnlinkedBugs.filter(b => !isBugDone(b));
     const closedUnlinkedBugs = projectUnlinkedBugs.filter(b => isBugDone(b));
@@ -8036,19 +8494,27 @@ const renderPlanningTab = () => {
       cycleList: item.cycles && item.cycles.size > 0 ? Array.from(item.cycles).join(', ') : 'Sin vincular',
       affectedCount: item.affectedCases ? item.affectedCases.size : 0,
       affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
-    }));
+    })).sort(sortBugsByCreatedDesc);
 
-    const totalAllBugs = allBugsMap.size;
-    const totalAllPlanBugs = totalAllBugs;
+    // Global / Plan-wide Bug Totals (Used in Bugs subview)
+    const totalAllPlanBugs = allBugsMap.size;
+    const totalAllBugs = totalAllPlanBugs;
+    const totalOpenPlanBugs = Array.from(allBugsMap.values()).filter(b => !b.isDone).length;
+    const totalOpenBugs = totalOpenPlanBugs;
+    const totalClosedPlanBugs = Array.from(allBugsMap.values()).filter(b => b.isDone).length;
+    const totalClosedBugs = totalClosedPlanBugs;
+
+    // Cycle-specific Bug Totals (Used in Runs subview)
     const criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
-      affectedCount: item.affectedCases.size,
-      affectedCasesList: Array.from(item.affectedCases.values())
-    }));
-    const totalOpenBugs = Array.from(allBugsMap.values()).filter(b => !b.isDone).length;
-    const totalClosedBugs = Array.from(allBugsMap.values()).filter(b => b.isDone).length;
-    const totalOpenPlanBugs = totalOpenBugs;
-    const totalClosedPlanBugs = totalClosedBugs;
+      affectedCount: item.affectedCases ? item.affectedCases.size : 0,
+      affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
+    })).sort(sortBugsByCreatedDesc);
+
+    const cycleAllBugsList = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
+    const totalCycleBugs = cycleAllBugsList.length;
+    const openCycleBugs = cycleAllBugsList.filter(b => !b.isDone).length;
+    const closedCycleBugs = cycleAllBugsList.filter(b => b.isDone).length;
 
     const ejecutados = passed + failed;
     const successRate = ejecutados > 0 ? ((passed / ejecutados) * 100).toFixed(1) : '0.0';
@@ -8128,7 +8594,7 @@ const renderPlanningTab = () => {
       }
 
       // Generate Bug Rows strictly for the selected cycle(s) (6 well-proportioned columns to prevent cutoff)
-      const cycleBugsArray = Array.from(cycleAllBugsMap.values());
+      const cycleBugsArray = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
 
       let tableRows = '';
       if (cycleBugsArray.length === 0) {
@@ -8710,9 +9176,10 @@ const renderPlanningTab = () => {
         bug.assignee.toLowerCase().includes(q) ||
         String(bug.severity).toLowerCase().includes(q) ||
         String(bug.status).toLowerCase().includes(q) ||
-        String(bug.resolution).toLowerCase().includes(q)
+        String(bug.resolution).toLowerCase().includes(q) ||
+        (bug.version && String(bug.version).toLowerCase().includes(q))
       );
-    });
+    }).sort(sortBugsByCreatedDesc);
 
     const filteredPlanGeneralBugsList = planGeneralBugsList.filter(bug => {
       if (dashboardGeneralBugStatusTab === 'OPEN' && bug.isDone) return false;
@@ -8726,9 +9193,10 @@ const renderPlanningTab = () => {
         String(bug.severity).toLowerCase().includes(q) ||
         String(bug.status).toLowerCase().includes(q) ||
         String(bug.resolution).toLowerCase().includes(q) ||
+        (bug.version && String(bug.version).toLowerCase().includes(q)) ||
         (bug.cycleList && bug.cycleList.toLowerCase().includes(q))
       );
-    });
+    }).sort(sortBugsByCreatedDesc);
 
     const filteredTraceabilityRows = traceabilityRows.filter(row => {
       if (!dashboardTraceabilitySearch) return true;
@@ -8747,33 +9215,60 @@ const renderPlanningTab = () => {
     return (
       <div className="tab-layout" style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', display: 'flex', flex: 1 }}>
         {/* ─── Dashboard Sidebar: Runs, Bugs, Traceability ─── */}
-        <aside
-          className="sidebar glass"
-          style={{
-            width: sidebarWidth,
-            minWidth: '220px',
-            maxWidth: '360px',
-            flexShrink: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            height: '100%',
-            overflow: 'hidden',
-            backgroundColor: '#FAFBFC',
-            borderRight: '1px solid var(--jira-border, #DCDFE4)'
-          }}
-        >
-          {/* Header */}
-          <div style={{ padding: '1rem 1.1rem 0.75rem 1.1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '15px' }}>📊</span>
-              <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                DASHBOARD
-              </span>
-            </div>
-            <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '9px', fontWeight: 700, padding: '1px 6px', borderRadius: '9999px' }}>
-              LIVE
-            </span>
-          </div>
+        {isFolderSidebarVisible && (
+          <>
+            <aside
+              className="sidebar glass"
+              style={{
+                width: sidebarWidth,
+                minWidth: '220px',
+                maxWidth: '360px',
+                flexShrink: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                height: '100%',
+                overflow: 'hidden',
+                backgroundColor: '#FAFBFC',
+                borderRight: '1px solid var(--jira-border, #DCDFE4)'
+              }}
+            >
+              {/* Header */}
+              <div style={{ padding: '1rem 1.1rem 0.75rem 1.1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '15px' }}>📊</span>
+                  <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                    DASHBOARD
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '9px', fontWeight: 700, padding: '1px 6px', borderRadius: '9999px' }}>
+                    LIVE
+                  </span>
+                  <button
+                    onClick={toggleFolderSidebar}
+                    title="Ocultar panel lateral (Sidebar)"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '3px',
+                      borderRadius: '4px',
+                      color: 'var(--jira-subtle, #626F86)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
+                      <path d="M15 15l-3-3 3-3" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
 
           {/* Navigation Menu */}
           <div style={{ padding: '0.75rem 0.5rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -8903,6 +9398,8 @@ const renderPlanningTab = () => {
             marginLeft: '-1px'
           }}
         />
+        </>
+        )}
 
         {/* ─── Main Dashboard View Container ─── */}
         <main className="dashboard-container" style={{ flex: 1, height: '100%', overflowY: 'auto', boxSizing: 'border-box', padding: '1.5rem 2rem 6rem 2rem' }}>
@@ -8910,9 +9407,83 @@ const renderPlanningTab = () => {
           <div className="dashboard-top-header">
             <div className="dashboard-header-row">
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {!isFolderSidebarVisible && (
+                  <button
+                    onClick={toggleFolderSidebar}
+                    className="btn-secondary"
+                    title="Mostrar panel lateral del Dashboard"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      fontSize: '0.78rem',
+                      padding: '0.35rem 0.65rem',
+                      borderRadius: '6px'
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
+                      <path d="M13 9l3 3-3 3" />
+                    </svg>
+                    <span>Dashboard</span>
+                  </button>
+                )}
+                {!isFolderSidebarVisible && (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', background: '#F1F2F4', padding: '2px', borderRadius: '6px', gap: '2px' }}>
+                    <button
+                      onClick={() => setDashboardSubView('runs')}
+                      style={{
+                        background: dashboardSubView === 'runs' ? '#FFFFFF' : 'transparent',
+                        color: dashboardSubView === 'runs' ? '#0C66E4' : '#626F86',
+                        fontWeight: dashboardSubView === 'runs' ? 700 : 500,
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '4px 8px',
+                        fontSize: '11px',
+                        cursor: 'pointer',
+                        boxShadow: dashboardSubView === 'runs' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
+                      }}
+                    >
+                      📊 Runs
+                    </button>
+                    <button
+                      onClick={() => setDashboardSubView('bugs')}
+                      style={{
+                        background: dashboardSubView === 'bugs' ? '#FFFFFF' : 'transparent',
+                        color: dashboardSubView === 'bugs' ? '#DE350B' : '#626F86',
+                        fontWeight: dashboardSubView === 'bugs' ? 700 : 500,
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '4px 8px',
+                        fontSize: '11px',
+                        cursor: 'pointer',
+                        boxShadow: dashboardSubView === 'bugs' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
+                      }}
+                    >
+                      🐞 Bugs
+                    </button>
+                    <button
+                      onClick={() => setDashboardSubView('traceability')}
+                      style={{
+                        background: dashboardSubView === 'traceability' ? '#FFFFFF' : 'transparent',
+                        color: dashboardSubView === 'traceability' ? '#0C66E4' : '#626F86',
+                        fontWeight: dashboardSubView === 'traceability' ? 700 : 500,
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '4px 8px',
+                        fontSize: '11px',
+                        cursor: 'pointer',
+                        boxShadow: dashboardSubView === 'traceability' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
+                      }}
+                    >
+                      🔗 Traceability
+                    </button>
+                  </div>
+                )}
                 <span className="dashboard-live-badge">
                   <span className="dashboard-live-dot" />
-                  ● En vivo · Auto-sync 15 min
+                  ● {isRefreshingReport ? 'Sincronizando...' : `En vivo · ${reportData._loadedAt ? new Date(reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Auto-sync silencioso'}`}
                 </span>
                 <span className="dashboard-tag-context">
                   • Jira Forge App
@@ -9257,21 +9828,21 @@ const renderPlanningTab = () => {
                               </div>
                             </div>
 
-                            {/* Card 3: Defectos & Bloqueos */}
+                            {/* Card 3: Defectos & Bloqueos (Ciclo) */}
                             <div className="dashboard-kpi-card">
                               <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle, #626F86)' }}>🐞 DEFECTOS &amp; BLOQUEOS</span>
-                                <span className={`dashboard-kpi-pill ${totalOpenBugs > 0 ? 'red' : 'green'}`}>
-                                  {totalOpenBugs} Abiertos
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-subtle, #626F86)' }}>🐞 DEFECTOS &amp; BLOQUEOS</span>
+                                <span className={`dashboard-kpi-pill ${openCycleBugs > 0 ? 'red' : 'green'}`}>
+                                  {openCycleBugs} Abiertos
                                 </span>
                               </div>
-                              <div className="dashboard-kpi-value" style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-dark, #172B4D)' }}>
-                                {totalAllBugs} <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>({totalOpenBugs} abiertos)</span>
+                              <div className="dashboard-kpi-value" style={{ color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-dark, #172B4D)' }}>
+                                {totalCycleBugs} <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>({openCycleBugs} abiertos)</span>
                               </div>
                               <div className="dashboard-kpi-footer">
-                                <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
-                                <span style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
-                                  {totalOpenBugs} Abiertos
+                                <span style={{ color: '#006644', fontWeight: 600 }}>{closedCycleBugs} Cerrados</span>
+                                <span style={{ color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
+                                  {openCycleBugs} Abiertos
                                 </span>
                               </div>
                             </div>
@@ -9613,7 +10184,7 @@ const renderPlanningTab = () => {
 
                         {widget.type === 'severity_breakdown' && (() => {
                           const sevCounts = { bloqueante: 0, critico: 0, mayor: 0, menor: 0, sinDefinir: 0 };
-                          const bugsList = Array.from(allBugsMap.values());
+                          const bugsList = cycleAllBugsList;
                           bugsList.forEach(b => {
                             const s = (b.severity || '').toLowerCase();
                             if (s.includes('bloq')) sevCounts.bloqueante++;
@@ -9632,7 +10203,7 @@ const renderPlanningTab = () => {
                                   <span>Distribución de Defectos por Severidad</span>
                                 </div>
                                 <span style={{ fontSize: '11px', background: '#FFEBE6', color: '#DE350B', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
-                                  {totalSevBugs} Defectos Totales
+                                  {totalSevBugs} Defectos en Ciclo
                                 </span>
                               </div>
 
@@ -9860,6 +10431,8 @@ const renderPlanningTab = () => {
                       <tr>
                         <th>ID</th>
                         <th>Resumen del bug</th>
+                        <th>Versión</th>
+                        <th>Fecha Registro / Antigüedad</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -9868,75 +10441,121 @@ const renderPlanningTab = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredBugsList.map((bug) => (
-                        <tr key={bug.key}>
-                          {/* 1. ID */}
-                          <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span className="dashboard-bug-icon">B</span>
-                              <a
-                                href={`/browse/${bug.key}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
-                                style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
-                                title="Abrir incidencia en Jira"
-                              >
-                                {bug.key}
-                              </a>
-                            </div>
-                          </td>
+                      {filteredBugsList.map((bug) => {
+                        const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
+                        const age = formatBugAge(bug.created, bug.resolutiondate, false);
+                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
+                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
-                          {/* 2. Resumen del bug */}
-                          <td style={{ maxWidth: '420px' }}>
-                            <div style={{ fontWeight: 600, color: 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
-                              {bug.summary}
-                            </div>
-                          </td>
-
-                          {/* 3. Severidad */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
-                              {getSeverityLabel(bug.severity)}
-                            </span>
-                          </td>
-
-                          {/* 4. Estado */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {renderBugStatusLozenge(bug.status, false)}
-                          </td>
-
-                          {/* 5. Responsable */}
-                          <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
-                                {getInitials(bug.assignee)}
+                        return (
+                          <tr key={bug.key}>
+                            {/* 1. ID */}
+                            <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span className="dashboard-bug-icon">B</span>
+                                <a
+                                  href={`/browse/${bug.key}`}
+                                  onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
+                                  style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
+                                  title="Abrir incidencia en Jira"
+                                >
+                                  {bug.key}
+                                </a>
                               </div>
-                              <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
-                                {bug.assignee}
-                              </span>
-                            </div>
-                          </td>
+                            </td>
 
-                          {/* 6. Resolución */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
-                              <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
-                                Sin resolver
-                              </span>
-                            ) : (
-                              <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
-                                {bug.resolution}
-                              </span>
-                            )}
-                          </td>
+                            {/* 2. Resumen del bug */}
+                            <td style={{ maxWidth: '380px' }}>
+                              <div style={{ fontWeight: 600, color: 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
+                                {bug.summary}
+                              </div>
+                            </td>
 
-                          {/* 7. Casos afectados */}
-                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-                            <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
-                              {bug.affectedCount}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                            {/* 3. Versión */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <span
+                                className="ads-lozenge ads-lozenge-subtle"
+                                style={{ fontSize: '11px', fontWeight: 600, maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' }}
+                                title={bug.version || 'Sin versión'}
+                              >
+                                🏷️ {bug.version || 'Sin versión'}
+                              </span>
+                            </td>
+
+                            {/* 4. Fecha Registro / Antigüedad (Aging laboral) */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                <div style={{ fontSize: '11px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <span>📅</span> <span>{dateStr}</span> {timeStr && <span style={{ color: 'var(--jira-subtle, #626F86)', fontWeight: 400, fontSize: '10px' }}>({timeStr})</span>}
+                                </div>
+                                {bug.created && (
+                                  <div
+                                    style={{
+                                      fontSize: '10px',
+                                      fontWeight: 700,
+                                      background: badgeColor,
+                                      color: textColor,
+                                      padding: '2px 6px',
+                                      borderRadius: '4px',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
+                                      width: 'fit-content'
+                                    }}
+                                    title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles transcurridas`}
+                                  >
+                                    <span>⏱️</span> <span>{age.label}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* 5. Severidad */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
+                                {getSeverityLabel(bug.severity)}
+                              </span>
+                            </td>
+
+                            {/* 6. Estado */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {renderBugStatusLozenge(bug.status, false)}
+                            </td>
+
+                            {/* 7. Responsable */}
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
+                                  {getInitials(bug.assignee)}
+                                </div>
+                                <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
+                                  {bug.assignee}
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* 8. Resolución */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
+                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
+                                  Sin resolver
+                                </span>
+                              ) : (
+                                <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
+                                  {bug.resolution}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* 9. Casos afectados */}
+                            <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+                              <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
+                                {bug.affectedCount}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 ) : (
@@ -10052,6 +10671,8 @@ const renderPlanningTab = () => {
                       <tr>
                         <th>ID</th>
                         <th>Resumen del bug</th>
+                        <th>Versión</th>
+                        <th>Fecha Registro / Antigüedad</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -10060,75 +10681,121 @@ const renderPlanningTab = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredPlanGeneralBugsList.map((bug) => (
-                        <tr key={bug.key} style={{ opacity: bug.isDone ? 0.85 : 1 }}>
-                          {/* 1. ID */}
-                          <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span className={`dashboard-bug-icon ${bug.isDone ? 'done' : ''}`}>B</span>
-                              <a
-                                href={`/browse/${bug.key}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
-                                style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
-                                title="Abrir incidencia en Jira"
-                              >
-                                {bug.key}
-                              </a>
-                            </div>
-                          </td>
+                      {filteredPlanGeneralBugsList.map((bug) => {
+                        const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
+                        const age = formatBugAge(bug.created, bug.resolutiondate, bug.isDone);
+                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
+                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
-                          {/* 2. Resumen del bug */}
-                          <td style={{ maxWidth: '420px' }}>
-                            <div style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
-                              {bug.summary}
-                            </div>
-                          </td>
-
-                          {/* 3. Severidad */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
-                              {getSeverityLabel(bug.severity)}
-                            </span>
-                          </td>
-
-                          {/* 5. Estado */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {renderBugStatusLozenge(bug.status, bug.isDone)}
-                          </td>
-
-                          {/* 6. Responsable */}
-                          <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
-                                {getInitials(bug.assignee)}
+                        return (
+                          <tr key={bug.key} style={{ opacity: bug.isDone ? 0.85 : 1 }}>
+                            {/* 1. ID */}
+                            <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span className={`dashboard-bug-icon ${bug.isDone ? 'done' : ''}`}>B</span>
+                                <a
+                                  href={`/browse/${bug.key}`}
+                                  onClick={(e) => { e.preventDefault(); router.open('/browse/' + bug.key); }}
+                                  style={{ color: '#0C66E4', textDecoration: 'none', fontWeight: 700 }}
+                                  title="Abrir incidencia en Jira"
+                                >
+                                  {bug.key}
+                                </a>
                               </div>
-                              <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
-                                {bug.assignee}
-                              </span>
-                            </div>
-                          </td>
+                            </td>
 
-                          {/* 7. Resolución */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
-                              <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
-                                Sin resolver
-                              </span>
-                            ) : (
-                              <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
-                                {bug.resolution}
-                              </span>
-                            )}
-                          </td>
+                            {/* 2. Resumen del bug */}
+                            <td style={{ maxWidth: '380px' }}>
+                              <div style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : 'var(--jira-dark, #172B4D)', fontSize: '13px' }} title={bug.summary}>
+                                {bug.summary}
+                              </div>
+                            </td>
 
-                          {/* 8. Casos afectados */}
-                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-                            <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
-                              {bug.affectedCount}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                            {/* 3. Versión */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <span
+                                className="ads-lozenge ads-lozenge-subtle"
+                                style={{ fontSize: '11px', fontWeight: 600, maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' }}
+                                title={bug.version || 'Sin versión'}
+                              >
+                                🏷️ {bug.version || 'Sin versión'}
+                              </span>
+                            </td>
+
+                            {/* 4. Fecha Registro / Antigüedad (Aging laboral) */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                <div style={{ fontSize: '11px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <span>📅</span> <span>{dateStr}</span> {timeStr && <span style={{ color: 'var(--jira-subtle, #626F86)', fontWeight: 400, fontSize: '10px' }}>({timeStr})</span>}
+                                </div>
+                                {bug.created && (
+                                  <div
+                                    style={{
+                                      fontSize: '10px',
+                                      fontWeight: 700,
+                                      background: badgeColor,
+                                      color: textColor,
+                                      padding: '2px 6px',
+                                      borderRadius: '4px',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
+                                      width: 'fit-content'
+                                    }}
+                                    title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles ${bug.isDone ? 'invertidas hasta resolución' : 'transcurridas'}`}
+                                  >
+                                    <span>⏱️</span> <span>{age.label}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* 5. Severidad */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
+                                {getSeverityLabel(bug.severity)}
+                              </span>
+                            </td>
+
+                            {/* 6. Estado */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {renderBugStatusLozenge(bug.status, bug.isDone)}
+                            </td>
+
+                            {/* 7. Responsable */}
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
+                                  {getInitials(bug.assignee)}
+                                </div>
+                                <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
+                                  {bug.assignee}
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* 8. Resolución */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
+                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
+                                  Sin resolver
+                                </span>
+                              ) : (
+                                <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
+                                  {bug.resolution}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* 9. Casos afectados */}
+                            <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+                              <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
+                                {bug.affectedCount}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 ) : (
@@ -10533,8 +11200,8 @@ const renderPlanningTab = () => {
               <div
                 className="ads-modal-container"
                 style={{
-                  width: '900px',
-                  maxWidth: '94vw',
+                  width: '960px',
+                  maxWidth: '95vw',
                   maxHeight: '85vh',
                   display: 'flex',
                   flexDirection: 'column',
@@ -10568,53 +11235,97 @@ const renderPlanningTab = () => {
                     <table className="dashboard-defects-table" style={{ width: '100%' }}>
                       <thead>
                         <tr>
-                          <th style={{ width: '15%' }}>Clave</th>
-                          <th style={{ width: '40%' }}>Resumen</th>
-                          <th style={{ width: '15%' }}>Severidad</th>
-                          <th style={{ width: '15%' }}>Estado</th>
-                          <th style={{ width: '15%', textAlign: 'center' }}>Acción</th>
+                          <th style={{ width: '12%' }}>Clave</th>
+                          <th style={{ width: '28%' }}>Resumen</th>
+                          <th style={{ width: '14%' }}>Versión</th>
+                          <th style={{ width: '18%' }}>Fecha / Antigüedad</th>
+                          <th style={{ width: '10%' }}>Severidad</th>
+                          <th style={{ width: '10%' }}>Estado</th>
+                          <th style={{ width: '8%', textAlign: 'center' }}>Acción</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {projectUnlinkedBugs.map((bug, idx) => (
-                          <tr key={bug.key || idx}>
-                            <td>
-                              <a
-                                href={`/browse/${bug.key}`}
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  router.open(`/browse/${bug.key}`);
-                                }}
-                                style={{ fontWeight: 700, color: '#0C66E4', textDecoration: 'none' }}
-                              >
-                                {bug.key}
-                              </a>
-                            </td>
-                            <td style={{ fontSize: '12px', color: '#172B4D' }}>{bug.summary || 'Sin resumen'}</td>
-                            <td>
-                              <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px' }}>
-                                {bug.severity || bug.priority || 'Sin definir'}
-                              </span>
-                            </td>
-                            <td>
-                              <span className={`ads-lozenge ${isBugDone(bug) ? 'ads-lozenge-success' : 'ads-lozenge-inprogress'}`} style={{ fontSize: '11px' }}>
-                                {bug.status || 'Abierto'}
-                              </span>
-                            </td>
-                            <td style={{ textAlign: 'center' }}>
-                              <button
-                                className="btn-primary"
-                                onClick={() => {
-                                  setLinkingUnlinkedBug(bug);
-                                  setTargetCycleForBug(filteredCycles[0]?.id || testCycles[0]?.id || '');
-                                }}
-                                style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                              >
-                                <span>🔗</span> Asociar a Caso
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                        {projectUnlinkedBugs.map((bug, idx) => {
+                          const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
+                          const age = formatBugAge(bug.created, bug.resolutiondate, isBugDone(bug));
+                          const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
+                          const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+
+                          return (
+                            <tr key={bug.key || idx}>
+                              <td>
+                                <a
+                                  href={`/browse/${bug.key}`}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    router.open(`/browse/${bug.key}`);
+                                  }}
+                                  style={{ fontWeight: 700, color: '#0C66E4', textDecoration: 'none' }}
+                                >
+                                  {bug.key}
+                                </a>
+                              </td>
+                              <td style={{ fontSize: '12px', color: '#172B4D' }}>{bug.summary || 'Sin resumen'}</td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px', fontWeight: 600 }}>
+                                  🏷️ {bug.version || 'Sin versión'}
+                                </span>
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <div style={{ fontSize: '11px', color: '#172B4D', fontWeight: 600 }}>
+                                    📅 {dateStr} {timeStr && <span style={{ color: '#626F86', fontWeight: 400, fontSize: '10px' }}>({timeStr})</span>}
+                                  </div>
+                                  {bug.created && (
+                                    <div
+                                      style={{
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        background: badgeColor,
+                                        color: textColor,
+                                        padding: '2px 5px',
+                                        borderRadius: '4px',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '3px',
+                                        width: 'fit-content'
+                                      }}
+                                      title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles`}
+                                    >
+                                      <span>⏱️</span> <span>{age.label}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px' }}>
+                                  {bug.severity || bug.priority || 'Sin definir'}
+                                </span>
+                              </td>
+                              <td>
+                                <span className={`ads-lozenge ${isBugDone(bug) ? 'ads-lozenge-success' : 'ads-lozenge-inprogress'}`} style={{ fontSize: '11px' }}>
+                                  {bug.status || 'Abierto'}
+                                </span>
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button
+                                  className="btn-primary"
+                                  onClick={() => {
+                                    setLinkingUnlinkedBug(bug);
+                                    const initialCycleId = filteredCycles[0]?.id || testCycles[0]?.id || '';
+                                    setTargetCycleForBug(initialCycleId);
+                                    const cycleObj = (reportData?.cycles || []).find(c => String(c.id) === String(initialCycleId));
+                                    const firstExec = cycleObj?.execution?.[0]?.id || '';
+                                    setTargetTestForBug(firstExec || testCases[0]?.id || '');
+                                  }}
+                                  style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}
+                                >
+                                  <span>🔗</span> Asociar
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   ) : (
@@ -10682,8 +11393,11 @@ const renderPlanningTab = () => {
                       className="form-control"
                       value={targetCycleForBug}
                       onChange={(e) => {
-                        setTargetCycleForBug(e.target.value);
-                        setTargetTestForBug('');
+                        const newCycleId = e.target.value;
+                        setTargetCycleForBug(newCycleId);
+                        const cycleObj = (reportData?.cycles || []).find(c => String(c.id) === String(newCycleId));
+                        const firstExec = cycleObj?.execution?.[0]?.id || '';
+                        setTargetTestForBug(firstExec || (testCases[0]?.id || ''));
                       }}
                       style={{ width: '100%', padding: '6px 10px', fontSize: '13px' }}
                     >
@@ -10701,7 +11415,7 @@ const renderPlanningTab = () => {
                       2. Selecciona el Caso de Prueba / Ejecución:
                     </label>
                     {(() => {
-                      const cycleObj = (reportData.cycles || []).find(c => String(c.id) === String(targetCycleForBug));
+                      const cycleObj = (reportData?.cycles || []).find(c => String(c.id) === String(targetCycleForBug));
                       const availableExec = cycleObj?.execution || [];
                       return (
                         <select

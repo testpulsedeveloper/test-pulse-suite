@@ -1593,7 +1593,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     const sevField = 'customfield_10238';
     await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
          try {
-            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'issuetype', sevField].join(',');
+            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
             let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
             if (resp.status === 429) {
                await new Promise(r => setTimeout(r, 1200));
@@ -1685,15 +1685,25 @@ resolver.define('getExecutionReport', async ({ payload }) => {
                   }
                 }
 
+                // Extract versions
+                const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+                const fixVersions = (i.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+                const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
                 bugMap[key] = {
                   key,
-                  summary: i.fields?.summary,
-                  status: i.fields?.status?.name,
+                  summary: i.fields?.summary || '',
+                  status: i.fields?.status?.name || '',
                   assignee: i.fields?.assignee?.displayName || 'Sin asignar',
                   resolution: i.fields?.resolution?.name || 'Unresolved',
                   priority: i.fields?.priority?.name || '',
                   issuetype: i.fields?.issuetype?.name || 'Bug',
                   severity: sevVal,
+                  created: i.fields?.created || null,
+                  resolutiondate: i.fields?.resolutiondate || null,
+                  versions: affectsVersions,
+                  fixVersions: fixVersions,
+                  version: versionDisplay,
                   rawFields: i.fields,
                   timesSpent
                 };
@@ -1705,11 +1715,12 @@ resolver.define('getExecutionReport', async ({ payload }) => {
 
      cycles.forEach(c => {
        if (Array.isArray(c.execution)) c.execution.forEach(ex => {
-          ex.linkedBugs?.forEach(b => {
-             if (bugMap[b.key]) {
-                Object.assign(b, bugMap[b.key]);
-             }
-          });
+          if (Array.isArray(ex.linkedBugs)) {
+             // Purge any dead or non-existent bugs from Jira
+             ex.linkedBugs = ex.linkedBugs
+               .filter(b => b && b.key && bugMap[b.key])
+               .map(b => ({ ...b, ...bugMap[b.key] }));
+          }
        });
      });
   }
@@ -1725,7 +1736,7 @@ resolver.define('getBugsBatch', async ({ payload }) => {
   const bugMap = {};
   await processInBatches(uniqueKeys, 8, 50, async key => {
     try {
-      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'issuetype', sevField].join(',');
+      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
       let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
       if (resp.status === 429) {
         await new Promise(r => setTimeout(r, 1200));
@@ -1748,15 +1759,25 @@ resolver.define('getBugsBatch', async ({ payload }) => {
             }
           }
         }
+
+        const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+        const fixVersions = (i.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+        const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
         bugMap[key] = {
           key,
-          summary: i.fields?.summary,
-          status: i.fields?.status?.name,
+          summary: i.fields?.summary || '',
+          status: i.fields?.status?.name || '',
           assignee: i.fields?.assignee?.displayName || 'Sin asignar',
           resolution: i.fields?.resolution?.name || 'Unresolved',
           priority: i.fields?.priority?.name || '',
           issuetype: i.fields?.issuetype?.name || 'Bug',
           severity: sevVal,
+          created: i.fields?.created || null,
+          resolutiondate: i.fields?.resolutiondate || null,
+          versions: affectsVersions,
+          fixVersions: fixVersions,
+          version: versionDisplay,
           rawFields: i.fields
         };
       }
@@ -2482,24 +2503,105 @@ resolver.define('backfillDescriptions', async ({ payload }) => {
 // Creates a Jira Issue Link between the test case and a bug
 resolver.define('linkBugToTest', async ({ payload }) => {
   const { testCaseId, bugKey, bugId } = payload;
+  const keyToCheck = (bugKey || bugId || '').toString().trim();
   
+  if (!keyToCheck) {
+    return { success: false, error: 'Clave o ID de incidencia no proporcionado.' };
+  }
+
   try {
-    const outwardIssue = bugKey ? { key: bugKey } : { id: String(bugId) };
-    const response = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: { name: 'Blocks' },
-        inwardIssue: { id: String(testCaseId) },
-        outwardIssue
-      })
-    });
-    const ok = response.status === 201 || response.status === 200;
-    if (!ok) {
-      const body = await response.text();
-      console.error('linkBugToTest failed:', response.status, body);
+    // 1. Verify that the bug actually exists in Jira
+    const sevField = 'customfield_10238';
+    const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+    const checkResp = await api.asUser().requestJira(route`/rest/api/3/issue/${keyToCheck}?fields=${fieldsToFetch}`);
+    
+    if (checkResp.status === 404 || !checkResp.ok) {
+      return { 
+        success: false, 
+        notFound: true, 
+        error: `La incidencia "${keyToCheck}" no existe en Jira o no tienes permisos para verla.` 
+      };
     }
-    return { success: ok };
+    const issueData = await checkResp.json();
+
+    // 2. Determine inward and outward issues
+    const outwardIssue = issueData.key ? { key: issueData.key } : (bugKey ? { key: bugKey } : { id: String(bugId) });
+    const inwardIssue = (isNaN(Number(testCaseId)) && typeof testCaseId === 'string' && testCaseId.includes('-'))
+      ? { key: testCaseId }
+      : { id: String(testCaseId) };
+
+    // 3. Try to establish Jira Issue Link with available link types
+    let linkOk = false;
+    let linkErrMsg = '';
+    const candidateTypes = ['Blocks', 'Relates', 'Problem/Incident', 'Duplicate'];
+    
+    for (const typeName of candidateTypes) {
+      try {
+        const response = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: { name: typeName },
+            inwardIssue,
+            outwardIssue
+          })
+        });
+        if (response.status === 201 || response.status === 200) {
+          linkOk = true;
+          break;
+        } else {
+          linkErrMsg = await response.text();
+        }
+      } catch (err) {
+        linkErrMsg = err.message;
+      }
+    }
+
+    if (!linkOk) {
+      console.warn(`[linkBugToTest] IssueLink warning for ${keyToCheck}:`, linkErrMsg);
+    }
+
+    // Extract severity and versions
+    let sevVal = 'Sin definir';
+    if (issueData.fields?.[sevField]) {
+      const sf = issueData.fields[sevField];
+      sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+    } else if (issueData.fields) {
+      for (const [fKey, fVal] of Object.entries(issueData.fields)) {
+        if (fKey.startsWith('customfield_') && fVal) {
+          const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+          if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+            sevVal = vStr;
+            break;
+          }
+        }
+      }
+    }
+
+    const affectsVersions = (issueData.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const fixVersions = (issueData.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
+    return { 
+      success: true,
+      linkOk,
+      bug: {
+        key: issueData.key,
+        summary: issueData.fields?.summary || '',
+        status: issueData.fields?.status?.name || 'Abierto',
+        assignee: issueData.fields?.assignee?.displayName || 'Sin asignar',
+        resolution: issueData.fields?.resolution?.name || 'Unresolved',
+        priority: issueData.fields?.priority?.name || '',
+        issuetype: issueData.fields?.issuetype?.name || 'Bug',
+        severity: sevVal,
+        created: issueData.fields?.created || null,
+        resolutiondate: issueData.fields?.resolutiondate || null,
+        versions: affectsVersions,
+        fixVersions: fixVersions,
+        version: versionDisplay,
+        rawFields: issueData.fields
+      }
+    };
   } catch (e) {
     console.error('linkBugToTest error:', e);
     return { success: false, error: e.message };
@@ -3350,7 +3452,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
   console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
-  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
 
   let allIssues = [];
   let token = null;
@@ -3383,6 +3485,10 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       const sf = issue.fields.customfield_10238;
       sev = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
     }
+
+    const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
 
     // Inspect Jira issuelinks on the bug to see if it is linked to any test entity
     let isLinkedToTest = linkedSet.has(issue.key);
@@ -3432,6 +3538,10 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       resolution: issue.fields?.resolution?.name || null,
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
+      resolutiondate: issue.fields?.resolutiondate || null,
+      versions: affectsVersions,
+      fixVersions: fixVersions,
+      version: versionDisplay,
       issuetype: issue.fields?.issuetype?.name || 'Bug',
       project: issue.fields?.project?.key || '',
       isLinked: isLinkedToTest,

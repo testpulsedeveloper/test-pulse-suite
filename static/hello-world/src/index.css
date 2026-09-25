@@ -529,18 +529,25 @@ body {
 }
 
 /* === Modals === */
-.modal-overlay {
+.modal-overlay,
+.ads-modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
+  width: 100vw;
+  height: 100vh;
   background-color: rgba(9, 30, 66, 0.54);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 9999;
 }
 
-[data-theme='dark'] .modal-overlay, @media (prefers-color-scheme: dark) {
-  .modal-overlay {
+[data-theme='dark'] .modal-overlay,
+[data-theme='dark'] .ads-modal-overlay,
+@media (prefers-color-scheme: dark) {
+  .modal-overlay,
+  .ads-modal-overlay {
     background-color: rgba(9, 30, 66, 0.8);
   }
 }
