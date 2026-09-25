@@ -1,5 +1,6 @@
 import Resolver from '@forge/resolver';
-import api, { route, fetch, webTrigger, storage } from '@forge/api';
+import api, { route, fetch, webTrigger } from '@forge/api';
+import { kvs as storage } from '@forge/kvs';
 
 const getAppStorage = async (key) => {
   try {
