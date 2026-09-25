@@ -4127,15 +4127,45 @@ Then el sistema valida la identidad.
                   padding: '10px 14px',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: '4px'
+                  gap: '6px'
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ background: '#E9F2FF', color: '#0C66E4', fontWeight: 800, fontSize: '11px', padding: '2px 8px', borderRadius: '4px' }}>
-                    🧪 {qrModalSession.testKey}
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span
+                      style={{
+                        background: '#E9F2FF',
+                        color: '#0C66E4',
+                        fontWeight: 800,
+                        fontSize: '12px',
+                        padding: '3px 8px',
+                        borderRadius: '4px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                      title="Test Run asignado a esta ejecución"
+                    >
+                      🏃 {qrModalSession.testRunKey || qrModalSession.testRunId || qrModalSession.testKey}
+                    </span>
+                    {qrModalSession.testKey && qrModalSession.testKey !== (qrModalSession.testRunKey || qrModalSession.testRunId) && (
+                      <span
+                        style={{
+                          background: '#F1F2F4',
+                          color: '#44546F',
+                          fontWeight: 600,
+                          fontSize: '11px',
+                          padding: '2px 6px',
+                          borderRadius: '4px'
+                        }}
+                        title="Caso de prueba base"
+                      >
+                        Caso: {qrModalSession.testKey}
+                      </span>
+                    )}
+                  </div>
                   {qrModalSession.iterName && (
-                    <span style={{ background: '#F1F2F4', color: '#44546F', fontWeight: 700, fontSize: '11px', padding: '2px 6px', borderRadius: '4px' }}>
+                    <span style={{ background: '#EAE6FF', color: '#5E4DB2', fontWeight: 700, fontSize: '11px', padding: '2px 6px', borderRadius: '4px' }}>
                       📁 {qrModalSession.iterName}
                     </span>
                   )}
@@ -5767,14 +5797,14 @@ Then el sistema valida la identidad.
 
       const testItem = typeof test === 'object' ? test : cycleTests.find(t => String(t.id) === String(test));
       const testId = testItem ? testItem.id : test;
-      const testKey = testItem?.key || testId;
-      const testRunKey = testItem?.testRunKey || testKey;
+      const testCaseKey = testItem?.testCaseKey || testItem?.key || testId;
+      const testRunKey = testItem?.testRunKey || testItem?.testRunId || testCaseKey;
       const testRunId = testItem?.testRunId || testItem?.testRunKey || testId;
       const testSummary = testItem?.summary || testItem?.name || 'Caso de Prueba';
 
       const res = await invoke('createMobileUploadSession', {
         testId,
-        testKey,
+        testKey: testCaseKey,
         testRunKey,
         testRunId,
         testSummary,
@@ -5793,7 +5823,9 @@ Then el sistema valida la identidad.
         sessionId: res.sessionId,
         uploadUrl: res.uploadUrl,
         testId,
-        testKey,
+        testKey: testCaseKey,
+        testRunKey: res.testRunKey || testRunKey,
+        testRunId: res.testRunId || testRunId,
         testSummary,
         iterId: iterId || null,
         iterName: iterName || null,
@@ -5880,7 +5912,7 @@ Then el sistema valida la identidad.
           addNotification({
             type: 'success',
             title: '📸 ¡Evidencia Móvil Recibida!',
-            description: `Captura adjuntada a ${qrModalSession.testKey}.`
+            description: `Captura adjuntada a ${qrModalSession.testRunKey || qrModalSession.testRunId || qrModalSession.testKey}.`
           });
         }
       } catch (e) {

@@ -4944,12 +4944,27 @@ resolver.define('createMobileUploadSession', async ({ payload }) => {
     throw new Error('No se pudo obtener la URL de WebTrigger de Forge: ' + (e.message || String(e)));
   }
 
+  // Attempt to resolve testRunKey from cycle storage if missing
+  let resolvedRunKey = testRunKey;
+  let resolvedRunId = testRunId;
+  if ((!resolvedRunKey || resolvedRunKey === testKey) && cycleId && testId) {
+    try {
+      const cycleKey = 'cycle_' + cycleId + '_tests';
+      const tests = (await storage.get(cycleKey)) || [];
+      const match = tests.find(t => String(t.id) === String(testId) || String(t.key) === String(testKey));
+      if (match) {
+        if (match.testRunKey) resolvedRunKey = match.testRunKey;
+        if (match.testRunId) resolvedRunId = match.testRunId;
+      }
+    } catch (_) {}
+  }
+
   const sessionData = {
     sessionId,
     testId: testId || testKey,
     testKey: testKey || testId,
-    testRunKey: testRunKey || testKey || testId,
-    testRunId: testRunId || testRunKey || testId,
+    testRunKey: resolvedRunKey || testRunKey || testKey || testId,
+    testRunId: resolvedRunId || testRunId || resolvedRunKey || testId,
     testSummary: testSummary || 'Caso de Prueba',
     iterId: iterId || null,
     iterName: iterName || null,
@@ -4964,6 +4979,8 @@ resolver.define('createMobileUploadSession', async ({ payload }) => {
     sessionId,
     uploadUrl: fullUploadUrl,
     testKey: sessionData.testKey,
+    testRunKey: sessionData.testRunKey,
+    testRunId: sessionData.testRunId,
     testSummary: sessionData.testSummary,
     iterName: sessionData.iterName
   };
@@ -5018,9 +5035,10 @@ function generateMobileErrorHtml(title, message) {
 }
 
 function generateMobileUploadHtml(session) {
-  const testKey = session.testKey || 'TEST';
+  const testRunKey = session.testRunKey || session.testRunId || session.testKey || 'TEST-RUN';
+  const testCaseKey = session.testKey || '';
   const testSummary = session.testSummary || 'Ejecución de Prueba';
-  const iterInfo = session.iterName ? `Paso / Iteración: ${session.iterName}` : 'Evidencia General del Caso';
+  const iterInfo = session.iterName ? `Paso / Iteración: ${session.iterName}` : 'Evidencia General de la Ejecución';
   const sessionId = session.sessionId;
 
   return `<!DOCTYPE html>
@@ -5091,7 +5109,10 @@ function generateMobileUploadHtml(session) {
     <div id="uploadFormContainer" class="body">
       <!-- Target Info -->
       <div class="meta-box">
-        <span class="meta-tag">🧪 ${testKey}</span>
+        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
+          <span class="meta-tag" style="margin-bottom: 0;">🏃 Test Run: ${testRunKey}</span>
+          ${testCaseKey && testCaseKey !== testRunKey ? `<span style="font-size: 11px; background: #E4E6EA; color: #44546F; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🧪 Caso: ${testCaseKey}</span>` : ''}
+        </div>
         <div class="meta-title">${testSummary}</div>
         <div class="meta-sub">📁 ${iterInfo}</div>
       </div>
