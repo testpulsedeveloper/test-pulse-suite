@@ -129,184 +129,6 @@ resolver.define('probeAPI', async () => {
     }
 });
 
-// === Dynamic Jira Fields Discovery & Extraction Helpers ===
-let jiraFieldsCache = null;
-let jiraFieldsCacheExpiry = 0;
-
-async function getJiraFieldsMap() {
-  const now = Date.now();
-  if (jiraFieldsCache && now < jiraFieldsCacheExpiry) {
-    return jiraFieldsCache;
-  }
-  try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/field`);
-    if (res.ok) {
-      const fieldsList = await res.json();
-      const map = {};
-      if (Array.isArray(fieldsList)) {
-        fieldsList.forEach(f => {
-          if (f.id && f.name) {
-            map[f.id] = f.name;
-          }
-        });
-      }
-      jiraFieldsCache = map;
-      jiraFieldsCacheExpiry = now + (15 * 60 * 1000); // 15 min cache
-      return map;
-    }
-  } catch (e) {
-    console.warn('[getJiraFieldsMap] Failed to fetch field definitions:', e.message);
-  }
-  return jiraFieldsCache || {};
-}
-
-function extractEstimatedDueDate(fields, namesMap = {}) {
-  if (!fields) return null;
-
-  // 1. Check if namesMap or fields has a matching customfield for estimated resolution date
-  if (namesMap && typeof namesMap === 'object') {
-    for (const [fKey, fName] of Object.entries(namesMap)) {
-      if (!fKey || !fName) continue;
-      const lowerName = String(fName).toLowerCase();
-      const isDateMatch = /(soluci[oó]n.*estimad|estimad.*soluci[oó]n|fecha.*estimad|fecha.*resoluci[oó]n|fecha.*compromiso|fecha.*promesa|fecha.*entrega|fecha.*meta|fecha.*fin|fecha.*vencimiento|estimated.*(date|resolution|fix|due|end)|due.*date|target.*date)/i.test(lowerName);
-      if (isDateMatch && fields[fKey]) {
-        const val = fields[fKey];
-        if (typeof val === 'string' && val.trim()) return val.trim();
-        if (typeof val === 'object' && val !== null) {
-          if (val.iso) return val.iso;
-          if (val.value) return val.value;
-          if (val.date) return val.date;
-        }
-      }
-    }
-  }
-
-  // 2. Scan all customfield_* in fields for ISO date/datetime string
-  for (const [fKey, fVal] of Object.entries(fields)) {
-    if (fKey.startsWith('customfield_') && fVal) {
-      if (typeof fVal === 'string' && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?/.test(fVal.trim())) {
-        return fVal.trim();
-      }
-      if (typeof fVal === 'object' && fVal !== null) {
-        const candidate = fVal.iso || fVal.value || fVal.date;
-        if (typeof candidate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(candidate.trim())) {
-          return candidate.trim();
-        }
-      }
-    }
-  }
-
-  // 3. Fallback to standard duedate
-  if (fields.duedate) {
-    return typeof fields.duedate === 'string' ? fields.duedate.trim() : fields.duedate;
-  }
-
-  return null;
-}
-
-function extractEnvironment(fields, renderedFields = {}, namesMap = {}) {
-  if (!fields) return null;
-
-  // 1. Check namesMap for "Ambiente", "Environment", "Entorno", etc.
-  if (namesMap && typeof namesMap === 'object') {
-    for (const [fKey, fName] of Object.entries(namesMap)) {
-      if (!fKey || !fName) continue;
-      const lowerName = String(fName).toLowerCase();
-      const isEnvMatch = /^(ambiente|environment|entorno)$|^(ambiente|environment|entorno)\s*(\/|-|\().*|ambiente.*prueba|test.*env/i.test(lowerName);
-      if (isEnvMatch && fields[fKey]) {
-        const val = fields[fKey];
-        if (typeof val === 'string' && val.trim()) return val.trim();
-        if (typeof val === 'object' && val !== null) {
-          if (val.value) return val.value;
-          if (val.name) return val.name;
-          if (val.label) return val.label;
-          if (Array.isArray(val) && val.length > 0) {
-            return val.map(v => typeof v === 'object' ? (v.value || v.name || v.label || '') : String(v)).filter(Boolean).join(', ');
-          }
-        }
-      }
-    }
-  }
-
-  // 2. Check standard environment field
-  if (renderedFields && renderedFields.environment) {
-    return renderedFields.environment;
-  }
-  if (fields.environment) {
-    if (typeof fields.environment === 'string' && fields.environment.trim()) {
-      return fields.environment.trim();
-    }
-    if (typeof fields.environment === 'object') {
-      return fields.environment;
-    }
-  }
-
-  // 3. Heuristic scan for values like "QA", "DEV", "PROD", "STAGING", "UAT"
-  for (const [fKey, fVal] of Object.entries(fields)) {
-    if (fKey.startsWith('customfield_') && fVal) {
-      let strVal = '';
-      if (typeof fVal === 'string') strVal = fVal.trim();
-      else if (typeof fVal === 'object' && fVal !== null) {
-        strVal = (fVal.value || fVal.name || fVal.label || '').trim();
-      }
-      if (strVal && /^(QA|DEV|PROD|STAGING|TEST|TESTING|UAT|DESARROLLO|PRODUCCI[OÓ]N|CALIDAD|PREPROD|STAGE|SIT)$/i.test(strVal)) {
-        return strVal;
-      }
-    }
-  }
-
-  return null;
-}
-
-function extractSystemModule(fields, namesMap = {}) {
-  if (!fields) return null;
-  if (namesMap && typeof namesMap === 'object') {
-    for (const [fKey, fName] of Object.entries(namesMap)) {
-      if (!fKey || !fName) continue;
-      const lowerName = String(fName).toLowerCase();
-      if (/sistema.*m[oó]dulo|m[oó]dulo.*sistema|sistema|m[oó]dulo/i.test(lowerName) && fields[fKey]) {
-        const val = fields[fKey];
-        if (typeof val === 'string' && val.trim()) return val.trim();
-        if (typeof val === 'object' && val !== null) {
-          if (val.value) return val.value;
-          if (val.name) return val.name;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function extractSeverity(fields, namesMap = {}) {
-  if (!fields) return 'Sin definir';
-  
-  if (fields.customfield_10238) {
-    const sf = fields.customfield_10238;
-    return typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-  }
-
-  if (namesMap && typeof namesMap === 'object') {
-    for (const [fKey, fName] of Object.entries(namesMap)) {
-      if (!fKey || !fName) continue;
-      const lowerName = String(fName).toLowerCase();
-      if (/(\*?severity|severidad|gravedad)/i.test(lowerName) && fields[fKey]) {
-        const sf = fields[fKey];
-        return typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-      }
-    }
-  }
-
-  for (const [fKey, fVal] of Object.entries(fields)) {
-    if (fKey.startsWith('customfield_') && fVal) {
-      const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-      if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low', 'trivial'].includes(String(vStr).toLowerCase())) {
-        return vStr;
-      }
-    }
-  }
-
-  return fields.priority?.name || 'Sin definir';
-}
 
 // === Evidences Deduplication & Isolation Helpers ===
 const getIterationEvidenceKeys = (iterations) => {
@@ -1806,13 +1628,14 @@ resolver.define('getExecutionReport', async ({ payload }) => {
 
   const bugMap = {};
   if (allBugKeys.size > 0) {
-    const globalFieldsMap = await getJiraFieldsMap();
+    const sevField = 'customfield_10238';
     await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
          try {
-            let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog,names,renderedFields`);
+            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+            let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
             if (resp.status === 429) {
                await new Promise(r => setTimeout(r, 1200));
-               resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog,names,renderedFields`);
+               resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
             }
             if (resp.ok) {
                const i = await resp.json();
@@ -1854,7 +1677,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
 
                const timesSpent = {};
                let currentStatus = 'Nuevo'; // Default assumed start state
-               let lastTime = new Date(i.fields?.created || Date.now()).getTime();
+               let lastTime = new Date(i.fields.created).getTime();
                
                const histories = i.changelog?.histories || [];
                // Jira returns histories ascending by created, but double check
@@ -1883,11 +1706,22 @@ resolver.define('getExecutionReport', async ({ payload }) => {
                   timesSpent[finalStatus] = (timesSpent[finalStatus] || 0) + ongoingHours;
                }
 
-                const namesMap = i.names || globalFieldsMap || {};
-                const estimatedDueDate = extractEstimatedDueDate(i.fields, namesMap);
-                const envVal = extractEnvironment(i.fields, i.renderedFields, namesMap);
-                const systemModule = extractSystemModule(i.fields, namesMap);
-                const sevVal = extractSeverity(i.fields, namesMap);
+                // Extract *Severity strictly from customfield_10238 or any customfield holding severity
+                let sevVal = 'Sin definir';
+                if (i.fields?.[sevField]) {
+                  const sf = i.fields[sevField];
+                  sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+                } else if (i.fields) {
+                  for (const [fKey, fVal] of Object.entries(i.fields)) {
+                    if (fKey.startsWith('customfield_') && fVal) {
+                      const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+                      if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+                        sevVal = vStr;
+                        break;
+                      }
+                    }
+                  }
+                }
 
                 // Extract versions
                 const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
@@ -1898,7 +1732,6 @@ resolver.define('getExecutionReport', async ({ payload }) => {
                   key,
                   summary: i.fields?.summary || '',
                   status: i.fields?.status?.name || '',
-                  statusCategory: i.fields?.status?.statusCategory?.key || '',
                   assignee: i.fields?.assignee?.displayName || 'Sin asignar',
                   resolution: i.fields?.resolution?.name || 'Unresolved',
                   priority: i.fields?.priority?.name || '',
@@ -1906,10 +1739,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
                   severity: sevVal,
                   created: i.fields?.created || null,
                   resolutiondate: i.fields?.resolutiondate || null,
-                  duedate: estimatedDueDate || i.fields?.duedate || null,
-                  estimatedDueDate: estimatedDueDate || i.fields?.duedate || null,
-                  environment: envVal,
-                  systemModule: systemModule,
+                  duedate: i.fields?.duedate || null,
                   versions: affectsVersions,
                   fixVersions: fixVersions,
                   version: versionDisplay,
@@ -1941,22 +1771,33 @@ resolver.define('getBugsBatch', async ({ payload }) => {
   const { keys = [] } = payload;
   const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
   if (uniqueKeys.length === 0) return {};
-  const globalFieldsMap = await getJiraFieldsMap();
+  const sevField = 'customfield_10238';
   const bugMap = {};
   await processInBatches(uniqueKeys, 8, 50, async key => {
     try {
-      let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=names,renderedFields`);
+      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+      let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
       if (resp.status === 429) {
         await new Promise(r => setTimeout(r, 1200));
-        resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=names,renderedFields`);
+        resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
       }
       if (resp.ok) {
         const i = await resp.json();
-        const namesMap = i.names || globalFieldsMap || {};
-        const estimatedDueDate = extractEstimatedDueDate(i.fields, namesMap);
-        const envVal = extractEnvironment(i.fields, i.renderedFields, namesMap);
-        const systemModule = extractSystemModule(i.fields, namesMap);
-        const sevVal = extractSeverity(i.fields, namesMap);
+        let sevVal = 'Sin definir';
+        if (i.fields?.[sevField]) {
+          const sf = i.fields[sevField];
+          sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+        } else if (i.fields) {
+          for (const [fKey, fVal] of Object.entries(i.fields)) {
+            if (fKey.startsWith('customfield_') && fVal) {
+              const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+              if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+                sevVal = vStr;
+                break;
+              }
+            }
+          }
+        }
 
         const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
         const fixVersions = (i.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
@@ -1966,7 +1807,6 @@ resolver.define('getBugsBatch', async ({ payload }) => {
           key,
           summary: i.fields?.summary || '',
           status: i.fields?.status?.name || '',
-          statusCategory: i.fields?.status?.statusCategory?.key || '',
           assignee: i.fields?.assignee?.displayName || 'Sin asignar',
           resolution: i.fields?.resolution?.name || 'Unresolved',
           priority: i.fields?.priority?.name || '',
@@ -1974,10 +1814,7 @@ resolver.define('getBugsBatch', async ({ payload }) => {
           severity: sevVal,
           created: i.fields?.created || null,
           resolutiondate: i.fields?.resolutiondate || null,
-          duedate: estimatedDueDate || i.fields?.duedate || null,
-          estimatedDueDate: estimatedDueDate || i.fields?.duedate || null,
-          environment: envVal,
-          systemModule: systemModule,
+          duedate: i.fields?.duedate || null,
           versions: affectsVersions,
           fixVersions: fixVersions,
           version: versionDisplay,
@@ -2720,7 +2557,9 @@ resolver.define('linkBugToTest', async ({ payload }) => {
 
   try {
     // 1. Verify that the bug actually exists in Jira
-    const checkResp = await api.asUser().requestJira(route`/rest/api/3/issue/${keyToCheck}?expand=names,renderedFields`);
+    const sevField = 'customfield_10238';
+    const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+    const checkResp = await api.asUser().requestJira(route`/rest/api/3/issue/${keyToCheck}?fields=${fieldsToFetch}`);
     
     if (checkResp.status === 404 || !checkResp.ok) {
       return { 
@@ -2768,13 +2607,22 @@ resolver.define('linkBugToTest', async ({ payload }) => {
       console.warn(`[linkBugToTest] IssueLink warning for ${keyToCheck}:`, linkErrMsg);
     }
 
-    // Dynamic field extraction
-    const globalFieldsMap = await getJiraFieldsMap();
-    const namesMap = issueData.names || globalFieldsMap || {};
-    const estimatedDueDate = extractEstimatedDueDate(issueData.fields, namesMap);
-    const envVal = extractEnvironment(issueData.fields, issueData.renderedFields, namesMap);
-    const systemModule = extractSystemModule(issueData.fields, namesMap);
-    const sevVal = extractSeverity(issueData.fields, namesMap);
+    // Extract severity and versions
+    let sevVal = 'Sin definir';
+    if (issueData.fields?.[sevField]) {
+      const sf = issueData.fields[sevField];
+      sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+    } else if (issueData.fields) {
+      for (const [fKey, fVal] of Object.entries(issueData.fields)) {
+        if (fKey.startsWith('customfield_') && fVal) {
+          const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+          if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+            sevVal = vStr;
+            break;
+          }
+        }
+      }
+    }
 
     const affectsVersions = (issueData.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issueData.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
@@ -2787,7 +2635,6 @@ resolver.define('linkBugToTest', async ({ payload }) => {
         key: issueData.key,
         summary: issueData.fields?.summary || '',
         status: issueData.fields?.status?.name || 'Abierto',
-        statusCategory: issueData.fields?.status?.statusCategory?.key || '',
         assignee: issueData.fields?.assignee?.displayName || 'Sin asignar',
         resolution: issueData.fields?.resolution?.name || 'Unresolved',
         priority: issueData.fields?.priority?.name || '',
@@ -2795,10 +2642,6 @@ resolver.define('linkBugToTest', async ({ payload }) => {
         severity: sevVal,
         created: issueData.fields?.created || null,
         resolutiondate: issueData.fields?.resolutiondate || null,
-        duedate: estimatedDueDate || issueData.fields?.duedate || null,
-        estimatedDueDate: estimatedDueDate || issueData.fields?.duedate || null,
-        environment: envVal,
-        systemModule: systemModule,
         versions: affectsVersions,
         fixVersions: fixVersions,
         version: versionDisplay,
@@ -3232,7 +3075,7 @@ resolver.define('getBugDetailsBatch', async ({ payload }) => {
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jql,
-        fields: ['*navigable', 'summary', 'priority', 'status', 'assignee', 'resolution', 'created', 'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions']
+        fields: ['summary', 'priority', 'status', 'assignee', 'resolution']
       })
     });
     
@@ -3242,33 +3085,14 @@ resolver.define('getBugDetailsBatch', async ({ payload }) => {
     }
     
     const data = await response.json();
-    const globalFieldsMap = await getJiraFieldsMap();
-
-    return (data.issues || []).map(issue => {
-      const namesMap = issue.names || globalFieldsMap || {};
-      const estimatedDueDate = extractEstimatedDueDate(issue.fields, namesMap);
-      const envVal = extractEnvironment(issue.fields, issue.renderedFields, namesMap);
-      const systemModule = extractSystemModule(issue.fields, namesMap);
-      const sev = extractSeverity(issue.fields, namesMap);
-
-      return {
-        key: issue.key,
-        summary: issue.fields?.summary || '',
-        priority: issue.fields?.priority?.name || 'N/A',
-        status: issue.fields?.status?.name || 'N/A',
-        statusCategory: issue.fields?.status?.statusCategory?.key || '',
-        assignee: issue.fields?.assignee?.displayName || 'Unassigned',
-        resolution: issue.fields?.resolution?.name || 'Unresolved',
-        severity: sev,
-        created: issue.fields?.created || null,
-        resolutiondate: issue.fields?.resolutiondate || null,
-        duedate: estimatedDueDate || issue.fields?.duedate || null,
-        estimatedDueDate: estimatedDueDate || issue.fields?.duedate || null,
-        environment: envVal,
-        systemModule: systemModule,
-        rawFields: issue.fields
-      };
-    });
+    return (data.issues || []).map(issue => ({
+      key: issue.key,
+      summary: issue.fields.summary,
+      priority: issue.fields.priority?.name || 'N/A',
+      status: issue.fields.status?.name || 'N/A',
+      assignee: issue.fields.assignee?.displayName || 'Unassigned',
+      resolution: issue.fields.resolution?.name || 'Unresolved'
+    }));
   } catch (e) {
     console.error("Exception fetching bugs", e);
     return [];
@@ -3466,8 +3290,15 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     const { issueIdOrKey } = payload;
     if (!issueIdOrKey) return null;
 
+    const fields = [
+      'summary', 'description', 'attachment', 'comment', 'assignee', 'reporter',
+      'creator', 'priority', 'status', 'resolution', 'created', 'updated',
+      'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions',
+      'issuetype', 'customfield_10238', 'labels', 'issuelinks'
+    ].join(',');
+
     const response = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${issueIdOrKey}?expand=renderedFields,names,schema`
+      route`/rest/api/3/issue/${issueIdOrKey}?fields=${fields}&expand=renderedFields`
     );
     if (!response.ok) {
       console.warn(`[getBugFullDetails] Failed to fetch bug ${issueIdOrKey}:`, response.status);
@@ -3523,13 +3354,11 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     const affectsVersions = (f.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (f.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
 
-    // 5. Dynamic Field Extraction (Estimated Due Date, Environment, Severity, Module)
-    const globalFieldsMap = await getJiraFieldsMap();
-    const namesMap = data.names || globalFieldsMap || {};
-    const estimatedDueDate = extractEstimatedDueDate(f, namesMap);
-    const envVal = extractEnvironment(f, rf, namesMap);
-    const systemModule = extractSystemModule(f, namesMap);
-    const sevVal = extractSeverity(f, namesMap);
+    // 5. Environment
+    let environmentText = null;
+    if (rf.environment) environmentText = rf.environment;
+    else if (typeof f.environment === 'string') environmentText = f.environment;
+    else if (f.environment && typeof f.environment === 'object') environmentText = f.environment;
 
     return {
       id: data.id,
@@ -3554,19 +3383,16 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       resolution: f.resolution?.name || 'Sin resolver',
       priority: f.priority?.name || 'Media',
       priorityIcon: f.priority?.iconUrl || null,
-      severity: sevVal,
+      severity: f.customfield_10238 || f.priority?.name || 'Sin definir',
       rawSeverity: f.customfield_10238 || null,
       versions: affectsVersions,
       fixVersions: fixVersions,
       created: f.created,
       updated: f.updated,
       resolutiondate: f.resolutiondate || null,
-      duedate: estimatedDueDate || f.duedate || null,
-      estimatedDueDate: estimatedDueDate || f.duedate || null,
-      environment: envVal,
-      systemModule: systemModule,
+      duedate: f.duedate || null,
+      environment: environmentText,
       labels: f.labels || [],
-      names: namesMap,
       rawFields: f
     };
   } catch (e) {
@@ -3788,7 +3614,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
   console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
-  const fields = ['*navigable', 'summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'issuelinks'];
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
 
   let allIssues = [];
   let token = null;
@@ -3814,15 +3640,13 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   console.log(`[getProjectUnlinkedBugs] Total bugs retrieved from Jira: ${allIssues.length}`);
 
-  const globalFieldsMap = await getJiraFieldsMap();
-
   // Return ALL bugs with explicit issuelinks detection
   return allIssues.map(issue => {
-    const namesMap = issue.names || globalFieldsMap || {};
-    const estimatedDueDate = extractEstimatedDueDate(issue.fields, namesMap);
-    const envVal = extractEnvironment(issue.fields, issue.renderedFields, namesMap);
-    const systemModule = extractSystemModule(issue.fields, namesMap);
-    const sev = extractSeverity(issue.fields, namesMap);
+    let sev = 'Sin definir';
+    if (issue.fields?.customfield_10238) {
+      const sf = issue.fields.customfield_10238;
+      sev = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+    }
 
     const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
@@ -3877,10 +3701,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
       resolutiondate: issue.fields?.resolutiondate || null,
-      duedate: estimatedDueDate || issue.fields?.duedate || null,
-      estimatedDueDate: estimatedDueDate || issue.fields?.duedate || null,
-      environment: envVal,
-      systemModule: systemModule,
+      duedate: issue.fields?.duedate || null,
       versions: affectsVersions,
       fixVersions: fixVersions,
       version: versionDisplay,

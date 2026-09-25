@@ -4696,21 +4696,7 @@ Then el sistema valida la identidad.
     const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
 
     // Due Date
-    let dueDateStr = b.estimatedDueDate || b.duedate || selectedBug.estimatedDueDate || selectedBug.duedate || null;
-    if (!dueDateStr && b.rawFields) {
-      for (const [k, v] of Object.entries(b.rawFields)) {
-        if (k.startsWith('customfield_') && v) {
-          const str = typeof v === 'object' ? (v.value || v.name || '') : String(v);
-          if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
-            const name = (b.names && b.names[k]) ? b.names[k].toLowerCase() : '';
-            if (name.includes('solución') || name.includes('estimad') || name.includes('due') || name.includes('compromiso') || name.includes('promesa') || name.includes('vencimiento')) {
-              dueDateStr = str;
-              break;
-            }
-          }
-        }
-      }
-    }
+    const dueDateStr = b.duedate || selectedBug.duedate || null;
     let formattedDueDate = null;
     let isDueDateFlagged = false;
 
@@ -4718,10 +4704,7 @@ Then el sistema valida la identidad.
       try {
         const d = new Date(dueDateStr);
         if (!isNaN(d.getTime())) {
-          const hasTime = String(dueDateStr).includes('T') && !String(dueDateStr).includes('T00:00:00');
-          formattedDueDate = hasTime
-            ? d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }) + ', ' + d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false })
-            : d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+          formattedDueDate = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
           const statusLower = String(rawStatus).toLowerCase();
           const isInProgress = statusLower.includes('curso') || statusLower.includes('progress') || statusLower.includes('progreso') || statusLower.includes('desarrollo') || statusLower.includes('testing') || statusLower.includes('atención');
           const isOverdue = d.getTime() < Date.now() && !isDone;
@@ -5264,7 +5247,7 @@ Then el sistema valida la identidad.
                         fontSize: '11px',
                         fontWeight: 700
                       }}
-                      dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : (b.environment?.value || b.environment?.name || adfToHtml(b.environment)) }}
+                      dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : adfToHtml(b.environment) }}
                     />
                   ) : (
                     <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
@@ -5273,30 +5256,6 @@ Then el sistema valida la identidad.
                   )}
                 </div>
               </div>
-
-              {/* 8. Sistema / Módulo */}
-              {b.systemModule && (
-                <div>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                    💻 SISTEMA O MÓDULO
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span
-                      style={{
-                        background: '#F4F5F7',
-                        color: '#172B4D',
-                        border: '1px solid #DFE1E6',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '11px',
-                        fontWeight: 600
-                      }}
-                    >
-                      {b.systemModule}
-                    </span>
-                  </div>
-                </div>
-              )}
 
               {/* 8. Fecha de Creación & Resolución */}
               <div style={{ borderTop: '1px solid #EBECF0', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px', color: '#626F86' }}>
@@ -9674,14 +9633,11 @@ const renderPlanningTab = () => {
         return <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '11px' }}>No definida</span>;
       }
       try {
-        const d = new Date(dueDateStr);
+        const d = new Date(dueDateStr + (dueDateStr.includes('T') ? '' : 'T23:59:59'));
         if (isNaN(d.getTime())) {
           return <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px' }}>{dueDateStr}</span>;
         }
-        const hasTime = String(dueDateStr).includes('T') && !String(dueDateStr).includes('T00:00:00');
-        const formatted = hasTime
-          ? d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }) + ', ' + d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false })
-          : d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+        const formatted = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
         const isOverdue = !isDone && (d.getTime() < Date.now());
         
         return (
@@ -9966,10 +9922,7 @@ const renderPlanningTab = () => {
                 resolution: mapBug?.resolution || projectBug?.resolution || rawBug.resolution || 'Sin resolver',
                 created: mapBug?.created || projectBug?.created || rawBug.created || rawBug.rawFields?.created || null,
                 resolutiondate: mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.resolutiondate || rawBug.rawFields?.resolutiondate || null,
-                duedate: mapBug?.estimatedDueDate || mapBug?.duedate || projectBug?.estimatedDueDate || projectBug?.duedate || rawBug.estimatedDueDate || rawBug.duedate || rawBug.rawFields?.duedate || null,
-                estimatedDueDate: mapBug?.estimatedDueDate || projectBug?.estimatedDueDate || rawBug.estimatedDueDate || mapBug?.duedate || projectBug?.duedate || rawBug.duedate || null,
-                environment: mapBug?.environment || projectBug?.environment || rawBug.environment || null,
-                systemModule: mapBug?.systemModule || projectBug?.systemModule || rawBug.systemModule || null,
+                duedate: mapBug?.duedate || projectBug?.duedate || rawBug.duedate || rawBug.rawFields?.duedate || null,
                 version: mapBug?.version || projectBug?.version || rawBug.version || 'Sin versión',
                 versions: mapBug?.versions || projectBug?.versions || rawBug.versions || [],
                 fixVersions: mapBug?.fixVersions || projectBug?.fixVersions || rawBug.fixVersions || [],
@@ -10011,10 +9964,7 @@ const renderPlanningTab = () => {
                   fixVersions: fixVersions,
                   created: bug.created || bug.rawFields?.created || null,
                   resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
-                  duedate: bug.estimatedDueDate || bug.duedate || null,
-                  estimatedDueDate: bug.estimatedDueDate || bug.duedate || null,
-                  environment: bug.environment || null,
-                  systemModule: bug.systemModule || null,
+                  duedate: bug.duedate || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -10047,10 +9997,7 @@ const renderPlanningTab = () => {
                     fixVersions: fixVersions,
                     created: bug.created || bug.rawFields?.created || null,
                     resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
-                    duedate: bug.estimatedDueDate || bug.duedate || null,
-                    estimatedDueDate: bug.estimatedDueDate || bug.duedate || null,
-                    environment: bug.environment || null,
-                    systemModule: bug.systemModule || null,
+                    duedate: bug.duedate || null,
                     cycles: new Set([cycleName]),
                     affectedCases: new Map()
                   });
@@ -10147,8 +10094,6 @@ const renderPlanningTab = () => {
         });
       }
 
-      const dueVal = ub.estimatedDueDate || ub.duedate || ub.rawFields?.duedate || null;
-
       if (allBugsMap.has(ub.key)) {
         // Bug was already registered in a cycle execution of this plan — enrich its linked test details and cycles
         const existing = allBugsMap.get(ub.key);
@@ -10170,13 +10115,7 @@ const renderPlanningTab = () => {
           existing.resolutiondate = ub.resolutiondate || ub.rawFields?.resolutiondate || null;
         }
         if (!existing.duedate) {
-          existing.duedate = dueVal;
-        }
-        if (!existing.environment && ub.environment) {
-          existing.environment = ub.environment;
-        }
-        if (!existing.systemModule && ub.systemModule) {
-          existing.systemModule = ub.systemModule;
+          existing.duedate = ub.duedate || ub.rawFields?.duedate || null;
         }
       } else {
         // Bug is in the project but wasn't part of planAllBugsMap
@@ -10198,10 +10137,7 @@ const renderPlanningTab = () => {
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
-            duedate: dueVal,
-            estimatedDueDate: dueVal,
-            environment: ub.environment || null,
-            systemModule: ub.systemModule || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null,
             cycles: resolvedCycles,
             affectedCases: affectedMap
           });
@@ -10221,10 +10157,7 @@ const renderPlanningTab = () => {
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
-            duedate: dueVal,
-            estimatedDueDate: dueVal,
-            environment: ub.environment || null,
-            systemModule: ub.systemModule || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null,
             cycles: new Set(),
             affectedCases: new Map()
           });
@@ -10235,10 +10168,7 @@ const renderPlanningTab = () => {
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
-            duedate: dueVal,
-            estimatedDueDate: dueVal,
-            environment: ub.environment || null,
-            systemModule: ub.systemModule || null
+            duedate: ub.duedate || ub.rawFields?.duedate || null
           });
         }
       }
