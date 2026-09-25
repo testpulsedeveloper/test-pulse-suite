@@ -3661,27 +3661,6 @@ Then el sistema valida la identidad.
 
               {/* Header Right Actions */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <button
-                  className="btn-secondary"
-                  onClick={() => handleOpenQrCapture(selectedTestCase)}
-                  style={{
-                    padding: '3px 8px',
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    border: '1px solid #0C66E4',
-                    background: '#E9F2FF',
-                    color: '#0C66E4',
-                    borderRadius: '4px',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    cursor: 'pointer'
-                  }}
-                  title="Escanear QR para capturar fotos/evidencia desde tu celular"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-                  <span>📱 QR Celular</span>
-                </button>
                 <button 
                   onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}
                   style={{
@@ -4025,15 +4004,6 @@ Then el sistema valida la identidad.
               Test Pulse QA Engine • {selectedTestCase.key}
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <button 
-                className="btn-secondary"
-                onClick={() => handleOpenQrCapture(selectedTestCase)}
-                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid #0C66E4', background: '#E9F2FF', color: '#0C66E4', fontWeight: 700 }}
-                title="Escanear QR para capturar fotos/evidencia desde tu celular"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-                <span>📱 Capturar con Celular (QR)</span>
-              </button>
               <button 
                 className="btn-secondary"
                 onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}
@@ -5817,7 +5787,7 @@ Then el sistema valida la identidad.
         throw new Error("No se pudo generar la sesión de carga móvil.");
       }
 
-      const svg = generateQrSvg(res.uploadUrl, { size: 240, margin: 2, darkColor: '#172B4D', lightColor: '#FFFFFF' });
+      const svg = generateQrSvg(res.uploadUrl, { size: 280, margin: 4, darkColor: '#000000', lightColor: '#FFFFFF' });
 
       setQrModalSession({
         sessionId: res.sessionId,
@@ -8170,34 +8140,8 @@ const renderPlanningTab = () => {
                               )}
                             </div>
 
-                            {/* Right Actions: QR Button, Play Button & Status Lozenge */}
+                            {/* Right Actions: Play Button & Status Lozenge */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                              {/* QR Mobile Capture Button directly on row */}
-                              <button
-                                title="Escanear QR para capturar evidencias con la cámara del celular"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenQrCapture(test);
-                                }}
-                                style={{
-                                  height: '28px',
-                                  padding: '0 8px',
-                                  borderRadius: '6px',
-                                  background: '#E9F2FF',
-                                  color: '#0C66E4',
-                                  border: '1px solid #0C66E4',
-                                  cursor: 'pointer',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  fontSize: '11px',
-                                  fontWeight: 700
-                                }}
-                              >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-                                <span>📱 QR</span>
-                              </button>
-
                               {/* Play / Run Action Button */}
                               <button
                                 title={runningTests[test.id] ? 'Detener Ejecución' : 'Iniciar Ejecución'}
@@ -8493,17 +8437,19 @@ const renderPlanningTab = () => {
                                         border: '1px solid #DCDFE4',
                                         background: '#FFFFFF',
                                         color: '#172B4D',
-                                        cursor: 'pointer',
+                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
                                         gap: '5px',
                                         borderRadius: '4px',
                                         fontSize: '11px',
-                                        fontWeight: 600
+                                        fontWeight: 600,
+                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                       }}
-                                      title="Adjuntar Archivo de Evidencia"
+                                      title={runningTests[test.id] ? "Adjuntar Archivo de Evidencia" : "Inicia la ejecución (Play) para adjuntar evidencias"}
                                     >
                                       <input
+                                        disabled={!runningTests[test.id]}
                                         type="file"
                                         style={{ display: 'none' }}
                                         onChange={(e) => {
@@ -8518,20 +8464,22 @@ const renderPlanningTab = () => {
 
                                     <button
                                       className="btn-secondary"
+                                      disabled={!runningTests[test.id]}
                                       style={{
                                         padding: '4px 10px',
                                         border: '1px solid #DCDFE4',
                                         background: '#FFFFFF',
                                         color: '#172B4D',
-                                        cursor: 'pointer',
+                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
                                         gap: '5px',
                                         borderRadius: '4px',
                                         fontSize: '11px',
-                                        fontWeight: 600
+                                        fontWeight: 600,
+                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                       }}
-                                      title="Grabar pantalla o capturar pantalla"
+                                      title={runningTests[test.id] ? "Grabar pantalla o capturar pantalla" : "Inicia la ejecución (Play) para grabar pantalla"}
                                       onClick={() => handleCaptureScreen(test.id, test.key)}
                                     >
                                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
@@ -8540,20 +8488,22 @@ const renderPlanningTab = () => {
 
                                     <button
                                       className="btn-secondary"
+                                      disabled={!runningTests[test.id]}
                                       style={{
                                         padding: '4px 10px',
                                         border: '1px solid #0C66E4',
                                         background: '#E9F2FF',
                                         color: '#0C66E4',
-                                        cursor: 'pointer',
+                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
                                         gap: '5px',
                                         borderRadius: '4px',
                                         fontSize: '11px',
-                                        fontWeight: 700
+                                        fontWeight: 700,
+                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                       }}
-                                      title="Escanear QR para capturar con cámara del celular"
+                                      title={runningTests[test.id] ? "Escanear QR para capturar con cámara del celular" : "Inicia la ejecución (Play) para capturar con celular"}
                                       onClick={() => handleOpenQrCapture(test)}
                                     >
                                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
@@ -8660,8 +8610,23 @@ const renderPlanningTab = () => {
                                           </select>
 
                                           {/* Iteration Evidence buttons */}
-                                          <label className="btn-secondary" style={{ padding: '3px 6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid #DCDFE4', background: '#FFFFFF' }} title="Adjuntar evidencia a iteración">
+                                          <label
+                                            className="btn-secondary"
+                                            style={{
+                                              padding: '3px 6px',
+                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                              borderRadius: '4px',
+                                              border: '1px solid #DCDFE4',
+                                              background: '#FFFFFF',
+                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                            }}
+                                            title={runningTests[test.id] ? "Adjuntar evidencia a iteración" : "Inicia la ejecución (Play) para adjuntar evidencias"}
+                                          >
                                             <input
+                                              disabled={!runningTests[test.id]}
                                               type="file"
                                               style={{ display: 'none' }}
                                               onChange={(e) => {
@@ -8673,14 +8638,42 @@ const renderPlanningTab = () => {
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
                                           </label>
 
-                                          <button title="Grabar pantalla para iteración" className="btn-secondary" style={{ padding: '3px 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid #DCDFE4', background: '#FFFFFF' }} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}>
+                                          <button
+                                            title={runningTests[test.id] ? "Grabar pantalla para iteración" : "Inicia la ejecución (Play) para grabar"}
+                                            disabled={!runningTests[test.id]}
+                                            className="btn-secondary"
+                                            style={{
+                                              padding: '3px 6px',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                              borderRadius: '4px',
+                                              border: '1px solid #DCDFE4',
+                                              background: '#FFFFFF',
+                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                            }}
+                                            onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}
+                                          >
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                                           </button>
 
                                           <button
-                                            title="Capturar evidencia con cámara del celular (QR)"
+                                            title={runningTests[test.id] ? "Capturar evidencia con cámara del celular (QR)" : "Inicia la ejecución (Play) para capturar con celular"}
+                                            disabled={!runningTests[test.id]}
                                             className="btn-secondary"
-                                            style={{ padding: '3px 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid #0C66E4', background: '#E9F2FF', color: '#0C66E4' }}
+                                            style={{
+                                              padding: '3px 6px',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                              borderRadius: '4px',
+                                              border: '1px solid #0C66E4',
+                                              background: '#E9F2FF',
+                                              color: '#0C66E4',
+                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                            }}
                                             onClick={() => handleOpenQrCapture(test, iter.id, `Iteración #${idx + 1}`)}
                                           >
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
@@ -8781,17 +8774,19 @@ const renderPlanningTab = () => {
                                     padding: '5px 12px',
                                     fontSize: '11px',
                                     fontWeight: 600,
-                                    cursor: 'pointer',
+                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                     border: '1px solid #DCDFE4',
                                     background: '#FFFFFF',
                                     borderRadius: '4px',
                                     display: 'inline-flex',
                                     alignItems: 'center',
-                                    gap: '6px'
+                                    gap: '6px',
+                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                   }}
-                                  title="Adjuntar Log o Captura"
+                                  title={runningTests[test.id] ? "Adjuntar Log o Captura" : "Inicia la ejecución (Play) para adjuntar evidencias"}
                                 >
                                   <input
+                                    disabled={!runningTests[test.id]}
                                     type="file"
                                     style={{ display: 'none' }}
                                     onChange={(e) => {
@@ -8806,6 +8801,7 @@ const renderPlanningTab = () => {
 
                                 <button
                                   className="btn-secondary"
+                                  disabled={!runningTests[test.id]}
                                   style={{
                                     padding: '5px 12px',
                                     fontSize: '11px',
@@ -8816,8 +8812,10 @@ const renderPlanningTab = () => {
                                     display: 'inline-flex',
                                     alignItems: 'center',
                                     gap: '6px',
-                                    cursor: 'pointer'
+                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                   }}
+                                  title={runningTests[test.id] ? "Grabar Pantalla" : "Inicia la ejecución (Play) para grabar pantalla"}
                                   onClick={() => handleCaptureScreen(test.id, test.key)}
                                 >
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
@@ -8826,6 +8824,7 @@ const renderPlanningTab = () => {
 
                                 <button
                                   className="btn-secondary"
+                                  disabled={!runningTests[test.id]}
                                   style={{
                                     padding: '5px 12px',
                                     fontSize: '11px',
@@ -8837,9 +8836,10 @@ const renderPlanningTab = () => {
                                     display: 'inline-flex',
                                     alignItems: 'center',
                                     gap: '6px',
-                                    cursor: 'pointer'
+                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
                                   }}
-                                  title="Capturar con cámara del celular vía QR"
+                                  title={runningTests[test.id] ? "Capturar con cámara del celular vía QR" : "Inicia la ejecución (Play) para capturar con celular"}
                                   onClick={() => handleOpenQrCapture(test)}
                                 >
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>

@@ -5328,12 +5328,18 @@ export async function mobileUploadHandler(request) {
 
   const defaultHeaders = {
     'Access-Control-Allow-Origin': ['*'],
-    'Access-Control-Allow-Headers': ['Content-Type', 'Authorization']
+    'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With']
   };
 
   if (method === 'GET') {
     const query = request.queryParameters || {};
-    const sessionId = (query.session && query.session[0]) || query.session || '';
+    let sessionId = (query.session && query.session[0]) || query.session || '';
+    if (!sessionId && request.url) {
+      try {
+        const u = new URL(request.url, 'https://forge.atlassian.com');
+        sessionId = u.searchParams.get('session') || '';
+      } catch (_) {}
+    }
 
     if (!sessionId) {
       return {

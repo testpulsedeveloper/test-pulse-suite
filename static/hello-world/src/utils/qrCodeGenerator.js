@@ -472,14 +472,15 @@ class QRCodeModel {
 
 /**
  * Generates an SVG string representation of a QR Code
+ * Uses pure integer vector path and standard quiet zone for instant camera detection
  * @param {string} text - URL or text to encode
- * @param {object} options - { size = 256, margin = 4, darkColor = '#000000', lightColor = '#FFFFFF' }
+ * @param {object} options - { size = 280, margin = 4, darkColor = '#000000', lightColor = '#FFFFFF' }
  * @returns {string} SVG code
  */
 export function generateQrSvg(text, options = {}) {
-  const size = options.size || 256;
+  const size = options.size || 280;
   const margin = options.margin !== undefined ? options.margin : 4;
-  const darkColor = options.darkColor || '#172B4D';
+  const darkColor = options.darkColor || '#000000';
   const lightColor = options.lightColor || '#FFFFFF';
 
   const qr = new QRCodeModel(0, QRErrorCorrectLevel.M);
@@ -488,22 +489,21 @@ export function generateQrSvg(text, options = {}) {
 
   const count = qr.getModuleCount();
   const totalCells = count + margin * 2;
-  const cellSize = size / totalCells;
 
-  let rects = [];
+  let pathData = '';
   for (let r = 0; r < count; r++) {
     for (let c = 0; c < count; c++) {
       if (qr.isDark(r, c)) {
-        const x = (c + margin) * cellSize;
-        const y = (r + margin) * cellSize;
-        rects.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${cellSize.toFixed(2)}" height="${cellSize.toFixed(2)}" fill="${darkColor}" />`);
+        const x = c + margin;
+        const y = r + margin;
+        pathData += `M${x},${y}h1v1h-1z `;
       }
     }
   }
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" shape-rendering="crispEdges">
-    <rect width="${size}" height="${size}" fill="${lightColor}" rx="12" />
-    ${rects.join('')}
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalCells} ${totalCells}" width="${size}" height="${size}" shape-rendering="crispEdges" style="display:block; image-rendering:pixelated; background:${lightColor}; border-radius:8px;">
+    <rect width="${totalCells}" height="${totalCells}" fill="${lightColor}" />
+    <path d="${pathData.trim()}" fill="${darkColor}" />
   </svg>`;
 }
 
