@@ -5423,7 +5423,13 @@ export async function mobileUploadHandler(request) {
       const buffer = Buffer.from(cleanBase64, 'base64');
       const resolvedMime = mimeType || 'image/jpeg';
       const ext = resolvedMime.includes('png') ? 'png' : (resolvedMime.includes('video') || resolvedMime.includes('mp4')) ? 'mp4' : 'jpg';
-      const finalFilename = filename || `mobile_ev_${session.testKey || 'test'}_${Date.now()}.${ext}`;
+      
+      // Generar nombre de archivo único con prefijo de Test Run y timestamp exacto (YYYYMMDD_HHmmss)
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const timeStampStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const prefix = session.testRunKey || session.testKey || 'EV';
+      const finalFilename = `EV_${prefix}_${timeStampStr}.${ext}`;
 
       const blob = new Blob([buffer], { type: resolvedMime });
       const formData = new FormData();
@@ -5451,11 +5457,41 @@ export async function mobileUploadHandler(request) {
       const attachData = await attachRes.json();
       const uploadedItem = Array.isArray(attachData) ? attachData[0] : attachData;
 
+      // Si el tester incluyó una nota desde el smartphone, agregar comentario nativo al Test Run en Jira
+      if (note && typeof note === 'string' && note.trim().length > 0) {
+        try {
+          await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/comment`, {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              body: {
+                type: 'doc',
+                version: 1,
+                content: [
+                  {
+                    type: 'paragraph',
+                    content: [
+                      { type: 'text', text: `📸 Evidencia Móvil (${uploadedItem.filename || finalFilename}): `, marks: [{ type: 'strong' }] },
+                      { type: 'text', text: note.trim() }
+                    ]
+                  }
+                ]
+              }
+            })
+          });
+        } catch (commentErr) {
+          console.warn('[mobileUploadHandler] Could not post comment to Jira issue:', commentErr);
+        }
+      }
+
       const evidenceObject = {
         id: uploadedItem.id,
-        filename: uploadedItem.filename,
+        filename: uploadedItem.filename || finalFilename,
         url: uploadedItem.content,
-        note: note || '',
+        note: (note && typeof note === 'string') ? note.trim() : '',
         uploadedAt: new Date().toISOString(),
         source: 'mobile_camera'
       };

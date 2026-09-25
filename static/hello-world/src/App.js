@@ -4656,7 +4656,7 @@ Then el sistema valida la identidad.
                           {imageAttachments.map(att => (
                             <div
                               key={att.id}
-                              onClick={() => setSelectedMediaModal({ url: att.content, name: att.filename, type: 'image' })}
+                              onClick={() => handlePreviewEvidence(att)}
                               style={{
                                 border: '1px solid #DCDFE4',
                                 borderRadius: '6px',
@@ -4699,25 +4699,32 @@ Then el sistema valida la identidad.
                         <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
                           Videos &amp; Grabaciones ({videoAttachments.length}):
                         </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '10px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '10px' }}>
                           {videoAttachments.map(att => (
                             <div
                               key={att.id}
+                              onClick={() => handlePreviewEvidence(att)}
                               style={{
                                 border: '1px solid #DCDFE4',
                                 borderRadius: '6px',
                                 overflow: 'hidden',
                                 background: '#FFFFFF',
-                                padding: '8px'
+                                padding: '8px',
+                                cursor: 'pointer',
+                                transition: 'transform 0.15s ease, box-shadow 0.15s ease'
                               }}
+                              onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 8px rgba(9,30,66,0.12)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
+                              title="Clic para reproducir video en pantalla completa"
                             >
-                              <video
-                                controls
-                                src={att.content}
-                                style={{ width: '100%', height: '140px', backgroundColor: '#000', borderRadius: '4px' }}
-                              />
+                              <div style={{ height: '110px', backgroundColor: '#091E42', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', color: '#FFF' }}>
+                                <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', marginBottom: '4px' }}>
+                                  ▶
+                                </div>
+                                <span style={{ fontSize: '11px', fontWeight: 600 }}>Reproducir Video</span>
+                              </div>
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px', fontSize: '11px' }}>
-                                <span style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '170px' }} title={att.filename}>
+                                <span style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }} title={att.filename}>
                                   🎥 {att.filename}
                                 </span>
                                 <span style={{ color: '#626F86', fontSize: '10px' }}>
@@ -5527,7 +5534,10 @@ Then el sistema valida la identidad.
       return i;
     });
 
-    const newStatus = calculateOverallStatus(newIterations);
+    const isRunning = !!runningTests[test.id];
+    const calculated = calculateOverallStatus(newIterations);
+    // Si la prueba está en ejecución activa (Play), mantenemos 'In Progress' en la UI para evitar saltos
+    const newStatus = isRunning ? 'In Progress' : calculated;
     const cycleIdStr = String(selectedCycle.id);
 
     setCycleTests(prev => {
@@ -5548,6 +5558,40 @@ Then el sistema valida la identidad.
       });
     } catch (e) {
       console.error('Error updating iteration:', e);
+    }
+  };
+
+  const handleStopExecution = async (testIdOrObj, testObj) => {
+    const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
+    setRunningTests(prev => ({ ...prev, [testId]: null }));
+
+    const test = testObj || cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    if (!test || !selectedCycle) return;
+
+    // Consolidar estatus final si tiene iteraciones
+    if (test.iterations && test.iterations.length > 0) {
+      const finalStatus = calculateOverallStatus(test.iterations);
+      const cycleIdStr = String(selectedCycle.id);
+
+      setCycleTests(prev => {
+        const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, status: finalStatus, _detailLoaded: true } : t);
+        if (perCycleCacheRef.current[cycleIdStr]) {
+          perCycleCacheRef.current[cycleIdStr] = updated;
+        }
+        return updated;
+      });
+
+      try {
+        await invoke('updateTestStatus', {
+          cycleId: selectedCycle.id,
+          testId: test.id,
+          testRunId: test.testRunId || test.testRunKey,
+          iterations: test.iterations,
+          status: finalStatus
+        });
+      } catch (e) {
+        console.error('Error consolidating status upon stop:', e);
+      }
     }
   };
 
@@ -6020,6 +6064,7 @@ Then el sistema valida la identidad.
   const handlePreviewEvidence = async (ev) => {
     const id = typeof ev === 'string' ? ev : ev.id;
     let filename = typeof ev === 'string' ? `evidence_${id}.jpg` : (ev.filename || `evidence_${id}.jpg`);
+    const note = (typeof ev === 'object' && ev.note) ? ev.note : null;
     
     // Si no tiene extensión (ej. porque el usuario lo renombró "Evidencia 1"), asumimos que es imagen/video
     const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
@@ -6069,10 +6114,18 @@ Then el sistema valida la identidad.
          return;
       }
       
-      setPreviewModalData({ id, filename, loading: true });
+      setPreviewModalData({ id, filename, note, loading: true });
       const data = await invoke('getAttachmentContent', { attachmentId: id });
       if (data && !data.error) {
-        setPreviewModalData({ id, filename, loading: false, base64: data.base64, mimeType: data.mimeType || 'image/png' });
+        const isVideo = filename.match(/\.(mp4|mov|webm)$/i);
+        setPreviewModalData({
+          id,
+          filename,
+          note,
+          loading: false,
+          base64: data.base64,
+          mimeType: data.mimeType || (isVideo ? 'video/mp4' : 'image/png')
+        });
       } else {
         setPreviewModalData(null);
         router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
@@ -7531,11 +7584,14 @@ const renderPlanningTab = () => {
 
     // Filter tests
     let filteredTests = deduplicatedCycleTests.filter(test => {
-      if (executionStatusFilter === 'Passed' && !isPassed(test.status)) return false;
-      if (executionStatusFilter === 'Failed' && !isFailed(test.status)) return false;
-      if (executionStatusFilter === 'Blocked' && !isBlocked(test.status)) return false;
-      if (executionStatusFilter === 'In Progress' && !isInProgress(test.status)) return false;
-      if (executionStatusFilter === 'Not Run' && !isNotRun(test.status)) return false;
+      const isCurrentlyRunning = !!runningTests[test.id];
+      if (!isCurrentlyRunning) {
+        if (executionStatusFilter === 'Passed' && !isPassed(test.status)) return false;
+        if (executionStatusFilter === 'Failed' && !isFailed(test.status)) return false;
+        if (executionStatusFilter === 'Blocked' && !isBlocked(test.status)) return false;
+        if (executionStatusFilter === 'In Progress' && !isInProgress(test.status)) return false;
+        if (executionStatusFilter === 'Not Run' && !isNotRun(test.status)) return false;
+      }
 
       if (executionSearchQuery) {
         const q = executionSearchQuery.toLowerCase();
@@ -8192,7 +8248,7 @@ const renderPlanningTab = () => {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   if (runningTests[test.id]) {
-                                    setRunningTests(prev => ({ ...prev, [test.id]: null }));
+                                    handleStopExecution(test.id, test);
                                   } else {
                                     handleRunTest(test.id, test.key, test);
                                   }
@@ -8566,13 +8622,18 @@ const renderPlanningTab = () => {
                                           key={idx}
                                           className="execution-evidence-pill"
                                           onClick={() => handlePreviewEvidence(ev)}
-                                          title={evName}
+                                          title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
                                           style={{ cursor: 'pointer' }}
                                         >
                                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                          <span style={{ maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
+                                          <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
                                             {evName}
                                           </span>
+                                          {ev.note && (
+                                            <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 5px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                              💬 Nota
+                                            </span>
+                                          )}
                                           <button
                                             onClick={(e) => {
                                               e.stopPropagation();
@@ -8775,11 +8836,16 @@ const renderPlanningTab = () => {
                                                   key={evIdx}
                                                   className="execution-evidence-pill"
                                                   onClick={() => handlePreviewEvidence(ev)}
-                                                  title={evName}
+                                                  title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
                                                   style={{ cursor: 'pointer', padding: '3px 8px', fontSize: '11px' }}
                                                 >
                                                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
                                                   <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{evName}</span>
+                                                  {ev.note && (
+                                                    <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 4px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                                      💬 Nota
+                                                    </span>
+                                                  )}
                                                   <button
                                                     onClick={(e) => {
                                                       e.stopPropagation();
@@ -8808,112 +8874,6 @@ const renderPlanningTab = () => {
                                     </div>
                                   ))
                                 )}
-                              </div>
-
-                              {/* 6. Action Bar inside Detail */}
-                              <div className="execution-detail-actions">
-                                <label
-                                  className="btn-secondary"
-                                  style={{
-                                    padding: '5px 12px',
-                                    fontSize: '11px',
-                                    fontWeight: 600,
-                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                    border: '1px solid #DCDFE4',
-                                    background: '#FFFFFF',
-                                    borderRadius: '4px',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
-                                  }}
-                                  title={runningTests[test.id] ? "Adjuntar Log o Captura" : "Inicia la ejecución (Play) para adjuntar evidencias"}
-                                >
-                                  <input
-                                    disabled={!runningTests[test.id]}
-                                    type="file"
-                                    style={{ display: 'none' }}
-                                    onChange={(e) => {
-                                      if (e.target.files && e.target.files.length > 0) {
-                                        handleUploadEvidence(test.id, test.key, e.target.files[0]);
-                                      }
-                                    }}
-                                  />
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                  <span>Adjuntar Log / Captura</span>
-                                </label>
-
-                                <button
-                                  className="btn-secondary"
-                                  disabled={!runningTests[test.id]}
-                                  style={{
-                                    padding: '5px 12px',
-                                    fontSize: '11px',
-                                    fontWeight: 600,
-                                    border: '1px solid #DCDFE4',
-                                    background: '#FFFFFF',
-                                    borderRadius: '4px',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
-                                  }}
-                                  title={runningTests[test.id] ? "Grabar Pantalla" : "Inicia la ejecución (Play) para grabar pantalla"}
-                                  onClick={() => handleCaptureScreen(test.id, test.key)}
-                                >
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-                                  <span>Grabar Pantalla</span>
-                                </button>
-
-                                <button
-                                  className="btn-secondary"
-                                  disabled={!runningTests[test.id]}
-                                  style={{
-                                    padding: '5px 12px',
-                                    fontSize: '11px',
-                                    fontWeight: 700,
-                                    border: '1px solid #0C66E4',
-                                    background: '#E9F2FF',
-                                    color: '#0C66E4',
-                                    borderRadius: '4px',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
-                                  }}
-                                  title={runningTests[test.id] ? "Capturar con cámara del celular vía QR" : "Inicia la ejecución (Play) para capturar con celular"}
-                                  onClick={() => handleOpenQrCapture(test)}
-                                >
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-                                  <span>📱 Cámara Celular (QR)</span>
-                                </button>
-
-                                <button
-                                  className="btn-primary"
-                                  style={{
-                                    background: runningTests[test.id] ? '#FF8B00' : '#0C66E4',
-                                    borderColor: runningTests[test.id] ? '#C25E00' : '#0052CC',
-                                    padding: '5px 14px',
-                                    fontSize: '12px',
-                                    fontWeight: 600,
-                                    borderRadius: '4px',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px'
-                                  }}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (runningTests[test.id]) {
-                                      setRunningTests(prev => ({ ...prev, [test.id]: null }));
-                                    } else {
-                                      handleRunTest(test.id, test.key, test);
-                                    }
-                                  }}
-                                >
-                                  {runningTests[test.id] ? '⏹ Detener Ejecución' : (test.status && normalizeUiStatus(test.status) !== 'Not Run' ? '🔄 Reanudar este Caso' : '▶ Iniciar Ejecución')}
-                                </button>
                               </div>
                             </div>
                           )}
@@ -14921,15 +14881,26 @@ const renderPlanningTab = () => {
               <h2 style={{margin: 0, fontSize: '1.2rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1}}>{previewModalData.filename}</h2>
               <button className="btn-secondary" onClick={() => setPreviewModalData(null)} style={{flexShrink: 0, marginLeft: '1rem', padding: '0.4rem 0.8rem', background: 'var(--danger-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', zIndex: 10000}}>✕ Cerrar</button>
             </div>
-            <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'var(--bg-main)', borderRadius: '4px'}}>
+            <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'var(--bg-main)', borderRadius: '4px', minHeight: '320px'}}>
               {previewModalData.loading ? (
-                <p>Cargando vista previa...</p>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+                  <div className="spinner" style={{ width: '28px', height: '28px', border: '3px solid #EBECF0', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+                  <p style={{ margin: 0, fontSize: '13px' }}>Cargando vista previa segura...</p>
+                </div>
               ) : previewModalData.filename.match(/\.(mp4|mov|webm)$/i) ? (
-                <video controls style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain'}} src={`data:${previewModalData.mimeType || 'video/mp4'};base64,${previewModalData.base64}`} />
+                <video controls autoPlay playsInline style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '4px'}} src={`data:${previewModalData.mimeType || 'video/mp4'};base64,${previewModalData.base64}`} />
               ) : (
-                <img src={`data:${previewModalData.mimeType};base64,${previewModalData.base64}`} alt="Evidence preview" style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain'}} />
+                <img src={`data:${previewModalData.mimeType || 'image/png'};base64,${previewModalData.base64}`} alt="Evidence preview" style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '4px'}} />
               )}
             </div>
+            {previewModalData.note && (
+              <div style={{ marginTop: '0.75rem', padding: '10px 14px', background: '#E9F2FF', border: '1px solid #B2D4FF', borderRadius: '6px', color: '#0747A6', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '15px' }}>💬</span>
+                <div>
+                  <strong>Nota del tester:</strong> {previewModalData.note}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
