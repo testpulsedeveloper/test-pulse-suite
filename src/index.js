@@ -1631,7 +1631,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     const sevField = 'customfield_10238';
     await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
          try {
-            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
             let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
             if (resp.status === 429) {
                await new Promise(r => setTimeout(r, 1200));
@@ -1739,6 +1739,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
                   severity: sevVal,
                   created: i.fields?.created || null,
                   resolutiondate: i.fields?.resolutiondate || null,
+                  duedate: i.fields?.duedate || null,
                   versions: affectsVersions,
                   fixVersions: fixVersions,
                   version: versionDisplay,
@@ -1774,7 +1775,7 @@ resolver.define('getBugsBatch', async ({ payload }) => {
   const bugMap = {};
   await processInBatches(uniqueKeys, 8, 50, async key => {
     try {
-      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
       let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
       if (resp.status === 429) {
         await new Promise(r => setTimeout(r, 1200));
@@ -1813,6 +1814,7 @@ resolver.define('getBugsBatch', async ({ payload }) => {
           severity: sevVal,
           created: i.fields?.created || null,
           resolutiondate: i.fields?.resolutiondate || null,
+          duedate: i.fields?.duedate || null,
           versions: affectsVersions,
           fixVersions: fixVersions,
           version: versionDisplay,
@@ -3612,7 +3614,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
   console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
-  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
 
   let allIssues = [];
   let token = null;
@@ -3699,13 +3701,15 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
       resolutiondate: issue.fields?.resolutiondate || null,
+      duedate: issue.fields?.duedate || null,
       versions: affectsVersions,
       fixVersions: fixVersions,
       version: versionDisplay,
       issuetype: issue.fields?.issuetype?.name || 'Bug',
       project: issue.fields?.project?.key || '',
       isLinked: isLinkedToTest,
-      linkedTests: linkedTests
+      linkedTests: linkedTests,
+      rawFields: issue.fields
     };
   });
 });

@@ -6224,69 +6224,12 @@ Then el sistema valida la identidad.
 
   const handleRunTest = async (testId, testKey, test) => {
     try {
+      setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
       if (test) {
-        try {
-          await handleTakeover(test);
-        } catch (e) {
-          console.warn("Takeover non-critical failure:", e);
-        }
+        handleTakeover(test).catch(e => console.warn("Takeover non-critical failure:", e));
       }
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        // En móviles, simplemente habilitamos la prueba sin intentar grabar pantalla ni lanzar alertas molestas
-        setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
-        return;
-      }
-      
-      setRunningTests(prev => ({ ...prev, [testId]: 'capturing' }));
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      
-      const video = document.createElement('video');
-      video.muted = true;
-      video.playsInline = true;
-      video.autoplay = true;
-      video.style.position = 'fixed';
-      video.style.top = '-9999px';
-      video.style.left = '-9999px';
-      document.body.appendChild(video);
-      
-      video.srcObject = stream;
-      
-      await new Promise((resolve, reject) => {
-        video.onloadedmetadata = () => {
-          video.play().then(resolve).catch(reject);
-        };
-        video.onerror = reject;
-        setTimeout(() => reject(new Error("Video play timeout")), 8000); // 8 seconds timeout
-      });
-      
-      // Delay to ensure user's shared window is fully painted
-      await new Promise(r => setTimeout(r, 800));
-      
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 1280;
-      canvas.height = video.videoHeight || 720;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      const track = stream.getVideoTracks()[0];
-      if (track) track.stop();
-      
-      if (video.parentNode) {
-        document.body.removeChild(video);
-      }
-      
-      canvas.toBlob(async (blob) => {
-        if (!blob) return;
-        const file = new File([blob], `evidence_${testKey || testId}_${Date.now()}.png`, { type: 'image/png' });
-        setRunningTests(prev => ({ ...prev, [testId]: 'uploading' }));
-        await handleUploadEvidence(testId, testKey, file);
-        setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
-      }, 'image/png');
-
     } catch (err) {
-      console.warn("Captura cancelada o no permitida", err);
-      // Even if failed/cancelled, unlock the status if they want to fail it or manually upload
+      console.warn("Error iniciando ejecución de prueba", err);
       setRunningTests(prev => ({ ...prev, [testId]: 'active' }));
     }
   };
@@ -9685,6 +9628,39 @@ const renderPlanningTab = () => {
       return <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Abierto'}</span>;
     };
 
+    const renderBugDueDate = (dueDateStr, isDone) => {
+      if (!dueDateStr) {
+        return <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '11px' }}>No definida</span>;
+      }
+      try {
+        const d = new Date(dueDateStr + (dueDateStr.includes('T') ? '' : 'T23:59:59'));
+        if (isNaN(d.getTime())) {
+          return <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px' }}>{dueDateStr}</span>;
+        }
+        const formatted = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+        const isOverdue = !isDone && (d.getTime() < Date.now());
+        
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <div style={{ fontSize: '11px', color: isOverdue ? '#BF2600' : 'var(--jira-dark, #172B4D)', fontWeight: isOverdue ? 700 : 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span>📅</span> <span>{formatted}</span>
+            </div>
+            {isOverdue ? (
+              <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '9px', fontWeight: 700, width: 'fit-content', padding: '1px 5px' }} title="Fecha estimada de resolución vencida">
+                ⚠️ VENCIDA
+              </span>
+            ) : !isDone ? (
+              <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '9px', fontWeight: 600, width: 'fit-content', padding: '1px 5px' }}>
+                En tiempo
+              </span>
+            ) : null}
+          </div>
+        );
+      } catch (e) {
+        return <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px' }}>{dueDateStr}</span>;
+      }
+    };
+
     // Test Type extraction helper for filtering Functional tests
     const getTestType = (tc, ex) => {
       const raw = tc?.rawFields?.['customfield_10535'] || 
@@ -9763,17 +9739,18 @@ const renderPlanningTab = () => {
                 ...rawBug,
                 ...(mapBug || {}),
                 ...(projectBug || {}),
-                summary: (rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : (mapBug?.summary || projectBug?.summary || rawBug.summary || 'Defecto detectado en ciclo'),
-                severity: (rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : (mapBug?.severity || projectBug?.severity || rawBug.severity),
-                assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
-                status: rawBug.status || mapBug?.status || projectBug?.status,
-                resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
-                created: rawBug.created || mapBug?.created || projectBug?.created || rawBug.rawFields?.created || null,
-                resolutiondate: rawBug.resolutiondate || mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.rawFields?.resolutiondate || null,
-                version: rawBug.version || mapBug?.version || projectBug?.version || 'Sin versión',
-                versions: rawBug.versions || mapBug?.versions || projectBug?.versions || [],
-                fixVersions: rawBug.fixVersions || mapBug?.fixVersions || projectBug?.fixVersions || [],
-                rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
+                summary: mapBug?.summary || projectBug?.summary || ((rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : 'Defecto detectado en ciclo'),
+                severity: mapBug?.severity || projectBug?.severity || ((rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : 'Sin definir'),
+                assignee: mapBug?.assignee || projectBug?.assignee || ((rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : 'Sin asignar'),
+                status: mapBug?.status || projectBug?.status || rawBug.status || 'Abierto',
+                resolution: mapBug?.resolution || projectBug?.resolution || rawBug.resolution || 'Sin resolver',
+                created: mapBug?.created || projectBug?.created || rawBug.created || rawBug.rawFields?.created || null,
+                resolutiondate: mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.resolutiondate || rawBug.rawFields?.resolutiondate || null,
+                duedate: mapBug?.duedate || projectBug?.duedate || rawBug.duedate || rawBug.rawFields?.duedate || null,
+                version: mapBug?.version || projectBug?.version || rawBug.version || 'Sin versión',
+                versions: mapBug?.versions || projectBug?.versions || rawBug.versions || [],
+                fixVersions: mapBug?.fixVersions || projectBug?.fixVersions || rawBug.fixVersions || [],
+                rawFields: mapBug?.rawFields || projectBug?.rawFields || rawBug.rawFields
               };
 
               const isDone = isBugDone(bug);
@@ -9812,6 +9789,7 @@ const renderPlanningTab = () => {
                   fixVersions: fixVersions,
                   created: bug.created || bug.rawFields?.created || null,
                   resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
+                  duedate: bug.duedate || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -9937,17 +9915,18 @@ const renderPlanningTab = () => {
                 ...rawBug,
                 ...(mapBug || {}),
                 ...(projectBug || {}),
-                summary: (rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : (mapBug?.summary || projectBug?.summary || rawBug.summary || 'Defecto detectado en ciclo'),
-                severity: (rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : (mapBug?.severity || projectBug?.severity || rawBug.severity),
-                assignee: (rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : (mapBug?.assignee || projectBug?.assignee || rawBug.assignee || 'Sin asignar'),
-                status: rawBug.status || mapBug?.status || projectBug?.status,
-                resolution: rawBug.resolution || mapBug?.resolution || projectBug?.resolution,
-                created: rawBug.created || mapBug?.created || projectBug?.created || rawBug.rawFields?.created || null,
-                resolutiondate: rawBug.resolutiondate || mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.rawFields?.resolutiondate || null,
-                version: rawBug.version || mapBug?.version || projectBug?.version || 'Sin versión',
-                versions: rawBug.versions || mapBug?.versions || projectBug?.versions || [],
-                fixVersions: rawBug.fixVersions || mapBug?.fixVersions || projectBug?.fixVersions || [],
-                rawFields: rawBug.rawFields || mapBug?.rawFields || projectBug?.rawFields
+                summary: mapBug?.summary || projectBug?.summary || ((rawBug.summary && rawBug.summary !== 'Defecto detectado en ciclo') ? rawBug.summary : 'Defecto detectado en ciclo'),
+                severity: mapBug?.severity || projectBug?.severity || ((rawBug.severity && rawBug.severity !== 'Sin definir') ? rawBug.severity : 'Sin definir'),
+                assignee: mapBug?.assignee || projectBug?.assignee || ((rawBug.assignee && rawBug.assignee !== 'Sin asignar') ? rawBug.assignee : 'Sin asignar'),
+                status: mapBug?.status || projectBug?.status || rawBug.status || 'Abierto',
+                resolution: mapBug?.resolution || projectBug?.resolution || rawBug.resolution || 'Sin resolver',
+                created: mapBug?.created || projectBug?.created || rawBug.created || rawBug.rawFields?.created || null,
+                resolutiondate: mapBug?.resolutiondate || projectBug?.resolutiondate || rawBug.resolutiondate || rawBug.rawFields?.resolutiondate || null,
+                duedate: mapBug?.duedate || projectBug?.duedate || rawBug.duedate || rawBug.rawFields?.duedate || null,
+                version: mapBug?.version || projectBug?.version || rawBug.version || 'Sin versión',
+                versions: mapBug?.versions || projectBug?.versions || rawBug.versions || [],
+                fixVersions: mapBug?.fixVersions || projectBug?.fixVersions || rawBug.fixVersions || [],
+                rawFields: mapBug?.rawFields || projectBug?.rawFields || rawBug.rawFields
               };
 
               const isDone = isBugDone(bug);
@@ -9985,6 +9964,7 @@ const renderPlanningTab = () => {
                   fixVersions: fixVersions,
                   created: bug.created || bug.rawFields?.created || null,
                   resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
+                  duedate: bug.duedate || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -10017,6 +9997,7 @@ const renderPlanningTab = () => {
                     fixVersions: fixVersions,
                     created: bug.created || bug.rawFields?.created || null,
                     resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
+                    duedate: bug.duedate || null,
                     cycles: new Set([cycleName]),
                     affectedCases: new Map()
                   });
@@ -10133,6 +10114,9 @@ const renderPlanningTab = () => {
         if (!existing.resolutiondate) {
           existing.resolutiondate = ub.resolutiondate || ub.rawFields?.resolutiondate || null;
         }
+        if (!existing.duedate) {
+          existing.duedate = ub.duedate || ub.rawFields?.duedate || null;
+        }
       } else {
         // Bug is in the project but wasn't part of planAllBugsMap
         if (isLinkedToAnyTest) {
@@ -10153,6 +10137,7 @@ const renderPlanningTab = () => {
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null,
             cycles: resolvedCycles,
             affectedCases: affectedMap
           });
@@ -10172,6 +10157,7 @@ const renderPlanningTab = () => {
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null,
             cycles: new Set(),
             affectedCases: new Map()
           });
@@ -10181,7 +10167,8 @@ const renderPlanningTab = () => {
             versions: affectsVersions,
             fixVersions: fixVersions,
             created: ub.created || ub.rawFields?.created || null,
-            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null
+            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null
           });
         }
       }
@@ -12245,6 +12232,7 @@ const renderPlanningTab = () => {
                         <th>Resumen del bug</th>
                         <th>Versión</th>
                         <th>Fecha Registro / Antigüedad</th>
+                        <th>Fecha Estimada (Due Date)</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -12330,6 +12318,11 @@ const renderPlanningTab = () => {
                                   </div>
                                 )}
                               </div>
+                            </td>
+
+                            {/* 4.1. Fecha Estimada (Due Date) */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {renderBugDueDate(bug.duedate, false)}
                             </td>
 
                             {/* 5. Severidad */}
@@ -12495,6 +12488,7 @@ const renderPlanningTab = () => {
                         <th>Resumen del bug</th>
                         <th>Versión</th>
                         <th>Fecha Registro / Antigüedad</th>
+                        <th>Fecha Estimada (Due Date)</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -12580,6 +12574,11 @@ const renderPlanningTab = () => {
                                   </div>
                                 )}
                               </div>
+                            </td>
+
+                            {/* 4.1. Fecha Estimada (Due Date) */}
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {renderBugDueDate(bug.duedate, bug.isDone)}
                             </td>
 
                             {/* 5. Severidad */}
@@ -13063,13 +13062,14 @@ const renderPlanningTab = () => {
                     <table className="dashboard-defects-table" style={{ width: '100%' }}>
                       <thead>
                         <tr>
-                          <th style={{ width: '12%' }}>Clave</th>
-                          <th style={{ width: '28%' }}>Resumen</th>
-                          <th style={{ width: '14%' }}>Versión</th>
-                          <th style={{ width: '18%' }}>Fecha / Antigüedad</th>
-                          <th style={{ width: '10%' }}>Severidad</th>
-                          <th style={{ width: '10%' }}>Estado</th>
-                          <th style={{ width: '8%', textAlign: 'center' }}>Acción</th>
+                          <th style={{ width: '10%' }}>Clave</th>
+                          <th style={{ width: '25%' }}>Resumen</th>
+                          <th style={{ width: '12%' }}>Versión</th>
+                          <th style={{ width: '16%' }}>Fecha / Antigüedad</th>
+                          <th style={{ width: '13%' }}>Fecha Estimada</th>
+                          <th style={{ width: '9%' }}>Severidad</th>
+                          <th style={{ width: '8%' }}>Estado</th>
+                          <th style={{ width: '7%', textAlign: 'center' }}>Acción</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -13131,6 +13131,9 @@ const renderPlanningTab = () => {
                                     </div>
                                   )}
                                 </div>
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                {renderBugDueDate(bug.duedate, isBugDone(bug))}
                               </td>
                               <td>
                                 <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px' }}>
