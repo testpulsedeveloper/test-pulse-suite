@@ -9,6 +9,7 @@ import './index.css';
 import TestPulseLoader from './components/TestPulseLoader';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 import packageJson from '../package.json';
+import { generateQrSvg } from './utils/qrCodeGenerator';
 
 const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
 
@@ -773,6 +774,12 @@ function App() {
   const [executionCurrentPage, setExecutionCurrentPage] = useState(1);
   const [executionPageSize, setExecutionPageSize] = useState(20);
   const [executionChecked, setExecutionChecked] = useState(new Set());
+  
+  // Mobile QR Upload State
+  const [qrModalSession, setQrModalSession] = useState(null);
+  const [qrModalLoading, setQrModalLoading] = useState(false);
+  const [qrModalCopied, setQrModalCopied] = useState(false);
+  const [qrModalReceived, setQrModalReceived] = useState(false);
   
   // Reports State
   const [reportData, setReportData] = useState({ cycles: [] });
@@ -4025,6 +4032,245 @@ Then el sistema valida la identidad.
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
+  const renderQrModal = () => {
+    if (!qrModalSession && !qrModalLoading) return null;
+
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(9, 30, 66, 0.65)',
+          backdropFilter: 'blur(6px)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '16px',
+          animation: 'fadeIn 0.2s ease-out'
+        }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            setQrModalSession(null);
+            setQrModalReceived(false);
+          }
+        }}
+      >
+        <div
+          style={{
+            background: '#FFFFFF',
+            borderRadius: '16px',
+            boxShadow: '0 24px 48px rgba(9, 30, 66, 0.35)',
+            width: '100%',
+            maxWidth: '460px',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            border: '1px solid #DCDFE4'
+          }}
+        >
+          {/* Header */}
+          <div
+            style={{
+              background: 'linear-gradient(135deg, #E1007A 0%, #0C66E4 100%)',
+              padding: '16px 20px',
+              color: '#FFFFFF',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '24px' }}>📱</span>
+              <div>
+                <div style={{ fontSize: '15px', fontWeight: 800, letterSpacing: '0.2px' }}>
+                  Captura Móvil de Evidencia (QR)
+                </div>
+                <div style={{ fontSize: '11.5px', opacity: 0.9, fontWeight: 500 }}>
+                  Apunta con la cámara de tu celular para subir fotos
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => { setQrModalSession(null); setQrModalReceived(false); }}
+              style={{
+                background: 'rgba(255, 255, 255, 0.2)',
+                border: 'none',
+                borderRadius: '50%',
+                width: '28px',
+                height: '28px',
+                color: '#FFFFFF',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Content */}
+          <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
+            
+            {/* Target Metadata Card */}
+            {qrModalSession && (
+              <div
+                style={{
+                  width: '100%',
+                  background: '#F7F8F9',
+                  border: '1px solid #DCDFE4',
+                  borderRadius: '10px',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ background: '#E9F2FF', color: '#0C66E4', fontWeight: 800, fontSize: '11px', padding: '2px 8px', borderRadius: '4px' }}>
+                    🧪 {qrModalSession.testKey}
+                  </span>
+                  {qrModalSession.iterName && (
+                    <span style={{ background: '#F1F2F4', color: '#44546F', fontWeight: 700, fontSize: '11px', padding: '2px 6px', borderRadius: '4px' }}>
+                      📁 {qrModalSession.iterName}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {qrModalSession.testSummary}
+                </div>
+              </div>
+            )}
+
+            {/* QR Code Container or Loading */}
+            {qrModalLoading ? (
+              <div style={{ height: '240px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+                <Spinner size="large" />
+                <div style={{ fontSize: '13px', fontWeight: 600, color: '#626F86' }}>Generando enlace seguro para cámara...</div>
+              </div>
+            ) : qrModalSession?.svg ? (
+              <div
+                style={{
+                  padding: '10px',
+                  background: '#FFFFFF',
+                  borderRadius: '16px',
+                  border: '2px solid #0C66E4',
+                  boxShadow: '0 8px 24px rgba(12, 102, 224, 0.12)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                dangerouslySetInnerHTML={{ __html: qrModalSession.svg }}
+              />
+            ) : null}
+
+            {/* Real-time Status Indicator */}
+            {qrModalReceived ? (
+              <div
+                style={{
+                  width: '100%',
+                  background: '#DCFFF1',
+                  border: '1px solid #7EE2B8',
+                  borderRadius: '10px',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  color: '#1F845A',
+                  fontWeight: 700,
+                  fontSize: '13px'
+                }}
+              >
+                <span style={{ fontSize: '20px' }}>✅</span>
+                <div>
+                  <div>¡Evidencia Recibida con Éxito!</div>
+                  <div style={{ fontSize: '11px', fontWeight: 500, color: '#216E4E' }}>La imagen ya fue adjuntada a la ejecución.</div>
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  width: '100%',
+                  background: '#F1F2F4',
+                  border: '1px solid #DCDFE4',
+                  borderRadius: '10px',
+                  padding: '8px 14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  color: '#44546F',
+                  fontSize: '12px',
+                  fontWeight: 600
+                }}
+              >
+                <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#0C66E4' }} />
+                <span>Esperando captura desde el celular...</span>
+              </div>
+            )}
+
+            {/* Instructions Step-by-Step */}
+            <div style={{ width: '100%', fontSize: '11.5px', color: '#626F86', background: '#FAFBFC', padding: '10px 14px', borderRadius: '8px', border: '1px solid #EBECF0' }}>
+              <div style={{ fontWeight: 700, color: '#172B4D', marginBottom: '4px' }}>📌 Pasos rápidos:</div>
+              <div>1. Abre la app de <strong>Cámara</strong> en tu iPhone o Android.</div>
+              <div>2. Apunta al código QR y toca el enlace que aparece.</div>
+              <div>3. Toma la foto y presiona <strong>"Enviar a la Pantalla"</strong>.</div>
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', width: '100%', gap: '10px', marginTop: '4px' }}>
+              <button
+                onClick={() => {
+                  if (qrModalSession?.uploadUrl) {
+                    navigator.clipboard.writeText(qrModalSession.uploadUrl);
+                    setQrModalCopied(true);
+                    setTimeout(() => setQrModalCopied(false), 2500);
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid #DCDFE4',
+                  background: '#FFFFFF',
+                  color: '#172B4D',
+                  fontWeight: 600,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px'
+                }}
+              >
+                <span>{qrModalCopied ? '✅ Copiado' : '🔗 Copiar Enlace'}</span>
+              </button>
+
+              <button
+                onClick={() => { setQrModalSession(null); setQrModalReceived(false); }}
+                style={{
+                  padding: '8px 20px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: '#0C66E4',
+                  color: '#FFFFFF',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  cursor: 'pointer'
+                }}
+              >
+                Cerrar
+              </button>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderMediaModal = () => {
     if (!selectedMediaModal) return null;
     return (
@@ -5510,6 +5756,138 @@ Then el sistema valida la identidad.
       console.error("Captura cancelada", err);
     }
   };
+
+  const handleOpenQrCapture = async (test, iterId, iterName) => {
+    try {
+      setQrModalLoading(true);
+      setQrModalReceived(false);
+      setQrModalCopied(false);
+
+      const testItem = typeof test === 'object' ? test : cycleTests.find(t => String(t.id) === String(test));
+      const testId = testItem ? testItem.id : test;
+      const testKey = testItem?.key || testId;
+      const testRunKey = testItem?.testRunKey || testKey;
+      const testRunId = testItem?.testRunId || testItem?.testRunKey || testId;
+      const testSummary = testItem?.summary || testItem?.name || 'Caso de Prueba';
+
+      const res = await invoke('createMobileUploadSession', {
+        testId,
+        testKey,
+        testRunKey,
+        testRunId,
+        testSummary,
+        iterId: iterId || null,
+        iterName: iterName || null,
+        cycleId: selectedCycle?.id
+      });
+
+      if (!res || !res.uploadUrl) {
+        throw new Error("No se pudo generar la sesión de carga móvil.");
+      }
+
+      const svg = generateQrSvg(res.uploadUrl, { size: 240, margin: 2, darkColor: '#172B4D', lightColor: '#FFFFFF' });
+
+      setQrModalSession({
+        sessionId: res.sessionId,
+        uploadUrl: res.uploadUrl,
+        testId,
+        testKey,
+        testSummary,
+        iterId: iterId || null,
+        iterName: iterName || null,
+        svg
+      });
+    } catch (err) {
+      console.error('Error opening QR capture:', err);
+      addNotification({
+        type: 'error',
+        title: 'Error al generar código QR',
+        description: err.message || String(err)
+      });
+    } finally {
+      setQrModalLoading(false);
+    }
+  };
+
+  // Polling for QR Mobile Evidence Upload
+  useEffect(() => {
+    if (!qrModalSession || !qrModalSession.sessionId || qrModalReceived) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await invoke('checkMobileUploadStatus', { sessionId: qrModalSession.sessionId });
+        if (res && res.uploaded && res.evidence) {
+          setQrModalReceived(true);
+          const newEvidence = {
+            id: res.evidence.id,
+            filename: res.evidence.filename,
+            url: res.evidence.url,
+            note: res.evidence.note
+          };
+
+          const testId = qrModalSession.testId;
+          const iterId = qrModalSession.iterId;
+          const testItem = cycleTests.find(t => String(t.id) === String(testId));
+          const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
+
+          if (iterId) {
+            const iters = [...(testItem?.iterations || [])];
+            const iterIdx = iters.findIndex(i => i.id === iterId);
+            if (iterIdx > -1) {
+              iters[iterIdx] = {
+                ...iters[iterIdx],
+                evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence]
+              };
+              setCycleTests(prev => {
+                const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, iterations: iters, _detailLoaded: true } : t);
+                if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+                  perCycleCacheRef.current[cycleIdStr] = updated;
+                }
+                return updated;
+              });
+              await invoke('updateTestStatus', {
+                cycleId: selectedCycle?.id,
+                testId,
+                testRunId: testItem?.testRunId || testItem?.testRunKey,
+                iterations: iters
+              });
+            }
+          } else {
+            const currentEvidences = testItem?.evidences ? [...testItem.evidences] : [];
+            if (testItem?.evidence && currentEvidences.length === 0) {
+              currentEvidences.push(testItem.evidence);
+            }
+            currentEvidences.push(newEvidence);
+
+            setCycleTests(prev => {
+              const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, _detailLoaded: true } : t);
+              if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+                perCycleCacheRef.current[cycleIdStr] = updated;
+              }
+              return updated;
+            });
+
+            await invoke('updateTestStatus', {
+              cycleId: selectedCycle?.id,
+              testId,
+              testRunId: testItem?.testRunId || testItem?.testRunKey,
+              evidences: currentEvidences
+            });
+          }
+
+          addNotification({
+            type: 'success',
+            title: '📸 ¡Evidencia Móvil Recibida!',
+            description: `Captura adjuntada a ${qrModalSession.testKey}.`
+          });
+        }
+      } catch (e) {
+        console.warn('[QR Poll] Error checking mobile upload status:', e);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [qrModalSession, qrModalReceived, cycleTests, selectedCycle, addNotification]);
 
   const handleRunTest = async (testId, testKey, test) => {
     try {
@@ -8105,6 +8483,30 @@ const renderPlanningTab = () => {
                                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                                       <span>Grabar</span>
                                     </button>
+
+                                    <button
+                                      className="btn-secondary"
+                                      style={{
+                                        padding: '4px 10px',
+                                        border: '1px solid #0C66E4',
+                                        background: '#E9F2FF',
+                                        color: '#0C66E4',
+                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '5px',
+                                        borderRadius: '4px',
+                                        fontSize: '11px',
+                                        fontWeight: 700,
+                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                      }}
+                                      title={runningTests[test.id] ? "Escanear QR para capturar con cámara del celular" : "Inicia la ejecución para capturar con celular"}
+                                      onClick={() => handleOpenQrCapture(test)}
+                                      disabled={!runningTests[test.id]}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+                                      <span>Celular (QR)</span>
+                                    </button>
                                   </div>
                                 </div>
 
@@ -8221,6 +8623,15 @@ const renderPlanningTab = () => {
 
                                           <button title="Grabar pantalla para iteración" className="btn-secondary" style={{ padding: '3px 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid #DCDFE4', background: '#FFFFFF' }} onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}>
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                                          </button>
+
+                                          <button
+                                            title="Capturar evidencia con cámara del celular (QR)"
+                                            className="btn-secondary"
+                                            style={{ padding: '3px 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '1px solid #0C66E4', background: '#E9F2FF', color: '#0C66E4' }}
+                                            onClick={() => handleOpenQrCapture(test, iter.id, `Iteración #${idx + 1}`)}
+                                          >
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
                                           </button>
 
                                           {isAdmin && (
@@ -8363,6 +8774,30 @@ const renderPlanningTab = () => {
                                 >
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                                   <span>Grabar Pantalla</span>
+                                </button>
+
+                                <button
+                                  className="btn-secondary"
+                                  style={{
+                                    padding: '5px 12px',
+                                    fontSize: '11px',
+                                    fontWeight: 700,
+                                    border: '1px solid #0C66E4',
+                                    background: '#E9F2FF',
+                                    color: '#0C66E4',
+                                    borderRadius: '4px',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
+                                    ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                  }}
+                                  title={runningTests[test.id] ? "Capturar con cámara del celular vía QR" : "Inicia la ejecución"}
+                                  onClick={() => handleOpenQrCapture(test)}
+                                  disabled={!runningTests[test.id]}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+                                  <span>Cámara Celular (QR)</span>
                                 </button>
 
                                 <button
@@ -14281,6 +14716,7 @@ const renderPlanningTab = () => {
       {renderReportAutomationModal()}
       {renderBugSlidePanel()}
       {renderMediaModal()}
+      {renderQrModal()}
     </>
   );
 

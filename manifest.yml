@@ -15,11 +15,16 @@ modules:
     - key: automated-report-trigger
       function: scheduledReportHandler
       interval: hour
+  webtrigger:
+    - key: mobile-upload-webtrigger
+      function: mobileUploadHandler
   function:
     - key: resolver
       handler: index.handler
     - key: scheduledReportHandler
       handler: index.scheduledReportHandler
+    - key: mobileUploadHandler
+      handler: index.mobileUploadHandler
 resources:
   - key: main
     path: static/hello-world/build
