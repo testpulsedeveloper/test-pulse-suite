@@ -319,17 +319,24 @@ function adfToHtml(adf, attachments = []) {
               </div>
             </div>`;
           } else if (matchedAtt.isImage) {
-            return `<div style="margin: 8px 0; max-width: 520px; border: 1px solid #EBECF0; border-radius: 6px; overflow: hidden; background: #FFFFFF; text-align: left;">
-              <img src="${matchedAtt.thumbnail || matchedAtt.content}" alt="${matchedAtt.filename}" style="width: 100%; max-height: 380px; object-fit: contain; cursor: pointer; display: block;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))" />
-              <div style="padding: 4px 8px; background: #F4F5F7; font-size: 10px; color: #626F86; display: flex; justify-content: space-between;">
-                <span>📷 ${matchedAtt.filename}</span>
-                <span>${formatAttachmentSize(matchedAtt.size)}</span>
+            return `<div style="margin: 6px 0; display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border: 1px solid #DCDFE4; border-radius: 8px; background: #FFFFFF; box-shadow: 0 1px 3px rgba(9,30,66,0.06); max-width: 460px; cursor: pointer; text-align: left;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))">
+              <div style="display: flex; align-items: center; gap: 10px; overflow: hidden;">
+                <div style="width: 32px; height: 32px; border-radius: 6px; background: #E9F2FF; color: #0C66E4; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;">📷</div>
+                <div style="overflow: hidden;">
+                  <div style="font-weight: 600; font-size: 12px; color: #172B4D; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${matchedAtt.filename}">${matchedAtt.filename}</div>
+                  <div style="font-size: 10px; color: #626F86; margin-top: 1px;">${formatAttachmentSize(matchedAtt.size)} • Imagen adjunta</div>
+                </div>
               </div>
+              <button style="background: #0C66E4; color: #FFF; border: none; border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 700; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;">
+                🔍 Ver Imagen
+              </button>
             </div>`;
           } else {
-            return `<a href="${matchedAtt.content}" target="_blank" download style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; color: #0C66E4; font-size: 12px; font-weight: 600; text-decoration: none; margin: 4px 0;">
-              📄 ${matchedAtt.filename} <span style="color: #626F86; font-size: 10px; font-weight: normal;">(${formatAttachmentSize(matchedAtt.size)})</span>
-            </a>`;
+            return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; cursor: pointer; text-align: left;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))">
+              <span style="font-size: 14px;">📄</span>
+              <span style="font-size: 12px; font-weight: 600; color: #0C66E4; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${matchedAtt.filename}</span>
+              <span style="color: #626F86; font-size: 10px;">(${formatAttachmentSize(matchedAtt.size)})</span>
+            </div>`;
           }
         }
 
@@ -337,6 +344,11 @@ function adfToHtml(adf, attachments = []) {
         if (mediaAlt && mediaAlt.match(/\.(mp4|mov|webm|avi|mkv)$/i)) {
           return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; background: #091E42; color: #FFF; border-radius: 6px; font-size: 12px; font-weight: 600;">
             <span>🎥 Video: ${mediaAlt}</span>
+          </div>`;
+        }
+        if (mediaAlt && mediaAlt.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) {
+          return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; font-size: 12px; font-weight: 500; color: #172B4D;">
+            <span>📷 ${mediaAlt}</span>
           </div>`;
         }
         if (mediaAlt) {
@@ -399,6 +411,87 @@ function adfToHtml(adf, attachments = []) {
   }
 
   return sanitizeRenderedHtml(renderNode(adf));
+}
+
+function BugAttachmentImageCard({ att, onPreview }) {
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    let createdUrl = null;
+
+    async function loadThumb() {
+      try {
+        const res = await requestJira(`/rest/api/3/attachment/content/${att.id}`);
+        if (res.ok && active) {
+          const blob = await res.blob();
+          createdUrl = URL.createObjectURL(blob);
+          setBlobUrl(createdUrl);
+        }
+      } catch (e) {
+        // Fallback gracefully without breaking UI
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadThumb();
+
+    return () => {
+      active = false;
+      if (createdUrl) {
+        try { URL.revokeObjectURL(createdUrl); } catch (e) {}
+      }
+    };
+  }, [att.id]);
+
+  return (
+    <div
+      onClick={() => onPreview(att)}
+      style={{
+        border: '1px solid #DCDFE4',
+        borderRadius: '6px',
+        overflow: 'hidden',
+        background: '#FFFFFF',
+        cursor: 'pointer',
+        transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+        display: 'flex',
+        flexDirection: 'column'
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 8px rgba(9,30,66,0.12)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
+      title="Clic para ver en pantalla completa"
+    >
+      <div style={{ height: '110px', backgroundColor: '#F4F5F7', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderBottom: '1px solid #EBECF0', position: 'relative' }}>
+        {blobUrl ? (
+          <img
+            src={blobUrl}
+            alt={att.filename}
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : loading ? (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', color: '#626F86', fontSize: '10px' }}>
+            <div style={{ width: '16px', height: '16px', border: '2px solid #DCDFE4', borderTop: '2px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+            <span>Cargando...</span>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>
+            <span style={{ fontSize: '24px' }}>📷</span>
+            <span style={{ fontSize: '10px', fontWeight: 600, color: '#626F86' }}>Ver Imagen</span>
+          </div>
+        )}
+      </div>
+      <div style={{ padding: '6px 8px', fontSize: '11px' }}>
+        <div style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={att.filename}>
+          {att.filename}
+        </div>
+        <div style={{ color: '#626F86', fontSize: '10px', marginTop: '2px' }}>
+          {formatAttachmentSize(att.size)}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const MX_HOLIDAYS_SET = new Set([
@@ -4807,40 +4900,11 @@ Then el sistema valida la identidad.
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px' }}>
                           {imageAttachments.map(att => (
-                            <div
+                            <BugAttachmentImageCard
                               key={att.id}
-                              onClick={() => handlePreviewEvidence(att)}
-                              style={{
-                                border: '1px solid #DCDFE4',
-                                borderRadius: '6px',
-                                overflow: 'hidden',
-                                background: '#FFFFFF',
-                                cursor: 'pointer',
-                                transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-                                display: 'flex',
-                                flexDirection: 'column'
-                              }}
-                              onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 8px rgba(9,30,66,0.12)'; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
-                              title="Clic para ver en pantalla completa"
-                            >
-                              <div style={{ height: '110px', backgroundColor: '#F4F5F7', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderBottom: '1px solid #EBECF0' }}>
-                                <img
-                                  src={att.thumbnail || att.content}
-                                  alt={att.filename}
-                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                                  loading="lazy"
-                                />
-                              </div>
-                              <div style={{ padding: '6px 8px', fontSize: '11px' }}>
-                                <div style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={att.filename}>
-                                  {att.filename}
-                                </div>
-                                <div style={{ color: '#626F86', fontSize: '10px', marginTop: '2px' }}>
-                                  {formatFileSize(att.size)}
-                                </div>
-                              </div>
-                            </div>
+                              att={att}
+                              onPreview={handlePreviewEvidence}
+                            />
                           ))}
                         </div>
                       </div>
@@ -4898,12 +4962,9 @@ Then el sistema valida la identidad.
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                           {otherAttachments.map(att => (
-                            <a
+                            <div
                               key={att.id}
-                              href={att.content}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              download
+                              onClick={() => handlePreviewEvidence(att)}
                               style={{
                                 display: 'flex',
                                 alignItems: 'center',
@@ -4912,16 +4973,17 @@ Then el sistema valida la identidad.
                                 background: '#F4F5F7',
                                 border: '1px solid #DCDFE4',
                                 borderRadius: '6px',
-                                textDecoration: 'none',
+                                cursor: 'pointer',
                                 color: '#0C66E4',
                                 fontSize: '12px',
                                 fontWeight: 600
                               }}
+                              title="Clic para previsualizar o descargar"
                             >
                               <span>📄</span>
                               <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.filename}</span>
                               <span style={{ color: '#626F86', fontSize: '10px', fontWeight: 400 }}>({formatFileSize(att.size)})</span>
-                            </a>
+                            </div>
                           ))}
                         </div>
                       </div>
