@@ -195,19 +195,38 @@ function textToAdf(text) {
   return { type: 'doc', version: 1, content };
 }
 
-function adfToHtml(adf) {
+function formatAttachmentSize(bytes) {
+  if (!bytes || isNaN(bytes)) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function sanitizeRenderedHtml(html) {
+  if (!html) return '';
+  return String(html)
+    .replace(/URL validation failed/gi, '')
+    .replace(/<span[^>]*class="[^"]*inline-card-resolving[^"]*"[^>]*>.*?<\/span>/gi, '')
+    .replace(/<div[^>]*class="[^"]*media-card-error[^"]*"[^>]*>.*?<\/div>/gi, '')
+    .replace(/<p>\s*(&nbsp;|\s)*<\/p>/gi, '')
+    .trim();
+}
+
+function adfToHtml(adf, attachments = []) {
   if (!adf) return '';
   if (typeof adf === 'string') {
     if (adf.trim().startsWith('<') && adf.trim().endsWith('>')) {
-      return adf;
+      return sanitizeRenderedHtml(adf);
     }
-    return adf
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\n/g, '<br/>');
+    return sanitizeRenderedHtml(
+      adf
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br/>')
+    );
   }
-  if (typeof adf !== 'object') return String(adf);
+  if (typeof adf !== 'object') return sanitizeRenderedHtml(String(adf));
 
   function renderNode(node) {
     if (!node) return '';
@@ -242,6 +261,7 @@ function adfToHtml(adf) {
         return `<td style="padding: 0.4rem; border: 1px solid var(--ds-border, #dfe1e6);">${content}</td>`;
       case 'text': {
         let text = (node.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        if (text.includes('URL validation failed')) text = '';
         if (node.marks && Array.isArray(node.marks)) {
           for (const mark of node.marks) {
             if (mark.type === 'strong') text = `<strong>${text}</strong>`;
@@ -265,12 +285,120 @@ function adfToHtml(adf) {
         return '<hr style="border: none; border-top: 1px solid var(--ds-border, #dfe1e6); margin: 0.8rem 0;" />';
       case 'mention':
         return `<span style="background: rgba(9,30,66,0.08); padding: 1px 4px; border-radius: 3px; font-weight: 500;">@${node.attrs?.text || 'user'}</span>`;
+      case 'emoji':
+        return node.attrs?.text || node.attrs?.shortName || '';
+      case 'mediaSingle': {
+        const layout = node.attrs?.layout || 'center';
+        return `<div class="adf-media-single" style="margin: 0.8rem 0; text-align: ${layout === 'center' ? 'center' : 'left'};">${content}</div>`;
+      }
+      case 'mediaGroup': {
+        return `<div class="adf-media-group" style="display: flex; flex-wrap: wrap; gap: 8px; margin: 0.8rem 0;">${content}</div>`;
+      }
+      case 'media': {
+        const mediaId = node.attrs?.id;
+        const mediaAlt = node.attrs?.alt || '';
+        const attList = Array.isArray(attachments) ? attachments : [];
+        const matchedAtt = attList.find(a => 
+          (mediaId && String(a.id) === String(mediaId)) || 
+          (mediaAlt && (a.filename === mediaAlt || String(a.id) === String(mediaAlt)))
+        );
+
+        if (matchedAtt) {
+          if (matchedAtt.isVideo) {
+            return `<div style="margin: 8px 0; display: inline-flex; flex-direction: column; border: 1px solid #DCDFE4; border-radius: 8px; overflow: hidden; background: #FFFFFF; max-width: 420px; box-shadow: 0 1px 3px rgba(9,30,66,0.08); text-align: left;">
+              <div style="background: #091E42; color: #FFF; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  <span>🎥</span> <span>${matchedAtt.filename}</span>
+                </div>
+                <span style="font-size: 10px; color: #B3D4FF; flex-shrink: 0;">${formatAttachmentSize(matchedAtt.size)}</span>
+              </div>
+              <div style="padding: 8px 12px; display: flex; justify-content: flex-end; background: #F8FAFD;">
+                <button onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))" style="background: #0C66E4; color: #FFF; border: none; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
+                  ▶ Reproducir Video
+                </button>
+              </div>
+            </div>`;
+          } else if (matchedAtt.isImage) {
+            return `<div style="margin: 8px 0; max-width: 520px; border: 1px solid #EBECF0; border-radius: 6px; overflow: hidden; background: #FFFFFF; text-align: left;">
+              <img src="${matchedAtt.thumbnail || matchedAtt.content}" alt="${matchedAtt.filename}" style="width: 100%; max-height: 380px; object-fit: contain; cursor: pointer; display: block;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))" />
+              <div style="padding: 4px 8px; background: #F4F5F7; font-size: 10px; color: #626F86; display: flex; justify-content: space-between;">
+                <span>📷 ${matchedAtt.filename}</span>
+                <span>${formatAttachmentSize(matchedAtt.size)}</span>
+              </div>
+            </div>`;
+          } else {
+            return `<a href="${matchedAtt.content}" target="_blank" download style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; color: #0C66E4; font-size: 12px; font-weight: 600; text-decoration: none; margin: 4px 0;">
+              📄 ${matchedAtt.filename} <span style="color: #626F86; font-size: 10px; font-weight: normal;">(${formatAttachmentSize(matchedAtt.size)})</span>
+            </a>`;
+          }
+        }
+
+        // If not matched directly in attachments array
+        if (mediaAlt && mediaAlt.match(/\.(mp4|mov|webm|avi|mkv)$/i)) {
+          return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; background: #091E42; color: #FFF; border-radius: 6px; font-size: 12px; font-weight: 600;">
+            <span>🎥 Video: ${mediaAlt}</span>
+          </div>`;
+        }
+        if (mediaAlt) {
+          return `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 4px; font-size: 11px;">📎 ${mediaAlt}</span>`;
+        }
+        return '';
+      }
+      case 'inlineCard':
+      case 'blockCard':
+      case 'embedCard': {
+        const cardUrl = node.attrs?.url;
+        if (!cardUrl || cardUrl.includes('URL validation failed')) return '';
+        return `<a href="${cardUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 4px; color: #0C66E4; text-decoration: none; font-size: 12px; font-weight: 500; margin: 2px 0;">
+          🔗 ${cardUrl}
+        </a>`;
+      }
+      case 'panel': {
+        const pType = node.attrs?.panelType || 'info';
+        let pBg = '#E9F2FF';
+        let pBorder = '#0C66E4';
+        let pIcon = 'ℹ️';
+        if (pType === 'warning' || pType === 'note') {
+          pBg = '#FFF7D6';
+          pBorder = '#F5CD47';
+          pIcon = '⚠️';
+        } else if (pType === 'error') {
+          pBg = '#FFEBE6';
+          pBorder = '#DE350B';
+          pIcon = '🚨';
+        } else if (pType === 'success') {
+          pBg = '#E3FCEF';
+          pBorder = '#36B37E';
+          pIcon = '✅';
+        }
+        return `<div style="margin: 0.6rem 0; padding: 0.75rem 1rem; border-radius: 6px; border-left: 4px solid ${pBorder}; background: ${pBg}; color: #172B4D; font-size: 12.5px;">
+          <div style="font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">${pIcon} ${pType.toUpperCase()}</div>
+          ${content}
+        </div>`;
+      }
+      case 'expand':
+      case 'nestedExpand': {
+        const title = node.attrs?.title || 'Detalles';
+        return `<details style="margin: 0.5rem 0; padding: 0.5rem 0.75rem; background: #FAFBFC; border: 1px solid #DCDFE4; border-radius: 6px;">
+          <summary style="font-weight: 600; cursor: pointer; color: #172B4D;">${title}</summary>
+          <div style="margin-top: 0.5rem;">${content}</div>
+        </details>`;
+      }
+      case 'status': {
+        const sText = node.attrs?.text || '';
+        return `<span style="background: #E9F2FF; color: #0C66E4; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; text-transform: uppercase;">${sText}</span>`;
+      }
+      case 'date': {
+        const ts = node.attrs?.timestamp ? parseInt(node.attrs.timestamp, 10) : null;
+        const dStr = ts ? new Date(ts).toLocaleDateString('es-MX') : '';
+        return `<span style="background: #EBECF0; padding: 2px 6px; border-radius: 3px; font-size: 11px; color: #172B4D; font-weight: 500;">📅 ${dStr}</span>`;
+      }
       default:
         return content || (node.text ? node.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
     }
   }
 
-  return renderNode(adf);
+  return sanitizeRenderedHtml(renderNode(adf));
 }
 
 const MX_HOLIDAYS_SET = new Set([
@@ -4509,14 +4637,14 @@ Then el sistema valida la identidad.
     // Comments
     const comments = b.comments || [];
 
-    // Description HTML
+    // Description HTML (clean and mapped with attachments)
     let descHtml = '';
-    if (b.descriptionRendered) {
-      descHtml = b.descriptionRendered;
-    } else if (b.descriptionRaw) {
-      descHtml = adfToHtml(b.descriptionRaw);
+    if (b.descriptionRaw) {
+      descHtml = sanitizeRenderedHtml(adfToHtml(b.descriptionRaw, attachments));
+    } else if (b.descriptionRendered) {
+      descHtml = sanitizeRenderedHtml(b.descriptionRendered);
     } else if (selectedBug.description) {
-      descHtml = adfToHtml(selectedBug.description);
+      descHtml = sanitizeRenderedHtml(adfToHtml(selectedBug.description, attachments));
     }
 
     return (
@@ -4821,7 +4949,7 @@ Then el sistema valida la identidad.
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     {comments.map((comm) => {
                       const commDate = formatBugCreatedDate(comm.created);
-                      const commBodyHtml = comm.bodyRendered || adfToHtml(comm.bodyRaw);
+                      const commBodyHtml = sanitizeRenderedHtml(comm.bodyRendered || adfToHtml(comm.bodyRaw, attachments));
 
                       return (
                         <div
@@ -6102,78 +6230,151 @@ Then el sistema valida la identidad.
   };
 
   const handlePreviewEvidence = async (ev) => {
-    const id = typeof ev === 'string' ? ev : ev.id;
+    if (!ev) return;
+    const id = typeof ev === 'string' ? ev : (ev.id || ev.attachmentId);
     let filename = typeof ev === 'string' ? `evidence_${id}.jpg` : (ev.filename || `evidence_${id}.jpg`);
     const note = (typeof ev === 'object' && ev.note) ? ev.note : null;
     
-    // Si no tiene extensión (ej. porque el usuario lo renombró "Evidencia 1"), asumimos que es imagen/video
+    // Si no tiene extensión, determinamos según el tipo
+    const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(filename);
+    const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(filename);
+    const isPdf = /\.(pdf)$/i.test(filename);
     const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
-    const isImageOrVideo = filename.match(/\.(png|jpg|jpeg|gif|mp4|mov|webm)$/i);
-    const isPdf = filename.match(/\.(pdf)$/i);
 
-    if (isImageOrVideo || isPdf || !hasExtension) {
-      if (!hasExtension) filename += '.png';
-      
-      if (isPdf) {
-         // Open window synchronously to avoid popup blocker
-         const newWin = window.open('about:blank', '_blank');
-         if (newWin) {
-             newWin.document.write('<p style="font-family:sans-serif;padding:20px;">Cargando PDF...</p>');
-         }
-         
-         const data = await invoke('getAttachmentContent', { attachmentId: id });
-         if (data && !data.error) {
-            try {
-              const byteCharacters = atob(data.base64);
-              const byteNumbers = new Array(byteCharacters.length);
-              for (let i = 0; i < byteCharacters.length; i++) {
-                byteNumbers[i] = byteCharacters.charCodeAt(i);
-              }
-              const byteArray = new Uint8Array(byteNumbers);
-              const blob = new Blob([byteArray], { type: 'application/pdf' });
-              const blobUrl = URL.createObjectURL(blob);
-              
-              if (newWin) {
-                  newWin.location.href = blobUrl;
-              } else {
-                  // Fallback if popup blocker still blocked the synchronous open (e.g. strict settings)
-                  const a = document.createElement('a');
-                  a.href = blobUrl;
-                  a.target = '_blank';
-                  a.click();
-              }
-              return;
-            } catch(e) { 
-               console.error('Blob URL failed', e); 
-               if (newWin) newWin.close();
-            }
-         }
-         // Fallback if fetch fails
-         if (newWin) newWin.close();
-         router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
-         return;
+    if (isPdf) {
+      const newWin = window.open('about:blank', '_blank');
+      if (newWin) {
+        newWin.document.write('<p style="font-family:sans-serif;padding:20px;color:#172B4D;">Cargando documento PDF...</p>');
       }
-      
+      try {
+        let blobUrl = null;
+        const res = await requestJira(`/rest/api/3/attachment/content/${id}`);
+        if (res.ok) {
+          const blob = await res.blob();
+          const pdfBlob = new Blob([blob], { type: 'application/pdf' });
+          blobUrl = URL.createObjectURL(pdfBlob);
+        } else {
+          const data = await invoke('getAttachmentContent', { attachmentId: id });
+          if (data && !data.error && data.base64) {
+            const byteCharacters = atob(data.base64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const pdfBlob = new Blob([byteArray], { type: 'application/pdf' });
+            blobUrl = URL.createObjectURL(pdfBlob);
+          }
+        }
+        if (blobUrl) {
+          if (newWin) newWin.location.href = blobUrl;
+          else {
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.target = '_blank';
+            a.click();
+          }
+          return;
+        }
+      } catch (e) {
+        console.error('PDF preview error:', e);
+      }
+      if (newWin) newWin.close();
+      router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
+      return;
+    }
+
+    if (isVideo || isImage || !hasExtension) {
+      if (!hasExtension && !isVideo) filename += '.png';
+
+      // Limpiar URL Blob anterior si existía
+      if (previewModalData && previewModalData.blobUrl) {
+        try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
+      }
+
       setPreviewModalData({ id, filename, note, loading: true });
-      const data = await invoke('getAttachmentContent', { attachmentId: id });
-      if (data && !data.error) {
-        const isVideo = filename.match(/\.(mp4|mov|webm)$/i);
+
+      try {
+        let blobUrl = null;
+        let mimeType = isVideo ? 'video/mp4' : 'image/png';
+
+        // 1. Fetch directo en navegador vía requestJira (soporta streaming, archivos grandes y aceleración por HW)
+        try {
+          const res = await requestJira(`/rest/api/3/attachment/content/${id}`);
+          if (res.ok) {
+            const blob = await res.blob();
+            mimeType = res.headers?.get?.('content-type') || blob.type || (isVideo ? 'video/mp4' : 'image/png');
+            blobUrl = URL.createObjectURL(blob);
+          }
+        } catch (fetchErr) {
+          console.warn('requestJira attachment content failed, falling back to backend resolver:', fetchErr);
+        }
+
+        // 2. Fallback a resolver backend si requestJira no respondió
+        if (!blobUrl) {
+          const data = await invoke('getAttachmentContent', { attachmentId: id });
+          if (data && !data.error && data.base64) {
+            const byteCharacters = atob(data.base64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: data.mimeType || (isVideo ? 'video/mp4' : 'image/png') });
+            blobUrl = URL.createObjectURL(blob);
+            mimeType = data.mimeType || (isVideo ? 'video/mp4' : 'image/png');
+          }
+        }
+
+        if (blobUrl) {
+          setPreviewModalData({
+            id,
+            filename,
+            note,
+            loading: false,
+            blobUrl,
+            mimeType,
+            isVideo: isVideo || mimeType.startsWith('video/')
+          });
+        } else {
+          setPreviewModalData({
+            id,
+            filename,
+            note,
+            loading: false,
+            error: 'No se pudo generar la vista previa directa del archivo.',
+            downloadUrl: `/secure/attachment/${id}/${encodeURIComponent(filename)}`
+          });
+        }
+      } catch (err) {
+        console.error('Error in handlePreviewEvidence:', err);
         setPreviewModalData({
           id,
           filename,
           note,
           loading: false,
-          base64: data.base64,
-          mimeType: data.mimeType || (isVideo ? 'video/mp4' : 'image/png')
+          error: `Error al cargar archivo: ${err.message || String(err)}`,
+          downloadUrl: `/secure/attachment/${id}/${encodeURIComponent(filename)}`
         });
-      } else {
-        setPreviewModalData(null);
-        router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
       }
     } else {
       router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
     }
   };
+
+  useEffect(() => {
+    window.__previewAttachment = (id, filename) => {
+      try {
+        const decodedName = filename ? decodeURIComponent(filename) : undefined;
+        handlePreviewEvidence({ id, filename: decodedName });
+      } catch (e) {
+        handlePreviewEvidence({ id, filename });
+      }
+    };
+    return () => {
+      delete window.__previewAttachment;
+    };
+  }, []);
 
   const handleLinkCycleToPlan = async (cycleId, planId) => {
     setLocalLoading(true);
@@ -14975,22 +15176,85 @@ const renderPlanningTab = () => {
       {renderModal()}
       {renderSlidePanel()}
       {previewModalData && (
-        <div className="modal-overlay" style={{zIndex: 9999}}>
-          <div className="modal-content glass" style={{width: '90%', height: '90%', maxWidth: '1200px', display: 'flex', flexDirection: 'column'}}>
-            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem'}}>
-              <h2 style={{margin: 0, fontSize: '1.2rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1}}>{previewModalData.filename}</h2>
-              <button className="btn-secondary" onClick={() => setPreviewModalData(null)} style={{flexShrink: 0, marginLeft: '1rem', padding: '0.4rem 0.8rem', background: 'var(--danger-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', zIndex: 10000}}>✕ Cerrar</button>
+        <div className="modal-overlay" style={{zIndex: 9999}} onClick={() => {
+          if (previewModalData?.blobUrl) {
+            try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
+          }
+          setPreviewModalData(null);
+        }}>
+          <div className="modal-content glass" style={{width: '92%', height: '90%', maxWidth: '1200px', display: 'flex', flexDirection: 'column'}} onClick={(e) => e.stopPropagation()}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', gap: '12px'}}>
+              <h2 style={{margin: 0, fontSize: '1.15rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, display: 'flex', alignItems: 'center', gap: '8px'}}>
+                <span>{previewModalData.isVideo || previewModalData.filename?.match(/\.(mp4|mov|webm)$/i) ? '🎥' : '📷'}</span>
+                <span>{previewModalData.filename}</span>
+              </h2>
+              <div style={{display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0}}>
+                {previewModalData.blobUrl && (
+                  <a
+                    href={previewModalData.blobUrl}
+                    download={previewModalData.filename}
+                    className="btn-secondary"
+                    style={{ padding: '0.4rem 0.8rem', background: '#0C66E4', color: '#fff', textDecoration: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  >
+                    ⬇ Descargar
+                  </a>
+                )}
+                {previewModalData.downloadUrl && (
+                  <button
+                    onClick={() => router.open(previewModalData.downloadUrl)}
+                    className="btn-secondary"
+                    style={{ padding: '0.4rem 0.8rem', background: '#0C66E4', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    ⬇ Descargar archivo
+                  </button>
+                )}
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    if (previewModalData?.blobUrl) {
+                      try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
+                    }
+                    setPreviewModalData(null);
+                  }}
+                  style={{ padding: '0.4rem 0.8rem', background: 'var(--danger-color, #DE350B)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+                >
+                  ✕ Cerrar
+                </button>
+              </div>
             </div>
-            <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'var(--bg-main)', borderRadius: '4px', minHeight: '320px'}}>
+            <div style={{flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'hidden', background: '#091E42', borderRadius: '6px', minHeight: '320px', position: 'relative'}}>
               {previewModalData.loading ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
-                  <div className="spinner" style={{ width: '28px', height: '28px', border: '3px solid #EBECF0', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-                  <p style={{ margin: 0, fontSize: '13px' }}>Cargando vista previa segura...</p>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', color: '#DEEBFF' }}>
+                  <div className="spinner" style={{ width: '32px', height: '32px', border: '3px solid rgba(255,255,255,0.2)', borderTop: '3px solid #579DFF', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+                  <p style={{ margin: 0, fontSize: '13px', fontWeight: 500 }}>Cargando vista previa...</p>
                 </div>
-              ) : previewModalData.filename.match(/\.(mp4|mov|webm)$/i) ? (
-                <video controls autoPlay playsInline style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '4px'}} src={`data:${previewModalData.mimeType || 'video/mp4'};base64,${previewModalData.base64}`} />
+              ) : previewModalData.error ? (
+                <div style={{ textAlign: 'center', color: '#FFEBE6', padding: '20px' }}>
+                  <p style={{ fontSize: '14px', marginBottom: '12px' }}>⚠️ {previewModalData.error}</p>
+                  {previewModalData.downloadUrl && (
+                    <button
+                      onClick={() => router.open(previewModalData.downloadUrl)}
+                      style={{ background: '#0C66E4', color: '#FFF', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      Descargar archivo directamente
+                    </button>
+                  )}
+                </div>
+              ) : (previewModalData.isVideo || previewModalData.filename?.match(/\.(mp4|mov|webm)$/i)) ? (
+                <video
+                  controls
+                  autoPlay
+                  playsInline
+                  controlsList="nodownload"
+                  style={{ maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: '4px', background: '#000', outline: 'none' }}
+                  src={previewModalData.blobUrl || (previewModalData.base64 ? `data:${previewModalData.mimeType || 'video/mp4'};base64,${previewModalData.base64}` : '')}
+                />
               ) : (
-                <img src={`data:${previewModalData.mimeType || 'image/png'};base64,${previewModalData.base64}`} alt="Evidence preview" style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '4px'}} />
+                <img
+                  src={previewModalData.blobUrl || (previewModalData.base64 ? `data:${previewModalData.mimeType || 'image/png'};base64,${previewModalData.base64}` : '')}
+                  alt={previewModalData.filename || "Evidence preview"}
+                  style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '4px' }}
+                />
               )}
             </div>
             {previewModalData.note && (

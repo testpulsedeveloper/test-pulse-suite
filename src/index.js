@@ -3306,8 +3306,13 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     const f = data.fields || {};
     const rf = data.renderedFields || {};
 
-    // 1. Description: rendered HTML or raw ADF
-    const descriptionRendered = rf.description || null;
+    // 1. Description: rendered HTML or raw ADF (sanitize broken Jira server tags)
+    const descriptionRendered = rf.description
+      ? rf.description
+          .replace(/URL validation failed/gi, '')
+          .replace(/<span[^>]*class="[^"]*inline-card-resolving[^"]*"[^>]*>.*?<\/span>/gi, '')
+          .replace(/<div[^>]*class="[^"]*media-card-error[^"]*"[^>]*>.*?<\/div>/gi, '')
+      : null;
     const descriptionRaw = f.description || null;
 
     // 2. Attachments (categorized)
