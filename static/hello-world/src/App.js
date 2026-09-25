@@ -8593,8 +8593,17 @@ const renderPlanningTab = () => {
         scopePlansText = `${reportSelectedPlans.length} Planes seleccionados`;
       }
 
-      // Generate Bug Rows strictly for the selected cycle(s) (6 well-proportioned columns to prevent cutoff)
+      // Cycle bugs array
       const cycleBugsArray = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
+
+      // Version extraction from cycle bugs or test cases
+      const uniqueVersionsSet = new Set();
+      cycleBugsArray.forEach(b => {
+        if (b.version && b.version !== 'Sin versión') uniqueVersionsSet.add(b.version);
+        if (Array.isArray(b.versions)) b.versions.forEach(v => v && uniqueVersionsSet.add(v));
+        if (Array.isArray(b.fixVersions)) b.fixVersions.forEach(v => v && uniqueVersionsSet.add(v));
+      });
+      const scopeVersionsText = uniqueVersionsSet.size > 0 ? Array.from(uniqueVersionsSet).join(', ') : null;
 
       let tableRows = '';
       if (cycleBugsArray.length === 0) {
@@ -8632,31 +8641,72 @@ const renderPlanningTab = () => {
           const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
           const statusColor = bug.isDone ? '#006644' : '#BF2600';
 
+          // Dates, Aging & TTR
+          const bugCreated = formatBugCreatedDate(bug.created);
+          const bugAge = formatBugAge(bug.created, bug.resolutiondate, bug.isDone);
+          let resFormatted = null;
+          if (bug.isDone && bug.resolutiondate) {
+            resFormatted = formatBugCreatedDate(bug.resolutiondate);
+          }
+
+          let agePillBg = '#E3FCEF';
+          let agePillColor = '#006644';
+          let agePillBorder = '#ABF5D1';
+          if (!bug.isDone) {
+            if (bugAge.tone === 'orange') {
+              agePillBg = '#FFF0B3';
+              agePillColor = '#172B4D';
+              agePillBorder = '#FFE380';
+            } else if (bugAge.tone === 'red') {
+              agePillBg = '#FFEBE6';
+              agePillColor = '#BF2600';
+              agePillBorder = '#FFBDAD';
+            }
+          }
+
+          const verVal = bug.version || (Array.isArray(bug.versions) && bug.versions.length > 0 ? bug.versions.join(', ') : (Array.isArray(bug.fixVersions) && bug.fixVersions.length > 0 ? bug.fixVersions.join(', ') : ''));
+
           tableRows += `
             <tr style="background-color: ${bgRow};">
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 700; width: 14%; vertical-align: top;">
-                <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline;" target="_blank">
+              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; font-weight: 700; width: 15%; vertical-align: top;">
+                <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline; font-size: 13px;" target="_blank">
                   ${bug.key}
                 </a>
+                ${verVal && verVal !== 'Sin versión' ? `
+                  <div style="margin-top: 4px;">
+                    <span style="font-size: 10px; font-weight: 700; color: #0C66E4; background-color: #E9F2FF; border: 1px solid #CCE0FF; padding: 1px 5px; border-radius: 4px; display: inline-block;">
+                      🏷️ ${verVal}
+                    </span>
+                  </div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 36%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
+              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 31%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
                 ${bug.summary || 'Sin resumen'}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
+              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
+                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
                   ${bug.severity || 'Media'}
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; width: 12%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
+              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
+                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
                   ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 14%; word-break: break-word; vertical-align: top;">
-                ${bug.assignee || 'Sin asignar'}
+              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
+                <div style="color: #626F86; margin-bottom: 3px;">
+                  📅 <strong>Creado:</strong> ${bugCreated.dateStr}${bugCreated.timeStr ? ` ${bugCreated.timeStr}` : ''}
+                </div>
+                <div style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
+                  ${bug.isDone ? `✅ ${bugAge.label}` : `⏱️ ${bugAge.label}`}
+                </div>
+                ${bug.isDone && resFormatted?.dateStr ? `
+                  <div style="color: #006644; font-size: 10px; margin-top: 3px;">
+                    🏁 Resuelto: ${resFormatted.dateStr}${resFormatted.timeStr ? ` ${resFormatted.timeStr}` : ''}
+                  </div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
-                ${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}
+              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
+                <div style="font-weight: 600; color: #172B4D;">${bug.assignee || 'Sin asignar'}</div>
+                <div style="color: #626F86; font-size: 10px; margin-top: 2px;">${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}</div>
               </td>
             </tr>
           `;
@@ -8711,12 +8761,12 @@ const renderPlanningTab = () => {
       // Verdict Text
       let verdictText = '';
       const numSuccess = Number(successRate);
-      if (numSuccess >= 90 && totalOpenBugs === 0) {
-        verdictText = '🟢 <strong>Estado Favorable (Aprobado):</strong> La suite de pruebas presenta una alta tasa de éxito y no se registran defectos bloqueantes abiertos. El ciclo se encuentra en condiciones óptimas para pase a producción o liberación.';
+      if (numSuccess >= 90 && openCycleBugs === 0) {
+        verdictText = '🟢 <strong>Estado Favorable (Aprobado):</strong> La suite de pruebas presenta una alta tasa de éxito y no se registran defectos bloqueantes abiertos en el ciclo. El avance se encuentra en condiciones óptimas para pase a producción o liberación.';
       } else if (numSuccess >= 75) {
-        verdictText = `🟡 <strong>Estado con Observaciones (Riesgo Moderado):</strong> Se alcanzó una tasa de éxito del ${successRate}%, con ${totalOpenBugs} defecto(s) abierto(s) que requieren seguimiento antes del cierre final del ciclo.`;
+        verdictText = `🟡 <strong>Estado con Observaciones (Riesgo Moderado):</strong> Se alcanzó una tasa de éxito del ${successRate}%, con ${openCycleBugs} defecto(s) abierto(s) en el ciclo que requieren seguimiento antes del cierre final.`;
       } else {
-        verdictText = `🔴 <strong>Estado Crítico (Riesgo Alto):</strong> La tasa de éxito actual es del ${successRate}% con ${totalOpenBugs} defecto(s) abierto(s) y ${failed} caso(s) fallido(s). Se recomienda detener la liberación hasta estabilizar las incidencias reportadas.`;
+        verdictText = `🔴 <strong>Estado Crítico (Riesgo Alto):</strong> La tasa de éxito actual es del ${successRate}% con ${openCycleBugs} defecto(s) abierto(s) y ${failed} caso(s) fallido(s). Se recomienda estabilizar las incidencias reportadas antes de autorizar la liberación.`;
       }
 
       const htmlTemplate = `
@@ -8771,22 +8821,27 @@ const renderPlanningTab = () => {
             <!-- Project & Scope Meta Box -->
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
               <tr>
-                <td style="padding: 4px 8px; font-size: 13px;">
+                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
                   <span style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
                 </td>
-                <td style="padding: 4px 8px; font-size: 13px;">
+                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
                   <span style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
                 </td>
-                <td style="padding: 4px 8px; font-size: 13px;">
+                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
                   <span style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
                 </td>
-                <td style="padding: 4px 8px; font-size: 13px;">
+                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
                   <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
                 </td>
+                ${scopeVersionsText ? `
+                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Versión / Build:</strong><br/>
+                  <span style="font-weight: 700; color: #0C66E4; font-size: 13px;">${scopeVersionsText}</span>
+                </td>` : ''}
               </tr>
             </table>
 
@@ -8820,12 +8875,12 @@ const renderPlanningTab = () => {
                   </div>
                 </td>
 
-                <!-- Card 4: Defectos -->
+                <!-- Card 4: Defectos del Ciclo -->
                 <td width="20%" style="padding: 0 4px;">
                   <div style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalAllBugs}</div>
-                    <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${totalOpenBugs}</strong> abiertos (${totalClosedBugs} cerrados)</div>
+                    <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos Ciclo</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalCycleBugs}</div>
+                    <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${openCycleBugs}</strong> abiertos (${closedCycleBugs} cerrados)</div>
                   </div>
                 </td>
 
@@ -8839,6 +8894,44 @@ const renderPlanningTab = () => {
                 </td>
               </tr>
             </table>
+
+            <!-- Resumen de Cambios & Actividad del Ciclo -->
+            <div style="background-color: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
+              <div style="margin-bottom: 10px;">
+                <span style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px;">
+                  📋 Resumen de Cambios & Actividad del Ciclo
+                </span>
+                <span style="font-size: 11px; font-weight: 600; color: #626F86; background: #EBECF0; padding: 2px 8px; border-radius: 12px; margin-left: 8px;">
+                  Corte: ${dateFormatted}
+                </span>
+              </div>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px; line-height: 1.6; color: #172B4D;">
+                <tr>
+                  <td width="33%" style="vertical-align: top; padding-right: 12px;">
+                    <div style="font-weight: 700; color: #0E8A4C; margin-bottom: 4px;">✅ Avance de Ejecución</div>
+                    <div style="color: #44546F; font-size: 11.5px;">
+                      • <strong>${ejecutados}</strong> de ${allTotal} casos evaluados (<strong>${coverageRate}%</strong> cobertura).<br/>
+                      • <strong>${passed}</strong> aprobados (${successRate}% éxito).
+                    </div>
+                  </td>
+                  <td width="33%" style="vertical-align: top; padding-right: 12px; border-left: 1px solid #E2E8F0; padding-left: 12px;">
+                    <div style="font-weight: 700; color: #DE350B; margin-bottom: 4px;">🐞 Estatus de Defectos</div>
+                    <div style="color: #44546F; font-size: 11.5px;">
+                      • <strong>${openCycleBugs}</strong> defecto(s) abierto(s) en atención.<br/>
+                      • <strong>${closedCycleBugs}</strong> defecto(s) resueltos/cerrados.<br/>
+                      • MTTR de resolución: <strong>${avgResolutionHours}h</strong> hábiles.
+                    </div>
+                  </td>
+                  <td width="34%" style="vertical-align: top; border-left: 1px solid #E2E8F0; padding-left: 12px;">
+                    <div style="font-weight: 700; color: #0C66E4; margin-bottom: 4px;">🎯 Estabilidad & Cierre</div>
+                    <div style="color: #44546F; font-size: 11.5px;">
+                      ${notRun > 0 ? `• Restan <strong>${notRun}</strong> caso(s) por ejecutar.<br/>` : `• <strong>100% de los casos</strong> evaluados en el ciclo.<br/>`}
+                      ${openCycleBugs === 0 ? `• 🟢 Sin defectos abiertos que impidan liberación.` : `• ⚠️ Requiere seguimiento de defectos antes de liberar.`}
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </div>
 
             <!-- Desglose de Ejecución (Visual Bar) -->
             <div style="margin-bottom: 22px;">
@@ -8887,12 +8980,12 @@ const renderPlanningTab = () => {
               <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
                 <thead>
                   <tr style="background-color: #002D62; color: #ffffff;">
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Key</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 36%;">Resumen</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: center; font-weight: 700; width: 12%;">Estado</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 14%;">Responsable</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 10px; text-align: left; font-weight: 700; width: 12%;">Resolución</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 15%;">Incidencia</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 31%;">Resumen</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Severidad</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Estado</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 20%;">Línea de Tiempo / TTR</th>
+                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 12%;">Responsable</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8913,7 +9006,7 @@ const renderPlanningTab = () => {
                 ${verdictText}
               </p>
               <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
-                <li>Priorizar la atención y resolución de los <strong>${totalOpenBugs}</strong> defectos abiertos con el equipo de desarrollo.</li>
+                <li>Priorizar la atención y resolución de los <strong>${openCycleBugs}</strong> defectos abiertos con el equipo de desarrollo.</li>
                 <li>Realizar re-test de casos fallidos tras el despliegue del siguiente build o corrección.</li>
                 ${notRun > 0 ? `<li>Completar la ejecución de los <strong>${notRun}</strong> casos pendientes para alcanzar la cobertura total.</li>` : '<li>Cierre formal y firma del ciclo de pruebas tras verificación de criterios de aceptación.</li>'}
               </ul>
@@ -8937,8 +9030,8 @@ const renderPlanningTab = () => {
       `;
 
       // Plain text fallback
-      const plainText = `TEST PULSE SUITE - REPORTE DE ESTATUS\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos del Plan: ${totalAllBugs} (${totalOpenBugs} abiertos) | Defectos Ciclo Actual: ${cycleBugsArray.length}\nAlcance: ${scopeCyclesText}`;
-      const emailSubject = `[Reporte de Estatus] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${cycleBugsArray.filter(b => !b.isDone).length} Defectos Abiertos en Ciclo)`;
+      const plainText = `TEST PULSE SUITE - REPORTE DE ESTATUS\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nVersión: ${scopeVersionsText || 'N/A'}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos del Ciclo: ${cycleBugsArray.length} (${openCycleBugs} abiertos, ${closedCycleBugs} cerrados) | MTTR Prom: ${avgResolutionHours}h\nAlcance: ${scopeCyclesText}`;
+      const emailSubject = `[Reporte de Estatus] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${openCycleBugs} Defectos Abiertos en Ciclo)`;
 
       return {
         htmlReport: htmlTemplate,
@@ -8950,6 +9043,7 @@ const renderPlanningTab = () => {
         dateFormatted,
         scopeCyclesText,
         scopePlansText,
+        scopeVersionsText,
         stats: {
           total: allTotal,
           passed,
@@ -8961,6 +9055,9 @@ const renderPlanningTab = () => {
           totalAllBugs,
           totalOpenBugs,
           totalClosedBugs,
+          totalCycleBugs,
+          openCycleBugs,
+          closedCycleBugs,
           avgResolutionHours
         }
       };
