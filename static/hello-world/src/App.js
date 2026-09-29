@@ -1044,6 +1044,9 @@ function App() {
   const [reportData, setReportData] = useState({ cycles: [] });
   const [reportLoading, setReportLoading] = useState(false);
   const [isRefreshingReport, setIsRefreshingReport] = useState(false);
+  const [isHydratingReport, setIsHydratingReport] = useState(false);
+  const [hydrationProgress, setHydrationProgress] = useState({ loaded: 0, total: 0 });
+  const hydrationSessionRef = useRef(0);
   const [isFolderSidebarVisible, setIsFolderSidebarVisible] = useState(() => {
     try {
       return localStorage.getItem('tp_folders_sidebar_visible') !== 'false';
@@ -6472,6 +6475,7 @@ Then el sistema valida la identidad.
       return;
     }
 
+    const currentSession = ++hydrationSessionRef.current;
     const hasExistingData = reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0 && reportData._loadedAt;
     if (!hasExistingData && !isSilent) {
       setReportLoading(true);
@@ -6480,34 +6484,50 @@ Then el sistema valida la identidad.
     }
 
     try {
-      const data = await invoke('getExecutionReport', { projectId: projId, config: cfg });
-      setReportData({ ...(data || { cycles: [] }), _loadedAt: Date.now() });
+      // Phase 1: Rapid load of recent cycles (limit: 8)
+      const initialLimit = 8;
+      const data = await invoke('getExecutionReport', { 
+        projectId: projId, 
+        config: cfg, 
+        limit: initialLimit, 
+        offset: 0 
+      });
 
-      if (data?.cycles && Array.isArray(data.cycles)) {
+      if (currentSession !== hydrationSessionRef.current) return;
+
+      const initialCycles = data?.cycles || [];
+      const initialBugMap = data?.bugMap || {};
+      const totalCycles = data?.totalCycles || initialCycles.length;
+
+      setReportData({
+        cycles: initialCycles,
+        bugMap: initialBugMap,
+        totalCycles: totalCycles,
+        _loadedAt: Date.now()
+      });
+
+      // Populate or sync testCycles immediately with all known cycle summaries from Jira
+      if (data?.allCycleSummaries && Array.isArray(data.allCycleSummaries)) {
         setTestCycles(prev => {
-          if (!prev || prev.length === 0) {
-            return data.cycles.map(rc => ({
-              id: rc.id,
-              key: rc.key,
-              summary: rc.summary,
-              status: rc.status || 'To Do',
-              planId: rc.planId || null,
-              testCount: Array.isArray(rc.execution) ? rc.execution.length : 0
-            }));
-          }
-          return prev.map(c => {
-            const rc = data.cycles.find(rc => String(rc.id) === String(c.id));
-            if (rc && Array.isArray(rc.execution)) {
-              return { ...c, testCount: rc.execution.length, planId: rc.planId !== undefined ? rc.planId : c.planId };
-            }
-            return c;
+          const prevMap = new Map((prev || []).map(c => [String(c.id), c]));
+          return data.allCycleSummaries.map(s => {
+            const existing = prevMap.get(String(s.id));
+            const loadedCycle = initialCycles.find(ic => String(ic.id) === String(s.id));
+            return {
+              id: s.id,
+              key: s.key,
+              summary: s.summary,
+              status: existing?.status || 'To Do',
+              planId: s.planId || existing?.planId || null,
+              testCount: loadedCycle ? (loadedCycle.execution?.length || 0) : (existing?.testCount || 0)
+            };
           });
         });
       }
 
-      // Collect all bug keys already linked through Test Pulse (from reportData AND live cycle caches)
+      // Collect all bug keys already linked through Test Pulse
       const linkedBugKeysSet = new Set();
-      (data?.cycles || []).forEach(cycle => {
+      initialCycles.forEach(cycle => {
         (cycle.execution || []).forEach(ex => {
           (ex.linkedBugs || []).forEach(bug => { if (bug?.key) linkedBugKeysSet.add(bug.key); });
         });
@@ -6519,7 +6539,7 @@ Then el sistema valida la identidad.
       });
       const linkedBugKeys = Array.from(linkedBugKeysSet);
 
-      // Fetch bugs strictly from the CURRENT project/workspace
+      // Fetch unlinked bugs from the current workspace
       const currentProj = projects.find(p => String(p.id) === String(projId) || String(p.key) === String(projId));
       const targetProjectKey = currentProj?.key || (isNaN(projId) ? projId : null);
       invoke('getProjectUnlinkedBugs', {
@@ -6531,19 +6551,75 @@ Then el sistema valida la identidad.
         .then(bugs => setUnlinkedBugs(bugs || []))
         .catch(console.warn);
 
-      // If any linked bugs are missing from data.bugMap, fetch their details in batch immediately
-      const missingBugKeys = linkedBugKeys.filter(k => !data?.bugMap?.[k]);
-      if (missingBugKeys.length > 0) {
-        invoke('getBugsBatch', { keys: missingBugKeys })
-          .then(batchBugs => {
-            if (batchBugs && Object.keys(batchBugs).length > 0) {
-              setReportData(prev => ({
-                ...prev,
-                bugMap: { ...(prev?.bugMap || {}), ...batchBugs }
-              }));
+      // Initial rapid load is finished! UI becomes interactive right away
+      setReportLoading(false);
+      setIsRefreshingReport(false);
+
+      // Phase 2: Silent background hydration of historical cycles
+      if (data?.hasMore && data.nextOffset < totalCycles) {
+        setIsHydratingReport(true);
+        setHydrationProgress({ loaded: initialCycles.length, total: totalCycles });
+
+        (async () => {
+          let currentOffset = data.nextOffset;
+          const batchLimit = 10;
+          let keepHydrating = true;
+
+          while (keepHydrating && currentSession === hydrationSessionRef.current) {
+            try {
+              const batchData = await invoke('getExecutionReport', {
+                projectId: projId,
+                config: cfg,
+                limit: batchLimit,
+                offset: currentOffset
+              });
+
+              if (currentSession !== hydrationSessionRef.current) break;
+
+              if (batchData?.cycles && Array.isArray(batchData.cycles)) {
+                setReportData(prev => {
+                  const existingCycles = prev?.cycles || [];
+                  const existingMap = new Map(existingCycles.map(c => [String(c.id), c]));
+                  batchData.cycles.forEach(c => {
+                    existingMap.set(String(c.id), c);
+                  });
+                  const mergedCycles = Array.from(existingMap.values());
+                  const mergedBugMap = { ...(prev?.bugMap || {}), ...(batchData.bugMap || {}) };
+
+                  setHydrationProgress({ loaded: mergedCycles.length, total: totalCycles });
+                  return {
+                    ...prev,
+                    cycles: mergedCycles,
+                    bugMap: mergedBugMap,
+                    _loadedAt: Date.now()
+                  };
+                });
+
+                // Update testCounts in testCycles
+                setTestCycles(prev => (prev || []).map(c => {
+                  const found = batchData.cycles.find(bc => String(bc.id) === String(c.id));
+                  if (found && Array.isArray(found.execution)) {
+                    return { ...c, testCount: found.execution.length };
+                  }
+                  return c;
+                }));
+              }
+
+              if (batchData?.hasMore && batchData.nextOffset < totalCycles) {
+                currentOffset = batchData.nextOffset;
+              } else {
+                keepHydrating = false;
+              }
+            } catch (batchErr) {
+              console.warn('[loadReportData] Background hydration chunk warning:', batchErr);
+              keepHydrating = false;
             }
-          })
-          .catch(console.warn);
+          }
+
+          if (currentSession === hydrationSessionRef.current) {
+            setIsHydratingReport(false);
+          }
+        })();
       }
     } catch(err) {
       console.error("loadReportData error:", err);
@@ -11282,7 +11358,11 @@ const renderPlanningTab = () => {
                 )}
                 <span className="dashboard-live-badge">
                   <span className="dashboard-live-dot" />
-                  ● {isRefreshingReport ? 'Sincronizando...' : `En vivo · ${reportData._loadedAt ? new Date(reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Auto-sync silencioso'}`}
+                  ● {isHydratingReport 
+                      ? `Sincronizando histórico (${reportData?.cycles?.length || 0}/${reportData?.totalCycles || '...'})` 
+                      : isRefreshingReport 
+                        ? 'Sincronizando...' 
+                        : `En vivo · ${reportData._loadedAt ? new Date(reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Auto-sync silencioso'}`}
                 </span>
                 <span className="dashboard-tag-context">
                   • Jira Forge App

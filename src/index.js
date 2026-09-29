@@ -1566,8 +1566,93 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
 };
 
 
+const fetchBugsBatch = async (keys = []) => {
+  const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
+  if (uniqueKeys.length === 0) return {};
+  const sevField = 'customfield_10238';
+  const bugMap = {};
+  const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField];
+
+  // Chunk into groups of 50 keys to stay well within Jira JQL URL/payload limits
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < uniqueKeys.length; i += CHUNK_SIZE) {
+    const chunk = uniqueKeys.slice(i, i + CHUNK_SIZE);
+    try {
+      const jql = `key in (${chunk.join(',')})`;
+      let resp = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jql,
+          fields: fieldsToFetch,
+          maxResults: chunk.length
+        })
+      });
+      if (resp.status === 429) {
+        await new Promise(r => setTimeout(r, 1200));
+        resp = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jql,
+            fields: fieldsToFetch,
+            maxResults: chunk.length
+          })
+        });
+      }
+      if (resp.ok) {
+        const data = await resp.json();
+        const issues = data.issues || [];
+        for (const issue of issues) {
+          const key = issue.key;
+          let sevVal = 'Sin definir';
+          if (issue.fields?.[sevField]) {
+            const sf = issue.fields[sevField];
+            sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+          } else if (issue.fields) {
+            for (const [fKey, fVal] of Object.entries(issue.fields)) {
+              if (fKey.startsWith('customfield_') && fVal) {
+                const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
+                if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
+                  sevVal = vStr;
+                  break;
+                }
+              }
+            }
+          }
+
+          const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+          const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+          const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
+          bugMap[key] = {
+            key,
+            summary: issue.fields?.summary || '',
+            status: issue.fields?.status?.name || '',
+            assignee: issue.fields?.assignee?.displayName || 'Sin asignar',
+            resolution: issue.fields?.resolution?.name || 'Unresolved',
+            priority: issue.fields?.priority?.name || '',
+            issuetype: issue.fields?.issuetype?.name || 'Bug',
+            severity: sevVal,
+            created: issue.fields?.created || null,
+            resolutiondate: issue.fields?.resolutiondate || null,
+            duedate: issue.fields?.duedate || null,
+            versions: affectsVersions,
+            fixVersions: fixVersions,
+            version: versionDisplay,
+            rawFields: issue.fields
+          };
+        }
+      }
+    } catch (err) {
+      console.error('[fetchBugsBatch] Bulk JQL error for chunk:', err);
+    }
+  }
+  return bugMap;
+};
+
 resolver.define('getExecutionReport', async ({ payload }) => {
-  const { projectId, config } = payload;
+  const { projectId, config, limit = 8, offset = 0, fetchAll = false } = payload || {};
   const cycleType = config?.testCycleType || 'Test Cycle';
   
   const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
@@ -1575,15 +1660,21 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let token = null;
   let isLast = false;
   while (!isLast) {
-      const page = await fetchJqlPage(jql, ['summary', 'issuetype'], null, ['testops-plan-link'], token, 100);
-      if (page.error) break;
-      allIssues = allIssues.concat(page.issues);
-      token = page.nextPageToken;
-      isLast = page.isLast;
-      if (!token) break;
+    const page = await fetchJqlPage(jql, ['summary', 'issuetype'], null, ['testops-plan-link'], token, 100);
+    if (page.error) break;
+    allIssues = allIssues.concat(page.issues);
+    token = page.nextPageToken;
+    isLast = page.isLast;
+    if (!token || allIssues.length >= 500) break;
   }
+
+  const numLimit = typeof limit === 'number' && limit > 0 ? limit : 8;
+  const numOffset = typeof offset === 'number' && offset >= 0 ? offset : 0;
+  const targetIssues = fetchAll ? allIssues : allIssues.slice(numOffset, numOffset + numLimit);
+  const hasMore = !fetchAll && (numOffset + numLimit < allIssues.length);
+  const nextOffset = numOffset + numLimit;
   
-  const cycles = await processInBatches(allIssues, 5, 200, async (issue) => {
+  const cycles = await Promise.all(targetIssues.map(async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
     let rawExecution = (await readCycleIndex(issue.id)) ?? [];
@@ -1607,225 +1698,57 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     return {
       id: issue.id,
       key: issue.key,
-      summary: issue.fields.summary,
+      summary: issue.fields?.summary || '',
       planId,
       execution
     };
-  });
+  }));
 
-
-
-  
-  // Fetch live bug details
+  // Fetch live bug details in bulk via fast JQL
   const allBugKeys = new Set();
   cycles.forEach(c => {
-     c.execution?.forEach(ex => {
-        ex.linkedBugs?.forEach(b => {
-           if (b.key) allBugKeys.add(b.key);
-        });
-     });
+    c.execution?.forEach(ex => {
+      ex.linkedBugs?.forEach(b => {
+        if (b && b.key) allBugKeys.add(b.key);
+      });
+    });
   });
 
-  const bugMap = {};
-  if (allBugKeys.size > 0) {
-    const sevField = 'customfield_10238';
-    await processInBatches(Array.from(allBugKeys), 8, 100, async key => {
-         try {
-            const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
-            let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
-            if (resp.status === 429) {
-               await new Promise(r => setTimeout(r, 1200));
-               resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?expand=changelog&fields=${fieldsToFetch}`);
-            }
-            if (resp.ok) {
-               const i = await resp.json();
-               
-               // MX Holidays
-               const mxHolidays = new Set([
-                 '2024-01-01', '2024-02-05', '2024-03-18', '2024-05-01', '2024-09-16', '2024-10-01', '2024-11-18', '2024-12-25',
-                 '2025-01-01', '2025-02-03', '2025-03-17', '2025-05-01', '2025-09-16', '2025-11-17', '2025-12-25',
-                 '2026-01-01', '2026-02-02', '2026-03-16', '2026-05-01', '2026-09-16', '2026-11-16', '2026-12-25',
-                 '2027-01-01', '2027-02-01', '2027-03-15', '2027-05-01', '2027-09-16', '2027-11-15', '2027-12-25'
-               ]);
+  const bugMap = await fetchBugsBatch(Array.from(allBugKeys));
 
-               function getBusinessHours(startMs, endMs) {
-                 if (!startMs || !endMs || startMs >= endMs) return 0;
-                 let current = new Date(startMs);
-                 const end = new Date(endMs);
-                 let businessMinutes = 0;
-                 const mxOffset = -6 * 60 * 60 * 1000; 
+  cycles.forEach(c => {
+    if (Array.isArray(c.execution)) {
+      c.execution.forEach(ex => {
+        if (Array.isArray(ex.linkedBugs)) {
+          // Purge any dead or non-existent bugs from Jira
+          ex.linkedBugs = ex.linkedBugs
+            .filter(b => b && b.key && bugMap[b.key])
+            .map(b => ({ ...b, ...bugMap[b.key] }));
+        }
+      });
+    }
+  });
 
-                 while (current < end) {
-                    const mxTime = new Date(current.getTime() + mxOffset);
-                    const day = mxTime.getUTCDay();
-                    const hour = mxTime.getUTCHours();
-                    const dateString = mxTime.toISOString().split('T')[0];
-                    
-                    let isBusiness = false;
-                    if (!mxHolidays.has(dateString)) {
-                        if (day >= 1 && day <= 4) { 
-                            if (hour >= 7 && hour < 18) isBusiness = true;
-                        } else if (day === 5) {
-                            if (hour >= 7 && hour < 13) isBusiness = true;
-                        }
-                    }
-                    if (isBusiness) businessMinutes++;
-                    current.setTime(current.getTime() + 60000);
-                 }
-                 return businessMinutes / 60;
-               }
-
-               const timesSpent = {};
-               let currentStatus = 'Nuevo'; // Default assumed start state
-               let lastTime = new Date(i.fields.created).getTime();
-               
-               const histories = i.changelog?.histories || [];
-               // Jira returns histories ascending by created, but double check
-               histories.sort((a,b) => new Date(a.created).getTime() - new Date(b.created).getTime());
-
-               histories.forEach(history => {
-                  const statusItem = history.items.find(item => item.field === 'status');
-                  if (statusItem) {
-                     const transTime = new Date(history.created).getTime();
-                     const hours = getBusinessHours(lastTime, transTime);
-                     
-                     // If fromString exists, prefer it. Otherwise use the tracked currentStatus.
-                     const stateName = (statusItem.fromString || currentStatus).toLowerCase();
-                     timesSpent[stateName] = (timesSpent[stateName] || 0) + hours;
-                     
-                     currentStatus = statusItem.toString;
-                     lastTime = transTime;
-                  }
-               });
-               
-               // Add ongoing time if not closed
-               const finalStatus = currentStatus.toLowerCase();
-               const isClosed = ['cerrada', 'cerrado', 'done', 'resolved', 'resuelta', 'resuelto'].includes(finalStatus);
-               if (!isClosed) {
-                  const ongoingHours = getBusinessHours(lastTime, Date.now());
-                  timesSpent[finalStatus] = (timesSpent[finalStatus] || 0) + ongoingHours;
-               }
-
-                // Extract *Severity strictly from customfield_10238 or any customfield holding severity
-                let sevVal = 'Sin definir';
-                if (i.fields?.[sevField]) {
-                  const sf = i.fields[sevField];
-                  sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-                } else if (i.fields) {
-                  for (const [fKey, fVal] of Object.entries(i.fields)) {
-                    if (fKey.startsWith('customfield_') && fVal) {
-                      const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-                      if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
-                        sevVal = vStr;
-                        break;
-                      }
-                    }
-                  }
-                }
-
-                // Extract versions
-                const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-                const fixVersions = (i.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-                const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
-
-                bugMap[key] = {
-                  key,
-                  summary: i.fields?.summary || '',
-                  status: i.fields?.status?.name || '',
-                  assignee: i.fields?.assignee?.displayName || 'Sin asignar',
-                  resolution: i.fields?.resolution?.name || 'Unresolved',
-                  priority: i.fields?.priority?.name || '',
-                  issuetype: i.fields?.issuetype?.name || 'Bug',
-                  severity: sevVal,
-                  created: i.fields?.created || null,
-                  resolutiondate: i.fields?.resolutiondate || null,
-                  duedate: i.fields?.duedate || null,
-                  versions: affectsVersions,
-                  fixVersions: fixVersions,
-                  version: versionDisplay,
-                  rawFields: i.fields,
-                  timesSpent
-                };
-             }
-          } catch (e) {
-             console.error('Error fetching bug ' + key, e);
-          }
-     });
-
-     cycles.forEach(c => {
-       if (Array.isArray(c.execution)) c.execution.forEach(ex => {
-          if (Array.isArray(ex.linkedBugs)) {
-             // Purge any dead or non-existent bugs from Jira
-             ex.linkedBugs = ex.linkedBugs
-               .filter(b => b && b.key && bugMap[b.key])
-               .map(b => ({ ...b, ...bugMap[b.key] }));
-          }
-       });
-     });
-  }
-
-  return { cycles, bugMap };
+  return {
+    cycles,
+    bugMap,
+    totalCycles: allIssues.length,
+    hasMore,
+    nextOffset,
+    offset: numOffset,
+    limit: numLimit,
+    allCycleSummaries: allIssues.map(i => ({
+      id: i.id,
+      key: i.key,
+      summary: i.fields?.summary || '',
+      planId: i.properties?.['testops-plan-link']?.planId || null
+    }))
+  };
 });
 
 resolver.define('getBugsBatch', async ({ payload }) => {
-  const { keys = [] } = payload;
-  const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
-  if (uniqueKeys.length === 0) return {};
-  const sevField = 'customfield_10238';
-  const bugMap = {};
-  await processInBatches(uniqueKeys, 8, 50, async key => {
-    try {
-      const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
-      let resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
-      if (resp.status === 429) {
-        await new Promise(r => setTimeout(r, 1200));
-        resp = await api.asUser().requestJira(route`/rest/api/3/issue/${key}?fields=${fieldsToFetch}`);
-      }
-      if (resp.ok) {
-        const i = await resp.json();
-        let sevVal = 'Sin definir';
-        if (i.fields?.[sevField]) {
-          const sf = i.fields[sevField];
-          sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-        } else if (i.fields) {
-          for (const [fKey, fVal] of Object.entries(i.fields)) {
-            if (fKey.startsWith('customfield_') && fVal) {
-              const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-              if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
-                sevVal = vStr;
-                break;
-              }
-            }
-          }
-        }
-
-        const affectsVersions = (i.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-        const fixVersions = (i.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-        const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
-
-        bugMap[key] = {
-          key,
-          summary: i.fields?.summary || '',
-          status: i.fields?.status?.name || '',
-          assignee: i.fields?.assignee?.displayName || 'Sin asignar',
-          resolution: i.fields?.resolution?.name || 'Unresolved',
-          priority: i.fields?.priority?.name || '',
-          issuetype: i.fields?.issuetype?.name || 'Bug',
-          severity: sevVal,
-          created: i.fields?.created || null,
-          resolutiondate: i.fields?.resolutiondate || null,
-          duedate: i.fields?.duedate || null,
-          versions: affectsVersions,
-          fixVersions: fixVersions,
-          version: versionDisplay,
-          rawFields: i.fields
-        };
-      }
-    } catch (e) {
-      console.error('[getBugsBatch] Error fetching bug ' + key, e);
-    }
-  });
-  return bugMap;
+  const { keys = [] } = payload || {};
+  return await fetchBugsBatch(keys);
 });
 
 resolver.define('getCycleExecution', async ({ payload }) => {
