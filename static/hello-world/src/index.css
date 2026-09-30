@@ -1130,10 +1130,15 @@ body {
   color: #FF8B00;
   border: 1px solid #FFE380;
 }
+.dashboard-sev-badge.medio {
+  background-color: #FFFBE6;
+  color: #974F0C;
+  border: 1px solid #F5CD47;
+}
 .dashboard-sev-badge.menor {
-  background-color: #E9F2FF;
-  color: #0C66E4;
-  border: 1px solid #B3D4FF;
+  background-color: #E3FCEF;
+  color: #006644;
+  border: 1px solid #ABF5D1;
 }
 .dashboard-sev-badge.sin-definir {
   background-color: #F1F2F4;

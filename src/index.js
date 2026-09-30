@@ -1570,8 +1570,9 @@ const fetchBugsBatch = async (keys = []) => {
   const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
   if (uniqueKeys.length === 0) return {};
   const sevField = 'customfield_10238';
+  const estResField = 'customfield_10763';
   const bugMap = {};
-  const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField];
+  const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField, estResField];
 
   // Chunk into groups of 50 keys to stay well within Jira JQL URL/payload limits
   const CHUNK_SIZE = 50;
@@ -1624,6 +1625,7 @@ const fetchBugsBatch = async (keys = []) => {
           const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+          const estResDate = issue.fields?.[estResField] || issue.fields?.duedate || null;
 
           bugMap[key] = {
             key,
@@ -1636,7 +1638,8 @@ const fetchBugsBatch = async (keys = []) => {
             severity: sevVal,
             created: issue.fields?.created || null,
             resolutiondate: issue.fields?.resolutiondate || null,
-            duedate: issue.fields?.duedate || null,
+            duedate: estResDate,
+            estimatedResolutionDate: estResDate,
             versions: affectsVersions,
             fixVersions: fixVersions,
             version: versionDisplay,
@@ -3217,7 +3220,7 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       'summary', 'description', 'attachment', 'comment', 'assignee', 'reporter',
       'creator', 'priority', 'status', 'resolution', 'created', 'updated',
       'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions',
-      'issuetype', 'customfield_10238', 'labels', 'issuelinks'
+      'issuetype', 'customfield_10238', 'customfield_10763', 'labels', 'issuelinks'
     ].join(',');
 
     const response = await api.asUser().requestJira(
@@ -3283,6 +3286,8 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     else if (typeof f.environment === 'string') environmentText = f.environment;
     else if (f.environment && typeof f.environment === 'object') environmentText = f.environment;
 
+    const estResDate = f.customfield_10763 || f.duedate || null;
+
     return {
       id: data.id,
       key: data.key,
@@ -3313,7 +3318,8 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       created: f.created,
       updated: f.updated,
       resolutiondate: f.resolutiondate || null,
-      duedate: f.duedate || null,
+      duedate: estResDate,
+      estimatedResolutionDate: estResDate,
       environment: environmentText,
       labels: f.labels || [],
       rawFields: f
@@ -3537,7 +3543,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
   console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
-  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'issuelinks'];
+  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'customfield_10763', 'issuelinks'];
 
   let allIssues = [];
   let token = null;
@@ -3574,6 +3580,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
     const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+    const estResDate = issue.fields?.customfield_10763 || issue.fields?.duedate || null;
 
     // Inspect Jira issuelinks on the bug to see if it is linked to any test entity
     let isLinkedToTest = linkedSet.has(issue.key);
@@ -3624,7 +3631,8 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
       resolutiondate: issue.fields?.resolutiondate || null,
-      duedate: issue.fields?.duedate || null,
+      duedate: estResDate,
+      estimatedResolutionDate: estResDate,
       versions: affectsVersions,
       fixVersions: fixVersions,
       version: versionDisplay,

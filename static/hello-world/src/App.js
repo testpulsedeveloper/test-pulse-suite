@@ -1067,6 +1067,8 @@ function App() {
   const [reportSelectedPlans, setReportSelectedPlans] = useState([]);
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycles, setReportSelectedCycles] = useState([]);
+  const [reportSelectedVersions, setReportSelectedVersions] = useState([]);
+  const [selectedDashboardSeverityFilter, setSelectedDashboardSeverityFilter] = useState(null);
   const [executionTypeFieldId, setExecutionTypeFieldId] = useState(null);
   const [resolutionStage, setResolutionStage] = useState('Nuevo a Abierto');
   const [dashboardSubView, setDashboardSubView] = useState('runs'); // 'runs', 'bugs', 'traceability'
@@ -10267,29 +10269,58 @@ const renderPlanningTab = () => {
     const openUnlinkedBugs = projectUnlinkedBugs.filter(b => !isBugDone(b));
     const closedUnlinkedBugs = projectUnlinkedBugs.filter(b => isBugDone(b));
 
-    const planGeneralBugsList = Array.from(allBugsMap.values()).map(item => ({
+    let planGeneralBugsList = Array.from(allBugsMap.values()).map(item => ({
       ...item,
       cycleList: item.cycles && item.cycles.size > 0 ? Array.from(item.cycles).join(', ') : 'Sin vincular',
       affectedCount: item.affectedCases ? item.affectedCases.size : 0,
       affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
     })).sort(sortBugsByCreatedDesc);
 
-    // Global / Plan-wide Bug Totals (Used in Bugs subview)
-    const totalAllPlanBugs = allBugsMap.size;
-    const totalAllBugs = totalAllPlanBugs;
-    const totalOpenPlanBugs = Array.from(allBugsMap.values()).filter(b => !b.isDone).length;
-    const totalOpenBugs = totalOpenPlanBugs;
-    const totalClosedPlanBugs = Array.from(allBugsMap.values()).filter(b => b.isDone).length;
-    const totalClosedBugs = totalClosedPlanBugs;
-
-    // Cycle-specific Bug Totals (Used in Runs subview)
-    const criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
+    // Cycle-specific Bug Totals (Used in Runs subview and Cycle bugs)
+    let criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
       affectedCount: item.affectedCases ? item.affectedCases.size : 0,
       affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
     })).sort(sortBugsByCreatedDesc);
 
-    const cycleAllBugsList = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
+    let cycleAllBugsList = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
+
+    // Extract available versions for filtering across dashboard entities
+    const availableDashboardVersions = Array.from(new Set(
+      [
+        ...(unlinkedBugs || []).flatMap(b => b.versions || (b.version && b.version !== 'Sin versión' ? [b.version] : [])),
+        ...Object.values(reportData?.bugMap || {}).flatMap(b => b.versions || (b.version && b.version !== 'Sin versión' ? [b.version] : [])),
+        ...((planCycles || []).flatMap(c => (c.execution || []).flatMap(ex => (ex.linkedBugs || []).flatMap(b => b.versions || (b.version && b.version !== 'Sin versión' ? [b.version] : []))))),
+        ...((testCases || []).flatMap(tc => tc.versions || tc.rawFields?.versions || [])).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)),
+        ...((testCycles || []).flatMap(c => c.versions || c.rawFields?.versions || [])).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v))
+      ].filter(Boolean)
+    )).sort((a, b) => a.localeCompare(b));
+
+    // Filter by affected version if selected
+    if (reportSelectedVersions && reportSelectedVersions.length > 0) {
+      const matchVersion = (b) => {
+        const bVers = (b.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v));
+        if (bVers.length === 0) {
+          if (b.version && b.version !== 'Sin versión') {
+            return reportSelectedVersions.some(rv => b.version.toLowerCase().includes(rv.toLowerCase()));
+          }
+          return reportSelectedVersions.includes('Sin versión');
+        }
+        return bVers.some(v => reportSelectedVersions.includes(v));
+      };
+      planGeneralBugsList = planGeneralBugsList.filter(matchVersion);
+      criticalCycleBugs = criticalCycleBugs.filter(matchVersion);
+      cycleAllBugsList = cycleAllBugsList.filter(matchVersion);
+    }
+
+    // Global / Plan-wide Bug Totals (Used in Bugs subview)
+    const totalAllPlanBugs = planGeneralBugsList.length;
+    const totalAllBugs = totalAllPlanBugs;
+    const totalOpenPlanBugs = planGeneralBugsList.filter(b => !b.isDone).length;
+    const totalOpenBugs = totalOpenPlanBugs;
+    const totalClosedPlanBugs = planGeneralBugsList.filter(b => b.isDone).length;
+    const totalClosedBugs = totalClosedPlanBugs;
+
     const totalCycleBugs = cycleAllBugsList.length;
     const openCycleBugs = cycleAllBugsList.filter(b => !b.isDone).length;
     const closedCycleBugs = cycleAllBugsList.filter(b => b.isDone).length;
@@ -10976,19 +11007,21 @@ const renderPlanningTab = () => {
     const manualPassPct = execStats.manual.total > 0 ? Math.round((execStats.manual.passed / execStats.manual.total) * 100) : 98;
     const getSevRank = (sev) => {
       const s = String(sev || '').toLowerCase();
-      if (s.includes('bloq')) return 1;
-      if (s.includes('crit')) return 2;
-      if (s.includes('may')) return 3;
-      if (s.includes('men')) return 4;
-      return 5;
+      if (s.includes('bloq') || s.includes('blocker')) return 1;
+      if (s.includes('crit') || s.includes('crític')) return 2;
+      if (s.includes('may') || s.includes('major') || s.includes('alta') || s.includes('high')) return 3;
+      if (s.includes('med') || s.includes('medio') || s.includes('media') || s.includes('medium')) return 4;
+      if (s.includes('men') || s.includes('minor') || s.includes('baja') || s.includes('low') || s.includes('trivial')) return 5;
+      return 6;
     };
 
     const getSeverityClass = (sev) => {
       const s = String(sev || '').toLowerCase();
-      if (s.includes('bloq')) return 'bloqueante';
-      if (s.includes('crit')) return 'critico';
-      if (s.includes('may')) return 'mayor';
-      if (s.includes('men')) return 'menor';
+      if (s.includes('bloq') || s.includes('blocker')) return 'bloqueante';
+      if (s.includes('crit') || s.includes('crític')) return 'critico';
+      if (s.includes('may') || s.includes('major') || s.includes('alta') || s.includes('high')) return 'mayor';
+      if (s.includes('med') || s.includes('medio') || s.includes('media') || s.includes('medium')) return 'medio';
+      if (s.includes('men') || s.includes('minor') || s.includes('baja') || s.includes('low') || s.includes('trivial')) return 'menor';
       return 'sin-definir';
     };
 
@@ -10996,12 +11029,34 @@ const renderPlanningTab = () => {
       const s = String(sev || '').trim();
       if (!s || s === 'Sin definir' || s === 'N/A') return '○ Sin definir';
       const low = s.toLowerCase();
-      if (low.includes('bloq')) return '✱ BLOQUEANTE';
-      if (low.includes('crit')) return '▲ CRÍTICO';
-      if (low.includes('may')) return '● MAYOR';
-      if (low.includes('men')) return '○ MENOR';
+      if (low.includes('bloq') || low.includes('blocker')) return '✱ BLOQUEANTE';
+      if (low.includes('crit') || low.includes('crític')) return '▲ CRÍTICO';
+      if (low.includes('may') || low.includes('major') || low.includes('alta') || low.includes('high')) return '● MAYOR';
+      if (low.includes('med') || low.includes('medio') || low.includes('media') || low.includes('medium')) return '◆ MEDIO';
+      if (low.includes('men') || low.includes('minor') || low.includes('baja') || low.includes('low') || low.includes('trivial')) return '○ MENOR';
       return `● ${s}`;
     };
+
+    // Severity breakdown of OPEN bugs for interactive widget (Opción A)
+    const openPlanBugs = planGeneralBugsList.filter(b => !b.isDone);
+    const sevOpenCounts = {
+      bloqueante: openPlanBugs.filter(b => getSevRank(b.severity) === 1).length,
+      critico: openPlanBugs.filter(b => getSevRank(b.severity) === 2).length,
+      mayor: openPlanBugs.filter(b => getSevRank(b.severity) === 3).length,
+      medio: openPlanBugs.filter(b => getSevRank(b.severity) === 4).length,
+      menor: openPlanBugs.filter(b => getSevRank(b.severity) === 5).length,
+      sinDefinir: openPlanBugs.filter(b => getSevRank(b.severity) >= 6).length,
+      total: openPlanBugs.length
+    };
+
+    const donutSegments = [
+      { key: 'Bloqueante', label: 'Bloqueante', count: sevOpenCounts.bloqueante, color: '#DE350B', bg: '#FFEBE6', border: '#FFBDAD' },
+      { key: 'Crítico', label: 'Crítico', count: sevOpenCounts.critico, color: '#E5493A', bg: '#FFF0ED', border: '#FFC4BA' },
+      { key: 'Mayor', label: 'Mayor', count: sevOpenCounts.mayor, color: '#FF8B00', bg: '#FFFAE6', border: '#FFE380' },
+      { key: 'Medio', label: 'Medio', count: sevOpenCounts.medio, color: '#E2B203', bg: '#FFFBE6', border: '#F5CD47' },
+      { key: 'Menor', label: 'Menor', count: sevOpenCounts.menor, color: '#006644', bg: '#E3FCEF', border: '#ABF5D1' },
+      { key: 'Sin definir', label: 'Sin Definir', count: sevOpenCounts.sinDefinir, color: '#626F86', bg: '#F1F2F4', border: '#DCDFE4' }
+    ];
 
     // ── Traceability matrix rows ──
     const traceabilityRows = [];
@@ -11059,6 +11114,18 @@ const renderPlanningTab = () => {
     const filteredPlanGeneralBugsList = planGeneralBugsList.filter(bug => {
       if (dashboardGeneralBugStatusTab === 'OPEN' && bug.isDone) return false;
       if (dashboardGeneralBugStatusTab === 'CLOSED' && !bug.isDone) return false;
+
+      // Filter by interactive severity widget if selected
+      if (selectedDashboardSeverityFilter) {
+        const rank = getSevRank(bug.severity);
+        if (selectedDashboardSeverityFilter === 'Bloqueante' && rank !== 1) return false;
+        if (selectedDashboardSeverityFilter === 'Crítico' && rank !== 2) return false;
+        if (selectedDashboardSeverityFilter === 'Mayor' && rank !== 3) return false;
+        if (selectedDashboardSeverityFilter === 'Medio' && rank !== 4) return false;
+        if (selectedDashboardSeverityFilter === 'Menor' && rank !== 5) return false;
+        if (selectedDashboardSeverityFilter === 'Sin definir' && rank < 6) return false;
+      }
+
       if (!dashboardGeneralBugSearch) return true;
       const q = dashboardGeneralBugSearch.toLowerCase().trim();
       return (
@@ -11485,7 +11552,38 @@ const renderPlanningTab = () => {
                   </details>
                 </div>
 
-                {/* 3. Ambiente: QA */}
+                {/* 3. Versión Afectada */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Versión Afectada:</span>
+                  <details style={{ position: 'relative' }}>
+                    <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
+                      {reportSelectedVersions.length === 0 ? "Todas las Versiones" : `${reportSelectedVersions.length} Versiones seleccionadas`}
+                    </summary>
+                    <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
+                       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                         <input type="checkbox" checked={reportSelectedVersions.length === 0} onChange={() => setReportSelectedVersions([])} /> Todas las Versiones
+                       </label>
+                       {availableDashboardVersions.map(v => (
+                         <label key={v} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
+                           <input type="checkbox" checked={reportSelectedVersions.includes(v)} onChange={(e) => {
+                             let newVals = [...reportSelectedVersions];
+                             if (e.target.checked) newVals.push(v);
+                             else newVals = newVals.filter(val => val !== v);
+                             setReportSelectedVersions(newVals);
+                           }} />
+                           🏷️ {v}
+                         </label>
+                       ))}
+                       {availableDashboardVersions.length === 0 && (
+                         <span style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', padding: '4px' }}>
+                           No hay versiones registradas
+                         </span>
+                       )}
+                    </div>
+                  </details>
+                </div>
+
+                {/* 4. Ambiente: QA */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
                   <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
@@ -12262,6 +12360,140 @@ const renderPlanningTab = () => {
                 </div>
               </div>
 
+              {/* ─── WIDGET DONUT INTERACTIVO DE SEVERIDADES (OPCIÓN A) ─── */}
+              <div className="dashboard-card" style={{ padding: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '20px' }}>🍩</span>
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 800, color: 'var(--jira-dark, #172B4D)' }}>
+                        Distribución de Defectos Abiertos por Severidad
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--jira-subtle, #626F86)' }}>
+                        Haz clic en un segmento del gráfico circular o en una tarjeta para filtrar la relación de defectos.
+                      </div>
+                    </div>
+                  </div>
+                  {selectedDashboardSeverityFilter && (
+                    <button
+                      onClick={() => setSelectedDashboardSeverityFilter(null)}
+                      style={{
+                        background: '#FFEBE6',
+                        border: '1px solid #FFBDAD',
+                        borderRadius: '6px',
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        color: '#DE350B',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                    >
+                      <span>✕</span>
+                      <span>Quitar filtro ({selectedDashboardSeverityFilter})</span>
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', flexWrap: 'wrap' }}>
+                  {/* Donut SVG Responsivo */}
+                  <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0, margin: '0 auto' }}>
+                    <svg width="150" height="150" viewBox="0 0 140 140" style={{ transform: 'rotate(-90deg)' }}>
+                      {/* Fondo */}
+                      <circle cx="70" cy="70" r="52" fill="transparent" stroke="#F1F2F4" strokeWidth="15" />
+                      {/* Segmentos */}
+                      {(() => {
+                        let accumulatedPct = 0;
+                        return donutSegments.map(seg => {
+                          if (seg.count === 0 || sevOpenCounts.total === 0) return null;
+                          const pct = seg.count / sevOpenCounts.total;
+                          const strokeDash = `${pct * 326.7256} ${326.7256}`;
+                          const strokeOffset = -(accumulatedPct * 326.7256);
+                          accumulatedPct += pct;
+                          const isSelected = selectedDashboardSeverityFilter === seg.key;
+                          return (
+                            <circle
+                              key={seg.key}
+                              cx="70"
+                              cy="70"
+                              r="52"
+                              fill="transparent"
+                              stroke={seg.color}
+                              strokeWidth={isSelected ? "19" : "15"}
+                              strokeDasharray={strokeDash}
+                              strokeDashoffset={strokeOffset}
+                              style={{
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                                opacity: (!selectedDashboardSeverityFilter || isSelected) ? 1 : 0.35,
+                                filter: isSelected ? 'drop-shadow(0 0 4px rgba(0,0,0,0.35))' : 'none'
+                              }}
+                              onClick={() => setSelectedDashboardSeverityFilter(prev => prev === seg.key ? null : seg.key)}
+                            >
+                              <title>{`${seg.label}: ${seg.count} (${Math.round(pct * 100)}%)`}</title>
+                            </circle>
+                          );
+                        });
+                      })()}
+                    </svg>
+                    {/* Centro con total / filtro */}
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                      <span style={{ fontSize: '22px', fontWeight: 800, color: '#172B4D', lineHeight: 1 }}>
+                        {selectedDashboardSeverityFilter ? (donutSegments.find(s => s.key === selectedDashboardSeverityFilter)?.count ?? sevOpenCounts.total) : sevOpenCounts.total}
+                      </span>
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', marginTop: '3px' }}>
+                        {selectedDashboardSeverityFilter ? selectedDashboardSeverityFilter : 'Abiertos'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Pills / Tarjetas Interactivas de Severidad */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px', flex: 1, minWidth: '280px' }}>
+                    {donutSegments.map(seg => {
+                      const isSelected = selectedDashboardSeverityFilter === seg.key;
+                      const pct = sevOpenCounts.total > 0 ? Math.round((seg.count / sevOpenCounts.total) * 100) : 0;
+                      return (
+                        <button
+                          key={seg.key}
+                          type="button"
+                          onClick={() => setSelectedDashboardSeverityFilter(prev => prev === seg.key ? null : seg.key)}
+                          style={{
+                            background: isSelected ? seg.bg : '#FAFBFC',
+                            border: isSelected ? `2px solid ${seg.color}` : `1px solid ${seg.border}`,
+                            borderRadius: '8px',
+                            padding: '10px 12px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'flex-start',
+                            gap: '4px',
+                            transition: 'all 0.15s ease',
+                            boxShadow: isSelected ? '0 2px 8px rgba(0,0,0,0.12)' : 'none',
+                            textAlign: 'left'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                            <span style={{ fontSize: '11px', fontWeight: 700, color: isSelected ? seg.color : '#44546F', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: seg.color, display: 'inline-block' }} />
+                              {seg.label}
+                            </span>
+                            {isSelected && (
+                              <span style={{ fontSize: '10px', fontWeight: 800, color: seg.color }}>✓</span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                            <span style={{ fontSize: '18px', fontWeight: 800, color: seg.color }}>{seg.count}</span>
+                            <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>({pct}%)</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
               {/* ─── TABLA 1: DEFECTOS ABIERTOS EN CICLO(S) SELECCIONADOS ─── */}
               <div className="dashboard-card" style={{ overflowX: 'auto' }}>
                 <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
@@ -12310,9 +12542,9 @@ const renderPlanningTab = () => {
                       <tr>
                         <th>ID</th>
                         <th>Resumen del bug</th>
-                        <th>Versión</th>
+                        <th>Versión Afectada</th>
                         <th>Fecha Registro / Antigüedad</th>
-                        <th>Fecha Estimada (Due Date)</th>
+                        <th>Fecha Estimada Solución</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
@@ -12400,9 +12632,9 @@ const renderPlanningTab = () => {
                               </div>
                             </td>
 
-                            {/* 4.1. Fecha Estimada (Due Date) */}
+                            {/* 4.1. Fecha Estimada Solución */}
                             <td style={{ whiteSpace: 'nowrap' }}>
-                              {renderBugDueDate(bug.duedate, false)}
+                              {renderBugDueDate(bug.estimatedResolutionDate || bug.duedate, false)}
                             </td>
 
                             {/* 5. Severidad */}
@@ -12470,6 +12702,11 @@ const renderPlanningTab = () => {
                       <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '11px', fontWeight: 700, marginLeft: '8px' }}>
                         {planGeneralBugsList.length} total
                       </span>
+                      {selectedDashboardSeverityFilter && (
+                        <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '11px', fontWeight: 700, marginLeft: '6px' }}>
+                          Filtrado: {selectedDashboardSeverityFilter} ({filteredPlanGeneralBugsList.length})
+                        </span>
+                      )}
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
                       Listado general consolidado de todos los defectos vinculados al Plan (Abiertos, On Hold, En progreso, En análisis y Cerrados).
@@ -12560,20 +12797,35 @@ const renderPlanningTab = () => {
                   </div>
                 </div>
 
+                {/* Banner de filtro por severidad si está activo */}
+                {selectedDashboardSeverityFilter && (
+                  <div style={{ background: '#E9F2FF', border: '1px solid #B3D4FF', padding: '8px 14px', borderRadius: '6px', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '0 0 1rem 0' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#0C66E4', fontWeight: 600 }}>
+                      <span>🍩</span>
+                      <span>Filtrando tabla por severidad: <strong>{selectedDashboardSeverityFilter}</strong> ({filteredPlanGeneralBugsList.length} coincidencias)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDashboardSeverityFilter(null)}
+                      style={{ background: '#FFFFFF', border: '1px solid #0C66E4', borderRadius: '4px', color: '#0C66E4', fontWeight: 700, cursor: 'pointer', fontSize: '11px', padding: '3px 8px' }}
+                    >
+                      ✕ Quitar filtro
+                    </button>
+                  </div>
+                )}
+
                 {filteredPlanGeneralBugsList.length > 0 ? (
                   <table className="dashboard-defects-table">
                     <thead>
                       <tr>
                         <th>ID</th>
                         <th>Resumen del bug</th>
-                        <th>Versión</th>
+                        <th>Versión Afectada</th>
                         <th>Fecha Registro / Antigüedad</th>
-                        <th>Fecha Estimada (Due Date)</th>
+                        <th>Fecha Estimada Solución</th>
                         <th>Severidad</th>
                         <th>Estado</th>
                         <th>Responsable</th>
-                        <th>Resolución</th>
-                        <th style={{ textAlign: 'center' }}>Casos afectados</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -12656,9 +12908,9 @@ const renderPlanningTab = () => {
                               </div>
                             </td>
 
-                            {/* 4.1. Fecha Estimada (Due Date) */}
+                            {/* 4.1. Fecha Estimada Solución */}
                             <td style={{ whiteSpace: 'nowrap' }}>
-                              {renderBugDueDate(bug.duedate, bug.isDone)}
+                              {renderBugDueDate(bug.estimatedResolutionDate || bug.duedate, bug.isDone)}
                             </td>
 
                             {/* 5. Severidad */}
@@ -12683,26 +12935,6 @@ const renderPlanningTab = () => {
                                   {bug.assignee}
                                 </span>
                               </div>
-                            </td>
-
-                            {/* 8. Resolución */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
-                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
-                                  Sin resolver
-                                </span>
-                              ) : (
-                                <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
-                                  {bug.resolution}
-                                </span>
-                              )}
-                            </td>
-
-                            {/* 9. Casos afectados */}
-                            <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-                              <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
-                                {bug.affectedCount}
-                              </span>
                             </td>
                           </tr>
                         );
