@@ -1506,29 +1506,15 @@ const getCycleExecutionSummary = async (cycleId) => {
       }
     }
 
-    // 2. Fallback strictly to cycle lightweight index (no exec_ property scanning)
-    const entries = (await readCycleIndex(cycleId)) || [];
-    return entries.map(entry => ({
-      id: String(entry.id),
-      key: entry.key || entry.testCaseKey || '',
-      testRunId: entry.testRunId,
-      testRunKey: entry.testRunKey,
-      testCaseId: String(entry.id),
-      testCaseKey: entry.key || entry.testCaseKey || '',
-      summary: entry.summary || '',
-      status: normalizeJiraStatus(entry.status || 'Not Run'),
-      nativeStatus: normalizeJiraStatus(entry.status || 'Not Run'),
-      executionType: entry.executionType || 'Manual',
-      assignee: entry.assignee || null,
-      executedBy: entry.executedBy || null,
-      executedAt: entry.executedAt || null,
-      comment: entry.comment || '',
-      iterations: entry.iterations || [],
-      evidences: filterNonIterationEvidences(entry.evidences || [], getIterationEvidenceKeys(entry.iterations)),
-      linkedBugs: entry.linkedBugs || [],
-      lockedAt: entry.lockedAt || null,
-      _detailLoaded: true
-    }));
+    // If runIssues is an empty array or validRuns is empty:
+    // Check if this cycle previously had an index. If so, all runs were deleted in Jira!
+    const previousIndex = await readCycleIndex(cycleId);
+    if (previousIndex && previousIndex.length > 0) {
+      // Runs were deleted directly in Jira! Auto-reconcile and purge the cycle's index
+      await writeCycleIndex(cycleId, []);
+      return [];
+    }
+    return [];
   } catch (err) {
     console.error('[getCycleExecutionSummary] Unexpected error:', err.message);
     const entries = (await readCycleIndex(cycleId)) || [];
@@ -1680,21 +1666,23 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const cycles = await Promise.all(targetIssues.map(async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || null;
-    let rawExecution = (await readCycleIndex(issue.id)) ?? [];
-    
-    // Deduplicate by test case key and ID so count strictly matches Planning & Execution
-    const seenTc = new Set();
-    const execution = [];
-    for (let i = 0; i < rawExecution.length; i++) {
-      const item = rawExecution[i];
-      const tcKey = item.key || item.testCaseKey || '';
-      const tcId = String(item.id || item.testCaseId || '');
-      const dKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${i}`);
-      if (!seenTc.has(dKey)) {
-        seenTc.add(dKey);
-        const { _stub, ...rest } = item;
-        rest.status = normalizeJiraStatus(rest.status);
-        execution.push(rest);
+    let execution = [];
+    try {
+      execution = await getCycleExecutionSummary(issue.id);
+    } catch (e) {
+      let rawExecution = (await readCycleIndex(issue.id)) ?? [];
+      const seenTc = new Set();
+      for (let i = 0; i < rawExecution.length; i++) {
+        const item = rawExecution[i];
+        const tcKey = item.key || item.testCaseKey || '';
+        const tcId = String(item.id || item.testCaseId || '');
+        const dKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${i}`);
+        if (!seenTc.has(dKey)) {
+          seenTc.add(dKey);
+          const { _stub, ...rest } = item;
+          rest.status = normalizeJiraStatus(rest.status);
+          execution.push(rest);
+        }
       }
     }
 

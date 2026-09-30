@@ -945,43 +945,40 @@ function App() {
       }
 
       const deletedForCycle = perCycleDeletedRef.current[cId] || new Set();
-      // CRITICAL FIX: Base local merge on THAT specific cycle's cached tests, NOT the previous active cycle tests!
       const existingCycleItems = perCycleCacheRef.current[cId] || [];
-      const backendMap = {};
-      newExecutionData.forEach(item => { backendMap[item.id] = item; });
-
-      // 1. Keep items from existing cycle state
-      const merged = existingCycleItems
-        .filter(pItem => !deletedForCycle.has(String(pItem.id)))
-        .map(pItem => {
-          const backend = backendMap[pItem.id];
-          if (backend) {
-            return {
-              ...pItem,
-              ...backend,
-              description: pItem.description || backend.description,
-              iterations: (backend.iterations && backend.iterations.length > 0) ? backend.iterations : (pItem.iterations || []),
-              evidences: (backend.evidences && backend.evidences.length > 0) ? backend.evidences : (pItem.evidences || []),
-              linkedBugs: (backend.linkedBugs && backend.linkedBugs.length > 0) ? backend.linkedBugs : (pItem.linkedBugs || []),
-              _detailLoaded: pItem._detailLoaded || backend._detailLoaded || false
-            };
-          }
-          return pItem;
-        });
-
-      // 2. Add any items from backend that we don't have locally
-      newExecutionData.forEach(item => {
+      const existingMap = new Map();
+      existingCycleItems.forEach(item => {
+        if (item.id) existingMap.set(String(item.id), item);
         const itemKey = item.testCaseKey || item.key;
-        const alreadyExists = merged.some(pItem =>
-          String(pItem.id) === String(item.id) ||
-          (itemKey && (pItem.testCaseKey === itemKey || pItem.key === itemKey))
-        );
-        if (!alreadyExists && !deletedForCycle.has(String(item.id))) {
-          merged.push(item);
-        }
+        if (itemKey) existingMap.set(String(itemKey), item);
       });
 
-      // 3. Deduplicate final array strictly by key and id
+      // 1. Authoritative mapping from backend Jira response (preserves rich local details if present)
+      const merged = newExecutionData
+        .filter(backendItem => {
+          const tcId = String(backendItem.id || backendItem.testCaseId || '');
+          const tcKey = backendItem.testCaseKey || backendItem.key || '';
+          return !deletedForCycle.has(tcId) && (!tcKey || !deletedForCycle.has(tcKey));
+        })
+        .map(backendItem => {
+          const tcId = String(backendItem.id || backendItem.testCaseId || '');
+          const tcKey = backendItem.testCaseKey || backendItem.key || '';
+          const existing = existingMap.get(tcId) || (tcKey ? existingMap.get(tcKey) : null);
+          if (existing) {
+            return {
+              ...existing,
+              ...backendItem,
+              description: backendItem.description || existing.description,
+              iterations: (backendItem.iterations && backendItem.iterations.length > 0) ? backendItem.iterations : (existing.iterations || []),
+              evidences: (backendItem.evidences && backendItem.evidences.length > 0) ? backendItem.evidences : (existing.evidences || []),
+              linkedBugs: (backendItem.linkedBugs && backendItem.linkedBugs.length > 0) ? backendItem.linkedBugs : (existing.linkedBugs || []),
+              _detailLoaded: existing._detailLoaded || backendItem._detailLoaded || false
+            };
+          }
+          return backendItem;
+        });
+
+      // 2. Deduplicate final array strictly by key and id
       const dedupedMap = new Map();
       for (const item of merged) {
         const tcKey = item.testCaseKey || item.key;
@@ -2334,6 +2331,10 @@ Then el sistema valida la identidad.
               value={selectedProjectId || ''} 
               onChange={(e) => {
                 const newPid = e.target.value;
+                perCycleCacheRef.current = {};
+                perCycleDeletedRef.current = {};
+                setCycleTests([]);
+                setSelectedCycle(null);
                 setSelectedProjectId(newPid);
                 setTestCases([]);
                 setIsFetchingTests(true);
@@ -2539,9 +2540,16 @@ Then el sistema valida la identidad.
               onClick={async () => {
                 setIsRefreshing(true);
                 try {
+                  perCycleCacheRef.current = {};
+                  perCycleDeletedRef.current = {};
+                  if (selectedProjectId) {
+                    try {
+                      sessionStorage.removeItem(`tp_${selectedProjectId}_tc`);
+                    } catch (e) {}
+                  }
+
                   if (activeTab === 'execution' || activeTab === 'planning') {
                     setLocalLoading(true);
-                    perCycleCacheRef.current = {};
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
                     const [fetchedCycles, fetchedPlans] = await Promise.all([
                       invoke('getTestCycles', { projectId: selectedProjectId, config }),
