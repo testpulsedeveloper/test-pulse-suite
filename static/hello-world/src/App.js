@@ -5339,7 +5339,11 @@ Then el sistema valida la identidad.
         const tc = testCases.find(t => String(t.id) === String(ex.id));
         return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
       });
-      const filtered = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+      const filtered = enriched.filter(t => {
+        const id = String(t.id || t.testCaseId || '');
+        const key = String(t.key || t.testCaseKey || '');
+        return !deletedForCycle.has(id) && (!key || !deletedForCycle.has(key));
+      });
 
       // Strict deduplication by testCaseKey / id
       const dedupedMap = new Map();
@@ -6708,8 +6712,12 @@ Then el sistema valida la identidad.
             return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
           });
           // Filter out any tests deleted this session (avoids stale-read ghosts from Jira eventual consistency)
-          const deletedForCycle = perCycleDeletedRef.current[selectedCycle.id] || new Set();
-          const filteredEnriched = enriched.filter(t => !deletedForCycle.has(String(t.id)));
+          const deletedForCycle = perCycleDeletedRef.current[cycleId] || (selectedCycle ? perCycleDeletedRef.current[String(selectedCycle.id)] : null) || new Set();
+          const filteredEnriched = enriched.filter(t => {
+            const id = String(t.id || t.testCaseId || '');
+            const key = String(t.key || t.testCaseKey || '');
+            return !deletedForCycle.has(id) && (!key || !deletedForCycle.has(key));
+          });
           
           // Preserve exact order as added / linked
           perCycleCacheRef.current[cycleId] = filteredEnriched;
