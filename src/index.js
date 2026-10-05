@@ -457,7 +457,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const jql = `${projectJql}issuetype in (${validCycleTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
     // Pass at most 3 properties (Jira allows max 5)
     const propNames = ['testops-plan-link', 'execution', 'tests'];
-    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, propNames);
+    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created', 'versions', 'fixVersions'], null, propNames);
     return allIssues.map(issue => {
       const props = issue.properties || {};
       let totalTests = 0;
@@ -487,14 +487,24 @@ resolver.define('getTestCycles', async ({ payload }) => {
         }
       }
       
+      const rawAff = issue.fields?.versions || [];
+      const rawFix = issue.fields?.fixVersions || [];
+      const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
       const planLink = props['testops-plan-link'];
-      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : null;
+      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (props['testpulse-v2']?.planId || null));
       return {
         id: issue.id,
         key: issue.key,
         summary: issue.fields?.summary || issue.key,
         status: issue.fields?.status?.name || 'To Do',
         planId,
+        version: versionDisplay,
+        versions: affectsVersions,
+        fixVersions: fixVersions,
+        rawFields: issue.fields,
         testCount: totalTests
       };
     });
@@ -894,12 +904,10 @@ const trimBugsForIndex = (bugs) => {
 
 
 // === Cycle Index — Jira Entity Property sharding (no 32KB limit per shard) ===
-// Instead of one large property (which hits the 32KB limit at ~200 tests),
-// we shard the index into multiple properties of SHARD_SIZE entries each.
+// Sharded into blocks of SHARD_SIZE entries (40 entries × ~250 bytes ≈ 10KB, safely under Jira's 32KB limit).
 // Shard 0: /properties/execution  (backward compat with existing data)
-// Shard N: /properties/execution_N  (N = 1, 2, 3…)
-// 200 entries × ~150 bytes ≈ 30KB — safely under the 32KB per-property limit.
-const SHARD_SIZE = 100;
+// Shard N: /properties/execution_N  (N = 1, 2, 3… up to 100 = 4,000+ tests per cycle)
+const SHARD_SIZE = 40;
 const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 
 // Returns:
@@ -908,7 +916,7 @@ const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 //   [...] → tests in the index
 const readCycleIndex = async (cycleId) => {
   const allEntries = [];
-  for (let shard = 0; shard <= 25; shard++) {          // max 25 shards = 2500+ tests
+  for (let shard = 0; shard <= 100; shard++) {          // max 100 shards = 4000+ tests
     const propName = _shardProp(shard);
     const res = await api.asUser().requestJira(
       route`/rest/api/3/issue/${cycleId}/properties/${propName}?t=${Date.now()}`
@@ -936,10 +944,22 @@ const writeCycleIndex = async (cycleId, entries) => {
   // ALWAYS write at least shard 0, even for empty arrays.
   // An empty shard 0 is the "explicitly cleared" sentinel that prevents
   // getCycleExecutionSummary Tier 2 from resurrecting deleted tests via exec_ scan.
-  const shardCount = entries.length === 0 ? 1 : Math.ceil(entries.length / SHARD_SIZE);
+  const cleanEntries = (entries || []).map(e => ({
+    id: String(e.id || e.testCaseId || ''),
+    key: e.key || e.testCaseKey || '',
+    testCaseKey: e.testCaseKey || e.key || '',
+    testRunId: e.testRunId || null,
+    testRunKey: e.testRunKey || null,
+    summary: typeof e.summary === 'string' ? e.summary.slice(0, 160) : '',
+    status: e.status || 'Not Run',
+    executionType: e.executionType || 'Manual',
+    linkedBugs: trimBugsForIndex(e.linkedBugs || [])
+  }));
+
+  const shardCount = cleanEntries.length === 0 ? 1 : Math.ceil(cleanEntries.length / SHARD_SIZE);
   for (let shard = 0; shard < shardCount; shard++) {
     const propName = _shardProp(shard);
-    const shardEntries = entries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE);
+    const shardEntries = cleanEntries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE);
     let res = await api.asUser().requestJira(
       route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
         method: 'PUT',
@@ -959,12 +979,12 @@ const writeCycleIndex = async (cycleId, entries) => {
     }
     if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
     if (shard < shardCount - 1) {
-      await new Promise(r => setTimeout(r, 80));
+      await new Promise(r => setTimeout(r, 60));
     }
   }
 
   // Clean up any remaining trailing shards
-  for (let oldShard = shardCount; oldShard <= 25; oldShard++) {
+  for (let oldShard = shardCount; oldShard <= 100; oldShard++) {
     const propName = _shardProp(oldShard);
     api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
       method: 'DELETE'
@@ -973,7 +993,7 @@ const writeCycleIndex = async (cycleId, entries) => {
 };
 
 const deleteCycleIndex = async (cycleId) => {
-  for (let shard = 0; shard <= 10; shard++) {
+  for (let shard = 0; shard <= 100; shard++) {
     const res = await api.asUser().requestJira(
       route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`,
       { method: 'DELETE' }
@@ -1507,14 +1527,29 @@ const getCycleExecutionSummary = async (cycleId) => {
     }
 
     // If runIssues is an empty array or validRuns is empty:
-    // Check if this cycle previously had an index. If so, all runs were deleted in Jira!
-    const previousIndex = await readCycleIndex(cycleId);
-    if (previousIndex && previousIndex.length > 0) {
-      // Runs were deleted directly in Jira! Auto-reconcile and purge the cycle's index
-      await writeCycleIndex(cycleId, []);
-      return [];
-    }
-    return [];
+    // Fall back to stored cycle index safely without purging
+    const previousIndex = (await readCycleIndex(cycleId)) || [];
+    return previousIndex.map(entry => ({
+      id: String(entry.id),
+      key: entry.key || entry.testCaseKey || '',
+      testRunId: entry.testRunId,
+      testRunKey: entry.testRunKey,
+      testCaseId: String(entry.id),
+      testCaseKey: entry.key || entry.testCaseKey || '',
+      summary: entry.summary || '',
+      status: normalizeJiraStatus(entry.status || 'Not Run'),
+      nativeStatus: normalizeJiraStatus(entry.status || 'Not Run'),
+      executionType: entry.executionType || 'Manual',
+      assignee: entry.assignee || null,
+      executedBy: entry.executedBy || null,
+      executedAt: entry.executedAt || null,
+      comment: entry.comment || '',
+      iterations: entry.iterations || [],
+      evidences: filterNonIterationEvidences(entry.evidences || [], getIterationEvidenceKeys(entry.iterations)),
+      linkedBugs: entry.linkedBugs || [],
+      lockedAt: entry.lockedAt || null,
+      _detailLoaded: true
+    }));
   } catch (err) {
     console.error('[getCycleExecutionSummary] Unexpected error:', err.message);
     const entries = (await readCycleIndex(cycleId)) || [];
@@ -1649,7 +1684,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let token = null;
   let isLast = false;
   while (!isLast) {
-    const page = await fetchJqlPage(jql, ['summary', 'issuetype'], null, ['testops-plan-link'], token, 100);
+    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created'], null, ['testops-plan-link', 'testpulse-v2'], token, 100);
     if (page.error) break;
     allIssues = allIssues.concat(page.issues);
     token = page.nextPageToken;
@@ -1665,32 +1700,40 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   
   const cycles = await Promise.all(targetIssues.map(async (issue) => {
     const properties = issue.properties || {};
-    const planId = properties['testops-plan-link']?.planId || null;
-    let execution = [];
-    try {
-      execution = await getCycleExecutionSummary(issue.id);
-    } catch (e) {
-      let rawExecution = (await readCycleIndex(issue.id)) ?? [];
-      const seenTc = new Set();
-      for (let i = 0; i < rawExecution.length; i++) {
-        const item = rawExecution[i];
-        const tcKey = item.key || item.testCaseKey || '';
-        const tcId = String(item.id || item.testCaseId || '');
-        const dKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${i}`);
-        if (!seenTc.has(dKey)) {
-          seenTc.add(dKey);
-          const { _stub, ...rest } = item;
-          rest.status = normalizeJiraStatus(rest.status);
-          execution.push(rest);
-        }
+    const planId = properties['testops-plan-link']?.planId || properties['testpulse-v2']?.planId || null;
+    let rawExecution = (await readCycleIndex(issue.id)) ?? [];
+    
+    // Deduplicate by test case key and ID so count strictly matches Planning & Execution
+    const seenTc = new Set();
+    const execution = [];
+    for (let i = 0; i < rawExecution.length; i++) {
+      const item = rawExecution[i];
+      const tcKey = item.key || item.testCaseKey || '';
+      const tcId = String(item.id || item.testCaseId || '');
+      const dKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${i}`);
+      if (!seenTc.has(dKey)) {
+        seenTc.add(dKey);
+        const { _stub, ...rest } = item;
+        rest.status = normalizeJiraStatus(rest.status);
+        execution.push(rest);
       }
     }
+
+    const rawAff = issue.fields?.versions || [];
+    const rawFix = issue.fields?.fixVersions || [];
+    const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
 
     return {
       id: issue.id,
       key: issue.key,
       summary: issue.fields?.summary || '',
       planId,
+      version: versionDisplay,
+      versions: affectsVersions,
+      fixVersions: fixVersions,
+      rawFields: issue.fields,
       execution
     };
   }));
@@ -1728,12 +1771,25 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     nextOffset,
     offset: numOffset,
     limit: numLimit,
-    allCycleSummaries: allIssues.map(i => ({
-      id: i.id,
-      key: i.key,
-      summary: i.fields?.summary || '',
-      planId: i.properties?.['testops-plan-link']?.planId || null
-    }))
+    allCycleSummaries: allIssues.map(i => {
+      const rawAff = i.fields?.versions || [];
+      const rawFix = i.fields?.fixVersions || [];
+      const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+      const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+      const planLink = i.properties?.['testops-plan-link'];
+      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (i.properties?.['testpulse-v2']?.planId || null));
+      return {
+        id: i.id,
+        key: i.key,
+        summary: i.fields?.summary || '',
+        planId,
+        version: versionDisplay,
+        versions: affectsVersions,
+        fixVersions: fixVersions,
+        rawFields: i.fields
+      };
+    })
   };
 });
 
