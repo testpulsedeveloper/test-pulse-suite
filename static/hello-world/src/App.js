@@ -7584,7 +7584,7 @@ const renderPlanningTab = () => {
                               }
                             });
 
-                            const CHUNK_SIZE = 10;
+                            const CHUNK_SIZE = 25;
                             let allAddedTests = [];
                             for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                                 const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);

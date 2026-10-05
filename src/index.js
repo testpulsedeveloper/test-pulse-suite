@@ -1071,7 +1071,7 @@ async function unlinkIssueFromCycle(runIssueId, cycleId) {
   }
 }
 
-async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, testCases, config }) {
+async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, testCases, config, skipCandidateSearch = false }) {
   const testRunType = config?.testRunType || 'Test Run';
   if (!testCases || testCases.length === 0) return [];
 
@@ -1092,94 +1092,98 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
   const createdRuns = [];
   const testCasesToCreate = [];
 
-  // Step 1: Check for existing linked Test Runs in Jira for this cycle (Auto-Recovery)
-  // Use only linkedIssues query — fast and sufficient
-  try {
-    let candidateRuns = await fetchAllIssues(
-      `issue in linkedIssues("${cycleId}")`,
-      ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
-      null,
-      ['testpulse-run-data'],
-      50
-    );
-    if (!Array.isArray(candidateRuns)) candidateRuns = [];
+  if (skipCandidateSearch) {
+    testCasesToCreate.push(...testCases);
+  } else {
+    // Step 1: Check for existing linked Test Runs in Jira for this cycle (Auto-Recovery)
+    // Use only linkedIssues query — fast and sufficient
+    try {
+      let candidateRuns = await fetchAllIssues(
+        `issue in linkedIssues("${cycleId}")`,
+        ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
+        null,
+        ['testpulse-run-data'],
+        50
+      );
+      if (!Array.isArray(candidateRuns)) candidateRuns = [];
 
-    for (const tc of testCases) {
-      const tcIdStr = String(tc.id);
-      const tcKeyStr = tc.key ? String(tc.key) : '';
+      for (const tc of testCases) {
+        const tcIdStr = String(tc.id);
+        const tcKeyStr = tc.key ? String(tc.key) : '';
 
-      // Find if an existing run matches this test case and this cycle
-      const existingRun = candidateRuns.find(r => {
-        const prop = r.properties?.['testpulse-run-data'] || {};
-        const matchesCycle = String(prop.cycleId) === String(cycleId) || prop.cycleKey === String(cycleKey);
-        const matchesTc = String(prop.testCaseId) === tcIdStr || prop.testCaseKey === tcKeyStr || (tcKeyStr && r.fields?.summary?.includes(`[Run] ${tcKeyStr}:`)) || (tcKeyStr && r.fields?.summary?.includes(tcKeyStr));
-        return matchesCycle && matchesTc;
-      });
+        // Find if an existing run matches this test case and this cycle
+        const existingRun = candidateRuns.find(r => {
+          const prop = r.properties?.['testpulse-run-data'] || {};
+          const matchesCycle = String(prop.cycleId) === String(cycleId) || prop.cycleKey === String(cycleKey);
+          const matchesTc = String(prop.testCaseId) === tcIdStr || prop.testCaseKey === tcKeyStr || (tcKeyStr && r.fields?.summary?.includes(`[Run] ${tcKeyStr}:`)) || (tcKeyStr && r.fields?.summary?.includes(tcKeyStr));
+          return matchesCycle && matchesTc;
+        });
 
-      if (existingRun) {
-        // RECONECTAR / AUTO-RECUPERAR
-        try {
-          await linkTwoIssues(existingRun.id, cycleId, 'Relates');
-          if (tc.id) {
-            await linkTwoIssues(existingRun.id, tc.id, 'Relates');
+        if (existingRun) {
+          // RECONECTAR / AUTO-RECUPERAR
+          try {
+            await linkTwoIssues(existingRun.id, cycleId, 'Relates');
+            if (tc.id) {
+              await linkTwoIssues(existingRun.id, tc.id, 'Relates');
+            }
+
+            const existingProp = existingRun.properties?.['testpulse-run-data'] || {};
+            const updatedProp = {
+              ...existingProp,
+              cycleId: String(cycleId),
+              cycleKey: cycleKey || String(cycleId),
+              testCaseId: tcIdStr,
+              testCaseKey: tcKeyStr,
+              unlinkedFromCycle: false
+            };
+            delete updatedProp.unlinkedAt;
+
+            await api.asUser().requestJira(route`/rest/api/3/issue/${existingRun.id}/properties/testpulse-run-data`, {
+              method: 'PUT',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify(updatedProp)
+            });
+
+            const nativeStatus = existingRun.fields?.status?.name || 'Not Run';
+            const normStatus = normalizeJiraStatus(nativeStatus || existingProp.status || 'Not Run');
+
+            createdRuns.push({
+              id: tcIdStr,
+              key: tcKeyStr || existingRun.key,
+              testRunId: existingRun.id,
+              testRunKey: existingRun.key,
+              testCaseId: tcIdStr,
+              testCaseKey: tcKeyStr || existingRun.key,
+              summary: existingProp.snapshot?.testCaseSummary || tc.summary,
+              description: existingRun.fields?.description || existingProp.snapshot?.testCaseDescription || null,
+              executionType: existingProp.executionType || tc.executionType || 'Manual',
+              status: normStatus,
+              nativeStatus: nativeStatus,
+              assignee: existingRun.fields?.assignee || null,
+              executedBy: existingProp.executedBy || (existingRun.fields?.assignee ? { displayName: existingRun.fields.assignee.displayName, accountId: existingRun.fields.assignee.accountId } : null),
+              executedAt: existingProp.executedAt || null,
+              evidences: filterNonIterationEvidences([
+                ...(existingRun.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
+                ...(existingProp.evidences || [])
+              ], getIterationEvidenceKeys(existingProp.iterations)),
+              iterations: existingProp.iterations || [],
+              comment: existingProp.comment || '',
+              linkedBugs: existingProp.linkedBugs || [],
+              isRecovered: true
+            });
+            continue;
+          } catch (recoverErr) {
+            console.warn(`[createTestRunsInJiraForCycle] Error recovering run ${existingRun.id}:`, recoverErr.message);
           }
-
-          const existingProp = existingRun.properties?.['testpulse-run-data'] || {};
-          const updatedProp = {
-            ...existingProp,
-            cycleId: String(cycleId),
-            cycleKey: cycleKey || String(cycleId),
-            testCaseId: tcIdStr,
-            testCaseKey: tcKeyStr,
-            unlinkedFromCycle: false
-          };
-          delete updatedProp.unlinkedAt;
-
-          await api.asUser().requestJira(route`/rest/api/3/issue/${existingRun.id}/properties/testpulse-run-data`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedProp)
-          });
-
-          const nativeStatus = existingRun.fields?.status?.name || 'Not Run';
-          const normStatus = normalizeJiraStatus(nativeStatus || existingProp.status || 'Not Run');
-
-          createdRuns.push({
-            id: tcIdStr,
-            key: tcKeyStr || existingRun.key,
-            testRunId: existingRun.id,
-            testRunKey: existingRun.key,
-            testCaseId: tcIdStr,
-            testCaseKey: tcKeyStr || existingRun.key,
-            summary: existingProp.snapshot?.testCaseSummary || tc.summary,
-            description: existingRun.fields?.description || existingProp.snapshot?.testCaseDescription || null,
-            executionType: existingProp.executionType || tc.executionType || 'Manual',
-            status: normStatus,
-            nativeStatus: nativeStatus,
-            assignee: existingRun.fields?.assignee || null,
-            executedBy: existingProp.executedBy || (existingRun.fields?.assignee ? { displayName: existingRun.fields.assignee.displayName, accountId: existingRun.fields.assignee.accountId } : null),
-            executedAt: existingProp.executedAt || null,
-            evidences: filterNonIterationEvidences([
-              ...(existingRun.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
-              ...(existingProp.evidences || [])
-            ], getIterationEvidenceKeys(existingProp.iterations)),
-            iterations: existingProp.iterations || [],
-            comment: existingProp.comment || '',
-            linkedBugs: existingProp.linkedBugs || [],
-            isRecovered: true
-          });
-          continue;
-        } catch (recoverErr) {
-          console.warn(`[createTestRunsInJiraForCycle] Error recovering run ${existingRun.id}:`, recoverErr.message);
         }
-      }
 
-      // No existing run to recover: needs fresh creation
-      testCasesToCreate.push(tc);
+        // No existing run to recover: needs fresh creation
+        testCasesToCreate.push(tc);
+      }
+    } catch (searchErr) {
+      console.warn(`[createTestRunsInJiraForCycle] Error searching candidates:`, searchErr.message);
+      testCasesToCreate.push(...testCases.filter(tc => !createdRuns.some(cr => String(cr.id) === String(tc.id))));
     }
-  } catch (searchErr) {
-    console.warn(`[createTestRunsInJiraForCycle] Error searching candidates:`, searchErr.message);
-    testCasesToCreate.push(...testCases.filter(tc => !createdRuns.some(cr => String(cr.id) === String(tc.id))));
   }
 
   // Step 2: Fresh creation for test cases that did not have prior executions
@@ -1507,6 +1511,36 @@ const getCycleExecutionSummary = async (cycleId) => {
           const { _runIssue, _tcIdStr, _normStatus, _hasExecution, _createdAt, ...clean } = entry;
           return clean;
         });
+
+        // Merge with stored index so any tests created/added before Jira JQL indexes them are not dropped
+        const previousIndex = (await readCycleIndex(cycleId)) || [];
+        const knownIds = new Set(cleanEntries.map(e => String(e.id || e.testCaseId)));
+        for (const prev of previousIndex) {
+          if (prev && prev.id && !knownIds.has(String(prev.id))) {
+            cleanEntries.push({
+              id: String(prev.id),
+              key: prev.key || prev.testCaseKey || '',
+              testRunId: prev.testRunId,
+              testRunKey: prev.testRunKey,
+              testCaseId: String(prev.id),
+              testCaseKey: prev.key || prev.testCaseKey || '',
+              summary: prev.summary || '',
+              status: normalizeJiraStatus(prev.status || 'Not Run'),
+              nativeStatus: normalizeJiraStatus(prev.nativeStatus || prev.status || 'Not Run'),
+              executionType: prev.executionType || 'Manual',
+              assignee: prev.assignee || null,
+              executedBy: prev.executedBy || null,
+              executedAt: prev.executedAt || null,
+              comment: prev.comment || '',
+              iterations: prev.iterations || [],
+              evidences: filterNonIterationEvidences(prev.evidences || [], getIterationEvidenceKeys(prev.iterations)),
+              linkedBugs: prev.linkedBugs || [],
+              lockedAt: prev.lockedAt || null,
+              _detailLoaded: true
+            });
+            knownIds.add(String(prev.id));
+          }
+        }
 
         // Reconcile cycle sharded index in background so getTestCycles and Dashboard match live Jira runs
         writeCycleIndex(cycleId, cleanEntries.map(e => ({
@@ -1916,8 +1950,8 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const newTests = (testCases || []).filter(tc => !existingIds.has(String(tc.id)));
 
   if (newTests.length > 0) {
-    // createTestRunsInJiraForCycle handles auto-recovery (finds existing runs) + creation in one query
-    const CHUNK_SIZE = 10;
+    // createTestRunsInJiraForCycle with skipCandidateSearch avoids redundant JQL scans during bulk adds
+    const CHUNK_SIZE = 25;
     const allCreatedRuns = [];
     for (let i = 0; i < newTests.length; i += CHUNK_SIZE) {
       const chunk = newTests.slice(i, i + CHUNK_SIZE);
@@ -1926,7 +1960,8 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
         cycleId,
         cycleKey,
         testCases: chunk,
-        config
+        config,
+        skipCandidateSearch: true
       });
       allCreatedRuns.push(...created);
     }
