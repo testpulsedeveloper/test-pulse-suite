@@ -5511,14 +5511,31 @@ Then el sistema valida la identidad.
   const handleRemoveTestFromCycle = async (testId) => {
     if (!selectedCycle) return;
     const id = String(testId);
-    // Optimistic: remove from UI immediately, track to prevent ghost reappear
     const cycleId = String(selectedCycle.id);
-    deletedIdsRef.current.add(id);
-    if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
-    perCycleDeletedRef.current[cycleId].add(id);
-    setPlanningChecked(prev => { const s = new Set(prev); s.delete(id); return s; });
+    const targetItem = cycleTests.find(t => String(t.id) === id || String(t.key) === id || String(t.testRunId) === id || String(t.testCaseKey) === id || String(t.testCaseId) === id);
+    const idsToTrack = [id];
+    if (targetItem) {
+      if (targetItem.id) idsToTrack.push(String(targetItem.id));
+      if (targetItem.key) idsToTrack.push(String(targetItem.key));
+      if (targetItem.testCaseId) idsToTrack.push(String(targetItem.testCaseId));
+      if (targetItem.testCaseKey) idsToTrack.push(String(targetItem.testCaseKey));
+      if (targetItem.testRunId) idsToTrack.push(String(targetItem.testRunId));
+      if (targetItem.testRunKey) idsToTrack.push(String(targetItem.testRunKey));
+    }
+    idsToTrack.forEach(trackId => {
+      deletedIdsRef.current.add(trackId);
+      if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
+      perCycleDeletedRef.current[cycleId].add(trackId);
+    });
+    setPlanningChecked(prev => { const s = new Set(prev); idsToTrack.forEach(tid => s.delete(tid)); return s; });
     setCycleTests(prev => {
-      const next = prev.filter(t => String(t.id) !== id);
+      const next = prev.filter(t => {
+        const tId = String(t.id || '');
+        const tKey = String(t.key || '');
+        const tTcKey = String(t.testCaseKey || '');
+        const tRunId = String(t.testRunId || '');
+        return !idsToTrack.includes(tId) && (!tKey || !idsToTrack.includes(tKey)) && (!tTcKey || !idsToTrack.includes(tTcKey)) && (!tRunId || !idsToTrack.includes(tRunId));
+      });
       perCycleCacheRef.current[cycleId] = next;
       setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
@@ -5528,8 +5545,10 @@ Then el sistema valida la identidad.
       await invoke('removeTestFromCycle', { cycleId, testId: id });
     } catch (err) {
       // Rollback on error
-      deletedIdsRef.current.delete(id);
-      perCycleDeletedRef.current[cycleId]?.delete(id);
+      idsToTrack.forEach(trackId => {
+        deletedIdsRef.current.delete(trackId);
+        perCycleDeletedRef.current[cycleId]?.delete(trackId);
+      });
       addNotification({ type: 'error', title: 'Error al eliminar caso', description: err.message });
       const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
       if (execution) safeSetCycleTests(execution);
@@ -5538,25 +5557,50 @@ Then el sistema valida la identidad.
 
   const handleRemoveManyFromCycle = async (testIds) => {
     if (!selectedCycle || !testIds || testIds.length === 0) return;
-    const ids = testIds.map(String);
     const cycleId = String(selectedCycle.id);
-    // Optimistic: remove all from UI and clear selection
+    const idsToTrack = [];
+    testIds.forEach(testId => {
+      const id = String(testId);
+      idsToTrack.push(id);
+      const targetItem = cycleTests.find(t => String(t.id) === id || String(t.key) === id || String(t.testRunId) === id || String(t.testCaseKey) === id || String(t.testCaseId) === id);
+      if (targetItem) {
+        if (targetItem.id) idsToTrack.push(String(targetItem.id));
+        if (targetItem.key) idsToTrack.push(String(targetItem.key));
+        if (targetItem.testCaseId) idsToTrack.push(String(targetItem.testCaseId));
+        if (targetItem.testCaseKey) idsToTrack.push(String(targetItem.testCaseKey));
+        if (targetItem.testRunId) idsToTrack.push(String(targetItem.testRunId));
+        if (targetItem.testRunKey) idsToTrack.push(String(targetItem.testRunKey));
+      }
+    });
+
     if (!perCycleDeletedRef.current[cycleId]) perCycleDeletedRef.current[cycleId] = new Set();
-    ids.forEach(id => { deletedIdsRef.current.add(id); perCycleDeletedRef.current[cycleId].add(id); });
+    idsToTrack.forEach(trackId => {
+      deletedIdsRef.current.add(trackId);
+      perCycleDeletedRef.current[cycleId].add(trackId);
+    });
     setPlanningChecked(new Set());
     setCycleTests(prev => {
-      const next = prev.filter(t => !ids.includes(String(t.id)));
+      const next = prev.filter(t => {
+        const tId = String(t.id || '');
+        const tKey = String(t.key || '');
+        const tTcKey = String(t.testCaseKey || '');
+        const tRunId = String(t.testRunId || '');
+        return !idsToTrack.includes(tId) && (!tKey || !idsToTrack.includes(tKey)) && (!tTcKey || !idsToTrack.includes(tTcKey)) && (!tRunId || !idsToTrack.includes(tRunId));
+      });
       perCycleCacheRef.current[cycleId] = next;
       setTestCycles(cycles => cycles.map(c => String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       return next;
     });
     try {
-      await invoke('removeManyTestsFromCycle', { cycleId, testIds: ids });
-      addNotification({ type: 'success', title: `${ids.length} caso${ids.length !== 1 ? 's' : ''} eliminado${ids.length !== 1 ? 's' : ''} del ciclo` });
+      await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(testIds.map(String))) });
+      addNotification({ type: 'success', title: `${testIds.length} caso${testIds.length !== 1 ? 's' : ''} eliminado${testIds.length !== 1 ? 's' : ''} del ciclo` });
     } catch (err) {
       // Rollback on error
-      ids.forEach(id => { deletedIdsRef.current.delete(id); perCycleDeletedRef.current[cycleId]?.delete(id); });
+      idsToTrack.forEach(trackId => {
+        deletedIdsRef.current.delete(trackId);
+        perCycleDeletedRef.current[cycleId]?.delete(trackId);
+      });
       addNotification({ type: 'error', title: 'Error al eliminar casos', description: err.message });
       const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
       if (execution) safeSetCycleTests(execution);

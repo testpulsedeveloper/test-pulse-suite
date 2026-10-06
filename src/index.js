@@ -1392,23 +1392,34 @@ const getCycleExecutionSummary = async (cycleId) => {
           const isDirectTc = ['Test Case', 'TestCase', 'Caso de prueba', 'Caso de Prueba', 'Prueba'].some(t => type.toLowerCase().includes(t.toLowerCase()));
 
           let tcKey = runData.testCaseKey || (isDirectTc ? run.key : '');
-          if (!tcKey) {
-            tcKey = (run.fields?.issuelinks || [])
-              .map(l => l.outwardIssue || l.inwardIssue)
-              .filter(Boolean)
-              .find(i => String(i.id) !== String(cycleId))?.key || '';
-          }
           if (!tcKey && run.fields?.summary) {
             const match = run.fields.summary.match(/\[Run\]\s*([A-Z0-9_-]+):/i);
             if (match && match[1]) tcKey = match[1];
           }
-          let tcId = runData.testCaseId || (isDirectTc ? String(run.id) : '');
-          if (!tcId) {
-            tcId = (run.fields?.issuelinks || [])
+          if (!tcKey) {
+            const linkedTc = (run.fields?.issuelinks || [])
               .map(l => l.outwardIssue || l.inwardIssue)
               .filter(Boolean)
-              .find(i => String(i.id) !== String(cycleId))?.id || (tcKey || run.id);
+              .find(i => {
+                const typeName = (i.fields?.issuetype?.name || '').toLowerCase();
+                return String(i.id) !== String(cycleId) && (typeName.includes('test') || typeName.includes('caso') || typeName.includes('prueba'));
+              });
+            if (linkedTc) tcKey = linkedTc.key;
           }
+          if (!tcKey) tcKey = run.key;
+
+          let tcId = runData.testCaseId || (isDirectTc ? String(run.id) : '');
+          if (!tcId) {
+            const linkedTc = (run.fields?.issuelinks || [])
+              .map(l => l.outwardIssue || l.inwardIssue)
+              .filter(Boolean)
+              .find(i => {
+                const typeName = (i.fields?.issuetype?.name || '').toLowerCase();
+                return String(i.id) !== String(cycleId) && (typeName.includes('test') || typeName.includes('caso') || typeName.includes('prueba'));
+              });
+            if (linkedTc) tcId = String(linkedTc.id);
+          }
+          if (!tcId) tcId = (tcKey && tcKey !== run.key) ? tcKey : String(run.id);
 
           const nativeStatusName = run.fields?.status?.name || '';
           const normNativeStatus = normalizeJiraStatus(nativeStatusName);
@@ -1479,46 +1490,20 @@ const getCycleExecutionSummary = async (cycleId) => {
           };
         });
 
-        // DEDUPLICATION: group by testCaseId AND testCaseKey, keep best run per TC, unlink/delete duplicate blanks
+        // In-memory deduplication: group by unique test case, keep best run without deleting anything in Jira
         const byKey = new Map();
         for (const entry of mappedRuns) {
           const tcKey = entry.testCaseKey || entry.key;
           const tcId = entry.testCaseId || entry.id;
-          let existingWinnerKey = null;
-          if (tcKey && byKey.has(`key_${tcKey}`)) {
-            existingWinnerKey = `key_${tcKey}`;
-          } else if (tcId && byKey.has(`id_${tcId}`)) {
-            existingWinnerKey = `id_${tcId}`;
-          }
+          const lookupKey = tcKey ? `key_${tcKey}` : `id_${tcId}`;
 
-          if (!existingWinnerKey) {
-            if (tcKey) byKey.set(`key_${tcKey}`, entry);
-            if (tcId) byKey.set(`id_${tcId}`, entry);
+          if (!byKey.has(lookupKey)) {
+            byKey.set(lookupKey, entry);
           } else {
-            const existing = byKey.get(existingWinnerKey);
-            if (existing !== entry) {
-              const existingWins = existing._hasExecution || (!entry._hasExecution && existing._createdAt >= entry._createdAt);
-              const winner = existingWins ? existing : entry;
-              const loser = existingWins ? entry : existing;
-              if (tcKey) byKey.set(`key_${tcKey}`, winner);
-              if (tcId) byKey.set(`id_${tcId}`, winner);
-
-              // Silently unlink the duplicate blank run from the cycle in background
-              const loserRunId = loser._runIssue?.id;
-              if (loserRunId) {
-                const loserProp = loser._runIssue?.properties?.['testpulse-run-data'] || {};
-                const hasData = loser._hasExecution;
-                if (!hasData) {
-                  api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}`, { method: 'DELETE' }).catch(() => {});
-                } else {
-                  api.asUser().requestJira(route`/rest/api/3/issue/${loserRunId}/properties/testpulse-run-data`, {
-                    method: 'PUT',
-                    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ...loserProp, unlinkedFromCycle: true, unlinkedAt: Date.now() })
-                  }).catch(() => {});
-                }
-              }
-            }
+            const existing = byKey.get(lookupKey);
+            const existingWins = existing._hasExecution || (!entry._hasExecution && existing._createdAt >= entry._createdAt);
+            const winner = existingWins ? existing : entry;
+            byKey.set(lookupKey, winner);
           }
         }
 
@@ -2127,76 +2112,46 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   return { success: true, addedTests: createdRuns };
 });
 
-resolver.define('removeTestFromCycle', async ({ payload }) => {
-  const { cycleId, testId } = payload;
-  await updateLightweightIndex(cycleId, (lw) => lw.filter(t => String(t.id) !== String(testId)));
-  
-  try {
-    const jql = `issue in linkedIssues("${cycleId}") AND (issue in linkedIssues("${testId}") OR key = "${testId}" OR id = "${testId}") AND issuetype in ("Test Run", "TestRun", "Ejecución de prueba", "Ejecución")`;
-    const runRes = await api.asUser().requestJira(route`/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=5&fields=id,status,attachment,issuelinks&properties=testpulse-run-data`);
-    if (runRes.ok) {
-      const runData = await runRes.json();
-      const runs = runData.issues || [];
-      for (const r of runs) {
-        const prop = r.properties?.['testpulse-run-data'] || {};
-        const normStatus = normalizeJiraStatus(r.fields?.status?.name || prop.status || 'Not Run');
-        const isExecuted = normStatus !== 'Not Run' && normStatus !== 'To Do';
-        const hasEvidences = (r.fields?.attachment && r.fields.attachment.length > 0) || (prop.evidences && prop.evidences.length > 0);
-        const hasCommentsOrIterations = (prop.comment && prop.comment.trim().length > 0) || (prop.iterations && prop.iterations.length > 0) || prop.executedBy;
-
-        if (isExecuted || hasEvidences || hasCommentsOrIterations) {
-          // PRESERVE IN JIRA: Unlink from cycle and mark property for auto-recovery
-          await unlinkIssueFromCycle(r.id, cycleId);
-          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...prop,
-              cycleId: String(cycleId),
-              testCaseId: String(testId),
-              unlinkedFromCycle: true,
-              unlinkedAt: Date.now()
-            })
-          }).catch(() => {});
-        } else {
-          // Pristine / unexecuted: Delete issue to keep Jira clean
-          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}`, { method: 'DELETE' }).catch(() => {});
-        }
-      }
-    }
-  } catch (e) {
-    console.warn(`[removeTestFromCycle] Error handling Test Run:`, e.message);
-  }
-
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, { method: 'DELETE' }).catch(() => {});
-  return { success: true };
-});
-
-resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
-  const { cycleId, testIds } = payload;
+async function performRemoveTestsFromCycle(cycleId, testIds) {
   if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
-  const ids = testIds.map(String);
+  const ids = testIds.map(String).filter(Boolean);
   const idsSet = new Set(ids);
 
-  // 1. Update lightweight index immediately
-  await updateLightweightIndex(cycleId, (lw) => lw.filter(t => !idsSet.has(String(t.id))));
+  // 1. Immediately update lightweight index on cycle (matching all potential ID / Key variations)
+  await updateLightweightIndex(cycleId, (lw) => {
+    return lw.filter(t => {
+      const tId = String(t.id || '');
+      const tKey = String(t.key || '');
+      const tTcKey = String(t.testCaseKey || '');
+      const tRunId = String(t.testRunId || '');
+      const tRunKey = String(t.testRunKey || '');
+      return !idsSet.has(tId) &&
+             (!tKey || !idsSet.has(tKey)) &&
+             (!tTcKey || !idsSet.has(tTcKey)) &&
+             (!tRunId || !idsSet.has(tRunId)) &&
+             (!tRunKey || !idsSet.has(tRunKey));
+    });
+  });
 
-  // 2. Fetch all linked runs for this cycle in one single JQL call
+  // 2. Fetch all linked issues for this cycle (without restricting issuetype, to catch Task fallback runs)
   try {
-    const jql = `issue in linkedIssues("${cycleId}") AND issuetype in ("Test Run", "TestRun", "Ejecución de prueba", "Ejecución")`;
+    const jql = `issue in linkedIssues("${cycleId}")`;
     const runIssues = await fetchAllIssues(
       jql,
-      ['id', 'status', 'attachment', 'issuelinks', 'summary'],
+      ['id', 'key', 'status', 'attachment', 'issuelinks', 'summary'],
       null,
       ['testpulse-run-data'],
       50
     );
 
-    // Identify which Test Runs belong to any of the deleted testIds
+    // Identify which Test Runs in Jira belong to any of the deleted testIds
     const matchingRuns = (runIssues || []).filter(r => {
+      // Don't match the cycle itself
+      if (String(r.id) === String(cycleId) || String(r.key) === String(cycleId)) return false;
+
       const prop = r.properties?.['testpulse-run-data'] || {};
       const tcId = prop.testCaseId ? String(prop.testCaseId) : '';
-      const tcKey = prop.testCaseKey || '';
+      const tcKey = prop.testCaseKey ? String(prop.testCaseKey) : '';
       if (tcId && idsSet.has(tcId)) return true;
       if (tcKey && idsSet.has(tcKey)) return true;
       if (idsSet.has(String(r.id)) || idsSet.has(String(r.key))) return true;
@@ -2216,7 +2171,7 @@ resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
       return false;
     });
 
-    // Unlink / Delete matching runs in parallel batches
+    // Unlink or delete matching runs in parallel
     await processInBatches(matchingRuns, 10, 50, async (r) => {
       try {
         const prop = r.properties?.['testpulse-run-data'] || {};
@@ -2251,10 +2206,20 @@ resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
       ).catch(() => {});
     });
   } catch (err) {
-    console.warn('[removeManyTestsFromCycle] Error during cleanup:', err);
+    console.warn('[performRemoveTestsFromCycle] Error during cleanup:', err);
   }
 
   return { success: true, removed: ids.length };
+}
+
+resolver.define('removeTestFromCycle', async ({ payload }) => {
+  const { cycleId, testId } = payload;
+  return await performRemoveTestsFromCycle(cycleId, [testId]);
+});
+
+resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
+  const { cycleId, testIds } = payload;
+  return await performRemoveTestsFromCycle(cycleId, testIds);
 });
 
 
