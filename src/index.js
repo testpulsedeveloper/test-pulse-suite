@@ -1319,7 +1319,6 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       if (!runIssue || !runIssue.id) return null;
 
       try {
-        // Parallelize linking and property assignment
         const executionType = tcSnapshot?.executionType || tc.executionType || 'Manual';
         const runData = {
           testCaseId: String(tc.id),
@@ -1343,20 +1342,20 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
           }
         };
 
-        const postOperations = [
-          linkTwoIssues(runIssue.id, cycleId, 'Relates'),
-          api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(runData)
-          })
-        ];
+        // 1. Primary link: Link Test Run to Cycle (with retries)
+        await linkTwoIssues(runIssue.id, cycleId, 'Relates');
 
+        // 2. Set Test Run metadata property
+        await api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(runData)
+        }).catch(() => {});
+
+        // 3. Secondary link: Link Test Run to Test Case
         if (tc.id) {
-          postOperations.push(linkTwoIssues(runIssue.id, tc.id, 'Relates'));
+          await linkTwoIssues(runIssue.id, tc.id, 'Relates');
         }
-
-        await Promise.all(postOperations);
 
         return {
           id: String(tc.id),
@@ -1561,16 +1560,29 @@ const getCycleExecutionSummary = async (cycleId) => {
 
         // Merge with stored index so any tests created/added before Jira JQL indexes them are not dropped
         const previousIndex = (await readCycleIndex(cycleId)) || [];
-        const knownIds = new Set(cleanEntries.map(e => String(e.id || e.testCaseId)));
+        const knownIds = new Set(cleanEntries.flatMap(e => [
+          String(e.id || ''),
+          String(e.testCaseId || ''),
+          String(e.key || ''),
+          String(e.testCaseKey || ''),
+          String(e.testRunId || ''),
+          String(e.testRunKey || '')
+        ]).filter(Boolean));
+
         for (const prev of previousIndex) {
-          if (prev && prev.id && !knownIds.has(String(prev.id))) {
+          const prevId = String(prev.id || '');
+          const prevKey = String(prev.key || prev.testCaseKey || '');
+          const prevRunId = String(prev.testRunId || '');
+          const prevRunKey = String(prev.testRunKey || '');
+
+          if (prevId && !knownIds.has(prevId) && (!prevKey || !knownIds.has(prevKey)) && (!prevRunId || !knownIds.has(prevRunId)) && (!prevRunKey || !knownIds.has(prevRunKey))) {
             cleanEntries.push({
-              id: String(prev.id),
-              key: prev.key || prev.testCaseKey || '',
-              testRunId: prev.testRunId,
-              testRunKey: prev.testRunKey,
-              testCaseId: String(prev.id),
-              testCaseKey: prev.key || prev.testCaseKey || '',
+              id: prevId,
+              key: prevKey || prevId,
+              testRunId: prev.testRunId || null,
+              testRunKey: prev.testRunKey || null,
+              testCaseId: prevId,
+              testCaseKey: prevKey || prevId,
               summary: prev.summary || '',
               status: normalizeJiraStatus(prev.status || 'Not Run'),
               nativeStatus: normalizeJiraStatus(prev.nativeStatus || prev.status || 'Not Run'),
@@ -1585,7 +1597,16 @@ const getCycleExecutionSummary = async (cycleId) => {
               lockedAt: prev.lockedAt || null,
               _detailLoaded: true
             });
-            knownIds.add(String(prev.id));
+            knownIds.add(prevId);
+            if (prevKey) knownIds.add(prevKey);
+            if (prevRunId) knownIds.add(prevRunId);
+            if (prevRunKey) knownIds.add(prevRunKey);
+
+            // Auto-heal missing Jira issue link to cycle in the background
+            const targetRunRef = prev.testRunId || prev.testRunKey;
+            if (targetRunRef) {
+              linkTwoIssues(targetRunRef, cycleId, 'Relates').catch(() => {});
+            }
           }
         }
 
@@ -3928,26 +3949,64 @@ async function transitionJiraIssue(issueIdOrKey, targetStatusName) {
   }
 }
 
-// Helper: Creates an Issue Link between two Jira issues
-async function linkTwoIssues(inwardIdOrKey, outwardIdOrKey, linkTypeName = 'Relates') {
-  try {
-    const inwardIssue = String(inwardIdOrKey).includes('-') ? { key: String(inwardIdOrKey) } : { id: String(inwardIdOrKey) };
-    const outwardIssue = String(outwardIdOrKey).includes('-') ? { key: String(outwardIdOrKey) } : { id: String(outwardIdOrKey) };
-    
-    const res = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: { name: linkTypeName },
-        inwardIssue,
-        outwardIssue
-      })
-    });
-    return res.ok || res.status === 201 || res.status === 200;
-  } catch (e) {
-    console.warn(`[linkTwoIssues] Error linking ${inwardIdOrKey} -> ${outwardIdOrKey}:`, e.message);
-    return false;
+// Helper: Creates an Issue Link between two Jira issues with retries and fallback types
+async function linkTwoIssues(inwardIdOrKey, outwardIdOrKey, linkTypeName = 'Relates', maxRetries = 3) {
+  if (!inwardIdOrKey || !outwardIdOrKey) return false;
+  const inwardIssue = String(inwardIdOrKey).includes('-') ? { key: String(inwardIdOrKey) } : { id: String(inwardIdOrKey) };
+  const outwardIssue = String(outwardIdOrKey).includes('-') ? { key: String(outwardIdOrKey) } : { id: String(outwardIdOrKey) };
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const res = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: { name: linkTypeName },
+          inwardIssue,
+          outwardIssue
+        })
+      });
+
+      if (res.ok || res.status === 201 || res.status === 200) {
+        return true;
+      }
+
+      // If Jira returned 400 because the link type name isn't 'Relates', try Spanish/English alternates
+      if (res.status === 400 && attempt === 0) {
+        const altTypes = ['relates to', 'Relaciona', 'Reference', 'relacionado'];
+        for (const alt of altTypes) {
+          if (alt.toLowerCase() === linkTypeName.toLowerCase()) continue;
+          const altRes = await api.asUser().requestJira(route`/rest/api/3/issueLink`, {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: { name: alt },
+              inwardIssue,
+              outwardIssue
+            })
+          }).catch(() => null);
+          if (altRes && (altRes.ok || altRes.status === 201 || altRes.status === 200)) {
+            return true;
+          }
+        }
+      }
+
+      // If rate limited or locked (429, 409, 500, 503), wait with backoff
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt) + Math.random() * 100));
+      } else {
+        const errText = await res.text().catch(() => '');
+        console.warn(`[linkTwoIssues] Failed linking ${inwardIdOrKey} -> ${outwardIdOrKey} (${res.status}): ${errText}`);
+      }
+    } catch (e) {
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt)));
+      } else {
+        console.warn(`[linkTwoIssues] Exception linking ${inwardIdOrKey} -> ${outwardIdOrKey}:`, e.message);
+      }
+    }
   }
+  return false;
 }
 
 // Resolver: Creates Test Run Jira Issues in bulk for a cycle
