@@ -2213,6 +2213,9 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       if (r.fields?.summary) {
         const match = r.fields.summary.match(/\[Run\]\s*([A-Z0-9_-]+):/i);
         if (match && match[1] && idsSet.has(match[1])) return true;
+        for (const k of idsSet) {
+          if (k && k.includes('-') && r.fields.summary.includes(k)) return true;
+        }
       }
       return false;
     });
@@ -2278,13 +2281,15 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
 }
 
 resolver.define('removeTestFromCycle', async ({ payload }) => {
-  const { cycleId, testId } = payload;
-  return await performRemoveTestsFromCycle(cycleId, [testId]);
+  const { cycleId, testId, testIds } = payload;
+  const targetIds = testIds || (testId ? (Array.isArray(testId) ? testId : [testId]) : []);
+  return await performRemoveTestsFromCycle(cycleId, targetIds);
 });
 
 resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
-  const { cycleId, testIds } = payload;
-  return await performRemoveTestsFromCycle(cycleId, testIds);
+  const { cycleId, testIds, testId } = payload;
+  const targetIds = testIds || (testId ? (Array.isArray(testId) ? testId : [testId]) : []);
+  return await performRemoveTestsFromCycle(cycleId, targetIds);
 });
 
 

@@ -5542,7 +5542,7 @@ Then el sistema valida la identidad.
       return next;
     });
     try {
-      await invoke('removeTestFromCycle', { cycleId, testId: id });
+      await invoke('removeTestFromCycle', { cycleId, testId: id, testIds: Array.from(new Set(idsToTrack)) });
     } catch (err) {
       // Rollback on error
       idsToTrack.forEach(trackId => {
@@ -5593,7 +5593,7 @@ Then el sistema valida la identidad.
       return next;
     });
     try {
-      await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(testIds.map(String))) });
+      await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(idsToTrack)) });
       addNotification({ type: 'success', title: `${testIds.length} caso${testIds.length !== 1 ? 's' : ''} eliminado${testIds.length !== 1 ? 's' : ''} del ciclo` });
     } catch (err) {
       // Rollback on error
