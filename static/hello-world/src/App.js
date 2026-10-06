@@ -7498,59 +7498,13 @@ const renderPlanningTab = () => {
                   </div>
                 </div>
 
-                {/* WARNING BANNER (Atlassian Yellow Banner) */}
-                {isLoadingCycleTests ? (
+                {/* LOADING INDICATOR (Cycle Sync) */}
+                {isLoadingCycleTests && (
                   <div style={{ padding: '10px 14px', background: '#FAFBFC', border: '1px solid #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 1rem 0' }}>
                     <div style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
                     <span>Sincronizando casos de prueba del ciclo...</span>
                   </div>
-                ) : (totalInProject > 0 && notInCycleCount > 0 ? (
-                  <div className="planning-warning-banner">
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
-                      <div style={{ color: '#D97706', marginTop: '2px', flexShrink: 0 }}>
-                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"></path>
-                        </svg>
-                      </div>
-                      <div>
-                        <p style={{ margin: 0, fontWeight: 700, fontSize: '13px', color: '#78350F' }}>
-                          {inCycleCount} de {totalInProject} casos del proyecto están en este ciclo
-                        </p>
-                        <p style={{ margin: '3px 0 0 0', fontSize: '12px', color: '#92400E' }}>
-                          Faltan <strong>{notInCycleCount} casos</strong> ({missingPct}% del proyecto). Usa los filtros de abajo para encontrarlos y el botón <em>"Añadir seleccionados"</em> para añadirlos.
-                        </p>
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                      <button 
-                        className="btn-primary"
-                        style={{ background: '#091E42', borderColor: '#091E42', height: '32px', fontSize: '12px', fontWeight: 600 }}
-                        onClick={() => {
-                          const available = testCases.filter(tc =>
-                            (planningFolder === '' || tc.folderId === planningFolder) &&
-                            (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
-                            (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual'
-                              ? getExecVal(tc).includes('man')
-                              : getExecVal(tc).includes('auto'))) &&
-                            !cycleTestIds.has(String(tc.id)) &&
-                            (!tc.key || !cycleTestKeys.has(tc.key))
-                          );
-                          setSelectedTestsForCycle(available.map(tc => tc.id));
-                        }}
-                      >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                        <span>Seleccionar disponibles ({availableFilteredTestCases.length})</span>
-                      </button>
-                      <button 
-                        className="btn-secondary"
-                        style={{ height: '32px', fontSize: '12px', background: '#FFFFFF', borderColor: '#FDE68A', color: '#78350F' }}
-                        onClick={() => setSelectedTestsForCycle([])}
-                      >
-                        ✕ Limpiar
-                      </button>
-                    </div>
-                  </div>
-                ) : null)}
+                )}
 
                 {/* SECTION 2: Available Test Cases (Filtered Backlog) */}
                 <div className="planning-card-panel">

@@ -1095,9 +1095,9 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
   if (skipCandidateSearch) {
     testCasesToCreate.push(...testCases);
   } else {
-    // Step 1: Check for existing linked Test Runs in Jira for this cycle (Auto-Recovery)
-    // Use only linkedIssues query — fast and sufficient
+    // Step 1: Check for existing Test Runs in Jira for this cycle & test cases (Auto-Recovery)
     try {
+      // 1. Fetch runs currently linked to the cycle
       let candidateRuns = await fetchAllIssues(
         `issue in linkedIssues("${cycleId}")`,
         ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
@@ -1107,20 +1107,66 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       );
       if (!Array.isArray(candidateRuns)) candidateRuns = [];
 
+      // 2. Fetch unlinked runs attached to the specific test cases being added
+      const tcIdentifiers = testCases.map(tc => tc.id || tc.key).filter(Boolean);
+      const chunks = [];
+      for (let i = 0; i < tcIdentifiers.length; i += 25) {
+        chunks.push(tcIdentifiers.slice(i, i + 25));
+      }
+
+      const tcLinkedRunsArray = await Promise.all(chunks.map(async (chunk) => {
+        const jql = chunk.map(id => `issue in linkedIssues("${id}")`).join(' OR ');
+        return await fetchAllIssues(
+          `(${jql})`,
+          ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
+          null,
+          ['testpulse-run-data'],
+          50
+        ).catch(() => []);
+      }));
+
+      const candidateMap = new Map();
+      for (const r of candidateRuns) {
+        if (r && r.id) candidateMap.set(String(r.id), r);
+      }
+      for (const list of tcLinkedRunsArray) {
+        for (const r of (list || [])) {
+          if (r && r.id) candidateMap.set(String(r.id), r);
+        }
+      }
+      candidateRuns = Array.from(candidateMap.values());
+
       for (const tc of testCases) {
         const tcIdStr = String(tc.id);
         const tcKeyStr = tc.key ? String(tc.key) : '';
 
         // Find if an existing run matches this test case and this cycle
         const existingRun = candidateRuns.find(r => {
+          if (String(r.id) === String(cycleId) || String(r.key) === String(cycleId)) return false;
+          if (String(r.id) === tcIdStr || String(r.key) === tcKeyStr) return false;
+
           const prop = r.properties?.['testpulse-run-data'] || {};
           const matchesCycle = String(prop.cycleId) === String(cycleId) || prop.cycleKey === String(cycleKey);
-          const matchesTc = String(prop.testCaseId) === tcIdStr || prop.testCaseKey === tcKeyStr || (tcKeyStr && r.fields?.summary?.includes(`[Run] ${tcKeyStr}:`)) || (tcKeyStr && r.fields?.summary?.includes(tcKeyStr));
-          return matchesCycle && matchesTc;
+
+          // Check if this run belongs to this test case
+          const matchesTcProp = String(prop.testCaseId) === tcIdStr || (tcKeyStr && prop.testCaseKey === tcKeyStr);
+          const matchesSummary = Boolean(tcKeyStr && r.fields?.summary && (r.fields.summary.includes(`[Run] ${tcKeyStr}:`) || r.fields.summary.includes(tcKeyStr)));
+
+          let matchesLinks = false;
+          const links = r.fields?.issuelinks || [];
+          for (const l of links) {
+            const linked = l.outwardIssue || l.inwardIssue;
+            if (linked && (String(linked.id) === tcIdStr || (tcKeyStr && String(linked.key) === tcKeyStr))) {
+              matchesLinks = true;
+              break;
+            }
+          }
+
+          return (matchesCycle || !prop.cycleId) && (matchesTcProp || matchesLinks || matchesSummary);
         });
 
         if (existingRun) {
-          // RECONECTAR / AUTO-RECUPERAR
+          // RECONECTAR / AUTO-RECUPERAR EL RUN EXISTENTE EN LUGAR DE CREAR UNO NUEVO
           try {
             await linkTwoIssues(existingRun.id, cycleId, 'Relates');
             if (tc.id) {
@@ -1133,7 +1179,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
               cycleId: String(cycleId),
               cycleKey: cycleKey || String(cycleId),
               testCaseId: tcIdStr,
-              testCaseKey: tcKeyStr,
+              testCaseKey: tcKeyStr || existingProp.testCaseKey || '',
               unlinkedFromCycle: false
             };
             delete updatedProp.unlinkedAt;
@@ -2171,30 +2217,21 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       return false;
     });
 
-    // Unlink or delete matching runs in parallel
+    // Unlink matching runs in parallel and mark for auto-recovery
     await processInBatches(matchingRuns, 10, 50, async (r) => {
       try {
         const prop = r.properties?.['testpulse-run-data'] || {};
-        const normStatus = normalizeJiraStatus(r.fields?.status?.name || prop.status || 'Not Run');
-        const isExecuted = normStatus !== 'Not Run' && normStatus !== 'To Do';
-        const hasEvidences = (r.fields?.attachment && r.fields.attachment.length > 0) || (prop.evidences && prop.evidences.length > 0);
-        const hasCommentsOrIterations = (prop.comment && prop.comment.trim().length > 0) || (prop.iterations && prop.iterations.length > 0) || prop.executedBy;
-
-        if (isExecuted || hasEvidences || hasCommentsOrIterations) {
-          await unlinkIssueFromCycle(r.id, cycleId);
-          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...prop,
-              cycleId: String(cycleId),
-              unlinkedFromCycle: true,
-              unlinkedAt: Date.now()
-            })
-          }).catch(() => {});
-        } else {
-          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}`, { method: 'DELETE' }).catch(() => {});
-        }
+        await unlinkIssueFromCycle(r.id, cycleId);
+        await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...prop,
+            cycleId: String(cycleId),
+            unlinkedFromCycle: true,
+            unlinkedAt: Date.now()
+          })
+        }).catch(() => {});
       } catch (e) {}
     });
 
