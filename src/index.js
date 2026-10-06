@@ -2217,21 +2217,49 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       return false;
     });
 
-    // Unlink matching runs in parallel and mark for auto-recovery
+    // Process matching runs according to Option C (Hybrid):
+    // - Unexecuted / pristine runs -> Hard DELETE from Jira to keep project clean
+    // - Executed runs with evidences/comments -> Unlink from cycle & preserve for auto-recovery
     await processInBatches(matchingRuns, 10, 50, async (r) => {
       try {
         const prop = r.properties?.['testpulse-run-data'] || {};
-        await unlinkIssueFromCycle(r.id, cycleId);
-        await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
-          method: 'PUT',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...prop,
-            cycleId: String(cycleId),
-            unlinkedFromCycle: true,
-            unlinkedAt: Date.now()
-          })
-        }).catch(() => {});
+        const normStatus = normalizeJiraStatus(r.fields?.status?.name || prop.status || 'Not Run');
+        const isExecuted = normStatus !== 'Not Run' && normStatus !== 'To Do';
+        const hasEvidences = (r.fields?.attachment && r.fields.attachment.length > 0) || (prop.evidences && prop.evidences.length > 0);
+        const hasCommentsOrIterations = (prop.comment && prop.comment.trim().length > 0) || (prop.iterations && prop.iterations.length > 0) || Boolean(prop.executedBy) || Boolean(prop.executedAt);
+        const hasLinkedBugs = prop.linkedBugs && prop.linkedBugs.length > 0;
+
+        if (isExecuted || hasEvidences || hasCommentsOrIterations || hasLinkedBugs) {
+          // Preserve historical execution in Jira: Unlink from cycle and mark for recovery
+          await unlinkIssueFromCycle(r.id, cycleId);
+          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
+            method: 'PUT',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...prop,
+              cycleId: String(cycleId),
+              unlinkedFromCycle: true,
+              unlinkedAt: Date.now()
+            })
+          }).catch(() => {});
+        } else {
+          // Pristine / unexecuted: Delete issue from Jira to prevent clutter
+          const delRes = await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}`, { method: 'DELETE' }).catch(() => null);
+          if (!delRes || !delRes.ok) {
+            // Permission fallback: If user lacks Jira 'Delete Issues' permission, safely unlink
+            await unlinkIssueFromCycle(r.id, cycleId);
+            await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
+              method: 'PUT',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...prop,
+                cycleId: String(cycleId),
+                unlinkedFromCycle: true,
+                unlinkedAt: Date.now()
+              })
+            }).catch(() => {});
+          }
+        }
       } catch (e) {}
     });
 
