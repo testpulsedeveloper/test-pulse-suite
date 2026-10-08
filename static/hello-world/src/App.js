@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback, useDeferredValue } from 'react';
 import { invoke as forgeInvoke, view, router, requestJira } from '@forge/bridge';
 import { CreateIssueModal } from '@forge/jira-bridge';
 import Lozenge from '@atlaskit/lozenge';
@@ -882,12 +882,46 @@ const AtlaskitStatusLozenge = ({ status, style = {} }) => {
 };
 
 
+// Incremental rendering helper: renders a sentinel that triggers onVisible when scrolled near.
+// Used to render long lists in batches instead of mounting hundreds of heavy rows at once.
+const LIST_BATCH_SIZE = 100;
+function LoadMoreSentinel({ onVisible, remaining }) {
+  const ref = useRef(null);
+  const cbRef = useRef(onVisible);
+  cbRef.current = onVisible;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return undefined;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0] && entries[0].isIntersecting) cbRef.current && cbRef.current();
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div
+      ref={ref}
+      onClick={() => cbRef.current && cbRef.current()}
+      style={{ padding: '0.75rem', textAlign: 'center', fontSize: '12px', color: '#626F86', cursor: 'pointer' }}
+    >
+      Cargando más casos… ({remaining} restantes)
+    </div>
+  );
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
   
   // Design Tab State
   const [folders, setFolders] = useState([]);
   const [testCases, setTestCases] = useState([]);
+  // O(1) lookup by id — replaces repeated testCases.find(...) scans inside list renders
+  const testCasesById = useMemo(() => {
+    const m = new Map();
+    for (const t of testCases) if (t && t.id != null) m.set(String(t.id), t);
+    return m;
+  }, [testCases]);
+  const findTc = useCallback((id) => (id == null ? undefined : testCasesById.get(String(id))), [testCasesById]);
   const [activeFolder, setActiveFolder] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
   const [isAllTestsExpanded, setIsAllTestsExpanded] = useState(true);
@@ -1026,6 +1060,7 @@ function App() {
   const [bugKeyInput, setBugKeyInput] = useState('');
   const [executionStatusFilter, setExecutionStatusFilter] = useState('ALL');
   const [executionSearchQuery, setExecutionSearchQuery] = useState('');
+  const deferredExecutionSearch = useDeferredValue(executionSearchQuery);
   const [executionSortBy, setExecutionSortBy] = useState('none');
   const [executionCurrentPage, setExecutionCurrentPage] = useState(1);
   const [executionPageSize, setExecutionPageSize] = useState(20);
@@ -1137,6 +1172,7 @@ function App() {
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [folderSearchQuery, setFolderSearchQuery] = useState('');
   const [selectedDesignTestIds, setSelectedDesignTestIds] = useState(new Set());
   const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
@@ -1785,7 +1821,7 @@ function App() {
         if (summary && Array.isArray(summary) && summary.length > 0) {
           const enriched = summary.map(ex => {
             if (ex.key && ex.summary) return ex;
-            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            const tc = findTc(ex.id);
             return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
           });
           safeSetCycleTests(enriched);
@@ -1872,7 +1908,7 @@ function App() {
   // Filtered Data based on active folder scope, search, and type filter
   const filteredTestCasesAll = useMemo(() => {
     return activeFolderScopedTestCases.filter(tc => {
-      const matchesSearch = tc.key.toLowerCase().includes(searchQuery.toLowerCase()) || (tc.summary || '').toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = tc.key.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || (tc.summary || '').toLowerCase().includes(deferredSearchQuery.toLowerCase());
       const isAuto = isAutomatedTest(tc);
       const matchesType = designTypeFilter === 'all' 
         || (designTypeFilter === 'automated' && isAuto)
@@ -1887,7 +1923,7 @@ function App() {
       const numB = parseInt((b.key || '').replace(/\D/g, ''), 10) || 0;
       return numB - numA;
     });
-  }, [activeFolderScopedTestCases, searchQuery, isAutomatedTest, designTypeFilter, designSortOrder]);
+  }, [activeFolderScopedTestCases, deferredSearchQuery, isAutomatedTest, designTypeFilter, designSortOrder]);
   
   const totalPages = Math.ceil(filteredTestCasesAll.length / itemsPerPage);
   const filteredTestCases = filteredTestCasesAll.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -3569,9 +3605,9 @@ Then el sistema valida la identidad.
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap'
                           }} 
-                          title={test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                          title={test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                         >
-                          {test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                          {test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                         </span>
                       </div>
                     </div>
@@ -5336,7 +5372,7 @@ Then el sistema valida la identidad.
       const deletedForCycle = perCycleDeletedRef.current[cycleId] || new Set();
       const enriched = (executionSummary || []).map(ex => {
         if (ex.key && ex.summary) return ex;
-        const tc = testCases.find(t => String(t.id) === String(ex.id));
+        const tc = findTc(ex.id);
         return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
       });
       const filtered = enriched.filter(t => {
@@ -6752,7 +6788,7 @@ Then el sistema valida la identidad.
           // show blank key/summary without this join.
           const enriched = executionSummary.map(ex => {
             if (ex.key && ex.summary) return ex; // already enriched (old cycle)
-            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            const tc = findTc(ex.id);
             return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
           });
           // Filter out any tests deleted this session (avoids stale-read ghosts from Jira eventual consistency)
@@ -6856,7 +6892,7 @@ Then el sistema valida la identidad.
 
     const bugKey = linkingUnlinkedBug.key;
     const cycle = testCycles.find(c => String(c.id) === String(targetCycleForBug));
-    const targetTc = testCases.find(t => String(t.id) === String(targetTestForBug));
+    const targetTc = findTc(targetTestForBug);
 
     setIsLinkingUnlinkedBugLoading(true);
     try {
@@ -6974,11 +7010,19 @@ Then el sistema valida la identidad.
     if (!t) return 'manual';
     let target = t;
     if (t && !t.rawFields) {
-      const tc = testCases.find(x => String(x.id) === String(t.id));
+      const tc = findTc(t.id);
       if (tc) target = tc;
     }
     return isAutomatedTest(target) ? 'automatizado' : 'manual';
   };
+
+  // Incremental rendering counters for Planning lists (reset on cycle/filter change)
+  const [planningCycleVisible, setPlanningCycleVisible] = useState(LIST_BATCH_SIZE);
+  const [planningAvailVisible, setPlanningAvailVisible] = useState(LIST_BATCH_SIZE);
+  useEffect(() => {
+    setPlanningCycleVisible(LIST_BATCH_SIZE);
+    setPlanningAvailVisible(LIST_BATCH_SIZE);
+  }, [selectedCycle?.id, deferredSearchQuery, planningFolder, planningPriority, planningExecutionType]);
 
 const renderPlanningTab = () => {
     // Deduplicate cycleTests strictly by test case key and ID
@@ -7008,10 +7052,10 @@ const renderPlanningTab = () => {
     const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
 
     const filteredCycleTests = deduplicatedCycleTests.filter(test => 
-      !searchQuery || 
-      test.key?.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      (testCases.find(t => String(t.id) === String(test.id))?.summary || '').toLowerCase().includes(searchQuery.toLowerCase())
+      !deferredSearchQuery || 
+      test.key?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || 
+      test.summary?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || 
+      (findTc(test.id)?.summary || '').toLowerCase().includes(deferredSearchQuery.toLowerCase())
     );
 
     const cycleTestIds = new Set(deduplicatedCycleTests.map(ct => String(ct.id)));
@@ -7023,7 +7067,7 @@ const renderPlanningTab = () => {
       (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) &&
       !cycleTestIds.has(String(tc.id)) &&
       (!tc.key || !cycleTestKeys.has(tc.key)) &&
-      (!searchQuery || tc.key?.toLowerCase().includes(searchQuery.toLowerCase()) || tc.summary?.toLowerCase().includes(searchQuery.toLowerCase()))
+      (!deferredSearchQuery || tc.key?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || tc.summary?.toLowerCase().includes(deferredSearchQuery.toLowerCase()))
     );
 
     return (
@@ -7411,7 +7455,7 @@ const renderPlanningTab = () => {
                       </div>
                     ) : (
                       <>
-                        {filteredCycleTests.map(test => {
+                        {filteredCycleTests.slice(0, planningCycleVisible).map(test => {
                           const isAuto = getExecVal(test).includes('auto');
                           return (
                             <div key={test.id} className="planning-row">
@@ -7443,9 +7487,9 @@ const renderPlanningTab = () => {
                                 </span>
                                 <span 
                                   style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                                  title={test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                                  title={test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                                 >
-                                  {test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                                  {test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                                 </span>
                               </div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
@@ -7488,6 +7532,9 @@ const renderPlanningTab = () => {
                             </div>
                           );
                         })}
+                        {filteredCycleTests.length > planningCycleVisible && (
+                          <LoadMoreSentinel key={`cyc-${planningCycleVisible}`} remaining={filteredCycleTests.length - planningCycleVisible} onVisible={() => setPlanningCycleVisible(v => v + LIST_BATCH_SIZE)} />
+                        )}
                         {deduplicatedCycleTests.length === 0 && (
                           <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
                             No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
@@ -7702,7 +7749,7 @@ const renderPlanningTab = () => {
 
                   {/* Available Tests List */}
                   <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {availableFilteredTestCases.map(test => {
+                    {availableFilteredTestCases.slice(0, planningAvailVisible).map(test => {
                       const isSelected = selectedTestsForCycle.includes(test.id);
                       const isAuto = getExecVal(test).includes('auto');
                       return (
@@ -7738,9 +7785,9 @@ const renderPlanningTab = () => {
                             </span>
                             <span 
                               style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                              title={test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                              title={test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                             >
-                              {test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba"}
+                              {test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
                             </span>
                           </div>
                           <button 
@@ -7757,6 +7804,9 @@ const renderPlanningTab = () => {
                         </div>
                       );
                     })}
+                    {availableFilteredTestCases.length > planningAvailVisible && (
+                      <LoadMoreSentinel key={`avl-${planningAvailVisible}`} remaining={availableFilteredTestCases.length - planningAvailVisible} onVisible={() => setPlanningAvailVisible(v => v + LIST_BATCH_SIZE)} />
+                    )}
                     {availableFilteredTestCases.length === 0 && (
                       <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
                         No hay casos de prueba disponibles con los filtros actuales.
@@ -7904,7 +7954,7 @@ const renderPlanningTab = () => {
     // Deduplicate cycleTests strictly to guarantee zero duplicate artifacts
     const uniqueCycleTestsMap = new Map();
     cycleTests.forEach(test => {
-      const matchKey = test.key || test.testCaseKey || (testCases.find(t => String(t.id) === String(test.id))?.key) || String(test.id);
+      const matchKey = test.key || test.testCaseKey || (findTc(test.id)?.key) || String(test.id);
       if (!uniqueCycleTestsMap.has(matchKey)) {
         uniqueCycleTestsMap.set(matchKey, test);
       } else {
@@ -7944,11 +7994,11 @@ const renderPlanningTab = () => {
         if (executionStatusFilter === 'Not Run' && !isNotRun(test.status)) return false;
       }
 
-      if (executionSearchQuery) {
-        const q = executionSearchQuery.toLowerCase();
+      if (deferredExecutionSearch) {
+        const q = deferredExecutionSearch.toLowerCase();
         const keyMatch = (test.key || test.testCaseKey || '').toLowerCase().includes(q);
         const runKeyMatch = (test.testRunKey || '').toLowerCase().includes(q);
-        const summaryMatch = (test.summary || (testCases.find(t => t.id === test.id)?.summary) || '').toLowerCase().includes(q);
+        const summaryMatch = (test.summary || (findTc(test.id)?.summary) || '').toLowerCase().includes(q);
         if (!keyMatch && !runKeyMatch && !summaryMatch) return false;
       }
 
@@ -7973,8 +8023,8 @@ const renderPlanningTab = () => {
           return getRank(a.status) - getRank(b.status);
         }
         if (executionSortBy === 'summary') {
-          const sumA = a.summary || (testCases.find(t => t.id === a.id)?.summary) || '';
-          const sumB = b.summary || (testCases.find(t => t.id === b.id)?.summary) || '';
+          const sumA = a.summary || (findTc(a.id)?.summary) || '';
+          const sumB = b.summary || (findTc(b.id)?.summary) || '';
           return sumA.localeCompare(sumB);
         }
         return 0;
@@ -8455,7 +8505,7 @@ const renderPlanningTab = () => {
                     {paginatedTests.map(test => {
                       const isExpanded = String(expandedExecutionTest) === String(test.id);
                       const isAuto = getExecVal(test).includes('auto');
-                      const testSummary = test.summary || (testCases.find(t => t.id === test.id)?.summary) || "Caso de prueba";
+                      const testSummary = test.summary || (findTc(test.id)?.summary) || "Caso de prueba";
                       const testCaseKey = test.testCaseKey || test.key;
 
                       let cardStatusClass = '';
@@ -9974,14 +10024,14 @@ const renderPlanningTab = () => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
         cycle.execution.forEach((ex, idx) => {
-          const tcKey = ex.key || ex.testCaseKey || (testCases.find(t => String(t.id) === String(ex.id))?.key) || '';
+          const tcKey = ex.key || ex.testCaseKey || (findTc(ex.id)?.key) || '';
           const tcId = String(ex.id || ex.testCaseId || '');
           const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
           if (seenTcInCycle.has(dedupeKey)) return;
           seenTcInCycle.add(dedupeKey);
 
           if (ex.linkedBugs && Array.isArray(ex.linkedBugs)) {
-            const tc = testCases.find(t => String(t.id) === String(ex.id));
+            const tc = findTc(ex.id);
             const tcKeyDisplay = tc ? tc.key : (ex.key || `TC-${ex.id}`);
             const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
 
@@ -10097,13 +10147,13 @@ const renderPlanningTab = () => {
         const cycleName = cycle.summary || cycle.key || `Ciclo-${cycle.id}`;
         const seenTcInCycle = new Set();
         cycle.execution.forEach((ex, idx) => {
-          const tcKey = ex.key || ex.testCaseKey || (testCases.find(t => String(t.id) === String(ex.id))?.key) || '';
+          const tcKey = ex.key || ex.testCaseKey || (findTc(ex.id)?.key) || '';
           const tcId = String(ex.id || ex.testCaseId || '');
           const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
           if (seenTcInCycle.has(dedupeKey)) return;
           seenTcInCycle.add(dedupeKey);
 
-          const tc = testCases.find(t => String(t.id) === String(ex.id));
+          const tc = findTc(ex.id);
 
           const normExStatus = normalizeUiStatus(ex.status);
           totalCases++;
@@ -10149,7 +10199,7 @@ const renderPlanningTab = () => {
           }
 
           // Feature / Module (Only Functional Tests)
-          const tcFeature = tc || testCases.find(t => String(t.id) === String(ex.id));
+          const tcFeature = tc || findTc(ex.id);
           if (tcFeature && tcFeature.folderId && isFunctionalTest(tcFeature, ex)) {
             const fObj = folderPaths.find(f => f.id === tcFeature.folderId);
             if (fObj) {
@@ -11399,7 +11449,7 @@ const renderPlanningTab = () => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
         cycle.execution.forEach((ex, idx) => {
-          const tc = testCases.find(t => String(t.id) === String(ex.id));
+          const tc = findTc(ex.id);
           const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
           const tcId = String(ex.id || ex.testCaseId || '');
           const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
@@ -13509,7 +13559,7 @@ const renderPlanningTab = () => {
                           <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                             <button
                               onClick={() => {
-                                const found = testCases.find(t => String(t.id) === String(row.testCaseId));
+                                const found = findTc(row.testCaseId);
                                 if (found) setSelectedTestCase(found);
                               }}
                               style={{
@@ -13930,7 +13980,7 @@ const renderPlanningTab = () => {
                           <option value="">-- Selecciona un caso de prueba --</option>
                           {availableExec.length > 0 ? (
                             availableExec.map((ex) => {
-                              const tc = testCases.find(t => String(t.id) === String(ex.id));
+                              const tc = findTc(ex.id);
                               const tcKey = tc?.key || ex.key || `TC-${ex.id}`;
                               const tcSummary = tc?.summary || ex.summary || 'Caso de prueba';
                               return (

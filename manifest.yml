@@ -43,6 +43,6 @@ permissions:
 app:
   runtime:
     name: nodejs24.x
-    memoryMB: 256
+    memoryMB: 512
     architecture: arm64
   id: ari:cloud:ecosystem::app/ad7be07c-6f0f-4a18-9ceb-68355c2214b3

@@ -2078,6 +2078,12 @@ body {
   background: #FAFBFC;
 }
 
+/* Performance: let the browser skip layout/paint for off-screen rows */
+.planning-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}
+
 .planning-warning-banner {
   border-radius: 8px;
   background: #FFFBEB;

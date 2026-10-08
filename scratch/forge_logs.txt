@@ -1,4 +1,0 @@
-
-Error: unknown option '--tail'
-
-Rerunning the command with --verbose may give more details.

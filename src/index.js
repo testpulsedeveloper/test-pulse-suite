@@ -455,17 +455,20 @@ resolver.define('getTestCycles', async ({ payload }) => {
     ].filter(t => typeof t === 'string' && t.trim().length > 0)));
 
     const jql = `${projectJql}issuetype in (${validCycleTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
-    // Pass at most 3 properties (Jira allows max 5)
-    const propNames = ['testops-plan-link', 'execution', 'tests'];
+    // Pass at most 4 properties (Jira allows max 5)
+    const propNames = ['testops-plan-link', 'execution', 'tests', 'execution-meta'];
     const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created', 'versions', 'fixVersions'], null, propNames);
     return allIssues.map(issue => {
       const props = issue.properties || {};
       let totalTests = 0;
       const seenIds = new Set();
+
+      const meta = props['execution-meta'];
+      const hasMeta = meta && typeof meta === 'object' && typeof meta.total === 'number';
       
       const rawExec = props['execution'];
       const execVal = Array.isArray(rawExec) ? rawExec : (Array.isArray(rawExec?.value) ? rawExec.value : null);
-      if (Array.isArray(execVal)) {
+      if (!hasMeta && Array.isArray(execVal)) {
         for (const item of execVal) {
           const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
           if (id && !seenIds.has(id)) {
@@ -477,7 +480,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
       
       const rawTests = props['tests'];
       const testsVal = Array.isArray(rawTests) ? rawTests : (Array.isArray(rawTests?.value) ? rawTests.value : null);
-      if (totalTests === 0 && Array.isArray(testsVal)) {
+      if (!hasMeta && totalTests === 0 && Array.isArray(testsVal)) {
         for (const item of testsVal) {
           const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
           if (id && !seenIds.has(id)) {
@@ -486,6 +489,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
           }
         }
       }
+      if (hasMeta) totalTests = meta.total;
       
       const rawAff = issue.fields?.versions || [];
       const rawFix = issue.fields?.fixVersions || [];
@@ -910,34 +914,117 @@ const trimBugsForIndex = (bugs) => {
 const SHARD_SIZE = 40;
 const _shardProp = (shard) => shard === 0 ? 'execution' : `execution_${shard}`;
 
+// Helper: run async tasks with a bounded concurrency (keeps Jira rate limits happy)
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+const _shardIndexFromKey = (key) => {
+  if (key === 'execution') return 0;
+  const m = /^execution_(\d+)$/.exec(key);
+  return m ? parseInt(m[1], 10) : -1;
+};
+
+// Lists the existing execution shard numbers of a cycle in ONE request (sorted asc).
+// Returns null if the listing endpoint failed (caller should fall back to legacy probing).
+const listCycleShards = async (cycleId) => {
+  try {
+    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.keys || [])
+      .map(k => _shardIndexFromKey(k.key))
+      .filter(n => n >= 0)
+      .sort((a, b) => a - b);
+  } catch (_) {
+    return null;
+  }
+};
+
+const _fetchShard = async (cycleId, shard) => {
+  const propName = _shardProp(shard);
+  let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
+  if (res.status === 429) {
+    await new Promise(r => setTimeout(r, 800));
+    res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
+  }
+  if (res.status === 404) return { missing: true };
+  if (!res.ok) return { error: res.status };
+  const data = await res.json();
+  return { value: data.value };
+};
+
+const _normalizeShard = (raw) => {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  return (typeof raw[0] === 'string')
+    ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
+    : raw;
+};
+
 // Returns:
-//   null  → shard 0 is 404 (cycle has never had an index — use Tier 2 exec_ scan)
-//   []    → shard 0 exists with empty array (index was explicitly cleared — do NOT use Tier 2)
+//   null  → shard 0 does not exist (cycle has never had an index)
+//   []    → shard 0 exists with empty array (index was explicitly cleared)
 //   [...] → tests in the index
 const readCycleIndex = async (cycleId) => {
-  const allEntries = [];
-  for (let shard = 0; shard <= 100; shard++) {          // max 100 shards = 4000+ tests
-    const propName = _shardProp(shard);
-    const res = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${cycleId}/properties/${propName}?t=${Date.now()}`
-    );
-    if (res.status === 404) {
-      if (shard === 0) return null; // ← No index ever created for this cycle
-      break;                         // No more shards beyond this point
+  const shards = await listCycleShards(cycleId);
+
+  if (shards === null) {
+    // Legacy fallback: sequential probing (only used if the listing endpoint fails)
+    const allEntries = [];
+    for (let shard = 0; shard <= 100; shard++) {
+      const r = await _fetchShard(cycleId, shard);
+      if (r.missing) { if (shard === 0) return null; break; }
+      if (r.error) break;
+      const entries = _normalizeShard(r.value);
+      if (entries.length === 0) { if (shard === 0) return []; break; }
+      allEntries.push(...entries);
     }
-    if (!res.ok) break;
-    const data = await res.json();
-    const raw = data.value || [];
-    if (!Array.isArray(raw) || raw.length === 0) {
-      if (shard === 0) return [];
-      break;
-    }
-    const normalized = (typeof raw[0] === 'string')
-      ? raw.map(id => ({ id: String(id), status: 'Not Run', linkedBugs: [] }))
-      : raw;
-    allEntries.push(...normalized);
+    return allEntries;
   }
-  return allEntries; // [] = explicitly cleared, [...] = has tests
+
+  if (shards.length === 0 || shards[0] !== 0) return null;
+
+  // Only consider the contiguous run 0..N (same semantics as the legacy reader)
+  const contiguous = [];
+  for (let i = 0; i < shards.length && shards[i] === i; i++) contiguous.push(i);
+
+  const results = await mapWithConcurrency(contiguous, 8, (shard) => _fetchShard(cycleId, shard));
+  const allEntries = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.missing || r.error) { if (i === 0) return r.missing ? null : []; break; }
+    const entries = _normalizeShard(r.value);
+    if (entries.length === 0) { if (i === 0) return []; break; }
+    allEntries.push(...entries);
+  }
+  return allEntries;
+};
+
+const _putShard = async (cycleId, shard, shardEntries) => {
+  const propName = _shardProp(shard);
+  const doPut = () => api.asUser().requestJira(
+    route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(shardEntries)
+    }
+  );
+  let res = await doPut();
+  for (let attempt = 0; res.status === 429 && attempt < 2; attempt++) {
+    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    res = await doPut();
+  }
+  if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
+  return res.ok;
 };
 
 const writeCycleIndex = async (cycleId, entries) => {
@@ -957,49 +1044,57 @@ const writeCycleIndex = async (cycleId, entries) => {
   }));
 
   const shardCount = cleanEntries.length === 0 ? 1 : Math.ceil(cleanEntries.length / SHARD_SIZE);
-  for (let shard = 0; shard < shardCount; shard++) {
-    const propName = _shardProp(shard);
-    const shardEntries = cleanEntries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE);
-    let res = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
-        method: 'PUT',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(shardEntries)
-      }
-    );
-    if (res.status === 429) {
-      await new Promise(r => setTimeout(r, 1200));
-      res = await api.asUser().requestJira(
-        route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
-          method: 'PUT',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(shardEntries)
-        }
-      );
+  const existingShards = await listCycleShards(cycleId);
+
+  // Write shards with bounded parallelism
+  const shardNums = Array.from({ length: shardCount }, (_, i) => i);
+  await mapWithConcurrency(shardNums, 5, (shard) =>
+    _putShard(cycleId, shard, cleanEntries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE))
+  );
+
+  // Lightweight summary used by getTestCycles (avoids reading every shard just to count)
+  try {
+    const seen = new Set();
+    const meta = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0, updatedAt: Date.now() };
+    for (const e of cleanEntries) {
+      const dk = e.testCaseKey ? `k_${e.testCaseKey}` : `i_${e.id}`;
+      if (seen.has(dk)) continue;
+      seen.add(dk);
+      meta.total++;
+      const st = normalizeJiraStatus(e.status);
+      if (st === 'Passed') meta.passed++;
+      else if (st === 'Failed') meta.failed++;
+      else if (st === 'Blocked') meta.blocked++;
+      else if (st === 'Not Run') meta.notRun++;
+      else meta.other++;
     }
-    if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
-    if (shard < shardCount - 1) {
-      await new Promise(r => setTimeout(r, 60));
-    }
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(meta)
+    });
+  } catch (metaErr) {
+    console.warn('[writeCycleIndex] execution-meta write failed:', metaErr?.message);
   }
 
-  // Clean up any remaining trailing shards
-  for (let oldShard = shardCount; oldShard <= 100; oldShard++) {
-    const propName = _shardProp(oldShard);
-    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
-      method: 'DELETE'
-    }).catch(() => {});
+  // Delete ONLY trailing shards that actually exist (previously fired ~100 blind DELETEs per write)
+  const trailing = existingShards === null
+    ? Array.from({ length: 101 - shardCount }, (_, i) => shardCount + i)
+    : existingShards.filter(n => n >= shardCount);
+  if (trailing.length > 0) {
+    await mapWithConcurrency(trailing, 5, (shard) =>
+      api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
+    );
   }
 };
 
 const deleteCycleIndex = async (cycleId) => {
-  for (let shard = 0; shard <= 100; shard++) {
-    const res = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`,
-      { method: 'DELETE' }
-    );
-    if (res.status === 404) break; // no more shards
-  }
+  const shards = await listCycleShards(cycleId);
+  const targets = shards === null ? Array.from({ length: 101 }, (_, i) => i) : shards;
+  await mapWithConcurrency(targets, 5, (shard) =>
+    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
+  );
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, { method: 'DELETE' }).catch(() => null);
 };
 
 
