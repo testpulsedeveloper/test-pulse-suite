@@ -57,11 +57,12 @@ async function fetchAllIssues(jql, fields, expand, properties, maxPages = 35) {
     isLast = page.isLast;
     if (!token) break;
     pages++;
+    await new Promise(r => setTimeout(r, 60));
   }
   return allIssues;
 }
 
-async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100, retries = 2) {
+async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = null, maxResults = 100, retries = 3) {
   try {
     let safeFields = fields;
     if (Array.isArray(fields) && fields.includes('*all')) {
@@ -93,7 +94,7 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
     });
 
     if (response.status === 429 && retries > 0) {
-      const delay = (4 - retries) * 1200 + Math.floor(Math.random() * 800);
+      const delay = (4 - retries) * 1500 + Math.floor(Math.random() * 800);
       await new Promise(r => setTimeout(r, delay));
       return await fetchJqlPage(jql, fields, expand, properties, nextPageToken, maxResults, retries - 1);
     }
@@ -952,15 +953,19 @@ const listCycleShards = async (cycleId) => {
 
 const _fetchShard = async (cycleId, shard) => {
   const propName = _shardProp(shard);
-  let res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
-  if (res.status === 429) {
-    await new Promise(r => setTimeout(r, 800));
-    res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
+    if (res.status === 429) {
+      if (attempt === 3) return { error: 429 };
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt) + Math.random() * 500));
+      continue;
+    }
+    if (res.status === 404) return { missing: true };
+    if (!res.ok) return { error: res.status };
+    const data = await res.json();
+    return { value: data.value };
   }
-  if (res.status === 404) return { missing: true };
-  if (!res.ok) return { error: res.status };
-  const data = await res.json();
-  return { value: data.value };
+  return { error: 'max_retries' };
 };
 
 const _normalizeShard = (raw) => {
@@ -997,7 +1002,7 @@ const readCycleIndex = async (cycleId) => {
   const contiguous = [];
   for (let i = 0; i < shards.length && shards[i] === i; i++) contiguous.push(i);
 
-  const results = await mapWithConcurrency(contiguous, 8, (shard) => _fetchShard(cycleId, shard));
+  const results = await mapWithConcurrency(contiguous, 3, (shard) => _fetchShard(cycleId, shard));
   const allEntries = [];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
@@ -1018,13 +1023,23 @@ const _putShard = async (cycleId, shard, shardEntries) => {
       body: JSON.stringify(shardEntries)
     }
   );
-  let res = await doPut();
-  for (let attempt = 0; res.status === 429 && attempt < 2; attempt++) {
-    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-    res = await doPut();
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const res = await doPut();
+    if (res.status === 429) {
+      if (attempt === 3) {
+        console.error(`[writeCycleIndex] Shard ${shard} write failed after retries: 429`);
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 1200 * Math.pow(2, attempt) + Math.random() * 600));
+      continue;
+    }
+    if (!res.ok) {
+      console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
+      return false;
+    }
+    return true;
   }
-  if (!res.ok) console.error(`[writeCycleIndex] Shard ${shard} write failed: ${res.status}`);
-  return res.ok;
+  return false;
 };
 
 const writeCycleIndex = async (cycleId, entries) => {
@@ -1046,9 +1061,9 @@ const writeCycleIndex = async (cycleId, entries) => {
   const shardCount = cleanEntries.length === 0 ? 1 : Math.ceil(cleanEntries.length / SHARD_SIZE);
   const existingShards = await listCycleShards(cycleId);
 
-  // Write shards with bounded parallelism
+  // Write shards with bounded parallelism (concurrency 3)
   const shardNums = Array.from({ length: shardCount }, (_, i) => i);
-  await mapWithConcurrency(shardNums, 5, (shard) =>
+  await mapWithConcurrency(shardNums, 3, (shard) =>
     _putShard(cycleId, shard, cleanEntries.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE))
   );
 
@@ -1082,7 +1097,7 @@ const writeCycleIndex = async (cycleId, entries) => {
     ? Array.from({ length: 101 - shardCount }, (_, i) => shardCount + i)
     : existingShards.filter(n => n >= shardCount);
   if (trailing.length > 0) {
-    await mapWithConcurrency(trailing, 5, (shard) =>
+    await mapWithConcurrency(trailing, 3, (shard) =>
       api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
     );
   }
@@ -1091,7 +1106,7 @@ const writeCycleIndex = async (cycleId, entries) => {
 const deleteCycleIndex = async (cycleId) => {
   const shards = await listCycleShards(cycleId);
   const targets = shards === null ? Array.from({ length: 101 }, (_, i) => i) : shards;
-  await mapWithConcurrency(targets, 5, (shard) =>
+  await mapWithConcurrency(targets, 3, (shard) =>
     api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
   );
   await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, { method: 'DELETE' }).catch(() => null);
@@ -1895,7 +1910,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const hasMore = !fetchAll && (numOffset + numLimit < allIssues.length);
   const nextOffset = numOffset + numLimit;
   
-  const cycles = await Promise.all(targetIssues.map(async (issue) => {
+  const cycles = await mapWithConcurrency(targetIssues, 2, async (issue) => {
     const properties = issue.properties || {};
     const planId = properties['testops-plan-link']?.planId || properties['testpulse-v2']?.planId || null;
     let rawExecution = (await readCycleIndex(issue.id)) ?? [];
@@ -1933,7 +1948,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       rawFields: issue.fields,
       execution
     };
-  }));
+  });
 
   // Fetch live bug details in bulk via fast JQL
   const allBugKeys = new Set();

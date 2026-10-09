@@ -1619,8 +1619,7 @@ function App() {
       // 3c. Admin-only: allowed project list
       if (adminVal) invoke('getAllowedProjects').then(a => setAllowedProjects(a)).catch(console.warn);
 
-      // 3d. Preload Execution & Cycle metrics
-      loadReportData(targetProjectId, config).catch(console.warn);
+      // Reports data is loaded on-demand when entering the Reports tab to save initial bandwidth and avoid Jira 429 rate limits
 
     } catch (err) {
       clearTimeout(loadTimer);
