@@ -1344,7 +1344,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
 
   // Step 2: Fresh creation for test cases that did not have prior executions
   if (testCasesToCreate.length > 0) {
-    const snapshots = await Promise.all(testCasesToCreate.map(tc => getTestCaseSnapshot(tc.id || tc.key)));
+    const snapshots = await mapWithConcurrency(testCasesToCreate, 3, tc => getTestCaseSnapshot(tc.id || tc.key));
 
     const issueUpdates = testCasesToCreate.map((tc, idx) => {
       const tcSnapshot = snapshots[idx];
@@ -2667,18 +2667,15 @@ resolver.define('updateTestStatus', async ({ payload }) => {
         const cycleIssue = await cycleRes.json();
         const projectKey = cycleIssue.fields?.project?.key;
         const projectIdFromCycle = cycleIssue.fields?.project?.id;
-        const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testId}?fields=summary,issuetype,customfield_10534`);
-        let tcSummary = String(testId);
-        if (tcRes.ok) {
-          const tcIssue = await tcRes.json();
-          tcSummary = tcIssue.fields?.summary || String(testId);
-        }
+        const tcSnap = await getTestCaseSnapshot(testId);
+        const tcSummary = tcSnap?.summary || String(testId);
+        const tcKeyForRun = tcSnap?.key || String(testId);
         const runPayload = {
           fields: {
-            summary: `[Run] ${testId}: ${tcSummary}`.substring(0, 255),
+            summary: `[Run] ${tcKeyForRun}: ${tcSummary}`.substring(0, 255),
             project: { key: projectKey || cycleIssue.fields?.project?.key },
             issuetype: { name: 'Test Run' },
-            description: ensureValidAdf(null, `Test Run execution for test case ${testId}`)
+            description: ensureValidAdf(tcSnap?.description, `Snapshot del caso ${tcKeyForRun}: ${tcSummary}`)
           }
         };
         let createRes = await api.asUser().requestJira(route`/rest/api/3/issue`, {
@@ -2712,6 +2709,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
           const runDataProp = {
             cycleId: String(cycleId),
             testCaseId: String(testId),
+            testCaseKey: tcSnap?.key || '',
             status: newStatus,
             comment: comment || '',
             iterations: iterations || [],
@@ -2719,7 +2717,16 @@ resolver.define('updateTestStatus', async ({ payload }) => {
             linkedBugs: linkedBugs || [],
             executedBy: executorInfo || null,
             executedAt: Date.now(),
-            lockedAt: newLockedAt
+            lockedAt: newLockedAt,
+            snapshot: {
+              testCaseId: String(testId),
+              testCaseKey: tcSnap?.key || '',
+              testCaseSummary: tcSummary,
+              testCaseDescription: tcSnap?.renderedDescription || null,
+              includedSections: (tcSnap?.includedSections || []).map(s => s.section),
+              executionType: tcSnap?.executionType || 'Manual',
+              capturedAt: Date.now()
+            }
           };
           await api.asUser().requestJira(route`/rest/api/3/issue/${createdRunId}/properties/testpulse-run-data`, {
             method: 'PUT',
@@ -4121,21 +4128,13 @@ resolver.define('createTestRunsForCycle', async ({ payload }) => {
 
   if (!testCases || testCases.length === 0) return { created: [], count: 0 };
 
-  const issuesToCreate = testCases.map(tc => ({
+  const snapshots = await mapWithConcurrency(testCases, 3, tc => getTestCaseSnapshot(tc.id || tc.key));
+  const issuesToCreate = testCases.map((tc, idx) => ({
     fields: {
       project: { id: String(projectId) },
-      summary: `[Run] ${tc.key || tc.id}: ${tc.summary || 'Test Case'}`,
+      summary: `[Run] ${tc.key || tc.id}: ${tc.summary || 'Test Case'}`.substring(0, 255),
       issuetype: { name: testRunType },
-      description: {
-        type: "doc",
-        version: 1,
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: `Ejecución de prueba de Test Pulse para el caso ${tc.key || tc.id} en el ciclo ${cycleKey || cycleId}.` }]
-          }
-        ]
-      }
+      description: ensureValidAdf(snapshots[idx]?.description, `Snapshot del caso ${tc.key || tc.id}: ${tc.summary || ''}`)
     }
   }));
 
