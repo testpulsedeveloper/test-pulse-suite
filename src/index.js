@@ -3456,13 +3456,24 @@ resolver.define('getIssueDescription', async ({ payload }) => {
     const { issueId } = payload;
     if (!issueId) return null;
 
-    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?fields=description,summary,issuelinks&properties=testpulse-run-data&expand=renderedFields`);
+    const fieldMap = await resolveSnapshotFieldIds();
+    const extraIds = [...fieldMap.precondition, ...fieldMap.steps, ...fieldMap.expected].map(f => f.id);
+    const fieldList = ['description', 'summary', 'issuelinks', ...extraIds].join(',');
+
+    const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?fields=${fieldList}&properties=testpulse-run-data&expand=renderedFields`);
     if (!response.ok) return null;
     const data = await response.json();
-    
-    let desc = data.renderedFields?.description || data.fields?.description || null;
+
+    const withSections = (issueData) => {
+      const base = issueData.renderedFields?.description || '';
+      const sections = buildSnapshotSections(fieldMap, issueData.fields, issueData.renderedFields);
+      const html = base + sections.html;
+      return html || issueData.fields?.description || null;
+    };
+
+    let desc = withSections(data);
     const runProp = data.properties?.['testpulse-run-data'] || {};
-    
+
     // If description is empty or generic run text, check snapshot or parent Test Case
     if (!desc || (typeof desc === 'string' && desc.includes('Test Run execution for test case'))) {
       if (runProp.snapshot?.testCaseDescription) {
@@ -3474,10 +3485,11 @@ resolver.define('getIssueDescription', async ({ payload }) => {
         if (match && match[1]) parentTcKeyOrId = match[1];
       }
       if (parentTcKeyOrId && String(parentTcKeyOrId) !== String(issueId)) {
-        const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${parentTcKeyOrId}?fields=description&expand=renderedFields`);
+        const tcFieldList = ['description', ...extraIds].join(',');
+        const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${parentTcKeyOrId}?fields=${tcFieldList}&expand=renderedFields`);
         if (tcRes.ok) {
           const tcData = await tcRes.json();
-          return tcData.renderedFields?.description || tcData.fields?.description || desc;
+          return withSections(tcData) || desc;
         }
       }
     }

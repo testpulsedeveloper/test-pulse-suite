@@ -1121,22 +1121,23 @@ function App() {
   const [loadingDescription, setLoadingDescription] = useState(false);
 
   useEffect(() => {
-    if (selectedTestCase) {
-      if (selectedTestCase.description) {
-         setSelectedTestCaseDescription(selectedTestCase.description);
-      } else {
-         setLoadingDescription(true);
-         setSelectedTestCaseDescription(null);
-         invoke('getIssueDescription', { issueId: selectedTestCase.id }).then(desc => {
-            setSelectedTestCaseDescription(desc);
-            setLoadingDescription(false);
-         }).catch(() => {
-            setLoadingDescription(false);
-         });
-      }
-    } else {
+    if (!selectedTestCase) {
       setSelectedTestCaseDescription(null);
+      return;
     }
+    let cancelled = false;
+    // Show cached text immediately, then refresh from Jira (includes Precondición / Pasos / Resultados Esperados)
+    const cached = selectedTestCase.description || null;
+    setSelectedTestCaseDescription(cached);
+    setLoadingDescription(!cached);
+    invoke('getIssueDescription', { issueId: selectedTestCase.id }).then(desc => {
+      if (cancelled) return;
+      if (desc) setSelectedTestCaseDescription(desc);
+      setLoadingDescription(false);
+    }).catch(() => {
+      if (!cancelled) setLoadingDescription(false);
+    });
+    return () => { cancelled = true; };
   }, [selectedTestCase]);
 
   const [testCaseDetails, setTestCaseDetails] = useState({ type: 'traditional', content: [] });
