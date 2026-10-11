@@ -3325,8 +3325,10 @@ resolver.define('getBugDetailsBatch', async ({ payload }) => {
 
 
 resolver.define('getTestCaseHistory', async ({ payload }) => {
+  const startedAt = Date.now();
+  const TIME_BUDGET_MS = 18000; // stay well below Forge's 25s resolver limit
   try {
-    const { testId, projectId, config } = payload;
+    const { testId, projectId, config } = payload || {};
     if (!testId) return [];
 
     let tcId = String(testId);
@@ -3334,143 +3336,120 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     let targetProjectId = projectId;
 
     try {
-      const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testId}?fields=key,summary,project,issuelinks`);
+      const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testId}?fields=summary,project`);
       if (tcRes.ok) {
         const tcData = await tcRes.json();
         tcId = String(tcData.id);
         tcKey = tcData.key;
-        if (!targetProjectId) {
-          targetProjectId = tcData.fields?.project?.id || tcData.fields?.project?.key;
-        }
+        if (!targetProjectId) targetProjectId = tcData.fields?.project?.id;
+      } else {
+        console.warn(`[getTestCaseHistory] TC ${testId} fetch failed: ${tcRes.status}`);
       }
     } catch (e) {
       console.warn('[getTestCaseHistory] Could not fetch tc issue:', e.message);
     }
 
-    const historyMap = new Map(); // key -> historyItem
+    const historyMap = new Map(); // cycleId|runKey -> item
+    const runTypeName = (config?.testRunType || 'Test Run').toLowerCase();
 
-    // 1. Search Test Runs via JQL
+    const toItem = (run, prop, cycle) => {
+      const tpStatus = prop.status ? normalizeJiraStatus(prop.status) : null;
+      const nativeStatus = normalizeJiraStatus(run.fields?.status?.name || 'Not Run');
+      const status = (tpStatus && tpStatus !== 'Not Run') ? tpStatus : (nativeStatus || tpStatus || 'Not Run');
+      return {
+        cycleId: cycle.id || run.id,
+        cycleKey: cycle.key || run.key,
+        cycleSummary: cycle.summary || '',
+        testRunKey: run.key,
+        testRunId: run.id,
+        status,
+        executedBy: prop.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
+        iterations: prop.iterations || [],
+        comment: prop.comment || '',
+        executedAt: prop.executedAt || run.fields?.created
+      };
+    };
+
+    // 1. Test Runs linked to this Test Case (runs are always linked to their TC on creation)
     try {
-      const searchClauses = [];
-      if (tcKey) {
-        searchClauses.push(`summary ~ "\"[Run] ${tcKey}:*\""`);
-        searchClauses.push(`issue in linkedIssues("${tcKey}")`);
-      }
-      if (tcId) {
-        searchClauses.push(`issue in linkedIssues("${tcId}")`);
-      }
+      const ref = tcKey || tcId;
+      const jql = `issue in linkedIssues("${ref}") ORDER BY created DESC`;
+      const runs = await fetchAllIssues(jql, ['summary', 'status', 'assignee', 'issuelinks', 'created', 'issuetype'], null, ['testpulse-run-data'], 4);
+      for (const run of runs) {
+        const prop = run.properties?.['testpulse-run-data'] || {};
+        const typeName = (run.fields?.issuetype?.name || '').toLowerCase();
+        const looksLikeRun = !!(prop.testCaseId || prop.testCaseKey) ||
+          (run.fields?.summary || '').startsWith('[Run]') ||
+          typeName === runTypeName || typeName.includes('run') || typeName.includes('ejecuci');
+        if (!looksLikeRun) continue;
 
-      const projectFilter = targetProjectId ? `project = "${targetProjectId}" AND ` : '';
-      const runTypes = config?.testRunType ? `"${config.testRunType}", ` : '';
-      const jql = `${projectFilter}(${searchClauses.join(' OR ')}) AND (issuetype in (${runTypes}"Test Run", "TestRun", "Ejecución de prueba", "Ejecución", "Test Execution") OR summary ~ "[Run]*") ORDER BY created DESC`;
+        const belongs = (!prop.testCaseId && !prop.testCaseKey) ||
+          String(prop.testCaseId) === tcId || (tcKey && prop.testCaseKey === tcKey);
+        if (!belongs) continue;
 
-      const runRes = await api.asUser().requestJira(route`/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&properties=testpulse-run-data&fields=summary,status,assignee,issuelinks,created&maxResults=50`);
-      if (runRes.ok) {
-        const runData = await runRes.json();
-        for (const run of (runData.issues || [])) {
-          const prop = run.properties?.['testpulse-run-data'] || {};
-          const isThisTc = String(prop.testCaseId) === tcId || 
-                           (tcKey && prop.testCaseKey === tcKey) || 
-                           (tcKey && run.fields?.summary?.includes(`[Run] ${tcKey}:`)) ||
-                           (run.fields?.issuelinks || []).some(l => {
-                             const other = l.outwardIssue || l.inwardIssue;
-                             return other && (String(other.id) === tcId || (tcKey && other.key === tcKey));
-                           });
-
-          if (!isThisTc && (prop.testCaseId || prop.testCaseKey)) {
-            continue;
-          }
-
-          let cycleId = prop.cycleId ? String(prop.cycleId) : '';
-          let cycleKey = prop.cycleKey || '';
-          let cycleSummary = '';
-
-          const linkedCycle = (run.fields?.issuelinks || [])
-            .map(l => l.outwardIssue || l.inwardIssue)
-            .filter(Boolean)
-            .find(i => String(i.id) !== tcId && (!tcKey || i.key !== tcKey));
-
-          if (linkedCycle) {
-            if (!cycleId) cycleId = String(linkedCycle.id);
-            if (!cycleKey) cycleKey = linkedCycle.key;
-            if (linkedCycle.fields?.summary) cycleSummary = linkedCycle.fields.summary;
-          }
-
-          const mapKey = cycleId || run.key;
-          historyMap.set(mapKey, {
-            cycleId: cycleId || run.id,
-            cycleKey: cycleKey || (cycleId ? `Cycle #${cycleId}` : run.key),
-            cycleSummary: cycleSummary || '',
-            testRunKey: run.key,
-            testRunId: run.id,
-            status: normalizeJiraStatus(run.fields?.status?.name || prop.status || 'Not Run'),
-            executedBy: prop.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
-            iterations: prop.iterations || [],
-            comment: prop.comment || '',
-            executedAt: prop.executedAt || run.fields?.created
-          });
-        }
+        const links = (run.fields?.issuelinks || []).map(l => l.outwardIssue || l.inwardIssue).filter(Boolean);
+        const linkedCycle = links.find(i => String(i.id) === String(prop.cycleId)) ||
+          links.find(i => String(i.id) !== tcId && (!tcKey || i.key !== tcKey));
+        const cycle = {
+          id: prop.cycleId ? String(prop.cycleId) : (linkedCycle ? String(linkedCycle.id) : ''),
+          key: prop.cycleKey || linkedCycle?.key || '',
+          summary: linkedCycle?.fields?.summary || ''
+        };
+        historyMap.set(cycle.id || run.key, toItem(run, prop, cycle));
       }
     } catch (errSearch) {
-      console.warn('[getTestCaseHistory] JQL search error:', errSearch.message);
+      console.warn('[getTestCaseHistory] Linked runs search error:', errSearch.message);
     }
 
-    // 2. Scan cycles via lightweight index for missing cycles / cycle summaries
+    // 2. Fallback: cycle indexes (covers legacy runs without links). Bounded + time-budgeted.
     try {
-      const cycleType = config?.testCycleType || 'Test Cycle';
-      const projectJql = targetProjectId ? `project = "${targetProjectId}" AND ` : '';
-      const cycleJql = `${projectJql}(issuetype in ("${cycleType}", "Test Cycle", "Ciclo de prueba") OR summary ~ "Ciclo*" OR summary ~ "Cycle*") ORDER BY created DESC`;
-      
-      const cycleRes = await api.asUser().requestJira(route`/rest/api/3/search/jql?jql=${encodeURIComponent(cycleJql)}&fields=summary,key,id&maxResults=50`);
-      if (cycleRes.ok) {
-        const cycleData = await cycleRes.json();
-        const cycles = cycleData.issues || [];
+      if (targetProjectId && Date.now() - startedAt < TIME_BUDGET_MS) {
+        const cycleType = config?.testCycleType || 'Test Cycle';
+        const cycleJql = `project = ${targetProjectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+        const page = await fetchJqlPage(cycleJql, ['summary'], null, null, null, 100);
+        if (page.error) console.warn('[getTestCaseHistory] Cycle search error:', page.error);
+        const cycles = page.issues || [];
 
-        for (const cycle of cycles) {
-          const cycleIdStr = String(cycle.id);
-          const entries = (await readCycleIndex(cycle.id)) || [];
-          const match = entries.find(e => String(e.id) === tcId || (tcKey && (e.key === tcKey || e.testCaseKey === tcKey)));
-
-          if (match) {
-            const existing = historyMap.get(cycleIdStr);
-            if (existing) {
-              if (!existing.cycleSummary) existing.cycleSummary = cycle.fields.summary;
-              if (!existing.cycleKey) existing.cycleKey = cycle.key;
-            } else {
-              historyMap.set(cycleIdStr, {
-                cycleId: cycle.id,
-                cycleKey: cycle.key,
-                cycleSummary: cycle.fields.summary || '',
-                testRunKey: match.testRunKey || '',
-                testRunId: match.testRunId || '',
-                status: normalizeJiraStatus(match.status || 'Not Run'),
-                executedBy: match.executedBy || null,
-                iterations: match.iterations || [],
-                comment: match.comment || '',
-                executedAt: match.executedAt || null
-              });
-            }
-          } else {
-            const existing = historyMap.get(cycleIdStr);
-            if (existing && !existing.cycleSummary) {
-              existing.cycleSummary = cycle.fields.summary;
-              if (!existing.cycleKey) existing.cycleKey = cycle.key;
-            }
-          }
+        // Fill summaries for cycles already found
+        for (const c of cycles) {
+          const ex = historyMap.get(String(c.id));
+          if (ex) { ex.cycleSummary = ex.cycleSummary || c.fields?.summary || ''; ex.cycleKey = ex.cycleKey || c.key; }
         }
+
+        const pending = cycles.filter(c => !historyMap.has(String(c.id)));
+        await mapWithConcurrency(pending, 3, async (c) => {
+          if (Date.now() - startedAt > TIME_BUDGET_MS) return;
+          const entries = (await readCycleIndex(c.id)) || [];
+          const match = entries.find(e => String(e.id) === tcId || String(e.testCaseId || '') === tcId || (tcKey && (e.key === tcKey || e.testCaseKey === tcKey)));
+          if (!match) return;
+          historyMap.set(String(c.id), {
+            cycleId: c.id,
+            cycleKey: c.key,
+            cycleSummary: c.fields?.summary || '',
+            testRunKey: match.testRunKey || '',
+            testRunId: match.testRunId || '',
+            status: normalizeJiraStatus(match.status || 'Not Run'),
+            executedBy: match.executedBy || null,
+            iterations: match.iterations || [],
+            comment: match.comment || '',
+            executedAt: match.executedAt || null
+          });
+        });
       }
     } catch (errCycles) {
       console.warn('[getTestCaseHistory] Cycle scan error:', errCycles.message);
     }
 
-    const historyList = Array.from(historyMap.values());
-    return historyList;
+    return Array.from(historyMap.values()).sort((a, b) => {
+      const ta = a.executedAt ? new Date(a.executedAt).getTime() : 0;
+      const tb = b.executedAt ? new Date(b.executedAt).getTime() : 0;
+      return tb - ta;
+    });
   } catch (e) {
     console.error("getTestCaseHistory error:", e);
     return [];
   }
 });
-
 
 resolver.define('getIssueDescription', async ({ payload }) => {
   try {

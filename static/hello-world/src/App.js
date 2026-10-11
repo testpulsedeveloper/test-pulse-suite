@@ -1142,6 +1142,7 @@ function App() {
   const [testCaseDetails, setTestCaseDetails] = useState({ type: 'traditional', content: [] });
   const [testCaseDetailsLoading, setTestCaseDetailsLoading] = useState(false);
   const [testCaseHistory, setTestCaseHistory] = useState([]);
+  const [testCaseHistoryLoading, setTestCaseHistoryLoading] = useState(false);
   const [modalDetailTab, setModalDetailTab] = useState('details');
 
   // Bug Details Modal / Drawer State (Lazy Loading)
@@ -3877,24 +3878,23 @@ Then el sistema valida la identidad.
 
     const loadTestCaseDetails = async (caseId) => {
     setTestCaseDetailsLoading(true);
+    setTestCaseHistoryLoading(true);
     setTestCaseHistory([]);
+
+    const historyPromise = invoke('getTestCaseHistory', { testId: caseId, projectId: selectedProjectId, config: projectConfig })
+      .then(h => setTestCaseHistory(Array.isArray(h) ? h : []))
+      .catch(e => { console.error('Error loading history:', e); setTestCaseHistory([]); })
+      .finally(() => setTestCaseHistoryLoading(false));
+
     let details = { type: 'traditional', content: [] };
-    let history = [];
     try {
       details = await invoke('getTestCaseDetails', { caseId });
     } catch(e) {
       console.error('Error loading details:', e);
     }
-    
-    try {
-      history = await invoke('getTestCaseHistory', { testId: caseId, projectId: selectedProjectId, config: projectConfig });
-    } catch(e) {
-      console.error('Error loading history:', e);
-    }
-    
     setTestCaseDetails(details || { type: 'traditional', content: [] });
-    setTestCaseHistory(history || []);
     setTestCaseDetailsLoading(false);
+    await historyPromise;
   };
 
   const handleSaveTestCaseDetails = async () => {
@@ -4283,7 +4283,7 @@ Then el sistema valida la identidad.
                 </div>
 
                 <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: '2.5rem' }}>
-                  {testCaseDetailsLoading ? (
+                  {testCaseHistoryLoading ? (
                     <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
                       <div className="spinner" style={{ margin: '0 auto 1rem auto', width: '24px', height: '24px', border: '3px solid #DCDFE4', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
                       Cargando historial de ejecuciones...
