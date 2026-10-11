@@ -215,7 +215,10 @@ function sanitizeRenderedHtml(html) {
 function adfToHtml(adf, attachments = []) {
   if (!adf) return '';
   if (typeof adf === 'string') {
-    if (adf.trim().startsWith('<') && adf.trim().endsWith('>')) {
+    const trimmed = adf.trim();
+    const looksLikeHtml = (trimmed.startsWith('<') && trimmed.endsWith('>')) ||
+      /<\/?(p|br|h[1-6]|div|span|ul|ol|li|strong|b|em|i|a|table|tr|td|th|pre|code|blockquote)\b[^>]*>/i.test(trimmed);
+    if (looksLikeHtml) {
       return sanitizeRenderedHtml(adf);
     }
     return sanitizeRenderedHtml(

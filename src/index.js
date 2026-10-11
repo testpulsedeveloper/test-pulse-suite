@@ -4446,7 +4446,7 @@ const buildSnapshotSections = (fieldMap, fields, renderedFields) => {
       const bodyHtml = (typeof rendered === 'string' && rendered.trim())
         ? rendered
         : (typeof fields?.[f.id] === 'string' ? `<p>${_escHtml(fields[f.id]).replace(/\r?\n/g, '<br/>')}</p>` : '');
-      html += `<h3>${def.title}</h3>${bodyHtml}`;
+      html += `<h3>${def.title}</h3><div>${bodyHtml}</div>`;
       included.push({ section: def.key, fieldId: f.id, fieldName: f.name });
       break; // one field per section is enough
     }
