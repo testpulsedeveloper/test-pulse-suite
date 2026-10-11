@@ -1068,6 +1068,24 @@ function App() {
   const [executionCurrentPage, setExecutionCurrentPage] = useState(1);
   const [executionPageSize, setExecutionPageSize] = useState(20);
   const [executionChecked, setExecutionChecked] = useState(new Set());
+
+  // Tester / folder filters + folder grouping (Planning & Execution)
+  const [execTesterFilter, setExecTesterFilter] = useState('ALL'); // 'ALL' | 'MINE' | 'UNASSIGNED' | accountId
+  const [execTesterFilterSource, setExecTesterFilterSource] = useState('default'); // 'default' | 'user'
+  const [execFolderFilter, setExecFolderFilter] = useState(''); // '' | '__ROOT__' | folderId
+  const [groupByFolder, setGroupByFolder] = useState(() => {
+    try { return localStorage.getItem('tp_group_by_folder') !== 'false'; } catch (e) { return true; }
+  });
+  const [collapsedGroups, setCollapsedGroups] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('tp_collapsed_groups') || '{}') || {}; } catch (e) { return {}; }
+  });
+  useEffect(() => { try { localStorage.setItem('tp_group_by_folder', String(groupByFolder)); } catch (e) {} }, [groupByFolder]);
+  useEffect(() => { try { localStorage.setItem('tp_collapsed_groups', JSON.stringify(collapsedGroups)); } catch (e) {} }, [collapsedGroups]);
+  const [assignModal, setAssignModal] = useState(null); // { items: [{testRunId, id}] }
+  const [assignQuery, setAssignQuery] = useState('');
+  const [assignResults, setAssignResults] = useState([]);
+  const [assignSearching, setAssignSearching] = useState(false);
+  const [assignSaving, setAssignSaving] = useState(false);
   
   // Mobile QR Upload State
   const [qrModalSession, setQrModalSession] = useState(null);
@@ -7085,6 +7103,240 @@ Then el sistema valida la identidad.
     setPlanningAvailVisible(LIST_BATCH_SIZE);
   }, [selectedCycle?.id, deferredSearchQuery, planningFolder, planningPriority, planningExecutionType]);
 
+  // ─── Tester / folder helpers (Planning & Execution) ───
+  const myAccountId = context?.accountId || null;
+  const _uid = (u) => (u && typeof u === 'object') ? (u.accountId || null) : (u ? String(u) : null);
+  const _uname = (u) => (u && typeof u === 'object') ? (u.displayName || u.name || '') : '';
+  // "Mine" = assigned to me OR executed by me (testers usually get assigned when they execute)
+  const isTestMine = (t) => !!myAccountId && (_uid(t.assignee) === myAccountId || _uid(t.executedBy) === myAccountId);
+  const isTestUnassigned = (t) => !_uid(t.assignee) && !_uid(t.executedBy);
+  const matchesTester = (t, filter) => {
+    if (!filter || filter === 'ALL') return true;
+    if (filter === 'MINE') return isTestMine(t);
+    if (filter === 'UNASSIGNED') return isTestUnassigned(t);
+    return _uid(t.assignee) === filter || _uid(t.executedBy) === filter;
+  };
+  const folderPathById = useMemo(() => {
+    const m = new Map();
+    folderPaths.forEach(f => m.set(String(f.id), f.path));
+    return m;
+  }, [folderPaths]);
+  const getTestFolderId = (t) => {
+    const tc = findTc(t.testCaseId || t.id) || t;
+    const fid = tc?.folderId ? String(tc.folderId) : null;
+    return fid && folderPathById.has(fid) ? fid : null;
+  };
+  const matchesFolder = (t, filter) => {
+    if (!filter) return true;
+    const fid = getTestFolderId(t);
+    if (filter === '__ROOT__') return !fid;
+    return fid === String(filter);
+  };
+  const groupTestsByFolder = (items) => {
+    const map = new Map();
+    items.forEach(t => {
+      const fid = getTestFolderId(t) || '__ROOT__';
+      if (!map.has(fid)) map.set(fid, []);
+      map.get(fid).push(t);
+    });
+    return Array.from(map.entries())
+      .map(([fid, list]) => ({ id: fid, name: fid === '__ROOT__' ? 'Sin carpeta' : (folderPathById.get(fid) || 'Carpeta'), items: list }))
+      .sort((a, b) => (a.id === '__ROOT__' ? 1 : b.id === '__ROOT__' ? -1 : a.name.localeCompare(b.name)));
+  };
+  const isGroupCollapsed = (scope, gid) => !!collapsedGroups[`${scope}:${gid}`];
+  const toggleGroup = (scope, gid) => setCollapsedGroups(prev => {
+    const k = `${scope}:${gid}`;
+    const n = { ...prev };
+    if (n[k]) delete n[k]; else n[k] = true;
+    return n;
+  });
+  const setAllGroups = (scope, groupIds, collapsed) => setCollapsedGroups(prev => {
+    const n = { ...prev };
+    groupIds.forEach(g => { const k = `${scope}:${g}`; if (collapsed) n[k] = true; else delete n[k]; });
+    return n;
+  });
+
+  const groupToolBtnStyle = { background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '4px', padding: '2px 8px', fontSize: '11px', fontWeight: 600, color: '#44546F', cursor: 'pointer', height: '24px', display: 'inline-flex', alignItems: 'center', gap: '4px' };
+
+  // Toolbar: group toggle + expand/collapse all (for a given list scope)
+  const renderGroupToolbar = (scope, items) => {
+    const groupIds = groupByFolder ? groupTestsByFolder(items).map(g => g.id) : [];
+    return (
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+        <button type="button" style={{ ...groupToolBtnStyle, background: groupByFolder ? '#E9F2FF' : '#FFFFFF', color: groupByFolder ? '#0C66E4' : '#44546F' }}
+          onClick={() => setGroupByFolder(v => !v)} title="Agrupar la lista por carpeta">
+          📁 {groupByFolder ? 'Agrupado' : 'Agrupar'}
+        </button>
+        {groupByFolder && groupIds.length > 0 && (
+          <>
+            <button type="button" style={groupToolBtnStyle} onClick={() => setAllGroups(scope, groupIds, false)} title="Expandir todas las carpetas">⊞ Expandir</button>
+            <button type="button" style={groupToolBtnStyle} onClick={() => setAllGroups(scope, groupIds, true)} title="Contraer todas las carpetas">⊟ Contraer</button>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  // Renders items grouped by folder with collapsible headers (or flat when grouping is off)
+  const renderGroupedList = (scope, items, renderItem, summaryFn) => {
+    if (!groupByFolder) return items.map(renderItem);
+    return groupTestsByFolder(items).map(g => {
+      const collapsed = isGroupCollapsed(scope, g.id);
+      return (
+        <React.Fragment key={`grp-${scope}-${g.id}`}>
+          <div
+            onClick={() => toggleGroup(scope, g.id)}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', margin: '6px 0 2px 0', background: '#F7F8F9', border: '1px solid #EBECF0', borderRadius: '6px', cursor: 'pointer', userSelect: 'none' }}
+            title={collapsed ? 'Expandir carpeta' : 'Contraer carpeta'}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#626F86" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s ease', flexShrink: 0 }}>
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+            <span style={{ fontSize: '13px' }}>📁</span>
+            <span style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{g.name}</span>
+            {summaryFn && <span style={{ fontSize: '11px', color: '#626F86', flexShrink: 0 }}>{summaryFn(g.items)}</span>}
+            <span style={{ fontSize: '10px', fontWeight: 700, background: '#DCDFE4', color: '#44546F', padding: '1px 7px', borderRadius: '10px', flexShrink: 0 }}>{g.items.length}</span>
+          </div>
+          {!collapsed && g.items.map(renderItem)}
+        </React.Fragment>
+      );
+    });
+  };
+
+  // Collapsible section header helper (Planning lists)
+  const isSectionCollapsed = (key) => !!collapsedGroups[`section:${key}`];
+  const toggleSection = (key) => toggleGroup('section', key);
+  const renderSectionChevron = (key) => {
+    const c = isSectionCollapsed(key);
+    return (
+      <button type="button" onClick={() => toggleSection(key)} title={c ? 'Expandir lista' : 'Contraer lista'}
+        style={{ background: 'transparent', border: 'none', padding: '2px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#44546F" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: c ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s ease' }}>
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
+    );
+  };
+
+  // Project default view for Execution (configured by admin)
+  useEffect(() => {
+    if (execTesterFilterSource === 'default') {
+      setExecTesterFilter(projectConfig?.executionDefaultView === 'MINE' ? 'MINE' : 'ALL');
+    }
+  }, [projectConfig?.executionDefaultView, selectedProjectId]);
+
+  // Assignable users search (debounced) for the bulk-assign modal
+  useEffect(() => {
+    if (!assignModal || !selectedProjectId) return undefined;
+    setAssignSearching(true);
+    const h = setTimeout(() => {
+      invoke('searchAssignableUsers', { projectId: selectedProjectId, query: assignQuery })
+        .then(list => setAssignResults(Array.isArray(list) ? list : []))
+        .catch(() => setAssignResults([]))
+        .finally(() => setAssignSearching(false));
+    }, 300);
+    return () => clearTimeout(h);
+  }, [assignModal, assignQuery, selectedProjectId]);
+
+  const openAssignModal = (items) => {
+    const withRun = (items || []).filter(t => t && t.testRunId);
+    if (withRun.length === 0) {
+      addNotification({ type: 'warning', title: 'Sin Test Runs', description: 'Los casos seleccionados aún no tienen Test Run en Jira.' });
+      return;
+    }
+    setAssignQuery('');
+    setAssignResults([]);
+    setAssignModal({ items: withRun });
+  };
+
+  const applyAssignment = async (user) => {
+    if (!assignModal || assignSaving) return;
+    setAssignSaving(true);
+    const items = assignModal.items.map(t => ({ testRunId: String(t.testRunId), id: String(t.id) }));
+    const okIds = [];
+    const failed = [];
+    try {
+      for (let i = 0; i < items.length; i += 25) {
+        const chunk = items.slice(i, i + 25);
+        const res = await invoke('bulkAssignTestRuns', { projectId: selectedProjectId, cycleId: selectedCycle?.id, items: chunk, user: user ? { accountId: user.accountId, displayName: user.displayName } : null });
+        if (res?.error === 'FORBIDDEN') throw new Error('Solo los administradores del proyecto pueden asignar testers.');
+        (res?.results || []).forEach(r => (r.ok ? okIds.push(String(r.testRunId)) : failed.push(r)));
+      }
+      const okSet = new Set(okIds);
+      const newAssignee = user ? { accountId: user.accountId, displayName: user.displayName } : null;
+      const apply = (arr) => (arr || []).map(t => {
+        if (!okSet.has(String(t.testRunId))) return t;
+        const notExecuted = normalizeUiStatus(t.status) === 'Not Run';
+        // For unexecuted runs, executedBy mirrors the previous assignee (backend fallback) → keep it consistent
+        const executedBy = (notExecuted && _uid(t.executedBy) === _uid(t.assignee)) ? newAssignee : t.executedBy;
+        return { ...t, assignee: newAssignee, executedBy };
+      });
+      setCycleTests(prev => apply(prev));
+      if (selectedCycle?.id && perCycleCacheRef.current[selectedCycle.id]) {
+        perCycleCacheRef.current[selectedCycle.id] = apply(perCycleCacheRef.current[selectedCycle.id]);
+      }
+      setExecutionChecked(new Set());
+      setAssignModal(null);
+      addNotification({
+        type: failed.length ? 'warning' : 'success',
+        title: user ? 'Tester asignado' : 'Asignación removida',
+        description: `${okIds.length} Test Run(s) ${user ? `asignados a ${user.displayName}` : 'sin asignar'}${failed.length ? ` · ${failed.length} con error` : ''}.`
+      });
+    } catch (err) {
+      addNotification({ type: 'error', title: 'No se pudo asignar', description: err.message || String(err) });
+    } finally {
+      setAssignSaving(false);
+    }
+  };
+
+  const renderAssignModal = () => {
+    if (!assignModal) return null;
+    return (
+      <div onClick={() => !assignSaving && setAssignModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(9,30,66,0.54)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div onClick={e => e.stopPropagation()} style={{ background: '#FFFFFF', borderRadius: '8px', width: '420px', maxWidth: '92vw', boxShadow: '0 8px 24px rgba(9,30,66,0.25)', padding: '1.25rem' }}>
+          <h3 style={{ margin: '0 0 0.25rem 0', fontSize: '16px', color: '#172B4D' }}>👤 Asignar tester</h3>
+          <p style={{ margin: '0 0 0.9rem 0', fontSize: '12px', color: '#626F86' }}>
+            Se asignará la <strong>Persona asignada</strong> de {assignModal.items.length} Test Run(s) en Jira.
+          </p>
+          <input
+            autoFocus
+            type="text"
+            value={assignQuery}
+            onChange={e => setAssignQuery(e.target.value)}
+            placeholder="Buscar usuario por nombre o correo…"
+            style={{ width: '100%', boxSizing: 'border-box', padding: '0.5rem 0.65rem', fontSize: '13px', border: '1px solid #DCDFE4', borderRadius: '6px', outline: 'none', marginBottom: '0.6rem' }}
+          />
+          <div style={{ maxHeight: '260px', overflowY: 'auto', border: '1px solid #EBECF0', borderRadius: '6px' }}>
+            {assignSearching && assignResults.length === 0 ? (
+              <div style={{ padding: '1rem', fontSize: '12px', color: '#626F86', textAlign: 'center' }}>Buscando…</div>
+            ) : assignResults.length === 0 ? (
+              <div style={{ padding: '1rem', fontSize: '12px', color: '#626F86', textAlign: 'center' }}>Sin resultados</div>
+            ) : assignResults.map(u => (
+              <div key={u.accountId}
+                onClick={() => applyAssignment(u)}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '0.5rem 0.75rem', cursor: assignSaving ? 'wait' : 'pointer', fontSize: '13px', color: '#172B4D', borderBottom: '1px solid #F1F2F4' }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#F4F5F7'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >
+                {u.avatarUrl ? <img src={u.avatarUrl} alt="" style={{ width: 22, height: 22, borderRadius: '50%' }} /> : <span>👤</span>}
+                <span>{u.displayName}</span>
+                {u.accountId === myAccountId && <span style={{ fontSize: '10px', color: '#626F86' }}>(tú)</span>}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.9rem' }}>
+            <button type="button" className="btn-secondary" disabled={assignSaving} onClick={() => applyAssignment(null)} style={{ fontSize: '12px', height: '30px' }}>
+              Quitar asignación
+            </button>
+            <button type="button" className="btn-secondary" disabled={assignSaving} onClick={() => setAssignModal(null)} style={{ fontSize: '12px', height: '30px' }}>
+              {assignSaving ? 'Asignando…' : 'Cancelar'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
 const renderPlanningTab = () => {
     // Deduplicate cycleTests strictly by test case key and ID
     const uniqueCycleTestsMap = new Map();
@@ -7427,6 +7679,7 @@ const renderPlanningTab = () => {
                 <div className="planning-card-panel">
                   <div className="planning-panel-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      {renderSectionChevron('planning-cycle')}
                       <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span>Tests in this Cycle</span>
                         {isLoadingCycleTests ? (
@@ -7437,6 +7690,7 @@ const renderPlanningTab = () => {
                       </h2>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {!isSectionCollapsed('planning-cycle') && deduplicatedCycleTests.length > 0 && renderGroupToolbar(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests.slice(0, planningCycleVisible))}
                       {planningChecked.size > 0 && (
                         <button 
                           className="btn-secondary" 
@@ -7485,6 +7739,7 @@ const renderPlanningTab = () => {
                     </div>
                   </div>
 
+                  {!isSectionCollapsed('planning-cycle') && (<>
                   {/* Select All Sub-bar */}
                   {deduplicatedCycleTests.length > 0 && (
                     <div className="planning-panel-subbar">
@@ -7516,7 +7771,7 @@ const renderPlanningTab = () => {
                       </div>
                     ) : (
                       <>
-                        {filteredCycleTests.slice(0, planningCycleVisible).map(test => {
+                        {renderGroupedList(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests.slice(0, planningCycleVisible), test => {
                           const isAuto = getExecVal(test).includes('auto');
                           return (
                             <div key={test.id} className="planning-row">
@@ -7592,7 +7847,7 @@ const renderPlanningTab = () => {
                               </div>
                             </div>
                           );
-                        })}
+                        }, items => `${items.filter(t => normalizeUiStatus(t.status) !== 'Not Run').length}/${items.length} ejecutados`)}
                         {filteredCycleTests.length > planningCycleVisible && (
                           <LoadMoreSentinel key={`cyc-${planningCycleVisible}`} remaining={filteredCycleTests.length - planningCycleVisible} onVisible={() => setPlanningCycleVisible(v => v + LIST_BATCH_SIZE)} />
                         )}
@@ -7604,6 +7859,7 @@ const renderPlanningTab = () => {
                       </>
                     )}
                   </div>
+                  </>)}
                 </div>
 
                 {/* LOADING INDICATOR (Cycle Sync) */}
@@ -7618,12 +7874,14 @@ const renderPlanningTab = () => {
                 <div className="planning-card-panel">
                   <div className="planning-panel-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {renderSectionChevron('planning-available')}
                       <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D' }}>
                         Available Test Cases
                       </h2>
                       <span style={{ fontSize: '11px', fontWeight: 700, background: '#F1F2F4', color: '#626F86', padding: '1px 8px', borderRadius: '10px' }}>
                         {availableFilteredTestCases.length}
                       </span>
+                      {!isSectionCollapsed('planning-available') && availableFilteredTestCases.length > 0 && renderGroupToolbar(`plan-avail-${selectedCycle?.id || ''}`, availableFilteredTestCases.slice(0, planningAvailVisible))}
                     </div>
 
                     {/* Filters & Bulk Add Button */}
@@ -7809,8 +8067,9 @@ const renderPlanningTab = () => {
                   </div>
 
                   {/* Available Tests List */}
+                  {!isSectionCollapsed('planning-available') && (
                   <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {availableFilteredTestCases.slice(0, planningAvailVisible).map(test => {
+                    {renderGroupedList(`plan-avail-${selectedCycle?.id || ''}`, availableFilteredTestCases.slice(0, planningAvailVisible), test => {
                       const isSelected = selectedTestsForCycle.includes(test.id);
                       const isAuto = getExecVal(test).includes('auto');
                       return (
@@ -7874,6 +8133,7 @@ const renderPlanningTab = () => {
                       </div>
                     )}
                   </div>
+                  )}
                 </div>
               </div>
             ) : (
@@ -8044,8 +8304,36 @@ const renderPlanningTab = () => {
     const inProgressPct = totalInCycle > 0 ? ((inProgressCount / totalInCycle) * 100).toFixed(1) : '0';
     const notRunPct = totalInCycle > 0 ? ((notRunCount / totalInCycle) * 100).toFixed(1) : '0';
 
+    // Tester + folder scope (applied before status/search). "Mine" falls back to all when it came from the
+    // project default and the user has nothing assigned/executed in this cycle (avoids an empty screen).
+    const mineCount = deduplicatedCycleTests.filter(isTestMine).length;
+    const unassignedCount = deduplicatedCycleTests.filter(isTestUnassigned).length;
+    const testerFallbackActive = execTesterFilter === 'MINE' && execTesterFilterSource === 'default' && mineCount === 0 && totalInCycle > 0;
+    const effectiveTesterFilter = testerFallbackActive ? 'ALL' : execTesterFilter;
+    const scopedTests = deduplicatedCycleTests.filter(t => matchesTester(t, effectiveTesterFilter) && matchesFolder(t, execFolderFilter));
+    const scopeIsFiltered = effectiveTesterFilter !== 'ALL' || !!execFolderFilter;
+    const pill = {
+      all: scopedTests.length,
+      passed: scopedTests.filter(t => isPassed(t.status)).length,
+      failed: scopedTests.filter(t => isFailed(t.status)).length,
+      blocked: scopedTests.filter(t => isBlocked(t.status)).length,
+      inProgress: scopedTests.filter(t => isInProgress(t.status)).length,
+      notRun: scopedTests.filter(t => isNotRun(t.status)).length
+    };
+    const testerOptions = (() => {
+      const m = new Map();
+      deduplicatedCycleTests.forEach(t => {
+        [t.assignee, t.executedBy].forEach(u => {
+          const id = _uid(u);
+          const name = _uname(u);
+          if (id && name && !m.has(id)) m.set(id, name);
+        });
+      });
+      return Array.from(m.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+    })();
+
     // Filter tests
-    let filteredTests = deduplicatedCycleTests.filter(test => {
+    let filteredTests = scopedTests.filter(test => {
       const isCurrentlyRunning = !!runningTests[test.id];
       if (!isCurrentlyRunning) {
         if (executionStatusFilter === 'Passed' && !isPassed(test.status)) return false;
@@ -8453,41 +8741,41 @@ const renderPlanningTab = () => {
                           onClick={() => { setExecutionStatusFilter('ALL'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'ALL' ? 'active' : ''}`}
                         >
-                          Todos {isLoadingCycleTests ? '(...)' : `(${totalInCycle})`}
+                          Todos {isLoadingCycleTests ? '(...)' : `(${pill.all})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Passed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Passed' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Passed' ? { background: '#216E4E', color: '#FFFFFF' } : {}}
                         >
-                          Passed {isLoadingCycleTests ? '(...)' : `(${passedCount})`}
+                          Passed {isLoadingCycleTests ? '(...)' : `(${pill.passed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Failed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Failed' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Failed' ? { background: '#BF2600', color: '#FFFFFF' } : {}}
                         >
-                          Failed {isLoadingCycleTests ? '(...)' : `(${failedCount})`}
+                          Failed {isLoadingCycleTests ? '(...)' : `(${pill.failed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Blocked'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Blocked' ? 'active' : ''}`}
                           style={executionStatusFilter === 'Blocked' ? { background: '#FFAB00', color: '#172B4D' } : {}}
                         >
-                          Blocked {isLoadingCycleTests ? '(...)' : `(${blockedCount})`}
+                          Blocked {isLoadingCycleTests ? '(...)' : `(${pill.blocked})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('In Progress'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'In Progress' ? 'active' : ''}`}
                           style={executionStatusFilter === 'In Progress' ? { background: '#0747A6', color: '#FFFFFF' } : {}}
                         >
-                          In Progress {isLoadingCycleTests ? '(...)' : `(${inProgressCount})`}
+                          In Progress {isLoadingCycleTests ? '(...)' : `(${pill.inProgress})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Not Run'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Not Run' ? 'active' : ''}`}
                         >
-                          Not Run {isLoadingCycleTests ? '(...)' : `(${notRunCount})`}
+                          Not Run {isLoadingCycleTests ? '(...)' : `(${pill.notRun})`}
                         </button>
                       </div>
                     </div>
@@ -8516,6 +8804,58 @@ const renderPlanningTab = () => {
                       </select>
                     </div>
                   </div>
+
+                  {/* Scope Toolbar: Tester / Folder / Grouping / Assign */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.6rem', padding: '0.5rem 0.25rem 0.25rem 0.25rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      <select
+                        value={execTesterFilter}
+                        onChange={e => { setExecTesterFilter(e.target.value); setExecTesterFilterSource('user'); setExecutionCurrentPage(1); }}
+                        title="Filtrar por tester (asignado o quien ejecutó)"
+                        style={{ padding: '0.35rem 0.6rem', fontSize: '12px', border: `1px solid ${execTesterFilter !== 'ALL' ? '#0C66E4' : '#DCDFE4'}`, borderRadius: '6px', background: execTesterFilter !== 'ALL' ? '#E9F2FF' : '#FFFFFF', color: '#172B4D', outline: 'none', cursor: 'pointer', fontWeight: 600 }}
+                      >
+                        <option value="ALL">👥 Todos los testers</option>
+                        <option value="MINE">👤 Mis ejecuciones ({mineCount})</option>
+                        <option value="UNASSIGNED">⚪ Sin asignar ({unassignedCount})</option>
+                        {testerOptions.length > 0 && <option disabled>──────────</option>}
+                        {testerOptions.map(t => (
+                          <option key={t.id} value={t.id}>{t.name}{t.id === myAccountId ? ' (tú)' : ''}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={execFolderFilter}
+                        onChange={e => { setExecFolderFilter(e.target.value); setExecutionCurrentPage(1); }}
+                        title="Filtrar por carpeta del caso de prueba"
+                        style={{ padding: '0.35rem 0.6rem', fontSize: '12px', border: `1px solid ${execFolderFilter ? '#0C66E4' : '#DCDFE4'}`, borderRadius: '6px', background: execFolderFilter ? '#E9F2FF' : '#FFFFFF', color: '#172B4D', outline: 'none', cursor: 'pointer', maxWidth: '260px' }}
+                      >
+                        <option value="">📁 Todas las carpetas</option>
+                        <option value="__ROOT__">Sin carpeta</option>
+                        {folderPaths.map(f => (
+                          <option key={f.id} value={f.id}>{f.path}</option>
+                        ))}
+                      </select>
+                      {scopeIsFiltered && (
+                        <button type="button" style={groupToolBtnStyle} onClick={() => { setExecTesterFilter('ALL'); setExecTesterFilterSource('user'); setExecFolderFilter(''); setExecutionCurrentPage(1); }}>
+                          ✕ Limpiar filtros
+                        </button>
+                      )}
+                      {renderGroupToolbar(`exec-${selectedCycle?.id || ''}`, paginatedTests)}
+                    </div>
+                    {isAdmin && executionChecked.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => openAssignModal(deduplicatedCycleTests.filter(t => executionChecked.has(t.id)))}
+                        style={{ padding: '0.35rem 0.8rem', fontSize: '12px', fontWeight: 600, borderRadius: '6px', border: 'none', background: '#0C66E4', color: '#FFFFFF', cursor: 'pointer', height: '28px' }}
+                      >
+                        👤 Asignar tester ({executionChecked.size})
+                      </button>
+                    )}
+                  </div>
+                  {testerFallbackActive && (
+                    <div style={{ margin: '0 0.25rem 0.5rem 0.25rem', padding: '0.5rem 0.75rem', fontSize: '12px', background: '#FFF7D6', border: '1px solid #F8E6A0', borderRadius: '6px', color: '#7F5F01' }}>
+                      No tienes casos asignados ni ejecutados en este ciclo, por eso se muestran todos.
+                    </div>
+                  )}
 
                   {/* Test Cases List */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -8563,7 +8903,7 @@ const renderPlanningTab = () => {
                     </div>
 
                     {/* Test Cards */}
-                    {paginatedTests.map(test => {
+                    {renderGroupedList(`exec-${selectedCycle?.id || ''}`, paginatedTests, test => {
                       const isExpanded = String(expandedExecutionTest) === String(test.id);
                       const isAuto = getExecVal(test).includes('auto');
                       const testSummary = test.summary || (findTc(test.id)?.summary) || "Caso de prueba";
@@ -8668,6 +9008,16 @@ const renderPlanningTab = () => {
                               >
                                 {testSummary}
                               </span>
+
+                              {/* Assignee chip */}
+                              {_uname(test.assignee) && (
+                                <span
+                                  title={`Asignado a ${_uname(test.assignee)}`}
+                                  style={{ fontSize: '11px', padding: '1px 7px', borderRadius: '10px', flexShrink: 0, fontWeight: 600, background: _uid(test.assignee) === myAccountId ? '#E9F2FF' : '#F1F2F4', color: _uid(test.assignee) === myAccountId ? '#0C66E4' : '#44546F', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                >
+                                  👤 {_uid(test.assignee) === myAccountId ? 'Tú' : _uname(test.assignee)}
+                                </span>
+                              )}
 
                               {/* Defect Badge */}
                               {test.linkedBugs && test.linkedBugs.length > 0 && (
@@ -9367,7 +9717,7 @@ const renderPlanningTab = () => {
                           )}
                         </div>
                       );
-                    })}
+                    }, (items) => `${items.filter(t => isPassed(t.status)).length}✓ · ${items.filter(t => isFailed(t.status)).length}✗ · ${items.filter(t => isNotRun(t.status)).length} pendientes`)}
 
                     {paginatedTests.length === 0 && (
                       <div style={{ textAlign: 'center', padding: '3rem 1.5rem', background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '8px', color: '#626F86' }}>
@@ -15210,6 +15560,38 @@ const renderPlanningTab = () => {
                 </div>
               )}
 
+              {/* Card 5b: Vista por defecto en Ejecución (Admin Only) */}
+              {isAdmin && (
+                <div className="glass" style={{
+                  background: 'var(--bg-surface, #161b22)',
+                  border: '1px solid var(--ds-border, #30363d)',
+                  borderRadius: '10px',
+                  padding: '1.5rem 1.75rem',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                    <span style={{ fontSize: '1.3rem' }}>👤</span>
+                    <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                      Vista por defecto en Ejecución
+                    </h2>
+                  </div>
+                  <p style={{ margin: '0 0 1rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem', maxWidth: '650px' }}>
+                    Define qué casos ve cada usuario al abrir un ciclo en Ejecución. "Mis asignaciones" muestra los casos asignados al usuario o ejecutados por él; si no tiene ninguno en el ciclo, se muestran todos con un aviso. El usuario siempre puede cambiar el filtro.
+                  </p>
+                  <select
+                    value={projectConfig?.executionDefaultView === 'MINE' ? 'MINE' : 'ALL'}
+                    onChange={e => setProjectConfig(prev => ({ ...(prev || {}), executionDefaultView: e.target.value }))}
+                    style={{ padding: '0.5rem 0.75rem', fontSize: '0.9rem', borderRadius: '6px', border: '1px solid var(--ds-border, #30363d)', background: 'var(--bg-main, #0d1117)', color: 'var(--text-primary, #e6edf3)', minWidth: '260px' }}
+                  >
+                    <option value="ALL">Todos los casos del ciclo</option>
+                    <option value="MINE">Mis asignaciones / ejecuciones</option>
+                  </select>
+                  <div style={{ marginTop: '0.5rem', fontSize: '0.78rem', color: 'var(--text-secondary, #8b949e)' }}>
+                    Se guarda con el botón "Guardar Configuración".
+                  </div>
+                </div>
+              )}
+
               {/* Card 6: Mantenimiento de Test Runs (Admin Only) */}
               {isAdmin && (
                 <div className="glass" style={{
@@ -16235,6 +16617,7 @@ const renderPlanningTab = () => {
           {activeTab === 'design' && renderDesignTab()}
           {activeTab === 'planning' && renderPlanningTab()}
           {activeTab === 'execution' && renderExecutionTab()}
+          {renderAssignModal()}
           {activeTab === 'reports' && renderReportsTab()}
           {activeTab === 'config' && isAdmin && renderConfigTab()}
         </>

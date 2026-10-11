@@ -4536,6 +4536,58 @@ resolver.define('listCycleRunsForResync', async ({ payload }) => {
   return { items, withoutRun };
 });
 
+// ─── Tester assignment (Execution) ───
+resolver.define('searchAssignableUsers', async ({ payload }) => {
+  const { projectId, query } = payload || {};
+  if (!projectId) return [];
+  try {
+    const res = await api.asUser().requestJira(route`/rest/api/3/user/assignable/search?project=${String(projectId)}&query=${String(query || '')}&maxResults=20`);
+    if (!res.ok) {
+      console.warn(`[searchAssignableUsers] ${res.status}`);
+      return [];
+    }
+    const users = await res.json();
+    return (users || [])
+      .filter(u => u.active !== false && u.accountType !== 'app')
+      .map(u => ({ accountId: u.accountId, displayName: u.displayName, avatarUrl: u.avatarUrls?.['24x24'] || null }));
+  } catch (e) {
+    console.warn('[searchAssignableUsers] error:', e.message);
+    return [];
+  }
+});
+
+resolver.define('bulkAssignTestRuns', async ({ payload }) => {
+  const { projectId, cycleId, items, user } = payload || {};
+  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  const batch = (items || []).filter(it => it && it.testRunId).slice(0, 25);
+  const accountId = user?.accountId || null; // null = unassign
+
+  const results = await mapWithConcurrency(batch, 3, async (it) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await api.asUser().requestJira(route`/rest/api/3/issue/${String(it.testRunId)}/assignee`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId })
+        });
+        if (r.status === 429) { await new Promise(res => setTimeout(res, 1000 * (attempt + 1) + Math.random() * 400)); continue; }
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          return { testRunId: it.testRunId, ok: false, reason: `${r.status} ${txt.slice(0, 120)}` };
+        }
+        return { testRunId: it.testRunId, ok: true };
+      } catch (e) {
+        if (attempt === 2) return { testRunId: it.testRunId, ok: false, reason: e.message };
+      }
+    }
+    return { testRunId: it.testRunId, ok: false, reason: 'rate limit' };
+  });
+
+  // Note: the cycle index whitelists fields (no assignee); the Execution list reads the
+  // assignee live from each Test Run issue, so no index write is needed here.
+  return { results };
+});
+
 resolver.define('resyncTestRunsBatch', async ({ payload, context }) => {
   const { projectId, items } = payload || {};
   if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
