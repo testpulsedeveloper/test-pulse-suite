@@ -4390,10 +4390,87 @@ resolver.define('updateTestRunExecution', async ({ payload }) => {
 
 
 
+// ─── Snapshot extra sections (Precondición / Pasos / Resultados Esperados) ───
+// Field IDs are auto-detected by name (accent/case-insensitive) and cached per runtime instance.
+const SNAPSHOT_SECTION_DEFS = [
+  { key: 'precondition', title: 'Precondiciones', patterns: [/precondici/, /pre-?condition/] },
+  { key: 'steps', title: 'Pasos', patterns: [/^pasos\b/, /pasos de (la )?prueba/, /\btest steps?\b/, /^steps\b/] },
+  { key: 'expected', title: 'Resultados Esperados', patterns: [/resultados? esperados?/, /expected results?/] }
+];
+let _snapshotFieldCache = { at: 0, map: null };
+const _normName = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+const resolveSnapshotFieldIds = async () => {
+  if (_snapshotFieldCache.map && Date.now() - _snapshotFieldCache.at < 10 * 60 * 1000) return _snapshotFieldCache.map;
+  const map = { precondition: [], steps: [], expected: [] };
+  try {
+    const res = await api.asUser().requestJira(route`/rest/api/3/field`);
+    if (res.ok) {
+      const fields = await res.json();
+      for (const f of fields || []) {
+        if (!f?.custom || !f.id) continue;
+        const n = _normName(f.name);
+        for (const def of SNAPSHOT_SECTION_DEFS) {
+          if (def.patterns.some(p => p.test(n))) { map[def.key].push({ id: f.id, name: f.name }); break; }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[resolveSnapshotFieldIds] error:', e.message);
+  }
+  _snapshotFieldCache = { at: Date.now(), map };
+  return map;
+};
+
+const _escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// Converts a custom field raw value into ADF block nodes (or [] if empty/unsupported)
+const _fieldValueToAdfNodes = (val) => {
+  if (val == null) return [];
+  if (typeof val === 'object' && val.type === 'doc' && Array.isArray(val.content)) {
+    return val.content.length > 0 ? val.content : [];
+  }
+  if (typeof val === 'string') {
+    const t = val.trim();
+    if (!t) return [];
+    return t.split(/\r?\n/).map(line => line.trim()
+      ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
+      : { type: 'paragraph', content: [] });
+  }
+  if (typeof val === 'object' && (val.value || val.name)) {
+    return [{ type: 'paragraph', content: [{ type: 'text', text: String(val.value || val.name) }] }];
+  }
+  return [];
+};
+
+const buildSnapshotSections = (fieldMap, fields, renderedFields) => {
+  const adfNodes = [];
+  let html = '';
+  const included = [];
+  for (const def of SNAPSHOT_SECTION_DEFS) {
+    for (const f of (fieldMap?.[def.key] || [])) {
+      const nodes = _fieldValueToAdfNodes(fields?.[f.id]);
+      if (nodes.length === 0) continue;
+      adfNodes.push({ type: 'heading', attrs: { level: 3 }, content: [{ type: 'text', text: def.title }] }, ...nodes);
+      const rendered = renderedFields?.[f.id];
+      const bodyHtml = (typeof rendered === 'string' && rendered.trim())
+        ? rendered
+        : (typeof fields?.[f.id] === 'string' ? `<p>${_escHtml(fields[f.id]).replace(/\r?\n/g, '<br/>')}</p>` : '');
+      html += `<h3>${def.title}</h3>${bodyHtml}`;
+      included.push({ section: def.key, fieldId: f.id, fieldName: f.name });
+      break; // one field per section is enough
+    }
+  }
+  return { adfNodes, html, included };
+};
+
 const getTestCaseSnapshot = async (testCaseIdOrKey) => {
   if (!testCaseIdOrKey) return null;
   try {
-    const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testCaseIdOrKey}?fields=description,summary,issuetype,project,customfield_10534,customfield_10530,customfield_10535&expand=renderedFields`);
+    const fieldMap = await resolveSnapshotFieldIds();
+    const extraIds = [...fieldMap.precondition, ...fieldMap.steps, ...fieldMap.expected].map(f => f.id);
+    const fieldList = ['description', 'summary', 'issuetype', 'project', 'customfield_10534', 'customfield_10530', 'customfield_10535', ...extraIds].join(',');
+    const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testCaseIdOrKey}?fields=${fieldList}&expand=renderedFields`);
     if (tcRes.ok) {
       const tcData = await tcRes.json();
       let executionType = 'Manual';
@@ -4408,13 +4485,24 @@ const getTestCaseSnapshot = async (testCaseIdOrKey) => {
         else if (typeof v === 'object' && v !== null) executionType = v.value || v.name || '';
         else executionType = String(v);
       }
+
+      const baseAdf = ensureValidAdf(tcData.fields?.description, tcData.fields?.summary);
+      const sections = buildSnapshotSections(fieldMap, tcData.fields, tcData.renderedFields);
+      const hasOwnDesc = !!tcData.fields?.description;
+      const mergedAdf = sections.adfNodes.length > 0
+        ? { type: 'doc', version: 1, content: [...(hasOwnDesc ? (baseAdf.content || []) : []), ...sections.adfNodes] }
+        : baseAdf;
+      const baseHtml = tcData.renderedFields?.description || '';
+      const mergedHtml = (baseHtml + sections.html) || null;
+
       return {
         id: tcData.id,
         key: tcData.key,
         projectId: tcData.fields?.project?.id,
         summary: tcData.fields?.summary || '',
-        description: ensureValidAdf(tcData.fields?.description, tcData.fields?.summary),
-        renderedDescription: tcData.renderedFields?.description || null,
+        description: mergedAdf,
+        renderedDescription: mergedHtml,
+        includedSections: sections.included,
         executionType: executionType || 'Manual',
         rawFields: tcData.fields || {}
       };
@@ -4424,6 +4512,113 @@ const getTestCaseSnapshot = async (testCaseIdOrKey) => {
   }
   return null;
 };
+
+// ─── Admin: re-sync Test Runs from their current Test Case (keeps audit history) ───
+const _isProjectAdmin = async (projectId) => {
+  if (!projectId) return false;
+  try {
+    const r = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
+    if (!r.ok) return false;
+    const d = await r.json();
+    return d?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+  } catch (e) { return false; }
+};
+
+resolver.define('getSnapshotFieldMapping', async () => {
+  const map = await resolveSnapshotFieldIds();
+  return map;
+});
+
+resolver.define('listCycleRunsForResync', async ({ payload }) => {
+  const { projectId, cycleId } = payload || {};
+  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  if (!cycleId) return { error: 'MISSING_CYCLE' };
+  const entries = (await readCycleIndex(cycleId)) || [];
+  const seen = new Set();
+  const items = [];
+  let withoutRun = 0;
+  for (const e of entries) {
+    if (!e.testRunId) { withoutRun++; continue; }
+    if (seen.has(String(e.testRunId))) continue;
+    seen.add(String(e.testRunId));
+    items.push({ testRunId: String(e.testRunId), testRunKey: e.testRunKey || null, testCaseId: String(e.id || ''), testCaseKey: e.testCaseKey || e.key || '' });
+  }
+  return { items, withoutRun };
+});
+
+resolver.define('resyncTestRunsBatch', async ({ payload, context }) => {
+  const { projectId, items } = payload || {};
+  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  const batch = (items || []).slice(0, 10);
+  const actor = context?.accountId || null;
+
+  const results = await mapWithConcurrency(batch, 2, async (it) => {
+    try {
+      const runRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}?fields=summary&properties=testpulse-run-data`);
+      if (!runRes.ok) return { testRunId: it.testRunId, ok: false, reason: `run ${runRes.status}` };
+      const runIssue = await runRes.json();
+      const runData = runIssue.properties?.['testpulse-run-data'] || {};
+      const tcRef = runData.testCaseId || runData.testCaseKey || it.testCaseId || it.testCaseKey;
+      if (!tcRef) return { testRunId: it.testRunId, ok: false, reason: 'sin Test Case' };
+
+      const tcSnapshot = await getTestCaseSnapshot(tcRef);
+      if (!tcSnapshot) return { testRunId: it.testRunId, ok: false, reason: 'Test Case no accesible' };
+
+      // 1. Update Run description (Jira changelog keeps the previous value too)
+      const putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { description: tcSnapshot.description } })
+      });
+      if (!putRes.ok) return { testRunId: it.testRunId, ok: false, reason: `desc ${putRes.status}` };
+
+      // 2. New snapshot + audit trail of the previous one (execution data untouched)
+      const history = Array.isArray(runData.snapshotHistory) ? runData.snapshotHistory : [];
+      if (runData.snapshot) {
+        const { testCaseDescription, ...prevMeta } = runData.snapshot;
+        history.unshift({
+          ...prevMeta,
+          testCaseDescription: typeof testCaseDescription === 'string' ? testCaseDescription.slice(0, 4000) : null,
+          replacedAt: Date.now(),
+          replacedBy: actor
+        });
+      }
+      const newRunData = {
+        ...runData,
+        snapshot: {
+          ...(runData.snapshot || {}),
+          testCaseId: tcSnapshot.id,
+          testCaseKey: tcSnapshot.key,
+          testCaseSummary: tcSnapshot.summary,
+          testCaseDescription: tcSnapshot.renderedDescription || null,
+          includedSections: (tcSnapshot.includedSections || []).map(s => s.section),
+          capturedAt: Date.now(),
+          capturedBy: actor,
+          source: 'admin-resync'
+        },
+        snapshotHistory: history.slice(0, 5)
+      };
+      let propRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}/properties/testpulse-run-data`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(newRunData)
+      });
+      if (!propRes.ok && propRes.status !== 429) {
+        // Property too large → keep only metadata in history
+        newRunData.snapshotHistory = history.slice(0, 5).map(({ testCaseDescription, ...m }) => m);
+        propRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}/properties/testpulse-run-data`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(newRunData)
+        });
+      }
+      return { testRunId: it.testRunId, ok: propRes.ok, reason: propRes.ok ? null : `prop ${propRes.status}`, sections: (tcSnapshot.includedSections || []).length };
+    } catch (e) {
+      return { testRunId: it.testRunId, ok: false, reason: e.message };
+    }
+  });
+  return { results };
+});
 
 const buildExecutionAdfComment = ({ cycleKey, testCaseKey, status, comment, iterations, executedBy }) => {
   const content = [

@@ -1402,6 +1402,64 @@ function App() {
   // Allowlist
   const [allowedProjects, setAllowedProjects] = useState(null);  // null = todos permitidos
   const [isProjectAllowed, setIsProjectAllowed] = useState(true);
+
+  // ── Admin: re-sync Test Runs from current Test Case ──
+  const [snapshotFieldMap, setSnapshotFieldMap] = useState(null);
+  const [resyncCycleId, setResyncCycleId] = useState('');
+  const [resyncRunning, setResyncRunning] = useState(false);
+  const [resyncProgress, setResyncProgress] = useState({ done: 0, total: 0 });
+  const [resyncResult, setResyncResult] = useState(null);
+
+  useEffect(() => {
+    if (activeTab === 'config' && isAdmin && !snapshotFieldMap) {
+      invoke('getSnapshotFieldMapping').then(m => setSnapshotFieldMap(m || { precondition: [], steps: [], expected: [] })).catch(() => setSnapshotFieldMap({ precondition: [], steps: [], expected: [] }));
+    }
+  }, [activeTab, isAdmin, snapshotFieldMap]);
+
+  const handleResyncCycleRuns = () => {
+    if (!resyncCycleId || resyncRunning) return;
+    const cycle = testCycles.find(c => String(c.id) === String(resyncCycleId));
+    showConfirm(
+      'Actualizar Test Runs',
+      `Se actualizarán los Test Runs del ciclo ${cycle?.key || ''} con el contenido actual de sus Test Cases. El snapshot anterior se guarda para auditoría; estados y evidencias no se modifican.`,
+      () => runResyncCycleRuns(cycle),
+      { confirmLabel: 'Actualizar' }
+    );
+  };
+
+  const runResyncCycleRuns = async (cycle) => {
+    setResyncRunning(true);
+    setResyncResult(null);
+    setResyncProgress({ done: 0, total: 0 });
+    try {
+      const list = await invoke('listCycleRunsForResync', { projectId: selectedProjectId, cycleId: resyncCycleId });
+      if (list?.error === 'FORBIDDEN') throw new Error('Solo los administradores del proyecto pueden ejecutar esta acción.');
+      const items = list?.items || [];
+      setResyncProgress({ done: 0, total: items.length });
+      let ok = 0;
+      const failed = [];
+      for (let i = 0; i < items.length; i += 10) {
+        const chunk = items.slice(i, i + 10);
+        const res = await invoke('resyncTestRunsBatch', { projectId: selectedProjectId, items: chunk });
+        if (res?.error === 'FORBIDDEN') throw new Error('Solo los administradores del proyecto pueden ejecutar esta acción.');
+        (res?.results || []).forEach(r => {
+          if (r.ok) ok++;
+          else failed.push({ ...r, testRunKey: chunk.find(c => c.testRunId === r.testRunId)?.testRunKey });
+        });
+        setResyncProgress({ done: Math.min(i + chunk.length, items.length), total: items.length });
+      }
+      setResyncResult({ ok, failed, withoutRun: list?.withoutRun || 0 });
+      addNotification({
+        type: failed.length ? 'warning' : 'success',
+        title: 'Test Runs actualizados',
+        description: `${ok} de ${items.length} Test Runs del ciclo ${cycle?.key || ''} se actualizaron desde su Test Case.`
+      });
+    } catch (err) {
+      addNotification({ type: 'error', title: 'No se pudo actualizar', description: err.message || String(err) });
+    } finally {
+      setResyncRunning(false);
+    }
+  };
   const bulkFileRef = useRef(null);
 
   // Report Automation (Jira Automation Webhook & Scheduled Trigger)
@@ -15145,6 +15203,85 @@ const renderPlanningTab = () => {
                     />
                     <span>Habilitar Test Pulse Suite para usuarios de este proyecto</span>
                   </label>
+                </div>
+              )}
+
+              {/* Card 6: Mantenimiento de Test Runs (Admin Only) */}
+              {isAdmin && (
+                <div className="glass" style={{
+                  background: 'var(--bg-surface, #161b22)',
+                  border: '1px solid var(--ds-border, #30363d)',
+                  borderRadius: '10px',
+                  padding: '1.5rem 1.75rem',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                    <span style={{ fontSize: '1.3rem' }}>🔄</span>
+                    <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                      Actualizar Test Runs desde el Test Case
+                    </h2>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 600, padding: '0.15rem 0.5rem', borderRadius: '10px', background: 'rgba(210,153,34,0.15)', color: '#d29922', border: '1px solid rgba(210,153,34,0.3)' }}>Solo Admin</span>
+                  </div>
+                  <p style={{ margin: '0 0 1rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem', maxWidth: '760px' }}>
+                    Toma una nueva "foto" (snapshot) del Test Case actual y la aplica a los Test Runs del ciclo: descripción + Precondiciones, Pasos y Resultados Esperados.
+                    El snapshot anterior se guarda en el historial de auditoría del Run (quién y cuándo) y Jira conserva el cambio en su historial. Estados, evidencias e iteraciones <strong>no se modifican</strong>.
+                  </p>
+
+                  <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary, #8b949e)', marginBottom: '1rem' }}>
+                    <strong style={{ color: 'var(--text-primary, #e6edf3)' }}>Campos detectados:</strong>{' '}
+                    {!snapshotFieldMap ? 'Cargando…' : (() => {
+                      const labels = { precondition: 'Precondiciones', steps: 'Pasos', expected: 'Resultados Esperados' };
+                      return Object.keys(labels).map(k => {
+                        const f = (snapshotFieldMap[k] || [])[0];
+                        return (
+                          <span key={k} style={{ display: 'inline-block', margin: '0.2rem 0.35rem 0.2rem 0', padding: '0.15rem 0.55rem', borderRadius: '10px', border: '1px solid var(--ds-border, #30363d)', color: f ? '#3fb950' : '#8b949e' }}>
+                            {f ? '✓' : '—'} {labels[k]}{f ? ` (${f.name})` : ' (no encontrado)'}
+                          </span>
+                        );
+                      });
+                    })()}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <select
+                      value={resyncCycleId}
+                      onChange={(e) => { setResyncCycleId(e.target.value); setResyncResult(null); }}
+                      disabled={resyncRunning}
+                      style={{ minWidth: '320px', padding: '0.55rem 0.75rem', borderRadius: '6px', background: 'var(--bg-main, #0d1117)', color: 'var(--text-primary, #e6edf3)', border: '1px solid var(--ds-border, #30363d)' }}
+                    >
+                      <option value="">Selecciona un ciclo…</option>
+                      {testCycles.map(c => (
+                        <option key={c.id} value={c.id}>{c.key} — {c.summary}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleResyncCycleRuns}
+                      disabled={!resyncCycleId || resyncRunning}
+                      style={{ padding: '0.55rem 1.2rem', borderRadius: '6px', fontWeight: 600, border: '1px solid rgba(240,246,252,0.1)', background: (!resyncCycleId || resyncRunning) ? '#484f58' : '#1f6feb', color: '#fff', cursor: (!resyncCycleId || resyncRunning) ? 'not-allowed' : 'pointer' }}
+                    >
+                      {resyncRunning ? `⏳ Actualizando ${resyncProgress.done}/${resyncProgress.total}…` : '🔄 Actualizar Test Runs del ciclo'}
+                    </button>
+                  </div>
+
+                  {resyncRunning && resyncProgress.total > 0 && (
+                    <div style={{ marginTop: '0.9rem', height: '6px', borderRadius: '3px', background: 'var(--bg-main, #0d1117)', overflow: 'hidden', maxWidth: '520px' }}>
+                      <div style={{ height: '100%', width: `${Math.round(resyncProgress.done / resyncProgress.total * 100)}%`, background: '#1f6feb', transition: 'width 0.3s ease' }} />
+                    </div>
+                  )}
+
+                  {resyncResult && (
+                    <div style={{ marginTop: '0.9rem', fontSize: '0.85rem', color: 'var(--text-primary, #e6edf3)' }}>
+                      ✅ {resyncResult.ok} actualizados
+                      {resyncResult.failed.length > 0 && <span style={{ color: '#f85149' }}> · ❌ {resyncResult.failed.length} con error</span>}
+                      {resyncResult.withoutRun > 0 && <span style={{ color: '#8b949e' }}> · {resyncResult.withoutRun} casos sin Test Run (omitidos)</span>}
+                      {resyncResult.failed.length > 0 && (
+                        <ul style={{ margin: '0.4rem 0 0 1rem', color: '#8b949e', fontSize: '0.8rem' }}>
+                          {resyncResult.failed.slice(0, 10).map(f => <li key={f.testRunId}>{f.testRunKey || f.testRunId}: {f.reason}</li>)}
+                        </ul>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
