@@ -1,0 +1,11 @@
+# Ignore mobile app and local scratch files from Forge bundle
+test-pulse-mobile/
+scratch/
+backups_dev_phase/
+static/hello-world/node_modules/
+static/hello-world/src/
+static/hello-world/public/
+*.md
+*.html
+.git/
+.DS_Store

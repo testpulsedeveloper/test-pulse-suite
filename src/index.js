@@ -1597,8 +1597,12 @@ const getCycleExecutionSummary = async (cycleId) => {
           }
 
           const runDesc = run.fields?.description;
-          const isGenericDesc = typeof runDesc === 'string' && runDesc.includes('Test Run execution for test case');
-          const effectiveDesc = runData.snapshot?.testCaseDescription || (!isGenericDesc ? runDesc : null) || null;
+          // Live Jira description wins (so manual edits on the Test Run are reflected);
+          // the frozen snapshot is only a fallback for empty/generic run descriptions.
+          const runDescText = !runDesc ? '' : (typeof runDesc === 'string' ? runDesc : JSON.stringify(runDesc));
+          const isEmptyAdf = runDesc && typeof runDesc === 'object' && (!Array.isArray(runDesc.content) || runDesc.content.length === 0);
+          const isGenericDesc = !runDesc || isEmptyAdf || runDescText.includes('Test Run execution for test case') || runDescText.includes('Snapshot del caso');
+          const effectiveDesc = (!isGenericDesc ? runDesc : null) || runData.snapshot?.testCaseDescription || null;
 
           return {
             _runIssue: run,
