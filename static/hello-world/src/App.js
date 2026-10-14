@@ -1059,6 +1059,9 @@ function App() {
   const [addingProgress, setAddingProgress] = useState({ current: 0, total: 0 });
   const [previewImages, setPreviewImages] = useState({});
   const [previewModalData, setPreviewModalData] = useState(null);
+  const [executiveReportModalOpen, setExecutiveReportModalOpen] = useState(false);
+  const [executiveReportSubject, setExecutiveReportSubject] = useState('');
+  const [executiveReportNotes, setExecutiveReportNotes] = useState('');
   const [linkingBugTestId, setLinkingBugTestId] = useState(null); // id of test for which we show the bug-link input
   const [bugKeyInput, setBugKeyInput] = useState('');
   const [executionStatusFilter, setExecutionStatusFilter] = useState('ALL');
@@ -10516,7 +10519,13 @@ const renderPlanningTab = () => {
                   affectedCases: new Map()
                 });
 
-                if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
+                if (isDone) {
+                  const bugAgeInfo = formatBugAge(bug.created || bug.rawFields?.created, bug.resolutiondate || bug.rawFields?.resolutiondate, true);
+                  if (bugAgeInfo && typeof bugAgeInfo.hours === 'number' && bugAgeInfo.hours > 0) {
+                    totalResolutionHours += bugAgeInfo.hours;
+                    resolvedCount++;
+                  }
+                } else if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
                   for (const [state, hours] of Object.entries(bug.timesSpent)) {
                     if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
                     bugTimes[state].totalHours += hours;
@@ -10965,7 +10974,7 @@ const renderPlanningTab = () => {
     const bPct = allTotal > 0 ? (blocked / allTotal) * 100 : 0;
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
-    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '13.6';
+    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '0.0';
     const ctxProj = context?.extension?.project;
     const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
     
@@ -11008,7 +11017,7 @@ const renderPlanningTab = () => {
       ? `${currentProjectName} (${currentProjectKey})`
       : currentProjectName;
 
-    const buildExecutiveReportData = () => {
+    const buildExecutiveReportData = (customSubject = '', customNotes = '') => {
       const baseUrl = context?.siteUrl || '';
       const now = new Date();
       const dateFormatted = now.toLocaleDateString('es-ES', { 
@@ -11452,6 +11461,16 @@ const renderPlanningTab = () => {
               </tr>
             </table>
 
+            ${(customNotes && typeof customNotes === 'string' && customNotes.trim().length > 0) ? `
+            <!-- Observaciones y Notas Ejecutivas -->
+            <div style="background-color: #F0F7FF; border: 1px solid #B9D5FF; border-left: 5px solid #002D62; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
+              <div style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                📝 Observaciones y Notas Ejecutivas
+              </div>
+              <div style="font-size: 13px; color: #172B4D; line-height: 1.6; white-space: pre-wrap;">${customNotes.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+            </div>
+            ` : ''}
+
             <!-- Resumen de Cambios & Actividad del Ciclo -->
             <div style="background-color: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
               <div style="margin-bottom: 10px;">
@@ -11620,8 +11639,14 @@ const renderPlanningTab = () => {
       `;
 
       // Plain text fallback
-      const plainText = `TEST PULSE SUITE - REPORTE DE ESTATUS\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nVersión: ${scopeVersionsText || 'N/A'}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos del Ciclo: ${cycleBugsArray.length} (${openCycleBugs} abiertos, ${closedCycleBugs} cerrados) | Defectos Bloqueantes Abiertos en Plan: ${openGeneralBlockersCount} | MTTR Prom: ${avgResolutionHours}h\nAlcance: ${scopeCyclesText} / ${scopePlansText}`;
-      const emailSubject = `[Reporte de Estatus] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${openCycleBugs} Defectos en Ciclo${openGeneralBlockersCount > 0 ? ` | ⛔ ${openGeneralBlockersCount} Bloqueantes Abiertos` : ''})`;
+      const notesPlainText = (customNotes && typeof customNotes === 'string' && customNotes.trim().length > 0)
+        ? `\n\nNOTAS Y OBSERVACIONES EJECUTIVAS:\n${customNotes.trim()}\n`
+        : '';
+      const plainText = `TEST PULSE SUITE - REPORTE DE ESTATUS\nProyecto: ${projectDisplay}\nFecha: ${dateFormatted}\nVersión: ${scopeVersionsText || 'N/A'}\nCasos Totales: ${allTotal} | Éxito: ${successRate}% (${passed} Pasados)\nCobertura: ${coverageRate}% | Defectos del Ciclo: ${cycleBugsArray.length} (${openCycleBugs} abiertos, ${closedCycleBugs} cerrados) | Defectos Bloqueantes Abiertos en Plan: ${openGeneralBlockersCount} | MTTR Prom: ${avgResolutionHours}h\nAlcance: ${scopeCyclesText} / ${scopePlansText}${notesPlainText}`;
+      const defaultEmailSubject = `[Reporte de Estatus] ${currentProjectName} - ${scopeCyclesText} (${successRate}% Éxito - ${openCycleBugs} Defectos en Ciclo${openGeneralBlockersCount > 0 ? ` | ⛔ ${openGeneralBlockersCount} Bloqueantes Abiertos` : ''})`;
+      const emailSubject = (customSubject && typeof customSubject === 'string' && customSubject.trim().length > 0)
+        ? customSubject.trim()
+        : defaultEmailSubject;
 
       return {
         htmlReport: htmlTemplate,
@@ -11666,64 +11691,160 @@ const renderPlanningTab = () => {
       };
     };
 
-    const handleCopyReportToClipboard = async () => {
+    const handlePrintPdf = (reportHtml, docTitle) => {
+      const printWindow = window.open('about:blank', '_blank');
+      if (!printWindow) {
+        addNotification({
+          type: 'warning',
+          title: 'Ventana emergente bloqueada',
+          description: 'Por favor permite las ventanas emergentes en tu navegador para generar el PDF.'
+        });
+        return;
+      }
+      const cleanTitle = (docTitle || 'Reporte Ejecutivo - Test Pulse').replace(/"/g, '&quot;');
+      printWindow.document.write(`
+        <!DOCTYPE html>
+        <html lang="es">
+          <head>
+            <meta charset="utf-8" />
+            <title>${cleanTitle}</title>
+            <style>
+              @page {
+                size: letter portrait;
+                margin: 10mm 12mm;
+              }
+              @media print {
+                body {
+                  -webkit-print-color-adjust: exact !important;
+                  print-color-adjust: exact !important;
+                  background-color: #ffffff !important;
+                  padding: 0 !important;
+                }
+                .no-print {
+                  display: none !important;
+                }
+              }
+              body {
+                margin: 0;
+                padding: 24px;
+                background-color: #f4f5f7;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+              }
+              .print-toolbar {
+                width: 100%;
+                max-width: 800px;
+                background: #002D62;
+                color: #ffffff;
+                padding: 12px 20px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                box-sizing: border-box;
+              }
+              .print-btn {
+                background: #E1007A;
+                color: #ffffff;
+                border: none;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: 700;
+                border-radius: 6px;
+                cursor: pointer;
+                transition: opacity 0.2s;
+              }
+              .print-btn:hover {
+                opacity: 0.9;
+              }
+              .report-container {
+                width: 100%;
+                max-width: 800px;
+                background: #ffffff;
+                box-sizing: border-box;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="print-toolbar no-print">
+              <span style="font-weight: 600; font-size: 14px;">📄 Vista Previa de Impresión / Guardar como PDF</span>
+              <div>
+                <button class="print-btn" onclick="window.print()">🖨️ Guardar como PDF / Imprimir</button>
+                <button style="background:transparent; border:1px solid rgba(255,255,255,0.4); color:#fff; padding:8px 14px; border-radius:6px; margin-left:8px; cursor:pointer;" onclick="window.close()">Cerrar</button>
+              </div>
+            </div>
+            <div class="report-container">
+              ${reportHtml}
+            </div>
+            <script>
+              window.onload = function() {
+                setTimeout(function() {
+                  window.print();
+                }, 400);
+              };
+            </script>
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+    };
+
+    const copyReportHtmlToClipboard = async (htmlTemplate, plainText) => {
+      let copied = false;
+      try {
+        if (navigator.clipboard && window.ClipboardItem) {
+          const item = new ClipboardItem({
+            'text/html': new Blob([htmlTemplate], { type: 'text/html' }),
+            'text/plain': new Blob([plainText || ''], { type: 'text/plain' })
+          });
+          await navigator.clipboard.write([item]);
+          copied = true;
+        }
+      } catch (clipErr) {
+        console.warn("navigator.clipboard.write failed, trying DOM fallback:", clipErr);
+      }
+
+      if (!copied) {
+        const el = document.createElement('div');
+        el.innerHTML = htmlTemplate;
+        el.style.position = 'fixed';
+        el.style.left = '-9999px';
+        el.style.top = '0';
+        document.body.appendChild(el);
+        
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        
+        document.execCommand('copy');
+        selection.removeAllRanges();
+        document.body.removeChild(el);
+      }
+      return true;
+    };
+
+    const handleOpenExecutiveReportModal = () => {
       try {
         const reportData = buildExecutiveReportData();
-        const htmlTemplate = reportData.htmlReport;
-        const plainText = reportData.plainText;
-        const emailSubject = reportData.emailSubject;
-
-        // Copy rich HTML to clipboard
-        let copied = false;
-        try {
-          if (navigator.clipboard && window.ClipboardItem) {
-            const item = new ClipboardItem({
-              'text/html': new Blob([htmlTemplate], { type: 'text/html' }),
-              'text/plain': new Blob([plainText], { type: 'text/plain' })
-            });
-            await navigator.clipboard.write([item]);
-            copied = true;
-          }
-        } catch (clipErr) {
-          console.warn("navigator.clipboard.write failed, trying DOM fallback:", clipErr);
-        }
-
-        if (!copied) {
-          const el = document.createElement('div');
-          el.innerHTML = htmlTemplate;
-          el.style.position = 'fixed';
-          el.style.left = '-9999px';
-          el.style.top = '0';
-          document.body.appendChild(el);
-          
-          const selection = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents(el);
-          selection.removeAllRanges();
-          selection.addRange(range);
-          
-          document.execCommand('copy');
-          selection.removeAllRanges();
-          document.body.removeChild(el);
-        }
-
-        addNotification({
-          type: 'success',
-          title: '📋 Reporte Ejecutivo Copiado',
-          description: 'El reporte con diseño ejecutivo HTML está en tu portapapeles. Usa Ctrl+V o Cmd+V en Gmail para pegarlo.'
-        });
-
-        const subject = encodeURIComponent(emailSubject);
-        router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`);
-      } catch(err) {
-        console.error('Error al generar reporte:', err);
+        setExecutiveReportSubject(reportData.emailSubject);
+        setExecutiveReportModalOpen(true);
+      } catch (err) {
+        console.error('Error al abrir modal de reporte:', err);
         addNotification({
           type: 'error',
-          title: 'Error al exportar reporte',
+          title: 'Error al preparar reporte',
           description: err.message
         });
       }
     };
+
+    const handleCopyReportToClipboard = handleOpenExecutiveReportModal;
 
     const handleTestAutomatedReportDispatch = async () => {
       if (!reportAutomationConfig.webhookUrl || !reportAutomationConfig.webhookUrl.startsWith('http')) {
@@ -11949,6 +12070,257 @@ const renderPlanningTab = () => {
         row.bugs.some(b => (b.key && b.key.toLowerCase().includes(q)) || (b.summary && b.summary.toLowerCase().includes(q)))
       );
     });
+
+    const renderExecutiveReportModal = () => {
+      if (!executiveReportModalOpen) return null;
+      const previewRep = buildExecutiveReportData(executiveReportSubject, executiveReportNotes);
+
+      return (
+        <div
+          className="modal-overlay"
+          style={{
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(9, 30, 66, 0.65)'
+          }}
+          onClick={() => setExecutiveReportModalOpen(false)}
+        >
+          <div
+            className="modal-content glass"
+            style={{
+              width: '92%',
+              maxWidth: '980px',
+              height: '92vh',
+              maxHeight: '920px',
+              display: 'flex',
+              flexDirection: 'column',
+              background: '#ffffff',
+              borderRadius: '12px',
+              boxShadow: '0 12px 36px rgba(0, 45, 98, 0.25)',
+              overflow: 'hidden'
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '16px 24px',
+              borderBottom: '1px solid #E2E8F0',
+              background: 'linear-gradient(135deg, #002D62 0%, #0C66E4 100%)',
+              color: '#ffffff'
+            }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px', color: '#ffffff' }}>
+                  <span>📧</span>
+                  <span>Preparar y Enviar Reporte Ejecutivo</span>
+                </h2>
+                <div style={{ fontSize: '12px', color: '#DEEBFF', marginTop: '3px' }}>
+                  Revisa las métricas, edita el asunto y añade observaciones antes de generar el PDF y enviar por correo.
+                </div>
+              </div>
+              <button
+                onClick={() => setExecutiveReportModalOpen(false)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.15)',
+                  border: 'none',
+                  color: '#ffffff',
+                  fontSize: '18px',
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '50%',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                title="Cerrar"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body: Editable Form & Live Preview */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: '16px', background: '#F8F9FA' }}>
+              
+              {/* Form Card */}
+              <div style={{ background: '#ffffff', border: '1px solid #DFE1E6', borderRadius: '8px', padding: '16px 18px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                <div style={{ fontSize: '12px', fontWeight: 700, color: '#002D62', textTransform: 'uppercase', marginBottom: '12px', letterSpacing: '0.5px' }}>
+                  ✏️ Campos Editables del Reporte
+                </div>
+                
+                {/* Asunto Input */}
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#44546F', marginBottom: '4px' }}>
+                    Asunto del Correo:
+                  </label>
+                  <input
+                    type="text"
+                    value={executiveReportSubject}
+                    onChange={e => setExecutiveReportSubject(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      border: '1px solid #C1C7D0',
+                      borderRadius: '6px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                    placeholder="Asunto del correo..."
+                  />
+                </div>
+
+                {/* Notas / Observaciones Textarea */}
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#44546F', marginBottom: '4px' }}>
+                    Notas y Observaciones Ejecutivas (Opcional - aparecerán al inicio del reporte):
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={executiveReportNotes}
+                    onChange={e => setExecutiveReportNotes(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      border: '1px solid #C1C7D0',
+                      borderRadius: '6px',
+                      outline: 'none',
+                      resize: 'vertical',
+                      boxSizing: 'border-box'
+                    }}
+                    placeholder="Ej. Se concluyeron las pruebas de regresión en QA con 95% de éxito. El bloqueo en pagos fue solventado y verificado en build #104. Listo para liberación."
+                  />
+                </div>
+              </div>
+
+              {/* Live Preview Container */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    👁️ Vista Previa en Vivo (tal como saldrá en PDF y Correo)
+                  </span>
+                  <span style={{ fontSize: '11px', color: '#006644', fontWeight: 600, background: '#E3FCEF', padding: '2px 8px', borderRadius: '10px' }}>
+                    ✓ Sincronizado en tiempo real
+                  </span>
+                </div>
+                <div style={{
+                  background: '#ffffff',
+                  border: '1px solid #DFE1E6',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+                }}>
+                  <div dangerouslySetInnerHTML={{ __html: previewRep.htmlReport }} />
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '14px 24px',
+              borderTop: '1px solid #E2E8F0',
+              background: '#ffffff'
+            }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setExecutiveReportModalOpen(false)}
+                style={{ padding: '8px 16px', fontSize: '13px', borderRadius: '6px', cursor: 'pointer' }}
+              >
+                Cancelar
+              </button>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <button
+                  className="btn-secondary"
+                  onClick={() => handlePrintPdf(previewRep.htmlReport, previewRep.emailSubject)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 14px',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    background: '#F4F5F7',
+                    border: '1px solid #DFE1E6'
+                  }}
+                  title="Abrir vista de impresión y guardar como PDF"
+                >
+                  🖨️ Guardar PDF
+                </button>
+
+                <button
+                  className="btn-secondary"
+                  onClick={async () => {
+                    await copyReportHtmlToClipboard(previewRep.htmlReport, previewRep.plainText);
+                    addNotification({
+                      type: 'success',
+                      title: '📋 Reporte Copiado',
+                      description: 'El reporte HTML enriquecido está en tu portapapeles.'
+                    });
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 14px',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    background: '#F4F5F7',
+                    border: '1px solid #DFE1E6'
+                  }}
+                  title="Copiar HTML al portapapeles"
+                >
+                  📋 Solo Copiar
+                </button>
+
+                <button
+                  className="btn-primary"
+                  onClick={async () => {
+                    await copyReportHtmlToClipboard(previewRep.htmlReport, previewRep.plainText);
+                    handlePrintPdf(previewRep.htmlReport, previewRep.emailSubject);
+                    const subjectEnc = encodeURIComponent(previewRep.emailSubject);
+                    router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subjectEnc}`);
+                    addNotification({
+                      type: 'success',
+                      title: '🚀 Reporte listo para enviar',
+                      description: 'Ventana de PDF lista para guardar y reporte copiado al portapapeles. Pégalo en Gmail (Ctrl+V) y adjunta tu archivo PDF.'
+                    });
+                    setExecutiveReportModalOpen(false);
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 18px',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    background: 'linear-gradient(135deg, #E1007A 0%, #002D62 100%)',
+                    boxShadow: '0 2px 6px rgba(225, 0, 122, 0.3)'
+                  }}
+                  title="Abre la ventana de PDF, copia el reporte al portapapeles y abre Gmail para redactar"
+                >
+                  🚀 Guardar PDF, Copiar y Abrir Gmail
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
 
     return (
       <div className="tab-layout" style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', display: 'flex', flex: 1 }}>
@@ -14438,6 +14810,7 @@ const renderPlanningTab = () => {
               </div>
             </div>
           )}
+          {renderExecutiveReportModal()}
         </main>
       </div>
     );
