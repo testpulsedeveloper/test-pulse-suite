@@ -94,7 +94,17 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
     });
 
     if (response.status === 429 && retries > 0) {
-      const delay = (4 - retries) * 1500 + Math.floor(Math.random() * 800);
+      let delay = (4 - retries) * 1500 + Math.floor(Math.random() * 800);
+      try {
+        const retryAfter = response.headers?.get('Retry-After') || response.headers?.get('retry-after');
+        if (retryAfter) {
+          const sec = parseInt(retryAfter, 10);
+          if (!isNaN(sec) && sec > 0) {
+            delay = Math.min(sec * 1000 + Math.floor(Math.random() * 500), 10000);
+          }
+        }
+      } catch (_) {}
+      console.warn(`[fetchJqlPage] Rate-limited (429), waiting ${delay}ms before retry (${retries} left)`);
       await new Promise(r => setTimeout(r, delay));
       return await fetchJqlPage(jql, fields, expand, properties, nextPageToken, maxResults, retries - 1);
     }

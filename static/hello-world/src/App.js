@@ -1062,6 +1062,8 @@ function App() {
   const [executiveReportModalOpen, setExecutiveReportModalOpen] = useState(false);
   const [executiveReportSubject, setExecutiveReportSubject] = useState('');
   const [executiveReportNotes, setExecutiveReportNotes] = useState('');
+  const [executiveReportBuild, setExecutiveReportBuild] = useState('');
+  const executiveReportContainerRef = useRef(null);
   const [linkingBugTestId, setLinkingBugTestId] = useState(null); // id of test for which we show the bug-link input
   const [bugKeyInput, setBugKeyInput] = useState('');
   const [executionStatusFilter, setExecutionStatusFilter] = useState('ALL');
@@ -6644,8 +6646,26 @@ Then el sistema valida la identidad.
     const cfg = overrideConfig || projectConfig;
     if (!projId) return;
     if (isCircuitBroken()) {
+      try {
+        const snapshotKey = `tp_report_snapshot_${projId}`;
+        const raw = localStorage.getItem(snapshotKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.reportData?.cycles?.length > 0) {
+            setReportData({
+              ...parsed.reportData,
+              _loadedAt: parsed.timestamp || Date.now(),
+              _isSnapshot: true,
+              _snapshotTimestamp: parsed.timestamp || Date.now()
+            });
+            if (parsed.allCycleSummaries && Array.isArray(parsed.allCycleSummaries)) {
+              setTestCycles(parsed.allCycleSummaries);
+            }
+          }
+        }
+      } catch (e) {}
       if (!isSilent) {
-        addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Espera unos minutos antes de recargar el reporte.' });
+        addNotification({ type: 'warning', title: 'Rate limit activo', description: 'Mostrando último corte guardado. Jira temporalmente en pausa.' });
       }
       return;
     }
@@ -6678,8 +6698,20 @@ Then el sistema valida la identidad.
         cycles: initialCycles,
         bugMap: initialBugMap,
         totalCycles: totalCycles,
-        _loadedAt: Date.now()
+        _loadedAt: Date.now(),
+        _isSnapshot: false
       });
+
+      try {
+        if (initialCycles.length > 0) {
+          const snapshotKey = `tp_report_snapshot_${projId}`;
+          localStorage.setItem(snapshotKey, JSON.stringify({
+            reportData: { cycles: initialCycles, bugMap: initialBugMap, totalCycles },
+            allCycleSummaries: data?.allCycleSummaries || [],
+            timestamp: Date.now()
+          }));
+        }
+      } catch (e) {}
 
       // Populate or sync testCycles immediately with all known cycle summaries from Jira
       if (data?.allCycleSummaries && Array.isArray(data.allCycleSummaries)) {
@@ -6799,18 +6831,51 @@ Then el sistema valida la identidad.
     } catch(err) {
       console.error("loadReportData error:", err);
       if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
-      setReportData(prev => {
-        if (!prev || !prev.cycles || prev.cycles.length === 0) {
-          return { ...prev, _loadError: true };
+      let restoredFromSnapshot = false;
+      try {
+        const snapshotKey = `tp_report_snapshot_${projId}`;
+        const raw = localStorage.getItem(snapshotKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.reportData?.cycles?.length > 0) {
+            setReportData({
+              ...parsed.reportData,
+              _loadedAt: parsed.timestamp || Date.now(),
+              _isSnapshot: true,
+              _snapshotTimestamp: parsed.timestamp || Date.now()
+            });
+            if (parsed.allCycleSummaries && Array.isArray(parsed.allCycleSummaries)) {
+              setTestCycles(parsed.allCycleSummaries);
+            }
+            restoredFromSnapshot = true;
+          }
         }
-        return prev;
-      });
-      if (!isSilent) {
-        addNotification({
-          type: 'warning',
-          title: 'Sincronización de métricas',
-          description: 'Jira tardó en responder. Mostrando los datos actuales disponibles.'
+      } catch (snapErr) {
+        console.warn('Error reading snapshot:', snapErr);
+      }
+
+      if (!restoredFromSnapshot) {
+        setReportData(prev => {
+          if (!prev || !prev.cycles || prev.cycles.length === 0) {
+            return { ...prev, _loadError: true };
+          }
+          return prev;
         });
+      }
+      if (!isSilent) {
+        if (restoredFromSnapshot) {
+          addNotification({
+            type: 'info',
+            title: '⚠️ Modo Respaldo Activo',
+            description: 'Jira tardó en responder. Mostrando el último corte registrado de métricas.'
+          });
+        } else {
+          addNotification({
+            type: 'warning',
+            title: 'Sincronización de métricas',
+            description: 'Jira tardó en responder. Mostrando los datos actuales disponibles.'
+          });
+        }
       }
     } finally {
       setReportLoading(false);
@@ -10963,10 +11028,10 @@ const renderPlanningTab = () => {
     const openCycleBugs = cycleAllBugsList.filter(b => !b.isDone).length;
     const closedCycleBugs = cycleAllBugsList.filter(b => b.isDone).length;
 
-    const ejecutados = passed + failed;
-    const successRate = ejecutados > 0 ? ((passed / ejecutados) * 100).toFixed(1) : '0.0';
+    const evaluados = passed + failed + blocked;
+    const successRate = evaluados > 0 ? ((passed / evaluados) * 100).toFixed(1) : '0.0';
     const allTotal = passed + failed + blocked + notRun;
-    const coverageRate = allTotal > 0 ? (((passed + failed + blocked) / allTotal) * 100).toFixed(1) : '0.0';
+    const coverageRate = allTotal > 0 ? ((evaluados / allTotal) * 100).toFixed(1) : '0.0';
 
     // Calc angles for donut
     const pPct = allTotal > 0 ? (passed / allTotal) * 100 : 0;
@@ -11017,7 +11082,7 @@ const renderPlanningTab = () => {
       ? `${currentProjectName} (${currentProjectKey})`
       : currentProjectName;
 
-    const buildExecutiveReportData = (customSubject = '', customNotes = '') => {
+    const buildExecutiveReportData = (customSubject = '', customNotes = '', customBuild = null) => {
       const baseUrl = context?.siteUrl || '';
       const now = new Date();
       const dateFormatted = now.toLocaleDateString('es-ES', { 
@@ -11053,21 +11118,27 @@ const renderPlanningTab = () => {
       const openGeneralBlockersCount = generalBlockerBugs.length;
       const closedGeneralBlockersCount = (planGeneralBugsList || []).filter(b => isBlockerBug(b) && b.isDone).length;
 
-      // Version extraction from cycle bugs or test cases & blocker bugs
-      const uniqueVersionsSet = new Set();
-      cycleBugsArray.forEach(b => {
-        if (b.version && b.version !== 'Sin versión') uniqueVersionsSet.add(b.version);
-        if (Array.isArray(b.versions)) b.versions.forEach(v => v && uniqueVersionsSet.add(v));
-        if (Array.isArray(b.fixVersions)) b.fixVersions.forEach(v => v && uniqueVersionsSet.add(v));
-      });
-      generalBlockerBugs.forEach(b => {
-        if (b.version && b.version !== 'Sin versión') uniqueVersionsSet.add(b.version);
-        if (Array.isArray(b.versions)) b.versions.forEach(v => v && uniqueVersionsSet.add(v));
-        if (Array.isArray(b.fixVersions)) b.fixVersions.forEach(v => v && uniqueVersionsSet.add(v));
-      });
-      const scopeVersionsText = (reportSelectedVersions && reportSelectedVersions.length > 0)
-        ? reportSelectedVersions.join(', ')
-        : (uniqueVersionsSet.size > 0 ? Array.from(uniqueVersionsSet).join(', ') : null);
+      // Version extraction strictly from the selected cycles (or user specified)
+      let scopeVersionsText = '';
+      if (customBuild !== null && customBuild !== undefined) {
+        scopeVersionsText = customBuild.trim();
+      } else if (reportSelectedVersions && reportSelectedVersions.length > 0) {
+        scopeVersionsText = reportSelectedVersions.join(', ');
+      } else {
+        const cycleVersionsSet = new Set();
+        (filteredCycles || []).forEach(c => {
+          const cVers = extractVersions(c, false);
+          (cVers.versions || []).forEach(v => v && cycleVersionsSet.add(v));
+        });
+        if (cycleVersionsSet.size === 0) {
+          cycleBugsArray.forEach(b => {
+            if (b.version && b.version !== 'Sin versión') cycleVersionsSet.add(b.version);
+            if (Array.isArray(b.versions)) b.versions.forEach(v => v && cycleVersionsSet.add(v));
+            if (Array.isArray(b.fixVersions)) b.fixVersions.forEach(v => v && cycleVersionsSet.add(v));
+          });
+        }
+        scopeVersionsText = cycleVersionsSet.size > 0 ? Array.from(cycleVersionsSet).join(', ') : '';
+      }
 
       // ── 1. Table Rows: Cycle Bugs ──
       let tableRows = '';
@@ -11403,11 +11474,10 @@ const renderPlanningTab = () => {
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
                   <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
                 </td>
-                ${scopeVersionsText ? `
                 <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
                   <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Versión / Build:</strong><br/>
-                  <span style="font-weight: 700; color: #0C66E4; font-size: 13px;">${scopeVersionsText}</span>
-                </td>` : ''}
+                  <span style="font-weight: 700; color: ${scopeVersionsText ? '#0C66E4' : '#626F86'}; font-size: 13px;">${scopeVersionsText || '(No especificado)'}</span>
+                </td>
               </tr>
             </table>
 
@@ -11419,7 +11489,7 @@ const renderPlanningTab = () => {
                   <div style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
                     <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
                     <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
-                    <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${ejecutados} evaluados</div>
+                    <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${evaluados} evaluados</div>
                   </div>
                 </td>
 
@@ -11437,7 +11507,7 @@ const renderPlanningTab = () => {
                   <div style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
                     <div style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
                     <div style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
-                    <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${passed + failed + blocked} ejecutados</div>
+                    <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${evaluados} ejecutados</div>
                   </div>
                 </td>
 
@@ -11486,7 +11556,7 @@ const renderPlanningTab = () => {
                   <td width="33%" style="vertical-align: top; padding-right: 12px;">
                     <div style="font-weight: 700; color: #0E8A4C; margin-bottom: 4px;">✅ Avance de Ejecución</div>
                     <div style="color: #44546F; font-size: 11.5px;">
-                      • <strong>${ejecutados}</strong> de ${allTotal} casos evaluados (<strong>${coverageRate}%</strong> cobertura).<br/>
+                      • <strong>${evaluados}</strong> de ${allTotal} casos evaluados (<strong>${coverageRate}%</strong> cobertura).<br/>
                       • <strong>${passed}</strong> aprobados (${successRate}% éxito).
                     </div>
                   </td>
@@ -11833,6 +11903,7 @@ const renderPlanningTab = () => {
       try {
         const reportData = buildExecutiveReportData();
         setExecutiveReportSubject(reportData.emailSubject);
+        setExecutiveReportBuild(reportData.scopeVersionsText || '');
         setExecutiveReportModalOpen(true);
       } catch (err) {
         console.error('Error al abrir modal de reporte:', err);
@@ -12073,7 +12144,11 @@ const renderPlanningTab = () => {
 
     const renderExecutiveReportModal = () => {
       if (!executiveReportModalOpen) return null;
-      const previewRep = buildExecutiveReportData(executiveReportSubject, executiveReportNotes);
+      const previewRep = buildExecutiveReportData(executiveReportSubject, executiveReportNotes, executiveReportBuild);
+
+      const getActiveReportHtml = () => {
+        return executiveReportContainerRef.current ? executiveReportContainerRef.current.innerHTML : previewRep.htmlReport;
+      };
 
       return (
         <div
@@ -12119,7 +12194,7 @@ const renderPlanningTab = () => {
                   <span>Preparar y Enviar Reporte Ejecutivo</span>
                 </h2>
                 <div style={{ fontSize: '12px', color: '#DEEBFF', marginTop: '3px' }}>
-                  Revisa las métricas, edita el asunto y añade observaciones antes de generar el PDF y enviar por correo.
+                  Todo el contenido del reporte es editable en línea. Puedes hacer clic en cualquier texto o celda del reporte para modificarlo.
                 </div>
               </div>
               <button
@@ -12149,7 +12224,7 @@ const renderPlanningTab = () => {
               {/* Form Card */}
               <div style={{ background: '#ffffff', border: '1px solid #DFE1E6', borderRadius: '8px', padding: '16px 18px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                 <div style={{ fontSize: '12px', fontWeight: 700, color: '#002D62', textTransform: 'uppercase', marginBottom: '12px', letterSpacing: '0.5px' }}>
-                  ✏️ Campos Editables del Reporte
+                  ✏️ Configuración General y Alcance
                 </div>
                 
                 {/* Asunto Input */}
@@ -12171,6 +12246,28 @@ const renderPlanningTab = () => {
                       boxSizing: 'border-box'
                     }}
                     placeholder="Asunto del correo..."
+                  />
+                </div>
+
+                {/* Build / Version Input */}
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#44546F', marginBottom: '4px' }}>
+                    Versión / Build (de los ciclos seleccionados; puedes modificarla o dejarla en blanco):
+                  </label>
+                  <input
+                    type="text"
+                    value={executiveReportBuild}
+                    onChange={e => setExecutiveReportBuild(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      border: '1px solid #C1C7D0',
+                      borderRadius: '6px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                    placeholder="Ej. E2E 3.72.12.15 o déjalo en blanco"
                   />
                 </div>
 
@@ -12198,24 +12295,35 @@ const renderPlanningTab = () => {
                 </div>
               </div>
 
-              {/* Live Preview Container */}
+              {/* Live Preview Container with Direct WYSIWYG Editing */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                    👁️ Vista Previa en Vivo (tal como saldrá en PDF y Correo)
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: '#002D62', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      👁️ Vista Previa & Edición en Línea (WYSIWYG)
+                    </span>
+                    <span style={{ fontSize: '11px', color: '#0C66E4', background: '#E9F2FF', padding: '2px 8px', borderRadius: '10px', fontWeight: 600 }}>
+                      ✏️ Haz clic en cualquier parte del reporte para editar
+                    </span>
+                  </div>
                   <span style={{ fontSize: '11px', color: '#006644', fontWeight: 600, background: '#E3FCEF', padding: '2px 8px', borderRadius: '10px' }}>
-                    ✓ Sincronizado en tiempo real
+                    ✓ Sincronizado para PDF y Correo
                   </span>
                 </div>
                 <div style={{
                   background: '#ffffff',
-                  border: '1px solid #DFE1E6',
+                  border: '2px solid #0C66E4',
                   borderRadius: '8px',
                   padding: '16px',
                   boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
                 }}>
-                  <div dangerouslySetInnerHTML={{ __html: previewRep.htmlReport }} />
+                  <div
+                    ref={executiveReportContainerRef}
+                    contentEditable={true}
+                    suppressContentEditableWarning={true}
+                    style={{ outline: 'none', cursor: 'text' }}
+                    dangerouslySetInnerHTML={{ __html: previewRep.htmlReport }}
+                  />
                 </div>
               </div>
             </div>
@@ -12240,7 +12348,7 @@ const renderPlanningTab = () => {
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <button
                   className="btn-secondary"
-                  onClick={() => handlePrintPdf(previewRep.htmlReport, previewRep.emailSubject)}
+                  onClick={() => handlePrintPdf(getActiveReportHtml(), previewRep.emailSubject)}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -12253,7 +12361,7 @@ const renderPlanningTab = () => {
                     background: '#F4F5F7',
                     border: '1px solid #DFE1E6'
                   }}
-                  title="Abrir vista de impresión y guardar como PDF"
+                  title="Abrir vista de impresión y guardar como PDF con todas tus ediciones"
                 >
                   🖨️ Guardar PDF
                 </button>
@@ -12261,11 +12369,11 @@ const renderPlanningTab = () => {
                 <button
                   className="btn-secondary"
                   onClick={async () => {
-                    await copyReportHtmlToClipboard(previewRep.htmlReport, previewRep.plainText);
+                    await copyReportHtmlToClipboard(getActiveReportHtml(), previewRep.plainText);
                     addNotification({
                       type: 'success',
                       title: '📋 Reporte Copiado',
-                      description: 'El reporte HTML enriquecido está en tu portapapeles.'
+                      description: 'El reporte editado está en tu portapapeles listo para pegar en tu correo.'
                     });
                   }}
                   style={{
@@ -12280,7 +12388,7 @@ const renderPlanningTab = () => {
                     background: '#F4F5F7',
                     border: '1px solid #DFE1E6'
                   }}
-                  title="Copiar HTML al portapapeles"
+                  title="Copiar HTML editado al portapapeles"
                 >
                   📋 Solo Copiar
                 </button>
@@ -12288,8 +12396,9 @@ const renderPlanningTab = () => {
                 <button
                   className="btn-primary"
                   onClick={async () => {
-                    await copyReportHtmlToClipboard(previewRep.htmlReport, previewRep.plainText);
-                    handlePrintPdf(previewRep.htmlReport, previewRep.emailSubject);
+                    const htmlToExport = getActiveReportHtml();
+                    await copyReportHtmlToClipboard(htmlToExport, previewRep.plainText);
+                    handlePrintPdf(htmlToExport, previewRep.emailSubject);
                     const subjectEnc = encodeURIComponent(previewRep.emailSubject);
                     router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subjectEnc}`);
                     addNotification({
@@ -12311,7 +12420,7 @@ const renderPlanningTab = () => {
                     background: 'linear-gradient(135deg, #E1007A 0%, #002D62 100%)',
                     boxShadow: '0 2px 6px rgba(225, 0, 122, 0.3)'
                   }}
-                  title="Abre la ventana de PDF, copia el reporte al portapapeles y abre Gmail para redactar"
+                  title="Abre la ventana de PDF, copia el reporte editado al portapapeles y abre Gmail para redactar"
                 >
                   🚀 Guardar PDF, Copiar y Abrir Gmail
                 </button>
@@ -12633,6 +12742,51 @@ const renderPlanningTab = () => {
 
 
                 <button 
+                  className="btn-secondary" 
+                  onClick={() => {
+                    if (reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0) {
+                      try {
+                        const snapshotKey = `tp_report_snapshot_${selectedProjectId}`;
+                        localStorage.setItem(snapshotKey, JSON.stringify({
+                          reportData: { cycles: reportData.cycles, bugMap: reportData.bugMap || {}, totalCycles: reportData.totalCycles || reportData.cycles.length },
+                          allCycleSummaries: testCycles || [],
+                          timestamp: Date.now()
+                        }));
+                        addNotification({
+                          type: 'success',
+                          title: '📸 Snapshot Guardado',
+                          description: 'Corte de métricas guardado exitosamente. La app estará protegida ante bloqueos de Jira durante las sesiones de estatus.'
+                        });
+                      } catch (e) {
+                        addNotification({
+                          type: 'error',
+                          title: 'Error al guardar snapshot',
+                          description: e.message
+                        });
+                      }
+                    } else {
+                      addNotification({
+                        type: 'warning',
+                        title: 'Sin datos para snapshot',
+                        description: 'Espera a que carguen las métricas antes de guardar el snapshot.'
+                      });
+                    }
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 12px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    borderRadius: '6px'
+                  }}
+                  title="Congelar snapshot local para las sesiones de estatus (12:30 / 5:00 PM)"
+                >
+                  📸 Guardar Snapshot
+                </button>
+
+                <button 
                   className="btn-primary" 
                   onClick={handleCopyReportToClipboard}
                   style={{
@@ -12663,6 +12817,53 @@ const renderPlanningTab = () => {
                 </span>
               )}
             </div>
+
+            {/* Amber Banner when Snapshot mode is active */}
+            {reportData?._isSnapshot && (
+              <div style={{
+                background: '#FFF0B3',
+                border: '1px solid #FFE380',
+                borderLeft: '5px solid #FFAB00',
+                color: '#172B4D',
+                padding: '10px 16px',
+                borderRadius: '6px',
+                margin: '12px 0',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '10px',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{ fontSize: '18px' }}>⚠️</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: '13px', color: '#172B4D' }}>
+                      Modo Respaldo Activo (Jira con alta demanda / bloqueo temporal)
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#44546F' }}>
+                      Mostrando corte congelado de métricas capturado a las {new Date(reportData._snapshotTimestamp || reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Puedes exponer tus métricas con seguridad.
+                    </div>
+                  </div>
+                </div>
+                <button
+                  className="btn-secondary"
+                  onClick={() => loadReportData(selectedProjectId, projectConfig, false)}
+                  style={{
+                    padding: '5px 12px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    background: '#002D62',
+                    color: '#ffffff',
+                    border: 'none',
+                    borderRadius: '4px'
+                  }}
+                >
+                  🔄 Intentar en vivo
+                </button>
+              </div>
+            )}
 
             {/* Filter Toolbar */}
             <div className="dashboard-filter-toolbar">
