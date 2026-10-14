@@ -11029,6 +11029,7 @@ const renderPlanningTab = () => {
     const closedCycleBugs = cycleAllBugsList.filter(b => b.isDone).length;
 
     const evaluados = passed + failed + blocked;
+    const ejecutados = evaluados;
     const successRate = evaluados > 0 ? ((passed / evaluados) * 100).toFixed(1) : '0.0';
     const allTotal = passed + failed + blocked + notRun;
     const coverageRate = allTotal > 0 ? ((evaluados / allTotal) * 100).toFixed(1) : '0.0';
