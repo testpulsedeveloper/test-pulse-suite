@@ -1127,23 +1127,6 @@ function App() {
   const [folders, setFolders] = useState([]);
   const [testCases, setTestCases] = useState([]);
   const [requirementsMap, setRequirementsMap] = useState({});
-  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storiesByEpic: {}, tcMap: {} });
-  const [traceabilityHierarchyLoading, setTraceabilityHierarchyLoading] = useState(false);
-  const loadTraceabilityHierarchy = useCallback(async (projId = selectedProjectId, cfg = projectConfig) => {
-    const targetId = projId || selectedProjectId;
-    if (!targetId) return;
-    try {
-      setTraceabilityHierarchyLoading(true);
-      const res = await invoke('getTraceabilityHierarchy', { projectId: targetId, config: cfg });
-      if (res && res.tcMap) {
-        setTraceabilityHierarchy(res);
-      }
-    } catch (err) {
-      console.warn("loadTraceabilityHierarchy error:", err);
-    } finally {
-      setTraceabilityHierarchyLoading(false);
-    }
-  }, [selectedProjectId, projectConfig]);
   // O(1) lookup by id or key — replaces repeated testCases.find(...) scans inside list renders
   const testCasesById = useMemo(() => {
     const m = new Map();
@@ -1367,14 +1350,6 @@ function App() {
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
-
-  useEffect(() => {
-    if (activeTab === 'dashboard' && dashboardSubView === 'traceability' && selectedProjectId) {
-      if (!traceabilityHierarchy || !traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0) {
-        loadTraceabilityHierarchy();
-      }
-    }
-  }, [activeTab, dashboardSubView, selectedProjectId, traceabilityHierarchy, loadTraceabilityHierarchy]);
   const [showUnlinkedBugsModal, setShowUnlinkedBugsModal] = useState(false);
   const [linkingUnlinkedBug, setLinkingUnlinkedBug] = useState(null);
   const [targetCycleForBug, setTargetCycleForBug] = useState('');
@@ -1469,6 +1444,34 @@ function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadError, setLoadError] = useState(null);
+
+  // Traceability hierarchy state (Épicas ➔ Historias ➔ Casos de Prueba)
+  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storiesByEpic: {}, tcMap: {} });
+  const [traceabilityHierarchyLoading, setTraceabilityHierarchyLoading] = useState(false);
+  const loadTraceabilityHierarchy = useCallback(async (projId, cfg) => {
+    const targetId = projId || selectedProjectId;
+    const targetCfg = cfg || projectConfig;
+    if (!targetId) return;
+    try {
+      setTraceabilityHierarchyLoading(true);
+      const res = await invoke('getTraceabilityHierarchy', { projectId: targetId, config: targetCfg });
+      if (res && res.tcMap) {
+        setTraceabilityHierarchy(res);
+      }
+    } catch (err) {
+      console.warn("loadTraceabilityHierarchy error:", err);
+    } finally {
+      setTraceabilityHierarchyLoading(false);
+    }
+  }, [selectedProjectId, projectConfig]);
+
+  useEffect(() => {
+    if (activeTab === 'dashboard' && dashboardSubView === 'traceability' && selectedProjectId) {
+      if (!traceabilityHierarchy || !traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0) {
+        loadTraceabilityHierarchy();
+      }
+    }
+  }, [activeTab, dashboardSubView, selectedProjectId, traceabilityHierarchy, loadTraceabilityHierarchy]);
 
   // Notifications
   const { addNotification } = useNotification();
@@ -3001,10 +3004,14 @@ Then el sistema valida la identidad.
                   } else {
                     setLocalLoading(true);
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
-                    const [fetchedCycles, fetchedPlans] = await Promise.all([
+                    const promises = [
                       invoke('getTestCycles', { projectId: selectedProjectId, config }),
                       invoke('getTestPlans', { projectId: selectedProjectId, config })
-                    ]);
+                    ];
+                    if (activeTab === 'dashboard' && dashboardSubView === 'traceability') {
+                      promises.push(loadTraceabilityHierarchy(selectedProjectId, config));
+                    }
+                    const [fetchedCycles, fetchedPlans] = await Promise.all(promises);
                     if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
                     if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
                   }
@@ -14785,18 +14792,8 @@ const renderPlanningTab = () => {
                     </div>
                   </div>
 
-                  {/* Search filter & Sync */}
+                  {/* Search filter */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <button
-                      onClick={() => loadTraceabilityHierarchy()}
-                      disabled={traceabilityHierarchyLoading}
-                      className="btn-secondary"
-                      style={{ padding: '5px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
-                      title="Sincronizar jerarquía de Épicas e Historias desde Jira"
-                    >
-                      <span className={traceabilityHierarchyLoading ? 'rotating' : ''}>🔄</span>
-                      <span>{traceabilityHierarchyLoading ? 'Sincronizando...' : 'Sincronizar'}</span>
-                    </button>
                     <input
                       type="text"
                       placeholder="Buscar por épica, historia, plan, ciclo o bug..."
