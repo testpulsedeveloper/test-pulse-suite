@@ -1127,6 +1127,23 @@ function App() {
   const [folders, setFolders] = useState([]);
   const [testCases, setTestCases] = useState([]);
   const [requirementsMap, setRequirementsMap] = useState({});
+  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storiesByEpic: {}, tcMap: {} });
+  const [traceabilityHierarchyLoading, setTraceabilityHierarchyLoading] = useState(false);
+  const loadTraceabilityHierarchy = useCallback(async (projId = selectedProjectId, cfg = projectConfig) => {
+    const targetId = projId || selectedProjectId;
+    if (!targetId) return;
+    try {
+      setTraceabilityHierarchyLoading(true);
+      const res = await invoke('getTraceabilityHierarchy', { projectId: targetId, config: cfg });
+      if (res && res.tcMap) {
+        setTraceabilityHierarchy(res);
+      }
+    } catch (err) {
+      console.warn("loadTraceabilityHierarchy error:", err);
+    } finally {
+      setTraceabilityHierarchyLoading(false);
+    }
+  }, [selectedProjectId, projectConfig]);
   // O(1) lookup by id or key — replaces repeated testCases.find(...) scans inside list renders
   const testCasesById = useMemo(() => {
     const m = new Map();
@@ -1350,6 +1367,14 @@ function App() {
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
+
+  useEffect(() => {
+    if (activeTab === 'dashboard' && dashboardSubView === 'traceability' && selectedProjectId) {
+      if (!traceabilityHierarchy || !traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0) {
+        loadTraceabilityHierarchy();
+      }
+    }
+  }, [activeTab, dashboardSubView, selectedProjectId, traceabilityHierarchy, loadTraceabilityHierarchy]);
   const [showUnlinkedBugsModal, setShowUnlinkedBugsModal] = useState(false);
   const [linkingUnlinkedBug, setLinkingUnlinkedBug] = useState(null);
   const [targetCycleForBug, setTargetCycleForBug] = useState('');
@@ -1943,6 +1968,7 @@ function App() {
         setTestCycles(cycs);
       }
       setRefreshTrigger(prev => prev + 1);
+      loadTraceabilityHierarchy(targetProjectId, config);
 
       // Phase 3: background
       // 3a. sessionStorage cache for testCases (instant on second open)
@@ -12367,8 +12393,12 @@ const renderPlanningTab = () => {
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
+        const cyclePlan = testPlans.find(p => String(p.id) === String(cycle.planId));
+        const planName = cyclePlan ? (cyclePlan.name || cyclePlan.summary || cyclePlan.key) : 'General (Sin Plan)';
+        const planKey = cyclePlan?.key || null;
+
         cycle.execution.forEach((ex, idx) => {
-          const tc = findTc(ex.id);
+          const tc = findTc(ex.id) || (ex.key ? findTc(ex.key) : undefined);
           const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
           const tcId = String(ex.id || ex.testCaseId || '');
           const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
@@ -12380,28 +12410,60 @@ const renderPlanningTab = () => {
           const folderName = folderObj?.name || tc?.folderName || tc?.folder || 'General';
           const exType = ex.executionType || tc?.executionType || 'Manual';
 
-          const extracted = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
-          const epicVal = extracted.epicKey || null;
-          const epicSummary = extracted.epicSummary || null;
-          const reqVal = extracted.reqKey || null;
-          const reqSummary = extracted.reqSummary || null;
+          // 1. Top-down hierarchy lookup: Epic -> Story -> Test Case
+          const hier = (tcKey && traceabilityHierarchy?.tcMap?.[tcKey]) ||
+                       (tcId && traceabilityHierarchy?.tcMap?.[tcId]) ||
+                       (ex.key && traceabilityHierarchy?.tcMap?.[ex.key]) ||
+                       (ex.id && traceabilityHierarchy?.tcMap?.[String(ex.id)]) ||
+                       null;
+
+          let epicKey = hier?.epicKey || null;
+          let epicSummary = hier?.epicSummary || null;
+          let reqKey = hier?.storyKey || null;
+          let reqSummary = hier?.storySummary || null;
+
+          // 2. Direct inspection fallback on tc
+          if (!epicKey || !reqKey) {
+            const fallback = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
+            if (!epicKey && fallback.epicKey) {
+              epicKey = fallback.epicKey;
+              epicSummary = fallback.epicSummary;
+            }
+            if (!reqKey && fallback.reqKey) {
+              reqKey = fallback.reqKey;
+              reqSummary = fallback.reqSummary;
+            }
+          }
+
+          // 3. Reconcile Story -> Epic from stories list if epic still missing
+          if (!epicKey && reqKey && Array.isArray(traceabilityHierarchy?.stories)) {
+            const st = traceabilityHierarchy.stories.find(s => s.key === reqKey);
+            if (st) {
+              epicKey = st.parent?.key || (typeof st.customfield_10014 === 'string' ? st.customfield_10014 : null);
+              epicSummary = st.parent?.fields?.summary || null;
+            }
+          }
+
           const exBugs = (ex.linkedBugs && Array.isArray(ex.linkedBugs)) ? ex.linkedBugs.filter(isActualBug) : [];
 
           traceabilityRows.push({
             id: `${cycle.id}-${ex.id}`,
             cycleId: cycle.id,
             cycleName: cycle.summary,
+            planId: cycle.planId || null,
+            planName: planName,
+            planKey: planKey,
             testCaseId: ex.id,
             testCaseKey: tcKey,
             testCaseSummary: tcSummary,
             folderName: folderName,
             executionType: exType,
             status: ex.status || 'NOT_RUN',
-            epic: epicVal,
-            epicKey: extracted.epicKey,
+            epic: epicKey,
+            epicKey: epicKey,
             epicSummary: epicSummary,
-            requirement: reqVal,
-            requirementKey: extracted.reqKey,
+            requirement: reqKey,
+            requirementKey: reqKey,
             requirementSummary: reqSummary,
             bugs: exBugs
           });
@@ -12456,13 +12518,14 @@ const renderPlanningTab = () => {
       if (!dashboardTraceabilitySearch) return true;
       const q = dashboardTraceabilitySearch.toLowerCase().trim();
       return (
-        row.testCaseKey.toLowerCase().includes(q) ||
-        row.testCaseSummary.toLowerCase().includes(q) ||
-        row.cycleName.toLowerCase().includes(q) ||
-        row.folderName.toLowerCase().includes(q) ||
-        (row.epic && row.epic.toLowerCase().includes(q)) ||
+        (row.testCaseKey && row.testCaseKey.toLowerCase().includes(q)) ||
+        (row.testCaseSummary && row.testCaseSummary.toLowerCase().includes(q)) ||
+        (row.planName && row.planName.toLowerCase().includes(q)) ||
+        (row.cycleName && row.cycleName.toLowerCase().includes(q)) ||
+        (row.folderName && row.folderName.toLowerCase().includes(q)) ||
+        (row.epicKey && row.epicKey.toLowerCase().includes(q)) ||
         (row.epicSummary && row.epicSummary.toLowerCase().includes(q)) ||
-        (row.requirement && row.requirement.toLowerCase().includes(q)) ||
+        (row.requirementKey && row.requirementKey.toLowerCase().includes(q)) ||
         (row.requirementSummary && row.requirementSummary.toLowerCase().includes(q)) ||
         row.bugs.some(b => (b.key && b.key.toLowerCase().includes(q)) || (b.summary && b.summary.toLowerCase().includes(q)))
       );
@@ -14718,15 +14781,25 @@ const renderPlanningTab = () => {
                       <span>Matriz de Trazabilidad y Cobertura (Traceability Matrix)</span>
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
-                      Relación de extremo a extremo: Épica ➔ Historia de Usuario ➔ Caso de Prueba ➔ Ciclo ➔ Defectos
+                      Relación de extremo a extremo: Épica ➔ Historia de Usuario ➔ Plan de Pruebas ➔ Ciclo ➔ Defectos
                     </div>
                   </div>
 
-                  {/* Search filter */}
+                  {/* Search filter & Sync */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button
+                      onClick={() => loadTraceabilityHierarchy()}
+                      disabled={traceabilityHierarchyLoading}
+                      className="btn-secondary"
+                      style={{ padding: '5px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
+                      title="Sincronizar jerarquía de Épicas e Historias desde Jira"
+                    >
+                      <span className={traceabilityHierarchyLoading ? 'rotating' : ''}>🔄</span>
+                      <span>{traceabilityHierarchyLoading ? 'Sincronizando...' : 'Sincronizar'}</span>
+                    </button>
                     <input
                       type="text"
-                      placeholder="Buscar por épica, historia, caso o bug..."
+                      placeholder="Buscar por épica, historia, plan, ciclo o bug..."
                       value={dashboardTraceabilitySearch}
                       onChange={(e) => setDashboardTraceabilitySearch(e.target.value)}
                       style={{
@@ -14754,11 +14827,10 @@ const renderPlanningTab = () => {
                       <tr>
                         <th>Épica de Jira</th>
                         <th>Historia de Usuario (Requisito)</th>
-                        <th>Caso de Prueba</th>
+                        <th>Plan de Pruebas</th>
                         <th>Ciclo de Pruebas</th>
                         <th>Estado Ejecución</th>
                         <th>Defectos Vinculados</th>
-                        <th style={{ textAlign: 'right' }}>Acción</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -14766,10 +14838,10 @@ const renderPlanningTab = () => {
                         <tr key={row.id}>
                           {/* 1. Épica de Jira */}
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            {row.epic ? (
+                            {row.epicKey ? (
                               <a
-                                href={`/browse/${row.epicKey || row.epic}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + (row.epicKey || row.epic)); }}
+                                href={`/browse/${row.epicKey}`}
+                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + row.epicKey); }}
                                 className="ads-lozenge ads-lozenge-subtle"
                                 style={{
                                   display: 'inline-flex',
@@ -14783,9 +14855,9 @@ const renderPlanningTab = () => {
                                   textDecoration: 'none',
                                   cursor: 'pointer'
                                 }}
-                                title={row.epicSummary ? `${row.epicKey || row.epic}: ${row.epicSummary}` : (row.epicKey || row.epic)}
+                                title={row.epicSummary ? `${row.epicKey}: ${row.epicSummary}` : row.epicKey}
                               >
-                                ⚡ {row.epicKey || row.epic}
+                                ⚡ {row.epicKey}
                               </a>
                             ) : (
                               <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
@@ -14796,10 +14868,10 @@ const renderPlanningTab = () => {
 
                           {/* 2. Historia de Usuario (Requisito) */}
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            {row.requirement ? (
+                            {row.requirementKey ? (
                               <a
-                                href={`/browse/${row.requirementKey || row.requirement}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + (row.requirementKey || row.requirement)); }}
+                                href={`/browse/${row.requirementKey}`}
+                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + row.requirementKey); }}
                                 className="ads-lozenge ads-lozenge-subtle"
                                 style={{
                                   display: 'inline-flex',
@@ -14813,9 +14885,9 @@ const renderPlanningTab = () => {
                                   textDecoration: 'none',
                                   cursor: 'pointer'
                                 }}
-                                title={row.requirementSummary ? `${row.requirementKey || row.requirement}: ${row.requirementSummary}` : (row.requirementKey || row.requirement)}
+                                title={row.requirementSummary ? `${row.requirementKey}: ${row.requirementSummary}` : row.requirementKey}
                               >
-                                📖 {row.requirementKey || row.requirement}
+                                📖 {row.requirementKey}
                               </a>
                             ) : (
                               <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
@@ -14824,19 +14896,38 @@ const renderPlanningTab = () => {
                             )}
                           </td>
 
-                          {/* 3. Caso de Prueba */}
-                          <td style={{ maxWidth: '340px' }}>
-                            <div style={{ fontWeight: 700, color: '#0C66E4', fontSize: '12px' }}>
-                              {row.testCaseKey}
-                            </div>
-                            <div style={{ fontWeight: 500, color: 'var(--jira-dark, #172B4D)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '340px' }} title={row.testCaseSummary}>
-                              {row.testCaseSummary}
+                          {/* 3. Plan de Pruebas */}
+                          <td style={{ maxWidth: '320px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                              <span
+                                className="ads-lozenge ads-lozenge-subtle"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  fontWeight: 700,
+                                  color: row.planKey ? '#1D7F54' : '#626F86',
+                                  background: row.planKey ? '#E3FCEF' : '#F1F2F4',
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '11px',
+                                  width: 'fit-content'
+                                }}
+                                title={row.planName}
+                              >
+                                📋 {row.planName}
+                              </span>
+                              {row.testCaseKey && (
+                                <div style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '300px' }} title={`${row.testCaseKey}: ${row.testCaseSummary}`}>
+                                  <span style={{ fontWeight: 600 }}>{row.testCaseKey}</span>: {row.testCaseSummary}
+                                </div>
+                              )}
                             </div>
                           </td>
 
-                          {/* 4. Ciclo */}
-                          <td style={{ whiteSpace: 'nowrap', fontSize: '12px', color: 'var(--jira-subtle)' }}>
-                            {row.cycleName}
+                          {/* 4. Ciclo de Pruebas */}
+                          <td style={{ whiteSpace: 'nowrap', fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600 }}>
+                            🔄 {row.cycleName}
                           </td>
 
                           {/* 5. Estado Ejecución */}
@@ -14874,28 +14965,6 @@ const renderPlanningTab = () => {
                             ) : (
                               <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
                             )}
-                          </td>
-
-                          {/* 7. Acción */}
-                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                            <button
-                              onClick={() => {
-                                const found = findTc(row.testCaseId);
-                                if (found) setSelectedTestCase(found);
-                              }}
-                              style={{
-                                padding: '4px 8px',
-                                fontSize: '11px',
-                                fontWeight: 600,
-                                background: '#FFFFFF',
-                                border: '1px solid var(--jira-border, #DCDFE4)',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                color: '#0C66E4'
-                              }}
-                            >
-                              Ver Caso
-                            </button>
                           </td>
                         </tr>
                       ))}

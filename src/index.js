@@ -743,6 +743,184 @@ resolver.define('getRequirements', async ({ payload, context }) => {
   }
 });
 
+resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
+  try {
+    const projectId = payload?.projectId || context?.extension?.project?.id;
+    if (!projectId) return { epics: [], stories: [], storiesByEpic: {}, tcMap: {} };
+
+    // Step 0: Get project issue types to identify exact Epic and Requirement type names
+    let epicTypeName = 'Epic';
+    let availableTypes = [];
+    try {
+      const pResp = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
+      if (pResp.ok) {
+        const pData = await pResp.json();
+        if (Array.isArray(pData.issueTypes)) {
+          availableTypes = pData.issueTypes;
+          const foundEpic = pData.issueTypes.find(t => {
+            const nl = (t.name || '').toLowerCase();
+            return nl === 'epic' || nl === 'épica' || nl === 'epica' || t.hierarchyLevel === 1;
+          });
+          if (foundEpic) {
+            epicTypeName = foundEpic.name;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Step 1: Traer las ÉPICAS del proyecto
+    const epicsJql = `project = ${projectId} AND issuetype = "${epicTypeName}" ORDER BY created DESC`;
+    const epicsPage = await fetchJqlPage(epicsJql, ['summary', 'status', 'issuelinks'], null, null, null, 100);
+    const epics = (epicsPage?.issues || []).map(issue => ({
+      id: issue.id,
+      key: issue.key,
+      summary: issue.fields?.summary || '',
+      status: issue.fields?.status?.name || '',
+      issuelinks: issue.fields?.issuelinks || []
+    }));
+
+    const epicMap = {};
+    epics.forEach(e => {
+      epicMap[e.key] = e;
+    });
+
+    // Step 2: Traer las HISTORIAS ligadas a esas Épicas
+    let reqTypes = (payload?.config?.requirementIssueTypes || []).filter(Boolean);
+    if (reqTypes.length === 0) {
+      if (availableTypes.length > 0) {
+        reqTypes = availableTypes
+          .filter(t => !t.subtask && t.name !== epicTypeName && !['test case', 'caso de prueba', 'test cycle', 'test set', 'test plan'].includes(t.name.toLowerCase()))
+          .map(t => t.name);
+      }
+      if (reqTypes.length === 0) {
+        reqTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
+      }
+    }
+
+    let safeReqTypes = reqTypes;
+    if (availableTypes.length > 0) {
+      const availNames = new Set(availableTypes.map(t => t.name.toLowerCase()));
+      const filtered = reqTypes.filter(t => availNames.has(t.toLowerCase()));
+      if (filtered.length > 0) safeReqTypes = filtered;
+    }
+
+    const typeList = safeReqTypes.map(t => `"${t}"`).join(', ');
+    const storiesJql = `project = ${projectId} AND issuetype IN (${typeList}) ORDER BY created DESC`;
+    const storiesPage = await fetchJqlPage(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
+    
+    const stories = (storiesPage?.issues || []).map(issue => ({
+      id: issue.id,
+      key: issue.key,
+      summary: issue.fields?.summary || '',
+      status: issue.fields?.status?.name || '',
+      parent: issue.fields?.parent || null,
+      customfield_10014: issue.fields?.customfield_10014 || null,
+      issuelinks: issue.fields?.issuelinks || []
+    }));
+
+    // If epics exist, also find any issues directly having parent in epics (in case they have an issue type not in typeList)
+    if (epics.length > 0) {
+      const epicKeysList = epics.slice(0, 50).map(e => `"${e.key}"`).join(', ');
+      try {
+        const childrenJql = `project = ${projectId} AND parent IN (${epicKeysList}) ORDER BY created DESC`;
+        const childrenPage = await fetchJqlPage(childrenJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
+        if (childrenPage?.issues && Array.isArray(childrenPage.issues)) {
+          const seenKeys = new Set(stories.map(s => s.key));
+          childrenPage.issues.forEach(issue => {
+            if (!seenKeys.has(issue.key)) {
+              seenKeys.add(issue.key);
+              stories.push({
+                id: issue.id,
+                key: issue.key,
+                summary: issue.fields?.summary || '',
+                status: issue.fields?.status?.name || '',
+                parent: issue.fields?.parent || null,
+                customfield_10014: issue.fields?.customfield_10014 || null,
+                issuelinks: issue.fields?.issuelinks || []
+              });
+            }
+          });
+        }
+      } catch (_) {}
+    }
+
+    // Step 3: En las Historias, mapear los CASOS DE PRUEBA ligados
+    const tcMap = {}; // testCaseKeyOrId -> { epicKey, epicSummary, storyKey, storySummary }
+    const storiesByEpic = {};
+
+    stories.forEach(story => {
+      let epicKey = null;
+      let epicSummary = null;
+
+      if (story.parent?.key) {
+        epicKey = story.parent.key;
+        epicSummary = story.parent.fields?.summary || epicMap[epicKey]?.summary || null;
+      } else if (typeof story.customfield_10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(story.customfield_10014.trim())) {
+        epicKey = story.customfield_10014.trim();
+        epicSummary = epicMap[epicKey]?.summary || null;
+      }
+
+      if (epicKey) {
+        if (!storiesByEpic[epicKey]) storiesByEpic[epicKey] = [];
+        storiesByEpic[epicKey].push(story.key);
+      }
+
+      // Read linked test cases in this story's issuelinks
+      if (Array.isArray(story.issuelinks)) {
+        story.issuelinks.forEach(link => {
+          const cand = link.inwardIssue || link.outwardIssue;
+          if (cand && cand.key) {
+            tcMap[cand.key] = {
+              epicKey,
+              epicSummary,
+              storyKey: story.key,
+              storySummary: story.summary
+            };
+            if (cand.id) {
+              tcMap[String(cand.id)] = tcMap[cand.key];
+            }
+          }
+        });
+      }
+    });
+
+    // Also check direct links on Epics
+    epics.forEach(epic => {
+      if (Array.isArray(epic.issuelinks)) {
+        epic.issuelinks.forEach(link => {
+          const cand = link.inwardIssue || link.outwardIssue;
+          if (cand && cand.key) {
+            if (!tcMap[cand.key]) {
+              tcMap[cand.key] = {
+                epicKey: epic.key,
+                epicSummary: epic.summary,
+                storyKey: null,
+                storySummary: null
+              };
+            } else if (!tcMap[cand.key].epicKey) {
+              tcMap[cand.key].epicKey = epic.key;
+              tcMap[cand.key].epicSummary = epic.summary;
+            }
+            if (cand.id) {
+              tcMap[String(cand.id)] = tcMap[cand.key];
+            }
+          }
+        });
+      }
+    });
+
+    return {
+      epics,
+      stories,
+      storiesByEpic,
+      tcMap
+    };
+  } catch (err) {
+    console.error("getTraceabilityHierarchy exception:", err);
+    return { epics: [], stories: [], storiesByEpic: {}, tcMap: {} };
+  }
+});
+
 resolver.define('linkCasesToRequirement', async ({ payload }) => {
   try {
     const { requirementId, testCaseIds, linkType } = payload;
