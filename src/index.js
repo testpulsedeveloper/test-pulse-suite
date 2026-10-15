@@ -515,7 +515,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
     const jql = `${projectJql}issuetype in (${validCycleTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
     // Pass at most 4 properties (Jira allows max 5)
     const propNames = ['testops-plan-link', 'execution', 'tests', 'execution-meta'];
-    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created', 'versions', 'fixVersions'], null, propNames);
+    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created', 'versions', 'fixVersions', 'issuelinks', 'parent'], null, propNames);
     return allIssues.map(issue => {
       const props = issue.properties || {};
       let totalTests = 0;
@@ -556,7 +556,25 @@ resolver.define('getTestCycles', async ({ payload }) => {
       const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
 
       const planLink = props['testops-plan-link'];
-      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (props['testpulse-v2']?.planId || null));
+      let planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (props['testpulse-v2']?.planId || null));
+      if (!planId && issue.fields?.parent) {
+        const pType = (issue.fields.parent.fields?.issuetype?.name || '').toLowerCase();
+        if (pType.includes('plan') || pType.includes('set')) {
+          planId = issue.fields.parent.key || issue.fields.parent.id;
+        }
+      }
+      if (!planId && Array.isArray(issue.fields?.issuelinks)) {
+        for (const link of issue.fields.issuelinks) {
+          const cand = link.inwardIssue || link.outwardIssue;
+          if (cand) {
+            const cType = (cand.fields?.issuetype?.name || '').toLowerCase();
+            if (cType.includes('plan') || cType.includes('set')) {
+              planId = cand.key || cand.id;
+              break;
+            }
+          }
+        }
+      }
       return {
         id: issue.id,
         key: issue.key,
@@ -784,13 +802,46 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       epicMap[e.key] = e;
     });
 
+    // Define all issue types that belong to test management or defects and must NEVER be treated as requirements
+    const blacklistWords = [
+      'test case', 'testcase', 'caso de prueba', 'casos de prueba',
+      'test cycle', 'testcycle', 'ciclo de prueba', 'ciclo de pruebas', 'ciclo',
+      'test plan', 'testplan', 'plan de prueba', 'plan de pruebas', 'test set', 'testset',
+      'test run', 'testrun', 'ejecución', 'ejecucion',
+      'bug', 'defecto', 'error', 'incidencia',
+      (epicTypeName || '').toLowerCase().trim(),
+      (payload?.config?.testCaseType || '').toLowerCase().trim(),
+      (payload?.config?.testCycleType || '').toLowerCase().trim(),
+      (payload?.config?.planIssueType || '').toLowerCase().trim(),
+      (payload?.config?.testRunType || '').toLowerCase().trim()
+    ].filter(Boolean);
+
+    const isBlacklistedType = (typeName) => {
+      if (!typeName) return false;
+      const lower = String(typeName).toLowerCase().trim();
+      return blacklistWords.some(w => lower === w || lower.includes(w));
+    };
+
     // Step 2: Traer las HISTORIAS ligadas a esas Épicas
-    let reqTypes = (payload?.config?.requirementIssueTypes || []).filter(Boolean);
-    if (reqTypes.length === 0) {
+    let configuredReqTypes = (payload?.config?.requirementIssueTypes || []).filter(Boolean);
+    configuredReqTypes = configuredReqTypes.filter(t => !isBlacklistedType(t));
+
+    let reqTypes = [];
+    if (configuredReqTypes.length > 0) {
+      reqTypes = configuredReqTypes;
+    } else {
       if (availableTypes.length > 0) {
+        const preferredTerms = ['story', 'historia', 'requisito', 'requirement', 'user story', 'task', 'tarea', 'feature', 'enabler'];
         reqTypes = availableTypes
-          .filter(t => !t.subtask && t.name !== epicTypeName && !['test case', 'caso de prueba', 'test cycle', 'test set', 'test plan'].includes(t.name.toLowerCase()))
-          .map(t => t.name);
+          .filter(t => !t.subtask && !isBlacklistedType(t.name))
+          .map(t => t.name)
+          .filter(name => preferredTerms.some(term => name.toLowerCase().includes(term)));
+
+        if (reqTypes.length === 0) {
+          reqTypes = availableTypes
+            .filter(t => !t.subtask && !isBlacklistedType(t.name))
+            .map(t => t.name);
+        }
       }
       if (reqTypes.length === 0) {
         reqTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
@@ -800,7 +851,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     let safeReqTypes = reqTypes;
     if (availableTypes.length > 0) {
       const availNames = new Set(availableTypes.map(t => t.name.toLowerCase()));
-      const filtered = reqTypes.filter(t => availNames.has(t.toLowerCase()));
+      const filtered = reqTypes.filter(t => availNames.has(t.toLowerCase()) && !isBlacklistedType(t));
       if (filtered.length > 0) safeReqTypes = filtered;
     }
 
@@ -808,11 +859,12 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     const storiesJql = `project = ${projectId} AND issuetype IN (${typeList}) ORDER BY created DESC`;
     const storiesPage = await fetchJqlPage(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
     
-    const stories = (storiesPage?.issues || []).map(issue => ({
+    const stories = (storiesPage?.issues || []).filter(issue => !isBlacklistedType(issue.fields?.issuetype?.name)).map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields?.summary || '',
       status: issue.fields?.status?.name || '',
+      issuetype: issue.fields?.issuetype?.name || '',
       parent: issue.fields?.parent || null,
       customfield_10014: issue.fields?.customfield_10014 || null,
       issuelinks: issue.fields?.issuelinks || []
@@ -827,6 +879,8 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         if (childrenPage?.issues && Array.isArray(childrenPage.issues)) {
           const seenKeys = new Set(stories.map(s => s.key));
           childrenPage.issues.forEach(issue => {
+            const issueType = issue.fields?.issuetype?.name || '';
+            if (isBlacklistedType(issueType)) return;
             if (!seenKeys.has(issue.key)) {
               seenKeys.add(issue.key);
               stories.push({
@@ -834,6 +888,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
                 key: issue.key,
                 summary: issue.fields?.summary || '',
                 status: issue.fields?.status?.name || '',
+                issuetype: issueType,
                 parent: issue.fields?.parent || null,
                 customfield_10014: issue.fields?.customfield_10014 || null,
                 issuelinks: issue.fields?.issuelinks || []
@@ -849,6 +904,8 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     const storiesByEpic = {};
 
     stories.forEach(story => {
+      if (isBlacklistedType(story.issuetype)) return;
+
       let epicKey = null;
       let epicSummary = null;
 
@@ -870,6 +927,15 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         story.issuelinks.forEach(link => {
           const cand = link.inwardIssue || link.outwardIssue;
           if (cand && cand.key) {
+            const candType = (cand.fields?.issuetype?.name || '').toLowerCase().trim();
+            // Never treat test runs, bugs, or other epics as test cases
+            if (candType && (
+              candType.includes('test run') || candType.includes('testrun') || candType.includes('ejecuc') ||
+              candType.includes('bug') || candType.includes('defecto') ||
+              candType.includes('epic') || candType.includes('épica')
+            )) {
+              return;
+            }
             tcMap[cand.key] = {
               epicKey,
               epicSummary,

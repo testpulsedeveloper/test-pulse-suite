@@ -994,13 +994,24 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
   const isReqType = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
     if (!t) return false;
+    // Strict blacklist: NEVER treat test management types or defects as requirements
+    if (
+      t.includes('test run') || t.includes('testrun') || t.includes('ejecuc') ||
+      t.includes('test case') || t.includes('testcase') || t.includes('caso de prueba') ||
+      t.includes('test cycle') || t.includes('ciclo') ||
+      t.includes('test plan') || t.includes('test set') || t.includes('plan de prueba') ||
+      t.includes('bug') || t.includes('defecto') || t.includes('error') || t.includes('incidencia') ||
+      t === 'epic' || t === 'épica'
+    ) {
+      return false;
+    }
     if (reqTypesConfig.length > 0) return reqTypesConfig.includes(t);
-    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'task', 'tarea', 'sub-task', 'subtask'].includes(t);
+    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'task', 'tarea'].includes(t);
   };
 
   const isEpicType = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
-    return t === 'epic' || t === 'épica';
+    return t === 'epic' || t === 'épica' || t.includes('epic') || t.includes('épica');
   };
 
   // 1. Explicit properties on tc
@@ -12400,7 +12411,8 @@ const renderPlanningTab = () => {
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
-        const cyclePlan = testPlans.find(p => String(p.id) === String(cycle.planId));
+        const cPlanId = cycle.planId || cycle.plan?.id || cycle.plan?.key || (typeof cycle.plan === 'string' ? cycle.plan : null);
+        const cyclePlan = testPlans.find(p => String(p.id) === String(cPlanId) || String(p.key) === String(cPlanId));
         const planName = cyclePlan ? (cyclePlan.name || cyclePlan.summary || cyclePlan.key) : 'General (Sin Plan)';
         const planKey = cyclePlan?.key || null;
 
@@ -12439,6 +12451,15 @@ const renderPlanningTab = () => {
             if (!reqKey && fallback.reqKey) {
               reqKey = fallback.reqKey;
               reqSummary = fallback.reqSummary;
+            }
+          }
+
+          // Guard against test runs or non-requirement keys
+          if (reqKey && typeof reqKey === 'string') {
+            const lowerReq = reqKey.toLowerCase();
+            if (lowerReq.includes('run') || (tc?.testRunKey && reqKey === tc.testRunKey)) {
+              reqKey = null;
+              reqSummary = null;
             }
           }
 
@@ -14888,38 +14909,31 @@ const renderPlanningTab = () => {
                               </a>
                             ) : (
                               <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
-                                📁 {row.folderName}
+                                📖 Por vincular
                               </span>
                             )}
                           </td>
 
                           {/* 3. Plan de Pruebas */}
-                          <td style={{ maxWidth: '320px' }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                              <span
-                                className="ads-lozenge ads-lozenge-subtle"
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  fontWeight: 700,
-                                  color: row.planKey ? '#1D7F54' : '#626F86',
-                                  background: row.planKey ? '#E3FCEF' : '#F1F2F4',
-                                  padding: '2px 8px',
-                                  borderRadius: '4px',
-                                  fontSize: '11px',
-                                  width: 'fit-content'
-                                }}
-                                title={row.planName}
-                              >
-                                📋 {row.planName}
-                              </span>
-                              {row.testCaseKey && (
-                                <div style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '300px' }} title={`${row.testCaseKey}: ${row.testCaseSummary}`}>
-                                  <span style={{ fontWeight: 600 }}>{row.testCaseKey}</span>: {row.testCaseSummary}
-                                </div>
-                              )}
-                            </div>
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <span
+                              className="ads-lozenge ads-lozenge-subtle"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontWeight: 700,
+                                color: row.planKey ? '#1D7F54' : '#626F86',
+                                background: row.planKey ? '#E3FCEF' : '#F1F2F4',
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                width: 'fit-content'
+                              }}
+                              title={row.planName}
+                            >
+                              📋 {row.planName}
+                            </span>
                           </td>
 
                           {/* 4. Ciclo de Pruebas */}
