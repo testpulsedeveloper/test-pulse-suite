@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback, useDeferredValue } from 'react';
-import { invoke as forgeInvoke, view, router, requestJira } from '@forge/bridge';
+import { view, router, requestJira } from '@forge/bridge';
 import { CreateIssueModal } from '@forge/jira-bridge';
 import Lozenge from '@atlaskit/lozenge';
 import Badge from '@atlaskit/badge';
@@ -10,841 +10,30 @@ import TestPulseLoader from './components/TestPulseLoader';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 import packageJson from '../package.json';
 import { generateQrSvg, generateQrDataUrl } from './utils/qrCodeGenerator';
+import {
+  generateUUID,
+  normalizeUiStatus,
+  DEFAULT_DASHBOARD_WIDGETS,
+  AVAILABLE_WIDGET_CATALOG,
+  formatAttachmentSize,
+  MX_HOLIDAYS_SET,
+  getBusinessHoursBetween,
+  formatBugCreatedDate,
+  formatBugAge
+} from './utils/constants';
+import { textToAdf, sanitizeRenderedHtml, adfToHtml } from './utils/adfUtils';
+import {
+  RichTextEditor,
+  SearchableSelect,
+  BugAttachmentImageCard,
+  NotificationProvider,
+  useNotification
+} from './components/CommonComponents';
+import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
+
+export { normalizeUiStatus };
 
 const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
-
-const generateUUID = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return 'iter_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
-};
-
-export const normalizeUiStatus = (status) => {
-  if (!status) return 'Not Run';
-  const s = String(status).trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  if ([
-    'passed', 'pass', 'listo', 'done', 'aprobado', 'aprobada', 'exito', 'exitoso', 'exitosa',
-    'finalizado', 'finalizada', 'completado', 'completada', 'terminado', 'terminada',
-    'resuelto', 'resuelta', 'resolved', 'closed', 'cerrado', 'cerrada', 'ok',
-    'satisfactorio', 'satisfactoria', 'superado', 'superada', 'conforme', 'validated',
-    'validado', 'validada', 'accepted', 'aceptado', 'aceptada', 'success', 'successful'
-  ].includes(s)) return 'Passed';
-  if ([
-    'failed', 'fail', 'fallido', 'fallida', 'fallo', 'rechazado', 'rechazada',
-    'error', 'defectuoso', 'defectuosa', 'no superado', 'no superada', 'no conforme',
-    'no paso', 'rejected', 'failing', 'bug', 'descartado', 'descartada'
-  ].includes(s)) return 'Failed';
-  if ([
-    'blocked', 'block', 'bloqueado', 'bloqueada', 'bloqueo', 'impedido', 'impedida',
-    'detenido', 'detenida', 'pausado', 'pausada', 'on hold', 'hold', 'detener', 'bloq'
-  ].includes(s)) return 'Blocked';
-  if ([
-    'in progress', 'en curso', 'en progreso', 'running', 'en desarrollo', 'en pruebas',
-    'en ejecucion', 'en revision', 'testing', 'qa', 'in review', 'ejecutando',
-    'en proceso', 'work in progress', 'wip'
-  ].includes(s)) return 'In Progress';
-  return 'Not Run';
-};
-
-const DEFAULT_DASHBOARD_WIDGETS = [
-  { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
-  { id: 'w_general_status', type: 'general_status', title: 'Estado General de Pruebas', width: 'half', visible: true },
-  { id: 'w_manual_vs_auto', type: 'manual_vs_auto', title: 'Ejecución: Manual vs Auto', width: 'half', visible: true },
-  { id: 'w_tester_stats', type: 'tester_stats', title: 'Estado por QA Tester', width: 'half', visible: true },
-  { id: 'w_module_stats', type: 'module_stats', title: 'Estado por Módulo / Funcionalidad', width: 'half', visible: true },
-  { id: 'w_cycles_progress', type: 'cycles_progress', title: 'Progreso por Ciclo de Pruebas', width: 'full', visible: true },
-];
-
-const AVAILABLE_WIDGET_CATALOG = [
-  {
-    type: 'kpi_scorecard',
-    title: 'Métricas Clave (Bento Grid)',
-    category: 'Métricas',
-    categoryColor: '#0C66E4',
-    icon: '📊',
-    defaultWidth: 'full',
-    description: 'Scorecard con 5 tarjetas ejecutivas: Total de Casos, Tasa de Éxito, Defectos Abiertos, MTTR y Cobertura.'
-  },
-  {
-    type: 'general_status',
-    title: 'Estado General de Pruebas',
-    category: 'Calidad',
-    categoryColor: '#36B37E',
-    icon: '🍩',
-    defaultWidth: 'half',
-    description: 'Gráfico Donut interactivo con desglose de casos Pasados, Fallados, Bloqueados y Sin Ejecutar.'
-  },
-  {
-    type: 'manual_vs_auto',
-    title: 'Ejecución: Manual vs Auto',
-    category: 'Automatización',
-    categoryColor: '#6554C0',
-    icon: '⚡',
-    defaultWidth: 'half',
-    description: 'Comparativa de volumen, tasas de aprobación y velocidad entre pruebas automatizadas y manuales.'
-  },
-  {
-    type: 'tester_stats',
-    title: 'Estado por QA Tester',
-    category: 'Equipo',
-    categoryColor: '#FFAB00',
-    icon: '👥',
-    defaultWidth: 'half',
-    description: 'Productividad, balance de carga y desglose de avance por cada tester asignado con avatares.'
-  },
-  {
-    type: 'module_stats',
-    title: 'Estado por Módulo / Funcionalidad',
-    category: 'Calidad',
-    categoryColor: '#36B37E',
-    icon: '🧱',
-    defaultWidth: 'half',
-    description: 'Cobertura funcional agrupada por carpetas/módulos con semáforo de nivel de riesgo (Alto, Medio, Estable).'
-  },
-  {
-    type: 'cycles_progress',
-    title: 'Progreso por Ciclo de Pruebas',
-    category: 'Métricas',
-    categoryColor: '#0C66E4',
-    icon: '🔄',
-    defaultWidth: 'full',
-    description: 'Barras apiladas de avance individual para cada Ciclo de Pruebas activo en el proyecto.'
-  },
-  {
-    type: 'severity_breakdown',
-    title: 'Distribución de Defectos por Severidad',
-    category: 'Defectos',
-    categoryColor: '#DE350B',
-    icon: '🐞',
-    defaultWidth: 'half',
-    description: 'Conteo y proporciones de bugs clasificados en Bloqueante, Crítico, Mayor, Menor y Sin Definir.'
-  },
-  {
-    type: 'automation_health',
-    title: 'Salud de Automatización & CI/CD',
-    category: 'Automatización',
-    categoryColor: '#6554C0',
-    icon: '🚀',
-    defaultWidth: 'half',
-    description: 'Métricas de madurez de automatización, ratio de automatización y preparación de la suite para CI/CD.'
-  }
-];
-
-function textToAdf(text) {
-  if (!text) return { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: ' ' }] }] };
-  const lines = text.split('\n');
-  const content = [];
-  
-  let currentTable = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) {
-      if (currentTable) { content.push(currentTable); currentTable = null; }
-      continue;
-    }
-
-    if (line.startsWith('||') && line.endsWith('||')) {
-      if (!currentTable) {
-        currentTable = { type: 'table', attrs: { isNumberColumnEnabled: false, layout: "default" }, content: [] };
-      }
-      const cells = line.split('||').filter(Boolean).map(cell => ({
-        type: 'tableHeader',
-        content: [{ type: 'paragraph', content: [{ type: 'text', text: cell.trim() }] }]
-      }));
-      currentTable.content.push({ type: 'tableRow', content: cells });
-    } else if (line.startsWith('|') && line.endsWith('|')) {
-      if (!currentTable) {
-        currentTable = { type: 'table', attrs: { isNumberColumnEnabled: false, layout: "default" }, content: [] };
-      }
-      const cells = line.split('|').filter(Boolean).map(cell => ({
-        type: 'tableCell',
-        content: [{ type: 'paragraph', content: [{ type: 'text', text: cell.trim() }] }]
-      }));
-      currentTable.content.push({ type: 'tableRow', content: cells });
-    } else {
-      if (currentTable) { content.push(currentTable); currentTable = null; }
-      
-      const match = line.match(/^([^:]+):(.*)$/);
-      if (match) {
-        const strongText = match[1] + ':';
-        const restText = match[2];
-        const paraContent = [
-          { type: 'text', text: strongText, marks: [{ type: 'strong' }] }
-        ];
-        if (restText) {
-          paraContent.push({ type: 'text', text: restText });
-        }
-        content.push({ type: 'paragraph', content: paraContent });
-      } else {
-        content.push({
-          type: 'paragraph',
-          content: [{ type: 'text', text: line }]
-        });
-      }
-    }
-  }
-  if (currentTable) content.push(currentTable);
-
-  if (content.length === 0) {
-    content.push({ type: 'paragraph', content: [{ type: 'text', text: ' ' }] });
-  }
-
-  return { type: 'doc', version: 1, content };
-}
-
-function formatAttachmentSize(bytes) {
-  if (!bytes || isNaN(bytes)) return '';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-function sanitizeRenderedHtml(html) {
-  if (!html) return '';
-  return String(html)
-    .replace(/URL validation failed/gi, '')
-    .replace(/<span[^>]*class="[^"]*inline-card-resolving[^"]*"[^>]*>.*?<\/span>/gi, '')
-    .replace(/<div[^>]*class="[^"]*media-card-error[^"]*"[^>]*>.*?<\/div>/gi, '')
-    .replace(/<p>\s*(&nbsp;|\s)*<\/p>/gi, '')
-    .trim();
-}
-
-function adfToHtml(adf, attachments = []) {
-  if (!adf) return '';
-  if (typeof adf === 'string') {
-    const trimmed = adf.trim();
-    const looksLikeHtml = (trimmed.startsWith('<') && trimmed.endsWith('>')) ||
-      /<\/?(p|br|h[1-6]|div|span|ul|ol|li|strong|b|em|i|a|table|tr|td|th|pre|code|blockquote)\b[^>]*>/i.test(trimmed);
-    if (looksLikeHtml) {
-      return sanitizeRenderedHtml(adf);
-    }
-    return sanitizeRenderedHtml(
-      adf
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br/>')
-    );
-  }
-  if (typeof adf !== 'object') return sanitizeRenderedHtml(String(adf));
-
-  function renderNode(node) {
-    if (!node) return '';
-    if (Array.isArray(node)) {
-      return node.map(renderNode).join('');
-    }
-    const type = node.type;
-    const content = node.content ? node.content.map(renderNode).join('') : '';
-
-    switch (type) {
-      case 'doc':
-        return content;
-      case 'paragraph':
-        return `<p style="margin: 0.4rem 0;">${content || '&nbsp;'}</p>`;
-      case 'heading': {
-        const level = node.attrs?.level || 3;
-        return `<h${level} style="margin: 0.6rem 0 0.3rem 0;">${content}</h${level}>`;
-      }
-      case 'bulletList':
-        return `<ul style="margin: 0.4rem 0; padding-left: 1.5rem;">${content}</ul>`;
-      case 'orderedList':
-        return `<ol style="margin: 0.4rem 0; padding-left: 1.5rem;">${content}</ol>`;
-      case 'listItem':
-        return `<li>${content}</li>`;
-      case 'table':
-        return `<table style="width: 100%; border-collapse: collapse; margin: 0.5rem 0;" border="1">${content}</table>`;
-      case 'tableRow':
-        return `<tr>${content}</tr>`;
-      case 'tableHeader':
-        return `<th style="padding: 0.4rem; background: var(--bg-surface-hover, #f4f5f7); text-align: left; border: 1px solid var(--ds-border, #dfe1e6); font-weight: bold;">${content}</th>`;
-      case 'tableCell':
-        return `<td style="padding: 0.4rem; border: 1px solid var(--ds-border, #dfe1e6);">${content}</td>`;
-      case 'text': {
-        let text = (node.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        if (text.includes('URL validation failed')) text = '';
-        if (node.marks && Array.isArray(node.marks)) {
-          for (const mark of node.marks) {
-            if (mark.type === 'strong') text = `<strong>${text}</strong>`;
-            else if (mark.type === 'em') text = `<em>${text}</em>`;
-            else if (mark.type === 'code') text = `<code style="background: rgba(9,30,66,0.08); padding: 2px 4px; border-radius: 3px; font-family: monospace;">${text}</code>`;
-            else if (mark.type === 'strike') text = `<del>${text}</del>`;
-            else if (mark.type === 'underline') text = `<u>${text}</u>`;
-            else if (mark.type === 'link') text = `<a href="${mark.attrs?.href || '#'}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-            else if (mark.type === 'textColor') text = `<span style="color: ${mark.attrs?.color || 'inherit'}">${text}</span>`;
-          }
-        }
-        return text;
-      }
-      case 'hardBreak':
-        return '<br/>';
-      case 'codeBlock':
-        return `<pre style="background: var(--bg-surface-hover, #f4f5f7); padding: 0.8rem; border-radius: 4px; overflow-x: auto; font-family: monospace;"><code>${content || (node.text || '')}</code></pre>`;
-      case 'blockquote':
-        return `<blockquote style="border-left: 3px solid var(--ds-border, #dfe1e6); margin: 0.5rem 0; padding-left: 0.8rem; color: var(--text-secondary, #6b778c);">${content}</blockquote>`;
-      case 'rule':
-        return '<hr style="border: none; border-top: 1px solid var(--ds-border, #dfe1e6); margin: 0.8rem 0;" />';
-      case 'mention':
-        return `<span style="background: rgba(9,30,66,0.08); padding: 1px 4px; border-radius: 3px; font-weight: 500;">@${node.attrs?.text || 'user'}</span>`;
-      case 'emoji':
-        return node.attrs?.text || node.attrs?.shortName || '';
-      case 'mediaSingle': {
-        const layout = node.attrs?.layout || 'center';
-        return `<div class="adf-media-single" style="margin: 0.8rem 0; text-align: ${layout === 'center' ? 'center' : 'left'};">${content}</div>`;
-      }
-      case 'mediaGroup': {
-        return `<div class="adf-media-group" style="display: flex; flex-wrap: wrap; gap: 8px; margin: 0.8rem 0;">${content}</div>`;
-      }
-      case 'media': {
-        const mediaId = node.attrs?.id;
-        const mediaAlt = node.attrs?.alt || '';
-        const attList = Array.isArray(attachments) ? attachments : [];
-        const matchedAtt = attList.find(a => 
-          (mediaId && String(a.id) === String(mediaId)) || 
-          (mediaAlt && (a.filename === mediaAlt || String(a.id) === String(mediaAlt)))
-        );
-
-        if (matchedAtt) {
-          if (matchedAtt.isVideo) {
-            return `<div style="margin: 8px 0; display: inline-flex; flex-direction: column; border: 1px solid #DCDFE4; border-radius: 8px; overflow: hidden; background: #FFFFFF; max-width: 420px; box-shadow: 0 1px 3px rgba(9,30,66,0.08); text-align: left;">
-              <div style="background: #091E42; color: #FFF; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-                <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  <span>🎥</span> <span>${matchedAtt.filename}</span>
-                </div>
-                <span style="font-size: 10px; color: #B3D4FF; flex-shrink: 0;">${formatAttachmentSize(matchedAtt.size)}</span>
-              </div>
-              <div style="padding: 8px 12px; display: flex; justify-content: flex-end; background: #F8FAFD;">
-                <button onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))" style="background: #0C66E4; color: #FFF; border: none; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
-                  ▶ Reproducir Video
-                </button>
-              </div>
-            </div>`;
-          } else if (matchedAtt.isImage) {
-            return `<div style="margin: 6px 0; display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border: 1px solid #DCDFE4; border-radius: 8px; background: #FFFFFF; box-shadow: 0 1px 3px rgba(9,30,66,0.06); max-width: 460px; cursor: pointer; text-align: left;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))">
-              <div style="display: flex; align-items: center; gap: 10px; overflow: hidden;">
-                <div style="width: 32px; height: 32px; border-radius: 6px; background: #E9F2FF; color: #0C66E4; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;">📷</div>
-                <div style="overflow: hidden;">
-                  <div style="font-weight: 600; font-size: 12px; color: #172B4D; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${matchedAtt.filename}">${matchedAtt.filename}</div>
-                  <div style="font-size: 10px; color: #626F86; margin-top: 1px;">${formatAttachmentSize(matchedAtt.size)} • Imagen adjunta</div>
-                </div>
-              </div>
-              <button style="background: #0C66E4; color: #FFF; border: none; border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 700; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;">
-                🔍 Ver Imagen
-              </button>
-            </div>`;
-          } else {
-            return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; cursor: pointer; text-align: left;" onclick="window.__previewAttachment &amp;&amp; window.__previewAttachment('${matchedAtt.id}', decodeURIComponent('${encodeURIComponent(matchedAtt.filename)}'))">
-              <span style="font-size: 14px;">📄</span>
-              <span style="font-size: 12px; font-weight: 600; color: #0C66E4; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${matchedAtt.filename}</span>
-              <span style="color: #626F86; font-size: 10px;">(${formatAttachmentSize(matchedAtt.size)})</span>
-            </div>`;
-          }
-        }
-
-        // If not matched directly in attachments array
-        if (mediaAlt && mediaAlt.match(/\.(mp4|mov|webm|avi|mkv)$/i)) {
-          return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; background: #091E42; color: #FFF; border-radius: 6px; font-size: 12px; font-weight: 600;">
-            <span>🎥 Video: ${mediaAlt}</span>
-          </div>`;
-        }
-        if (mediaAlt && mediaAlt.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) {
-          return `<div style="margin: 6px 0; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 6px; font-size: 12px; font-weight: 500; color: #172B4D;">
-            <span>📷 ${mediaAlt}</span>
-          </div>`;
-        }
-        if (mediaAlt) {
-          return `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 4px; font-size: 11px;">📎 ${mediaAlt}</span>`;
-        }
-        return '';
-      }
-      case 'inlineCard':
-      case 'blockCard':
-      case 'embedCard': {
-        const cardUrl = node.attrs?.url;
-        if (!cardUrl || cardUrl.includes('URL validation failed')) return '';
-        return `<a href="${cardUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; background: #F4F5F7; border: 1px solid #DCDFE4; border-radius: 4px; color: #0C66E4; text-decoration: none; font-size: 12px; font-weight: 500; margin: 2px 0;">
-          🔗 ${cardUrl}
-        </a>`;
-      }
-      case 'panel': {
-        const pType = node.attrs?.panelType || 'info';
-        let pBg = '#E9F2FF';
-        let pBorder = '#0C66E4';
-        let pIcon = 'ℹ️';
-        if (pType === 'warning' || pType === 'note') {
-          pBg = '#FFF7D6';
-          pBorder = '#F5CD47';
-          pIcon = '⚠️';
-        } else if (pType === 'error') {
-          pBg = '#FFEBE6';
-          pBorder = '#DE350B';
-          pIcon = '🚨';
-        } else if (pType === 'success') {
-          pBg = '#E3FCEF';
-          pBorder = '#36B37E';
-          pIcon = '✅';
-        }
-        return `<div style="margin: 0.6rem 0; padding: 0.75rem 1rem; border-radius: 6px; border-left: 4px solid ${pBorder}; background: ${pBg}; color: #172B4D; font-size: 12.5px;">
-          <div style="font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">${pIcon} ${pType.toUpperCase()}</div>
-          ${content}
-        </div>`;
-      }
-      case 'expand':
-      case 'nestedExpand': {
-        const title = node.attrs?.title || 'Detalles';
-        return `<details style="margin: 0.5rem 0; padding: 0.5rem 0.75rem; background: #FAFBFC; border: 1px solid #DCDFE4; border-radius: 6px;">
-          <summary style="font-weight: 600; cursor: pointer; color: #172B4D;">${title}</summary>
-          <div style="margin-top: 0.5rem;">${content}</div>
-        </details>`;
-      }
-      case 'status': {
-        const sText = node.attrs?.text || '';
-        return `<span style="background: #E9F2FF; color: #0C66E4; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; text-transform: uppercase;">${sText}</span>`;
-      }
-      case 'date': {
-        const ts = node.attrs?.timestamp ? parseInt(node.attrs.timestamp, 10) : null;
-        const dStr = ts ? new Date(ts).toLocaleDateString('es-MX') : '';
-        return `<span style="background: #EBECF0; padding: 2px 6px; border-radius: 3px; font-size: 11px; color: #172B4D; font-weight: 500;">📅 ${dStr}</span>`;
-      }
-      default:
-        return content || (node.text ? node.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
-    }
-  }
-
-  return sanitizeRenderedHtml(renderNode(adf));
-}
-
-function BugAttachmentImageCard({ att, onPreview }) {
-  const [blobUrl, setBlobUrl] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let active = true;
-    let createdUrl = null;
-
-    async function loadThumb() {
-      try {
-        const res = await requestJira(`/rest/api/3/attachment/content/${att.id}`);
-        if (res.ok && active) {
-          const blob = await res.blob();
-          createdUrl = URL.createObjectURL(blob);
-          setBlobUrl(createdUrl);
-        }
-      } catch (e) {
-        // Fallback gracefully without breaking UI
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    loadThumb();
-
-    return () => {
-      active = false;
-      if (createdUrl) {
-        try { URL.revokeObjectURL(createdUrl); } catch (e) {}
-      }
-    };
-  }, [att.id]);
-
-  return (
-    <div
-      onClick={() => onPreview(att)}
-      style={{
-        border: '1px solid #DCDFE4',
-        borderRadius: '6px',
-        overflow: 'hidden',
-        background: '#FFFFFF',
-        cursor: 'pointer',
-        transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-        display: 'flex',
-        flexDirection: 'column'
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 8px rgba(9,30,66,0.12)'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
-      title="Clic para ver en pantalla completa"
-    >
-      <div style={{ height: '110px', backgroundColor: '#F4F5F7', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderBottom: '1px solid #EBECF0', position: 'relative' }}>
-        {blobUrl ? (
-          <img
-            src={blobUrl}
-            alt={att.filename}
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-          />
-        ) : loading ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', color: '#626F86', fontSize: '10px' }}>
-            <div style={{ width: '16px', height: '16px', border: '2px solid #DCDFE4', borderTop: '2px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-            <span>Cargando...</span>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>
-            <span style={{ fontSize: '24px' }}>📷</span>
-            <span style={{ fontSize: '10px', fontWeight: 600, color: '#626F86' }}>Ver Imagen</span>
-          </div>
-        )}
-      </div>
-      <div style={{ padding: '6px 8px', fontSize: '11px' }}>
-        <div style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={att.filename}>
-          {att.filename}
-        </div>
-        <div style={{ color: '#626F86', fontSize: '10px', marginTop: '2px' }}>
-          {formatAttachmentSize(att.size)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const MX_HOLIDAYS_SET = new Set([
-  '2024-01-01', '2024-02-05', '2024-03-18', '2024-05-01', '2024-09-16', '2024-10-01', '2024-11-18', '2024-12-25',
-  '2025-01-01', '2025-02-03', '2025-03-17', '2025-05-01', '2025-09-16', '2025-11-17', '2025-12-25',
-  '2026-01-01', '2026-02-02', '2026-03-16', '2026-05-01', '2026-09-16', '2026-11-16', '2026-12-25',
-  '2027-01-01', '2027-02-01', '2027-03-15', '2027-05-01', '2027-09-16', '2027-11-15', '2027-12-25'
-]);
-
-function getBusinessHoursBetween(startMs, endMs) {
-  if (!startMs || !endMs || startMs >= endMs) return 0;
-  let current = new Date(startMs);
-  const end = new Date(endMs);
-  let businessMinutes = 0;
-  const mxOffset = -6 * 60 * 60 * 1000;
-
-  while (current < end) {
-    const mxTime = new Date(current.getTime() + mxOffset);
-    const day = mxTime.getUTCDay();
-    const hour = mxTime.getUTCHours();
-    const dateString = mxTime.toISOString().split('T')[0];
-
-    let isBusiness = false;
-    if (!MX_HOLIDAYS_SET.has(dateString)) {
-      if (day >= 1 && day <= 4) {
-        if (hour >= 7 && hour < 18) isBusiness = true;
-      } else if (day === 5) {
-        if (hour >= 7 && hour < 13) isBusiness = true;
-      }
-    }
-    if (isBusiness) businessMinutes++;
-    current.setTime(current.getTime() + 60000);
-  }
-  return businessMinutes / 60;
-}
-
-function formatBugCreatedDate(createdStr) {
-  if (!createdStr) return { dateStr: 'Sin fecha', timeStr: '' };
-  try {
-    const d = new Date(createdStr);
-    if (isNaN(d.getTime())) return { dateStr: 'Sin fecha', timeStr: '' };
-    const dateStr = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
-    const timeStr = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-    return { dateStr, timeStr };
-  } catch (e) {
-    return { dateStr: 'Sin fecha', timeStr: '' };
-  }
-}
-
-function formatBugAge(createdStr, resolutionDateStr, isDone) {
-  if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-  try {
-    const created = new Date(createdStr).getTime();
-    if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-
-    let end = Date.now();
-    if (isDone && resolutionDateStr) {
-      const resTime = new Date(resolutionDateStr).getTime();
-      if (!isNaN(resTime) && resTime >= created) {
-        end = resTime;
-      }
-    }
-
-    const businessHours = getBusinessHoursBetween(created, end);
-    const bHoursFormatted = businessHours.toFixed(1);
-    const bDays = Math.floor(businessHours / 10);
-
-    let label = '';
-    let tone = 'neutral';
-
-    if (isDone) {
-      if (businessHours < 1) {
-        const mins = Math.max(1, Math.round(businessHours * 60));
-        label = `Resuelto en ${mins}m hábiles`;
-      } else if (businessHours < 10) {
-        label = `Resuelto en ${bHoursFormatted}h hábiles`;
-      } else {
-        const days = Math.round(businessHours / 10);
-        label = `Resuelto en ${days}d hábiles (${bHoursFormatted}h)`;
-      }
-      tone = 'done';
-    } else {
-      if (businessHours < 1) {
-        const mins = Math.max(1, Math.round(businessHours * 60));
-        label = `Abierto hace ${mins}m hábiles`;
-        tone = 'green';
-      } else if (businessHours <= 20) {
-        const days = Math.floor(businessHours / 10);
-        label = days > 0 ? `Abierto hace ${days}d hábil (${bHoursFormatted}h)` : `Abierto hace ${bHoursFormatted}h hábiles`;
-        tone = 'green';
-      } else if (businessHours <= 50) {
-        const days = Math.floor(businessHours / 10);
-        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
-        tone = 'orange';
-      } else {
-        const days = Math.floor(businessHours / 10);
-        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
-        tone = 'red';
-      }
-    }
-
-    return { label, tone, hours: businessHours, days: bDays, bHoursFormatted };
-  } catch (e) {
-    return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-  }
-}
-
-const RichTextEditor = ({ value, onChange, disabled }) => {
-  const editorRef = React.useRef(null);
-
-  React.useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== value) {
-      editorRef.current.innerHTML = value || '';
-    }
-  }, [value]);
-
-  const execCmd = (cmd) => {
-    document.execCommand(cmd, false, null);
-    if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
-    }
-  };
-
-  return (
-    <div style={{ border: '1px solid var(--ds-border)', borderRadius: '4px', overflow: 'hidden', background: 'var(--bg-main)' }}>
-      <div style={{ display: 'flex', gap: '0.2rem', padding: '0.3rem', background: 'var(--bg-surface)', borderBottom: '1px solid var(--ds-border)' }}>
-        <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      const newName = prompt("Nuevo nombre para la evidencia:", evName);
-                                      if (newName && newName !== evName) {
-                                        handleRenameEvidence(test.id, idx, newName, undefined);
-                                      }
-                                    }}
-                                    title="Renombrar evidencia"
-                                    disabled={!runningTests[test.id]}
-                                    style={{background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0 4px', lineHeight: 1}}
-                                  >✏️</button>
-                                  <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('bold'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontWeight: 'bold', color: 'var(--text-primary)' }}>B</button>
-        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('italic'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', fontStyle: 'italic', color: 'var(--text-primary)' }}>I</button>
-        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('underline'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', textDecoration: 'underline', color: 'var(--text-primary)' }}>U</button>
-        <div style={{ width: '1px', background: 'var(--ds-border)', margin: '0 0.2rem' }}></div>
-        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', color: 'var(--text-primary)' }}>• Lista</button>
-        <button disabled={disabled} onClick={(e) => { e.preventDefault(); execCmd('insertOrderedList'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem 0.5rem', color: 'var(--text-primary)' }}>1. Lista</button>
-      </div>
-      <div 
-        ref={editorRef}
-        contentEditable={!disabled}
-        onBlur={() => onChange(editorRef.current.innerHTML)}
-        style={{ minHeight: '150px', padding: '0.5rem', color: 'var(--text-primary)', outline: 'none' }}
-      />
-    </div>
-  );
-};
-
-// Safe invoke that doesn't crash when running locally outside of Jira
-// ── Perf instrumentation (Fase 0) + in-flight dedupe (Fase 1) ──
-// Stats are kept in memory only. In the browser console run `tpStats()` to print a
-// per-resolver table (calls, deduped, cache hits, errors, avg ms) and `tpStats(true)` to reset.
-const TP_PERF = { startedAt: Date.now(), byName: {} };
-const _tpStat = (name) => (TP_PERF.byName[name] = TP_PERF.byName[name] || { calls: 0, deduped: 0, cached: 0, errors: 0, r429: 0, totalMs: 0 });
-if (typeof window !== 'undefined') {
-  window.tpStats = (reset = false) => {
-    if (reset) { TP_PERF.byName = {}; TP_PERF.startedAt = Date.now(); return 'reset'; }
-    const mins = ((Date.now() - TP_PERF.startedAt) / 60000).toFixed(1);
-    const rows = Object.entries(TP_PERF.byName)
-      .map(([name, s]) => ({ resolver: name, calls: s.calls, deduped: s.deduped, cached: s.cached, errors: s.errors, r429: s.r429, avgMs: s.calls ? Math.round(s.totalMs / s.calls) : 0 }))
-      .sort((a, b) => b.calls - a.calls);
-    const total = rows.reduce((acc, r) => acc + r.calls, 0);
-    console.log(`[tpStats] ${total} llamadas reales al backend en ${mins} min`);
-    console.table(rows);
-    return rows;
-  };
-}
-
-// Read-only resolvers: identical concurrent calls share ONE request (no stale data — only while in flight).
-const TP_DEDUPE_RESOLVERS = new Set([
-  'getProjects', 'isProjectAllowed', 'checkAdminPermission', 'getConfig', 'getProjectIssueTypes',
-  'getReportAutomationConfig', 'getFolders', 'getTestPlans', 'getTestCycles', 'getTestCases', 'getFields',
-  'getExecutionReport', 'getCycleExecutionSummary', 'getProjectUnlinkedBugs', 'getTestExecution'
-]);
-// Metadata that practically never changes during a session: short TTL cache.
-const TP_TTL_RESOLVERS = { getFields: 300_000, getProjectIssueTypes: 300_000 };
-const _tpInFlight = new Map();
-const _tpTtlCache = new Map();
-
-const _rawInvoke = async (name, payload) => {
-  const s = _tpStat(name);
-  s.calls++;
-  const t0 = Date.now();
-  try {
-    return await forgeInvoke(name, payload);
-  } catch (e) {
-    s.errors++;
-    if (e && (e.status === 429 || String(e.message || '').includes('429'))) s.r429++;
-    console.warn("Forge invoke failed:", e);
-    // Forge sometimes rejects with undefined or an object that isn't an Error.
-    if (!e) {
-      throw new Error("NEEDS_AUTHENTICATION_ERR");
-    }
-    throw e;
-  } finally {
-    s.totalMs += Date.now() - t0;
-  }
-};
-
-const invoke = async (name, payload) => {
-  const isRead = TP_DEDUPE_RESOLVERS.has(name);
-  if (!isRead) {
-    // Any write may change metadata → drop TTL cache to never serve stale config/fields.
-    _tpTtlCache.clear();
-    return _rawInvoke(name, payload);
-  }
-  let key;
-  try { key = `${name}|${JSON.stringify(payload ?? null)}`; } catch (_) { return _rawInvoke(name, payload); }
-
-  const ttl = TP_TTL_RESOLVERS[name];
-  if (ttl) {
-    const hit = _tpTtlCache.get(key);
-    if (hit && Date.now() - hit.ts < ttl) { _tpStat(name).cached++; return hit.value; }
-  }
-  if (_tpInFlight.has(key)) { _tpStat(name).deduped++; return _tpInFlight.get(key); }
-
-  const p = _rawInvoke(name, payload)
-    .then(value => {
-      if (ttl && value && !value._isError && !value.error) _tpTtlCache.set(key, { ts: Date.now(), value });
-      return value;
-    })
-    .finally(() => { _tpInFlight.delete(key); });
-  _tpInFlight.set(key, p);
-  return p;
-};
-
-
-// --- Custom Searchable Select Component ---
-const SearchableSelect = ({ value, onChange, options, placeholder }) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  
-  const filtered = options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()));
-  const selectedOption = options.find(o => o.value === value);
-
-  return (
-    <div style={{ position: 'relative', width: '100%' }}>
-      <div 
-        onClick={() => setIsOpen(!isOpen)}
-        style={{ border: '1px solid var(--ds-border)', padding: '6px 8px', borderRadius: '3px', cursor: 'pointer', background: 'var(--bg-surface)', fontSize: '0.85rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
-      >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {selectedOption ? selectedOption.label : placeholder}
-        </span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-      </div>
-      {isOpen && (
-        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'var(--bg-surface)', border: '1px solid var(--ds-border)', borderRadius: '3px', marginTop: '2px', maxHeight: '250px', display: 'flex', flexDirection: 'column', boxShadow: '0 4px 8px rgba(0,0,0,0.1)' }}>
-          <input 
-            type="text" 
-            value={search} 
-            onChange={e => setSearch(e.target.value)} 
-            placeholder="Buscar campo..."
-            style={{ padding: '8px', borderBottom: '1px solid var(--ds-border)', border: 'none', borderTopLeftRadius: '3px', borderTopRightRadius: '3px', outline: 'none', background: 'var(--bg-base)', color: 'var(--text-primary)' }}
-            onClick={e => e.stopPropagation()}
-            autoFocus
-          />
-          <div style={{ overflowY: 'auto', flex: 1 }}>
-            {filtered.length > 0 ? filtered.map(o => (
-              <div 
-                key={o.value} 
-                onClick={() => { onChange(o.value); setIsOpen(false); setSearch(''); }}
-                style={{ padding: '6px 8px', cursor: 'pointer', background: value === o.value ? 'var(--ds-background-selected, rgba(0,82,204,0.1))' : 'transparent', fontSize: '0.85rem' }}
-                onMouseEnter={e => e.target.style.background = 'var(--ds-background-hover, rgba(9, 30, 66, 0.04))'}
-                onMouseLeave={e => e.target.style.background = value === o.value ? 'var(--ds-background-selected, rgba(0,82,204,0.1))' : 'transparent'}
-              >
-                {o.label}
-              </div>
-            )) : (
-              <div style={{ padding: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>No hay coincidencias</div>
-            )}
-          </div>
-        </div>
-      )}
-      {isOpen && (
-        <div 
-          onClick={() => setIsOpen(false)} 
-          style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 99 }} 
-        />
-      )}
-    </div>
-  );
-};
-// ------------------------------------------
-
-
-// ══════════════════════════════════════════════════════════════
-// Notification System (replaces alert / confirm / prompt)
-// ══════════════════════════════════════════════════════════════
-const NotificationContext = React.createContext(null);
-
-const NotificationStack = ({ notifications, onDismiss }) => (
-  <div style={{
-    position: 'fixed', top: '1rem', right: '1rem', zIndex: 9999,
-    display: 'flex', flexDirection: 'column', gap: '0.5rem',
-    maxWidth: '360px', pointerEvents: 'none'
-  }}>
-    {notifications.map(n => {
-      const colorMap = {
-        success: { bg: '#e3fcef', border: '#00875a', icon: '✅' },
-        error:   { bg: '#ffebe6', border: '#de350b', icon: '❌' },
-        warning: { bg: '#fff7e6', border: '#ff991f', icon: '⚠️' },
-        info:    { bg: '#e6f0ff', border: '#0052cc', icon: 'ℹ️' },
-      };
-      const c = colorMap[n.type] || colorMap.info;
-      return (
-        <div key={n.id} onClick={() => onDismiss(n.id)} style={{
-          background: c.bg, border: `1px solid ${c.border}`, borderRadius: '6px',
-          padding: '0.75rem 1rem', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-          pointerEvents: 'all', cursor: 'pointer',
-          display: 'flex', gap: '0.6rem', alignItems: 'flex-start'
-        }}>
-          <span style={{ flexShrink: 0 }}>{c.icon}</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            {n.title && <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: n.description ? '0.2rem' : 0 }}>{n.title}</div>}
-            {n.description && <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', wordBreak: 'break-word' }}>{n.description}</div>}
-          </div>
-        </div>
-      );
-    })}
-  </div>
-);
-
-function NotificationProvider({ children }) {
-  const [notifications, setNotifications] = useState([]);
-  const addNotification = useCallback(({ type = 'info', title, description, duration = 4500 }) => {
-    const id = Date.now() + Math.random();
-    setNotifications(prev => [...prev.slice(-4), { id, type, title, description }]);
-    if (duration > 0) setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), duration);
-  }, []);
-  return (
-    <NotificationContext.Provider value={{ addNotification }}>
-      {children}
-      <NotificationStack notifications={notifications} onDismiss={id => setNotifications(prev => prev.filter(n => n.id !== id))} />
-    </NotificationContext.Provider>
-  );
-}
-
-const useNotification = () => {
-  const ctx = React.useContext(NotificationContext);
-  if (!ctx) return { addNotification: ({ title, description }) => console.warn('Notification:', title, description) };
-  return ctx;
-};
 
 function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmLabel = 'Confirmar', danger = false }) {
   if (!isOpen) return null;
@@ -986,32 +175,51 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
   if (!tc) return { epicKey: null, epicSummary: null, reqKey: null, reqSummary: null };
 
   const raw = tc.rawFields || {};
-  const reqTypesConfig = (config?.requirementIssueTypes || []).map(t => String(t).toLowerCase().trim());
+  const reqTypesConfig = (config?.requirementIssueTypes || []).map(t => String(t).toLowerCase().trim()).filter(Boolean);
   const reqLinkTypeConfig = (config?.requirementLinkType && config.requirementLinkType !== 'ANY')
     ? String(config.requirementLinkType).toLowerCase().trim()
     : null;
 
-  const isReqType = (typeStr) => {
+  const customTestTypes = [
+    config?.testCaseType,
+    config?.testCycleType,
+    config?.planIssueType,
+    config?.testRunType
+  ].filter(Boolean).map(t => String(t).toLowerCase().trim());
+
+  const isBlacklistedOrEpic = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
     if (!t) return false;
-    // Strict blacklist: NEVER treat test management types or defects as requirements
-    if (
+    if (customTestTypes.some(ct => t === ct || t.includes(ct))) return true;
+    return (
       t.includes('test run') || t.includes('testrun') || t.includes('ejecuc') ||
       t.includes('test case') || t.includes('testcase') || t.includes('caso de prueba') ||
       t.includes('test cycle') || t.includes('ciclo') ||
       t.includes('test plan') || t.includes('test set') || t.includes('plan de prueba') ||
       t.includes('bug') || t.includes('defecto') || t.includes('error') || t.includes('incidencia') ||
-      t === 'epic' || t === 'épica'
-    ) {
-      return false;
-    }
-    if (reqTypesConfig.length > 0) return reqTypesConfig.includes(t);
-    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'task', 'tarea'].includes(t);
+      t === 'epic' || t === 'épica' || t === 'epica' || t.includes('epic') || t.includes('épica')
+    );
   };
 
   const isEpicType = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
-    return t === 'epic' || t === 'épica' || t.includes('epic') || t.includes('épica');
+    return t === 'epic' || t === 'épica' || t === 'epica' || t.includes('epic') || t.includes('épica');
+  };
+
+  const isReqType = (typeStr) => {
+    const t = String(typeStr || '').toLowerCase().trim();
+    if (!t) return false;
+    if (isBlacklistedOrEpic(t)) return false;
+    return true;
+  };
+
+  const isPreferredReqType = (typeStr) => {
+    const t = String(typeStr || '').toLowerCase().trim();
+    if (!isReqType(t)) return false;
+    if (reqTypesConfig.length > 0) {
+      return reqTypesConfig.some(cfgT => t === cfgT || t.includes(cfgT) || cfgT.includes(t));
+    }
+    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'requerimiento', 'task', 'tarea', 'feature'].some(w => t === w || t.includes(w));
   };
 
   // 1. Explicit properties on tc
@@ -1034,15 +242,15 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
   // 3. Parent field (modern Jira Cloud)
   if (raw.parent) {
     const pKey = raw.parent.key;
-    const pType = raw.parent.fields?.issuetype?.name || '';
-    const pSummary = raw.parent.fields?.summary || '';
+    const pType = raw.parent.fields?.issuetype?.name || reqMap[pKey]?.issueType || '';
+    const pSummary = raw.parent.fields?.summary || reqMap[pKey]?.summary || '';
 
     if (isEpicType(pType)) {
       if (!epicKey) {
         epicKey = pKey;
         epicSummary = pSummary;
       }
-    } else if (isReqType(pType)) {
+    } else if (isReqType(pType) || (!pType && pKey)) {
       if (!reqKey) {
         reqKey = pKey;
         reqSummary = pSummary;
@@ -1053,6 +261,7 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
   // 4. Issue Links (issuelinks)
   if (Array.isArray(raw.issuelinks) && raw.issuelinks.length > 0) {
     let matchedLinkReq = null;
+    let preferredLinkReq = null;
     let fallbackLinkReq = null;
 
     for (const link of raw.issuelinks) {
@@ -1066,8 +275,9 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
       const candidates = [link.inwardIssue, link.outwardIssue].filter(Boolean);
       for (const cand of candidates) {
         const cKey = cand.key;
-        const cType = cand.fields?.issuetype?.name || cand.fields?.issuetype || '';
-        const cSummary = cand.fields?.summary || '';
+        if (!cKey) continue;
+        const cType = cand.fields?.issuetype?.name || cand.fields?.issuetype || reqMap[cKey]?.issueType || '';
+        const cSummary = cand.fields?.summary || reqMap[cKey]?.summary || '';
 
         // Candidate is Epic
         if (isEpicType(cType)) {
@@ -1075,13 +285,16 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
             epicKey = cKey;
             epicSummary = cSummary;
           }
+          continue;
         }
 
-        // Candidate is Requirement / Story
-        if (isReqType(cType)) {
+        // Candidate is Requirement / Story (either by explicit non-blacklisted type or present in reqMap)
+        if (isReqType(cType) || (!cType && reqMap[cKey] && !isBlacklistedOrEpic(reqMap[cKey].issueType))) {
           const reqItem = { key: cKey, summary: cSummary, parent: cand.fields?.parent };
           if (isConfiguredLinkType && !matchedLinkReq) {
             matchedLinkReq = reqItem;
+          } else if (isPreferredReqType(cType) && !preferredLinkReq) {
+            preferredLinkReq = reqItem;
           } else if (!fallbackLinkReq) {
             fallbackLinkReq = reqItem;
           }
@@ -1089,7 +302,7 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
       }
     }
 
-    const chosenReq = matchedLinkReq || fallbackLinkReq;
+    const chosenReq = matchedLinkReq || preferredLinkReq || fallbackLinkReq;
     if (chosenReq) {
       if (!reqKey) {
         reqKey = chosenReq.key;
@@ -1116,16 +329,21 @@ const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
     if (stLabel) reqKey = stLabel.replace(/^(story|req):/i, '').trim();
   }
 
-  // 6. If we have a Requirement key but NO Epic, check reqMap
-  if (!epicKey && reqKey && reqMap[reqKey]) {
+  // 6. Enrich from reqMap (resolves Story -> Epic and missing summaries)
+  if (reqKey && reqMap[reqKey]) {
     const reqInfo = reqMap[reqKey];
-    if (reqInfo.epicKey) {
-      epicKey = reqInfo.epicKey;
-      epicSummary = reqInfo.epicSummary || null;
-    }
     if (!reqSummary && reqInfo.summary) {
       reqSummary = reqInfo.summary;
     }
+    if (!epicKey && reqInfo.epicKey) {
+      epicKey = reqInfo.epicKey;
+      epicSummary = reqInfo.epicSummary || null;
+    } else if (epicKey && !epicSummary && reqInfo.epicKey === epicKey && reqInfo.epicSummary) {
+      epicSummary = reqInfo.epicSummary;
+    }
+  }
+  if (epicKey && !epicSummary && reqMap[epicKey]?.summary) {
+    epicSummary = reqMap[epicKey].summary;
   }
 
   return { epicKey, epicSummary, reqKey, reqSummary };
@@ -1361,6 +579,7 @@ function App() {
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
+  const [expandedTraceabilityEpics, setExpandedTraceabilityEpics] = useState({});
   const [showUnlinkedBugsModal, setShowUnlinkedBugsModal] = useState(false);
   const [linkingUnlinkedBug, setLinkingUnlinkedBug] = useState(null);
   const [targetCycleForBug, setTargetCycleForBug] = useState('');
@@ -1424,6 +643,39 @@ function App() {
       setSelectedBugLoading(false);
     }
   }, [selectedBug]);
+
+  // Traceability Item (Epic / Story) Details Modal State (Lazy Loading)
+  const [selectedTraceabilityItem, setSelectedTraceabilityItem] = useState(null);
+  const [selectedTraceabilityDetails, setSelectedTraceabilityDetails] = useState(null);
+  const [selectedTraceabilityLoading, setSelectedTraceabilityLoading] = useState(false);
+
+  useEffect(() => {
+    if (selectedTraceabilityItem && selectedTraceabilityItem.key) {
+      setSelectedTraceabilityLoading(true);
+      setSelectedTraceabilityDetails(null);
+      invoke('getBugFullDetails', { issueIdOrKey: selectedTraceabilityItem.key })
+        .then(details => {
+          setSelectedTraceabilityDetails(details);
+          setSelectedTraceabilityLoading(false);
+        })
+        .catch(err => {
+          console.error('Error fetching traceability item details:', err);
+          setSelectedTraceabilityLoading(false);
+        });
+    } else {
+      setSelectedTraceabilityDetails(null);
+      setSelectedTraceabilityLoading(false);
+    }
+  }, [selectedTraceabilityItem?.key]);
+
+  const openTraceabilityItemModal = useCallback((type, key, extra = {}) => {
+    if (!key) return;
+    setSelectedTraceabilityItem({
+      type: type === 'epic' ? 'epic' : 'story',
+      key: String(key).trim(),
+      ...extra
+    });
+  }, []);
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
@@ -1457,7 +709,7 @@ function App() {
   const [loadError, setLoadError] = useState(null);
 
   // Traceability hierarchy state (Épicas ➔ Historias ➔ Casos de Prueba)
-  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storiesByEpic: {}, tcMap: {} });
+  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {}, _projectId: null });
   const [traceabilityHierarchyLoading, setTraceabilityHierarchyLoading] = useState(false);
   const loadTraceabilityHierarchy = useCallback(async (projId, cfg) => {
     const targetId = projId || selectedProjectId;
@@ -1467,7 +719,7 @@ function App() {
       setTraceabilityHierarchyLoading(true);
       const res = await invoke('getTraceabilityHierarchy', { projectId: targetId, config: targetCfg });
       if (res && res.tcMap) {
-        setTraceabilityHierarchy(res);
+        setTraceabilityHierarchy({ ...res, _projectId: String(targetId) });
       }
     } catch (err) {
       console.warn("loadTraceabilityHierarchy error:", err);
@@ -1477,12 +729,16 @@ function App() {
   }, [selectedProjectId, projectConfig]);
 
   useEffect(() => {
-    if (activeTab === 'dashboard' && dashboardSubView === 'traceability' && selectedProjectId) {
-      if (!traceabilityHierarchy || !traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0) {
-        loadTraceabilityHierarchy();
+    if ((activeTab === 'reports' || activeTab === 'dashboard') && selectedProjectId) {
+      if (
+        !traceabilityHierarchy ||
+        String(traceabilityHierarchy._projectId) !== String(selectedProjectId) ||
+        (!traceabilityHierarchyLoading && (!traceabilityHierarchy.stories || traceabilityHierarchy.stories.length === 0) && (!traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0))
+      ) {
+        loadTraceabilityHierarchy(selectedProjectId, projectConfig);
       }
     }
-  }, [activeTab, dashboardSubView, selectedProjectId, traceabilityHierarchy, loadTraceabilityHierarchy]);
+  }, [activeTab, dashboardSubView, selectedProjectId]);
 
   // Notifications
   const { addNotification } = useNotification();
@@ -1791,7 +1047,7 @@ function App() {
                      await new Promise(r => setTimeout(r, 1200 + Math.random() * 500));
                      return fetchAllTestCases(args, retries - 1);
                  }
-                 checkError(res, 'getTestCases');
+                 throw new Error(res[0]?.summary || 'Error al obtener casos de prueba (getTestCases)');
              } else {
                  allIssues = allIssues.concat(res);
              }
@@ -1822,6 +1078,9 @@ function App() {
       (tests || []).forEach(tc => {
         const raw = tc?.rawFields;
         if (raw?.parent?.key) linkedKeys.add(raw.parent.key);
+        if (typeof raw?.customfield_10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(raw.customfield_10014.trim())) {
+          linkedKeys.add(raw.customfield_10014.trim());
+        }
         if (Array.isArray(raw?.issuelinks)) {
           raw.issuelinks.forEach(link => {
             if (link?.inwardIssue?.key) linkedKeys.add(link.inwardIssue.key);
@@ -1830,7 +1089,7 @@ function App() {
         }
       });
 
-      const issueKeysArray = Array.from(linkedKeys).filter(k => /^[A-Z][A-Z0-9]+-\d+$/i.test(k)).slice(0, 100);
+      const issueKeysArray = Array.from(linkedKeys).filter(k => /^[A-Z][A-Z0-9]+-\d+$/i.test(k)).slice(0, 500);
       const reqRes = await invoke('getRequirements', {
         projectId: targetProjId,
         config: cfg || projectConfig,
@@ -1843,18 +1102,32 @@ function App() {
           if (!issue || !issue.key) return;
           const p = issue.fields?.parent;
           const cf10014 = issue.fields?.customfield_10014;
-          let epicKey = null;
-          let epicSummary = null;
-          if (p?.key) {
+          let epicKey = issue.epicKey || null;
+          let epicSummary = issue.epicSummary || null;
+          if (!epicKey && p?.key) {
             epicKey = p.key;
             epicSummary = p.fields?.summary || null;
-          } else if (typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
+          } else if (!epicKey && typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
             epicKey = cf10014.trim();
+          }
+          // Check if requirement has an issuelink directly to an Epic
+          if (!epicKey && Array.isArray(issue.fields?.issuelinks)) {
+            for (const lnk of issue.fields.issuelinks) {
+              const cand = lnk.inwardIssue || lnk.outwardIssue;
+              const cType = (cand?.fields?.issuetype?.name || '').toLowerCase().trim();
+              if (cand?.key && (cType === 'epic' || cType === 'épica' || cType.includes('epic') || cType.includes('épica'))) {
+                epicKey = cand.key;
+                epicSummary = cand.fields?.summary || null;
+                break;
+              }
+            }
           }
           reqMap[issue.key] = {
             key: issue.key,
             summary: issue.fields?.summary || '',
             issueType: issue.fields?.issuetype?.name || '',
+            status: issue.fields?.status?.name || '',
+            statusCategory: issue.fields?.status?.statusCategory?.key || '',
             epicKey,
             epicSummary
           };
@@ -1982,27 +1255,12 @@ function App() {
         setTestCycles(cycs);
       }
       setRefreshTrigger(prev => prev + 1);
-      loadTraceabilityHierarchy(targetProjectId, config);
 
-      // Phase 3: background
-      // 3a. sessionStorage cache for testCases (instant on second open)
-      const cacheKey = `tp_${targetProjectId}_tc`;
-      try {
-        const raw = sessionStorage.getItem(cacheKey);
-        if (raw) {
-          const { ts, data } = JSON.parse(raw);
-          if (Date.now() - ts < 300_000 && Array.isArray(data) && data.length > 0) {
-            setTestCases(data);
-            fetchLinkedRequirements(data, targetProjectId, config);
-          }
-        }
-      } catch (e) {}
-
+      // Phase 3: testCases + linkedRequirements (served in ~5ms from IndexedDB on re-entry)
       setIsFetchingTests(true);
       fetchAllTestCases({ folderId: null, projectId: targetProjectId, config })
         .then(tests => {
           setTestCases(tests || []);
-          try { sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: tests || [] })); } catch (e) {}
           fetchLinkedRequirements(tests || [], targetProjectId, config);
         })
         .catch(console.warn)
@@ -2973,11 +2231,8 @@ Then el sistema valida la identidad.
                 try {
                   perCycleCacheRef.current = {};
                   perCycleDeletedRef.current = {};
-                  if (selectedProjectId) {
-                    try {
-                      sessionStorage.removeItem(`tp_${selectedProjectId}_tc`);
-                    } catch (e) {}
-                  }
+                  clearPersistentCache();
+                  queryClient.invalidateQueries();
 
                   if (activeTab === 'execution' || activeTab === 'planning') {
                     setLocalLoading(true);
@@ -4369,10 +3624,12 @@ Then el sistema valida la identidad.
                 {/* Epic Lozenge if present */}
                 {modalEpicReq.epicKey && (
                   <span
-                    onClick={() => router.open('/browse/' + modalEpicReq.epicKey)}
+                    onClick={() => openTraceabilityItemModal('epic', modalEpicReq.epicKey, {
+                      summary: modalEpicReq.epicSummary || ''
+                    })}
                     className="ads-lozenge ads-lozenge-subtle"
                     style={{ fontSize: '10px', color: '#6554C0', background: '#EAE6FF', fontWeight: 700, cursor: 'pointer' }}
-                    title={modalEpicReq.epicSummary ? `${modalEpicReq.epicKey}: ${modalEpicReq.epicSummary}` : modalEpicReq.epicKey}
+                    title={modalEpicReq.epicSummary ? `Ver detalle de Épica ${modalEpicReq.epicKey}: ${modalEpicReq.epicSummary}` : `Ver detalle de Épica ${modalEpicReq.epicKey}`}
                   >
                     ⚡ {modalEpicReq.epicKey}
                   </span>
@@ -4381,10 +3638,14 @@ Then el sistema valida la identidad.
                 {/* Requirement / Story Lozenge if present */}
                 {modalEpicReq.reqKey && (
                   <span
-                    onClick={() => router.open('/browse/' + modalEpicReq.reqKey)}
+                    onClick={() => openTraceabilityItemModal('story', modalEpicReq.reqKey, {
+                      summary: modalEpicReq.reqSummary || '',
+                      epicKey: modalEpicReq.epicKey || null,
+                      epicSummary: modalEpicReq.epicSummary || ''
+                    })}
                     className="ads-lozenge ads-lozenge-subtle"
                     style={{ fontSize: '10px', color: '#0065FF', background: '#DEEBFF', fontWeight: 700, cursor: 'pointer' }}
-                    title={modalEpicReq.reqSummary ? `${modalEpicReq.reqKey}: ${modalEpicReq.reqSummary}` : modalEpicReq.reqKey}
+                    title={modalEpicReq.reqSummary ? `Ver detalle de Historia ${modalEpicReq.reqKey}: ${modalEpicReq.reqSummary}` : `Ver detalle de Historia ${modalEpicReq.reqKey}`}
                   >
                     📖 {modalEpicReq.reqKey}
                   </span>
@@ -5754,6 +5015,1165 @@ Then el sistema valida la identidad.
               <button 
                 className="btn-primary"
                 onClick={() => router.open('/browse/' + bugKey)}
+                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
+              >
+                <span>Abrir en Jira</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTraceabilityItemSlidePanel = () => {
+    if (!selectedTraceabilityItem) return null;
+
+    const item = selectedTraceabilityItem;
+    const d = selectedTraceabilityDetails || {};
+    const isEpic = item.type === 'epic';
+    const itemKey = d.key || item.key || '';
+    const itemKeyUpper = String(itemKey).trim().toUpperCase();
+
+    // Lookup fallback metadata from traceabilityHierarchy and requirementsMap
+    const hierarchyEpic = (traceabilityHierarchy?.epics || []).find(
+      ep => String(ep?.key || '').trim().toUpperCase() === itemKeyUpper
+    );
+    const hierarchyStory = (traceabilityHierarchy?.stories || []).find(
+      st => String(st?.key || '').trim().toUpperCase() === itemKeyUpper
+    );
+    const reqEntry = requirementsMap?.[itemKey] || requirementsMap?.[itemKeyUpper] || null;
+
+    const summary =
+      d.summary ||
+      item.summary ||
+      hierarchyEpic?.summary ||
+      hierarchyStory?.summary ||
+      reqEntry?.summary ||
+      'Sin título';
+
+    const rawStatus =
+      d.status ||
+      item.workflowStatus ||
+      item.status ||
+      hierarchyEpic?.status ||
+      hierarchyStory?.status ||
+      reqEntry?.status ||
+      'Abierto';
+
+    const rawStatusCat = (
+      d.statusCategory ||
+      item.workflowStatusCategory ||
+      item.statusCategory ||
+      hierarchyEpic?.statusCategory ||
+      hierarchyStory?.statusCategory ||
+      reqEntry?.statusCategory ||
+      ''
+    ).toLowerCase().trim();
+
+    const statusLower = String(rawStatus).toLowerCase().trim();
+    let wfColors = { color: '#44546F', bg: '#F1F2F4', border: '#DCDFE4' };
+    if (
+      rawStatusCat === 'done' ||
+      statusLower.includes('finaliz') ||
+      statusLower.includes('cerrad') ||
+      statusLower.includes('done') ||
+      statusLower.includes('complet') ||
+      statusLower.includes('resuelt') ||
+      statusLower.includes('aprob') ||
+      statusLower.includes('producc') ||
+      statusLower.includes('liber')
+    ) {
+      wfColors = { color: '#1F845A', bg: '#DCFFF1', border: '#BAF3DB' };
+    } else if (
+      statusLower.includes('bloque') ||
+      statusLower.includes('imped') ||
+      statusLower.includes('rechaz') ||
+      statusLower.includes('cancel')
+    ) {
+      wfColors = { color: '#AE2E24', bg: '#FFECEB', border: '#FFD5D2' };
+    } else if (
+      rawStatusCat === 'indeterminate' ||
+      statusLower.includes('curso') ||
+      statusLower.includes('progres') ||
+      statusLower.includes('prueb') ||
+      statusLower.includes('qa') ||
+      statusLower.includes('test') ||
+      statusLower.includes('revis') ||
+      statusLower.includes('review') ||
+      statusLower.includes('desarroll') ||
+      statusLower.includes('validac') ||
+      statusLower.includes('uat')
+    ) {
+      wfColors = { color: '#0055CC', bg: '#E9F2FF', border: '#CCE0FF' };
+    }
+
+    // Resolve Parent Epic if this is a Story
+    const parentEpicKey = !isEpic
+      ? (item.epicKey || hierarchyStory?.epicKey || reqEntry?.epicKey || d.parent?.key || null)
+      : null;
+    const parentEpicKeyUpper = parentEpicKey ? String(parentEpicKey).trim().toUpperCase() : '';
+    const parentEpicFromHierarchy = parentEpicKeyUpper
+      ? (traceabilityHierarchy?.epics || []).find(ep => String(ep?.key || '').trim().toUpperCase() === parentEpicKeyUpper)
+      : null;
+    const parentEpicSummary = !isEpic
+      ? (item.epicSummary ||
+         hierarchyStory?.epicSummary ||
+         reqEntry?.epicSummary ||
+         parentEpicFromHierarchy?.summary ||
+         requirementsMap?.[parentEpicKey]?.summary ||
+         d.parent?.summary ||
+         '')
+      : '';
+
+    // Resolve Linked Test Cases & Execution Context
+    const allCyclesForTrace = (reportData?.cycles && reportData.cycles.length > 0)
+      ? reportData.cycles
+      : (testCycles || []);
+
+    const findTcObj = (ref) => {
+      if (!ref) return null;
+      const rUp = String(ref).trim().toUpperCase();
+      return (testCases || []).find(
+        tc => String(tc?.key || '').trim().toUpperCase() === rUp || String(tc?.id || '').trim().toUpperCase() === rUp
+      ) || null;
+    };
+
+    // Build Story-level Linked Test Cases & Execution Rows
+    const storyTcRefs = new Set();
+    if (!isEpic) {
+      if (Array.isArray(hierarchyStory?.linkedTestCases)) {
+        hierarchyStory.linkedTestCases.forEach(tc => {
+          if (tc?.key) storyTcRefs.add(String(tc.key).trim().toUpperCase());
+          if (tc?.id) storyTcRefs.add(String(tc.id).trim().toUpperCase());
+        });
+      }
+      Object.entries(traceabilityHierarchy?.tcMap || {}).forEach(([tcRef, info]) => {
+        if (String(info?.storyKey || '').trim().toUpperCase() === itemKeyUpper) {
+          storyTcRefs.add(String(tcRef).trim().toUpperCase());
+        }
+      });
+      (testCases || []).forEach(tc => {
+        if (!tc) return;
+        const ext = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
+        if (String(ext?.reqKey || '').trim().toUpperCase() === itemKeyUpper) {
+          if (tc.key) storyTcRefs.add(String(tc.key).trim().toUpperCase());
+          if (tc.id) storyTcRefs.add(String(tc.id).trim().toUpperCase());
+        }
+      });
+    }
+
+    const linkedTestCaseObjects = [];
+    const seenTcObjKeys = new Set();
+    if (!isEpic) {
+      storyTcRefs.forEach(ref => {
+        const tcObj = findTcObj(ref);
+        if (tcObj) {
+          const k = tcObj.key || String(tcObj.id);
+          if (!seenTcObjKeys.has(k)) {
+            seenTcObjKeys.add(k);
+            linkedTestCaseObjects.push(tcObj);
+          }
+        }
+      });
+      if (Array.isArray(hierarchyStory?.linkedTestCases)) {
+        hierarchyStory.linkedTestCases.forEach(tc => {
+          const k = tc?.key || String(tc?.id || '');
+          if (k && !seenTcObjKeys.has(k)) {
+            seenTcObjKeys.add(k);
+            linkedTestCaseObjects.push(findTcObj(k) || tc);
+          }
+        });
+      }
+    }
+
+    // Execution rows for a Story
+    let storyExecutionRows = Array.isArray(item.storyRows) && item.storyRows.length > 0 ? item.storyRows : [];
+    if (!isEpic && storyExecutionRows.length === 0 && storyTcRefs.size > 0) {
+      const cycleMap = new Map();
+      allCyclesForTrace.forEach(cycle => {
+        if (!Array.isArray(cycle.execution)) return;
+        const cPlanId = cycle.planId || cycle.plan?.id || cycle.plan?.key || (typeof cycle.plan === 'string' ? cycle.plan : null);
+        const cyclePlan = (testPlans || []).find(p => String(p.id) === String(cPlanId) || String(p.key) === String(cPlanId));
+        const planName = cyclePlan ? (cyclePlan.name || cyclePlan.summary || cyclePlan.key) : 'General (Sin Plan)';
+        const planKey = cyclePlan?.key || null;
+
+        cycle.execution.forEach(ex => {
+          const tc = findTcObj(ex.testCaseId) || findTcObj(ex.testCaseKey) || findTcObj(ex.id) || (ex.key ? findTcObj(ex.key) : null);
+          const tcKeyUp = String(tc?.key || ex.testCaseKey || ex.key || '').trim().toUpperCase();
+          const tcIdUp = String(tc?.id || ex.testCaseId || ex.id || '').trim().toUpperCase();
+          if ((tcKeyUp && storyTcRefs.has(tcKeyUp)) || (tcIdUp && storyTcRefs.has(tcIdUp))) {
+            const cId = String(cycle.id);
+            if (!cycleMap.has(cId)) {
+              cycleMap.set(cId, {
+                id: `${itemKey}_${cId}`,
+                cycleId: cycle.id,
+                cycleName: cycle.summary || cycle.key || `Ciclo-${cycle.id}`,
+                planName,
+                planKey,
+                statuses: [],
+                bugsMap: new Map(),
+                executedTcCount: 0
+              });
+            }
+            const bucket = cycleMap.get(cId);
+            bucket.statuses.push(ex.status || 'NOT_RUN');
+            bucket.executedTcCount += 1;
+            if (Array.isArray(ex.linkedBugs)) {
+              ex.linkedBugs.forEach(b => {
+                if (b && b.key) bucket.bugsMap.set(b.key, b);
+              });
+            }
+          }
+        });
+      });
+
+      storyExecutionRows = Array.from(cycleMap.values()).map(b => {
+        const norms = b.statuses.map(s => normalizeUiStatus(s));
+        let aggSt = 'NOT_RUN';
+        if (norms.includes('Failed')) aggSt = 'FAILED';
+        else if (norms.includes('Blocked')) aggSt = 'BLOCKED';
+        else if (norms.length > 0 && norms.every(n => n === 'Passed')) aggSt = 'PASSED';
+        else if (norms.some(n => n === 'Passed')) aggSt = 'IN_PROGRESS';
+        return {
+          id: b.id,
+          cycleId: b.cycleId,
+          cycleName: b.cycleName,
+          planName: b.planName,
+          planKey: b.planKey,
+          status: aggSt,
+          bugs: Array.from(b.bugsMap.values()),
+          executedTcCount: b.executedTcCount,
+          linkedTcCount: linkedTestCaseObjects.length || storyTcRefs.size
+        };
+      });
+    }
+
+    const storyAllBugsMap = new Map();
+    storyExecutionRows.forEach(r => {
+      (r.bugs || []).forEach(b => {
+        if (b && b.key) storyAllBugsMap.set(b.key, b);
+      });
+    });
+    const storyUniqueBugs = Array.from(storyAllBugsMap.values());
+    const storyIsCovered =
+      linkedTestCaseObjects.length > 0 ||
+      storyTcRefs.size > 0 ||
+      (item.rowData?.linkedTcCount || 0) > 0 ||
+      storyExecutionRows.some(r => r.cycleId !== null);
+    const storyCoveredCasesCount = Math.max(
+      linkedTestCaseObjects.length,
+      item.rowData?.linkedTcCount || 0,
+      item.rowData?.executedTcCount || 0
+    );
+
+    // Build Epic-level Stories & Coverage if this is an Epic
+    let epicGroupData = item.groupData || null;
+    if (isEpic && !epicGroupData) {
+      const storiesMapForEpic = new Map();
+      (traceabilityHierarchy?.stories || []).forEach(st => {
+        if (String(st?.epicKey || '').trim().toUpperCase() === itemKeyUpper && st?.key) {
+          storiesMapForEpic.set(st.key.toUpperCase(), {
+            key: st.key,
+            summary: st.summary || '',
+            workflowStatus: st.status || '',
+            workflowStatusCategory: st.statusCategory || '',
+            linkedTcCount: Array.isArray(st.linkedTestCases) ? st.linkedTestCases.length : 0
+          });
+        }
+      });
+      Object.values(requirementsMap || {}).forEach(req => {
+        if (String(req?.epicKey || '').trim().toUpperCase() === itemKeyUpper && req?.key) {
+          const kUp = req.key.toUpperCase();
+          if (!storiesMapForEpic.has(kUp)) {
+            storiesMapForEpic.set(kUp, {
+              key: req.key,
+              summary: req.summary || '',
+              workflowStatus: req.status || '',
+              workflowStatusCategory: req.statusCategory || '',
+              linkedTcCount: 0
+            });
+          }
+        }
+      });
+      (testCases || []).forEach(tc => {
+        if (!tc) return;
+        const ext = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
+        if (String(ext?.epicKey || '').trim().toUpperCase() === itemKeyUpper && ext?.reqKey) {
+          const kUp = ext.reqKey.toUpperCase();
+          if (!storiesMapForEpic.has(kUp)) {
+            storiesMapForEpic.set(kUp, {
+              key: ext.reqKey,
+              summary: ext.reqSummary || '',
+              workflowStatus: requirementsMap?.[ext.reqKey]?.status || '',
+              workflowStatusCategory: requirementsMap?.[ext.reqKey]?.statusCategory || '',
+              linkedTcCount: 1
+            });
+          } else {
+            storiesMapForEpic.get(kUp).linkedTcCount += 1;
+          }
+        }
+      });
+
+      const storyRowsConstructed = Array.from(storiesMapForEpic.values()).map(st => ({
+        id: `epic_${itemKey}_${st.key}`,
+        epicKey: itemKey,
+        epicSummary: summary,
+        requirementKey: st.key,
+        requirementSummary: st.summary,
+        requirementWorkflowStatus: st.workflowStatus,
+        requirementWorkflowStatusCategory: st.workflowStatusCategory,
+        linkedTcCount: st.linkedTcCount,
+        executedTcCount: 0,
+        planName: st.linkedTcCount > 0 ? 'Con casos vinculados' : 'Sin casos vinculados',
+        planKey: null,
+        cycleId: null,
+        cycleName: 'Sin ejecución en ciclo',
+        status: 'NOT_RUN',
+        bugs: []
+      }));
+
+      const totalSt = storyRowsConstructed.length;
+      const coveredSt = storyRowsConstructed.filter(s => (s.linkedTcCount || 0) > 0).length;
+      epicGroupData = {
+        epicKey: itemKey,
+        epicSummary: summary,
+        totalStories: totalSt,
+        coveredStories: coveredSt,
+        executedStories: 0,
+        coveragePct: totalSt > 0 ? Math.round((coveredSt / totalSt) * 100) : 0,
+        uniquePlans: [],
+        uniqueCycles: [],
+        uniqueBugs: [],
+        epicStatus: 'NOT_RUN',
+        storyRows: storyRowsConstructed
+      };
+    }
+
+    // Attachments & Comments from Jira issue details
+    const attachments = d.attachments || [];
+    const imageAttachments = attachments.filter(a => a.isImage);
+    const videoAttachments = attachments.filter(a => a.isVideo);
+    const otherAttachments = attachments.filter(a => !a.isImage && !a.isVideo);
+    const comments = d.comments || [];
+
+    // Description HTML
+    let descHtml = '';
+    if (d.descriptionRaw) {
+      descHtml = sanitizeRenderedHtml(adfToHtml(d.descriptionRaw, attachments));
+    } else if (d.descriptionRendered) {
+      descHtml = sanitizeRenderedHtml(d.descriptionRendered);
+    }
+
+    // Dates
+    const createdDate = d.created || null;
+    const updatedDate = d.updated || null;
+    const resDate = d.resolutiondate || null;
+    const createdFmt = createdDate ? formatBugCreatedDate(createdDate) : { dateStr: '—', timeStr: '' };
+    const updatedFmt = updatedDate ? formatBugCreatedDate(updatedDate) : null;
+
+    // Versions
+    let versionsList = [];
+    if (Array.isArray(d.fixVersions) && d.fixVersions.length > 0) versionsList = d.fixVersions;
+    else if (Array.isArray(d.versions) && d.versions.length > 0) versionsList = d.versions;
+
+    return (
+      <div
+        className="jira-modal-overlay"
+        onClick={() => setSelectedTraceabilityItem(null)}
+        style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(9, 30, 66, 0.54)',
+          backdropFilter: 'blur(2px)',
+          zIndex: 1050,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          animation: 'fadeIn 0.15s ease-out'
+        }}
+      >
+        <div
+          className="jira-modal-content"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            maxWidth: '1380px',
+            width: '95%',
+            height: '90vh',
+            minHeight: '640px',
+            maxHeight: '920px',
+            backgroundColor: '#FFFFFF',
+            borderRadius: '10px',
+            display: 'flex',
+            flexDirection: 'column',
+            boxShadow: '0 20px 32px -8px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31)',
+            overflow: 'hidden'
+          }}
+        >
+          {/* Header */}
+          <div style={{
+            padding: '1rem 1.5rem',
+            borderBottom: '1px solid #DCDFE4',
+            backgroundColor: '#FFFFFF',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexShrink: 0,
+            flexWrap: 'wrap',
+            gap: '10px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <span style={{
+                backgroundColor: isEpic ? '#EAE6FF' : '#DEEBFF',
+                color: isEpic ? '#5243AA' : '#0052CC',
+                padding: '3px 9px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: 800,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                border: isEpic ? '1px solid #C0B6F2' : '1px solid #B3D4FF'
+              }}>
+                {isEpic ? '⚡ ÉPICA' : '📖 HISTORIA DE USUARIO'}
+              </span>
+
+              <span style={{ fontSize: '15px', fontWeight: 800, color: isEpic ? '#5243AA' : '#0C66E4' }}>
+                {itemKey}
+              </span>
+
+              {isEpic && epicGroupData && (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    color: epicGroupData.coveragePct === 100 ? '#1F845A' : epicGroupData.coveragePct > 0 ? '#0C66E4' : '#974F0C',
+                    background: epicGroupData.coveragePct === 100 ? '#DCFFF1' : epicGroupData.coveragePct > 0 ? '#E9F2FF' : '#FFF7D6',
+                    padding: '2px 9px',
+                    borderRadius: '999px'
+                  }}
+                >
+                  {epicGroupData.coveragePct}% Cobertura ({epicGroupData.coveredStories}/{epicGroupData.totalStories} hist.)
+                </span>
+              )}
+
+              {!isEpic && (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    color: storyIsCovered ? '#1F845A' : '#974F0C',
+                    background: storyIsCovered ? '#DCFFF1' : '#FFF7D6',
+                    padding: '2px 9px',
+                    borderRadius: '999px'
+                  }}
+                >
+                  {storyIsCovered
+                    ? `✓ Cubierta (${storyCoveredCasesCount || 1} ${(storyCoveredCasesCount || 1) === 1 ? 'caso' : 'casos'})`
+                    : '⚠️ Sin cobertura (0 casos)'}
+                </span>
+              )}
+
+              {selectedTraceabilityLoading && (
+                <span style={{ fontSize: '11px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span className="spinner-border spinner-border-sm" style={{ width: '12px', height: '12px', border: '2px solid #0C66E4', borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} />
+                  Cargando detalles...
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                className="btn-icon"
+                onClick={() => setSelectedTraceabilityItem(null)}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '6px', borderRadius: '4px', color: '#626F86', fontSize: '16px', lineHeight: 1 }}
+                title="Cerrar modal"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Modal Main Body (2 Columns) */}
+          <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+            {/* Columna Izquierda / Principal (68%) */}
+            <div style={{ flex: 1, minWidth: 0, padding: '1.5rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Título */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                  {isEpic ? 'Resumen de la Épica' : 'Resumen de la Historia de Usuario'}
+                </div>
+                <h2 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', margin: 0, lineHeight: 1.35 }}>
+                  {summary}
+                </h2>
+              </div>
+
+              {/* ── SECCIÓN TRAZABILIDAD EN TEST PULSE ── */}
+              {isEpic && epicGroupData ? (
+                <div style={{ background: '#F8FAFD', border: '1px solid #DCDFE4', borderRadius: '8px', padding: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      🔗 Cobertura y Historias de Usuario Vinculadas ({epicGroupData.totalStories})
+                    </span>
+                    <AtlaskitStatusLozenge status={epicGroupData.epicStatus || 'NOT_RUN'} />
+                  </div>
+
+                  {/* Mini KPIs de la Épica */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px', marginBottom: '12px' }}>
+                    <div style={{ background: '#FFFFFF', border: '1px solid #EBECF0', borderRadius: '6px', padding: '8px 10px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Historias</div>
+                      <div style={{ fontSize: '16px', fontWeight: 800, color: '#0055CC' }}>{epicGroupData.totalStories}</div>
+                    </div>
+                    <div style={{ background: '#FFFFFF', border: '1px solid #EBECF0', borderRadius: '6px', padding: '8px 10px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Cobertura QA</div>
+                      <div style={{ fontSize: '16px', fontWeight: 800, color: epicGroupData.coveragePct === 100 ? '#1F845A' : '#0C66E4' }}>
+                        {epicGroupData.coveragePct}% <span style={{ fontSize: '11px', fontWeight: 600, color: '#626F86' }}>({epicGroupData.coveredStories}/{epicGroupData.totalStories})</span>
+                      </div>
+                    </div>
+                    <div style={{ background: '#FFFFFF', border: '1px solid #EBECF0', borderRadius: '6px', padding: '8px 10px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Planes / Ciclos</div>
+                      <div style={{ fontSize: '14px', fontWeight: 800, color: '#1D7F54' }}>
+                        {(epicGroupData.uniquePlans || []).length} planes · {(epicGroupData.uniqueCycles || []).length} ciclos
+                      </div>
+                    </div>
+                    <div style={{ background: '#FFFFFF', border: '1px solid #EBECF0', borderRadius: '6px', padding: '8px 10px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Defectos</div>
+                      <div style={{ fontSize: '16px', fontWeight: 800, color: (epicGroupData.uniqueBugs || []).length > 0 ? '#DE350B' : '#1F845A' }}>
+                        {(epicGroupData.uniqueBugs || []).length} bugs
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Tabla de Historias Hijas dentro del Modal de la Épica */}
+                  {Array.isArray(epicGroupData.storyRows) && epicGroupData.storyRows.length > 0 ? (
+                    <div style={{ maxHeight: '240px', overflowY: 'auto', border: '1px solid #DCDFE4', borderRadius: '6px', background: '#FFFFFF' }}>
+                      <table className="dashboard-table" style={{ margin: 0, fontSize: '12px' }}>
+                        <thead>
+                          <tr>
+                            <th>Historia de Usuario</th>
+                            <th>Cobertura</th>
+                            <th>Plan / Ciclo</th>
+                            <th>Ejecución</th>
+                            <th>Bugs</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {epicGroupData.storyRows.map((sRow, idx) => {
+                            const sCovered = (sRow.linkedTcCount || 0) > 0 || sRow.cycleId !== null;
+                            const sWf = (sRow.requirementWorkflowStatus || '').trim();
+                            return (
+                              <tr key={sRow.id || idx}>
+                                <td>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                      <span
+                                        onClick={() => openTraceabilityItemModal('story', sRow.requirementKey, {
+                                          summary: sRow.requirementSummary,
+                                          workflowStatus: sRow.requirementWorkflowStatus,
+                                          workflowStatusCategory: sRow.requirementWorkflowStatusCategory,
+                                          epicKey: itemKey,
+                                          epicSummary: summary,
+                                          rowData: sRow,
+                                          storyRows: epicGroupData.storyRows.filter(r => r.requirementKey === sRow.requirementKey)
+                                        })}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          fontWeight: 700,
+                                          color: '#0065FF',
+                                          background: '#DEEBFF',
+                                          padding: '1px 7px',
+                                          borderRadius: '4px',
+                                          fontSize: '11px',
+                                          cursor: 'pointer'
+                                        }}
+                                        title="Ver detalle de esta Historia dentro de Test Pulse"
+                                      >
+                                        📖 {sRow.requirementKey}
+                                      </span>
+                                      {sWf && (
+                                        <span style={{ fontSize: '9px', fontWeight: 700, textTransform: 'uppercase', padding: '1px 5px', borderRadius: '3px', background: '#EBECF0', color: '#44546F' }}>
+                                          {sWf}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {sRow.requirementSummary && (
+                                      <span
+                                        onClick={() => openTraceabilityItemModal('story', sRow.requirementKey, {
+                                          summary: sRow.requirementSummary,
+                                          workflowStatus: sRow.requirementWorkflowStatus,
+                                          workflowStatusCategory: sRow.requirementWorkflowStatusCategory,
+                                          epicKey: itemKey,
+                                          epicSummary: summary,
+                                          rowData: sRow,
+                                          storyRows: epicGroupData.storyRows.filter(r => r.requirementKey === sRow.requirementKey)
+                                        })}
+                                        style={{ fontSize: '11px', color: '#172B4D', cursor: 'pointer', fontWeight: 500 }}
+                                      >
+                                        {sRow.requirementSummary}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td style={{ whiteSpace: 'nowrap' }}>
+                                  <span style={{
+                                    fontSize: '10px',
+                                    fontWeight: 700,
+                                    color: sCovered ? '#1F845A' : '#974F0C',
+                                    background: sCovered ? '#DCFFF1' : '#FFF7D6',
+                                    padding: '2px 7px',
+                                    borderRadius: '999px'
+                                  }}>
+                                    {sCovered ? `✓ ${sRow.linkedTcCount || sRow.executedTcCount || 1} casos` : '⚠️ 0 casos'}
+                                  </span>
+                                </td>
+                                <td style={{ fontSize: '11px', color: '#44546F' }}>
+                                  <div>📋 {sRow.planName}</div>
+                                  <div style={{ fontSize: '10px', color: '#626F86' }}>🔄 {sRow.cycleName}</div>
+                                </td>
+                                <td>
+                                  <AtlaskitStatusLozenge status={sRow.status} />
+                                </td>
+                                <td>
+                                  {Array.isArray(sRow.bugs) && sRow.bugs.length > 0 ? (
+                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                      {sRow.bugs.map((b, bIdx) => (
+                                        <span
+                                          key={bIdx}
+                                          onClick={() => { setSelectedTraceabilityItem(null); setSelectedBug(b); }}
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '3px',
+                                            fontSize: '10px',
+                                            fontWeight: 700,
+                                            color: '#DE350B',
+                                            background: '#FFEBE6',
+                                            padding: '1px 6px',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer'
+                                          }}
+                                          title={`Ver defecto ${b.key} en Test Pulse`}
+                                        >
+                                          🐞 {b.key}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <span style={{ fontSize: '11px', color: '#8590A2' }}>0</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                      Esta épica aún no tiene Historias de Usuario vinculadas.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* ── TRAZABILIDAD DE LA HISTORIA DE USUARIO ── */
+                <div style={{ background: '#F8FAFD', border: '1px solid #DCDFE4', borderRadius: '8px', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      🔗 Trazabilidad QA en Test Pulse
+                    </span>
+                  </div>
+
+                  {/* Ejecución en Planes y Ciclos */}
+                  {storyExecutionRows.length > 0 ? (
+                    <div style={{ border: '1px solid #DCDFE4', borderRadius: '6px', background: '#FFFFFF', overflow: 'hidden' }}>
+                      <table className="dashboard-table" style={{ margin: 0, fontSize: '12px' }}>
+                        <thead>
+                          <tr>
+                            <th>Plan de Pruebas</th>
+                            <th>Ciclo de Pruebas</th>
+                            <th>Estado de Ejecución</th>
+                            <th>Defectos Vinculados</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {storyExecutionRows.map((er, idx) => (
+                            <tr key={er.id || idx}>
+                              <td style={{ fontWeight: 600, color: '#1D7F54' }}>📋 {er.planName}</td>
+                              <td style={{ fontWeight: 600, color: '#172B4D' }}>🔄 {er.cycleName}</td>
+                              <td><AtlaskitStatusLozenge status={er.status} /></td>
+                              <td>
+                                {Array.isArray(er.bugs) && er.bugs.length > 0 ? (
+                                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                    {er.bugs.map((b, bIdx) => (
+                                      <span
+                                        key={bIdx}
+                                        onClick={() => { setSelectedTraceabilityItem(null); setSelectedBug(b); }}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '3px',
+                                          fontSize: '11px',
+                                          fontWeight: 700,
+                                          color: '#DE350B',
+                                          background: '#FFEBE6',
+                                          padding: '2px 6px',
+                                          borderRadius: '4px',
+                                          cursor: 'pointer'
+                                        }}
+                                        title={`Ver defecto ${b.key} en Test Pulse`}
+                                      >
+                                        🐞 {b.key}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span style={{ fontSize: '11px', color: '#8590A2' }}>0 bugs</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                      {storyIsCovered
+                        ? 'Esta historia cuenta con casos de prueba diseñados, pero aún no han sido ejecutados en ningún ciclo.'
+                        : 'Esta historia aún no tiene casos de prueba ni ciclos vinculados.'}
+                    </div>
+                  )}
+
+                  {/* Casos de Prueba Vinculados a la Historia (Clic para abrir en Test Pulse) */}
+                  {linkedTestCaseObjects.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', marginBottom: '6px' }}>
+                        🧪 Casos de Prueba Vinculados ({linkedTestCaseObjects.length}):
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {linkedTestCaseObjects.map((tc, idx) => (
+                          <span
+                            key={tc.id || tc.key || idx}
+                            onClick={() => {
+                              setSelectedTraceabilityItem(null);
+                              handleViewTestCase(tc);
+                            }}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '4px 9px',
+                              background: '#FFFFFF',
+                              border: '1px solid #DCDFE4',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              color: '#0C66E4',
+                              cursor: 'pointer'
+                            }}
+                            title="Haz clic para abrir este Caso de Prueba en Test Pulse"
+                          >
+                            <span style={{ fontWeight: 800 }}>🧪 {tc.key || tc.id}</span>
+                            {tc.summary && (
+                              <span style={{ color: '#172B4D', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                — {tc.summary}
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Descripción / Criterios de Aceptación */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    📝 Descripción &amp; Criterios de Aceptación
+                  </span>
+                </div>
+
+                {selectedTraceabilityLoading && !descHtml ? (
+                  <div style={{ padding: '1.5rem', background: '#F8FAFD', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ height: '14px', width: '85%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                    <div style={{ height: '14px', width: '60%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                    <div style={{ height: '14px', width: '75%', background: '#E9F2FF', borderRadius: '4px', animation: 'pulse 1.2s infinite' }} />
+                  </div>
+                ) : descHtml ? (
+                  <div
+                    style={{
+                      padding: '1rem',
+                      background: '#FAFBFC',
+                      border: '1px solid #EBECF0',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      lineHeight: '1.6',
+                      color: 'var(--jira-dark, #172B4D)',
+                      overflowX: 'auto'
+                    }}
+                    dangerouslySetInnerHTML={{ __html: descHtml }}
+                  />
+                ) : (
+                  <div style={{ padding: '1.25rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic', textAlign: 'center' }}>
+                    {isEpic
+                      ? 'Esta épica no cuenta con descripción de texto registrada en Jira.'
+                      : 'Esta historia de usuario no cuenta con descripción ni criterios de aceptación registrados en Jira.'}
+                  </div>
+                )}
+              </div>
+
+              {/* Imágenes, Videos & Archivos Adjuntos */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    🖼️ Archivos Adjuntos &amp; Anexos ({attachments.length})
+                  </span>
+                </div>
+
+                {attachments.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    {imageAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Imágenes ({imageAttachments.length}):
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px' }}>
+                          {imageAttachments.map(att => (
+                            <BugAttachmentImageCard
+                              key={att.id}
+                              att={att}
+                              onPreview={handlePreviewEvidence}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {videoAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Videos ({videoAttachments.length}):
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '10px' }}>
+                          {videoAttachments.map(att => (
+                            <div
+                              key={att.id}
+                              onClick={() => handlePreviewEvidence(att)}
+                              style={{
+                                border: '1px solid #DCDFE4',
+                                borderRadius: '6px',
+                                overflow: 'hidden',
+                                background: '#FFFFFF',
+                                padding: '8px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <div style={{ height: '100px', backgroundColor: '#091E42', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', color: '#FFF' }}>
+                                <span>▶ Reproducir Video</span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px', fontSize: '11px' }}>
+                                <span style={{ fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }} title={att.filename}>
+                                  🎥 {att.filename}
+                                </span>
+                                <span style={{ color: '#626F86', fontSize: '10px' }}>
+                                  {formatFileSize(att.size)}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {otherAttachments.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '6px' }}>
+                          Documentos ({otherAttachments.length}):
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                          {otherAttachments.map(att => (
+                            <div
+                              key={att.id}
+                              onClick={() => handlePreviewEvidence(att)}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '6px 10px',
+                                background: '#F4F5F7',
+                                border: '1px solid #DCDFE4',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                color: '#0C66E4',
+                                fontSize: '12px',
+                                fontWeight: 600
+                              }}
+                            >
+                              <span>📄</span>
+                              <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.filename}</span>
+                              <span style={{ color: '#626F86', fontSize: '10px', fontWeight: 400 }}>({formatFileSize(att.size)})</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ padding: '0.85rem 1rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                    Sin archivos adjuntos registrados.
+                  </div>
+                )}
+              </div>
+
+              {/* Historial de Comentarios */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    💬 Historial de Comentarios ({comments.length})
+                  </span>
+                </div>
+
+                {comments.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {comments.map((comm) => {
+                      const commDate = formatBugCreatedDate(comm.created);
+                      const commBodyHtml = sanitizeRenderedHtml(comm.bodyRendered || adfToHtml(comm.bodyRaw, attachments));
+                      return (
+                        <div
+                          key={comm.id}
+                          style={{
+                            border: '1px solid #EBECF0',
+                            borderRadius: '8px',
+                            padding: '10px 14px',
+                            backgroundColor: '#FFFFFF',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              {comm.author.avatarUrl ? (
+                                <img
+                                  src={comm.author.avatarUrl}
+                                  alt={comm.author.displayName}
+                                  style={{ width: '22px', height: '22px', borderRadius: '50%' }}
+                                />
+                              ) : (
+                                <div style={{ width: '22px', height: '22px', borderRadius: '50%', backgroundColor: '#0C66E4', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 700 }}>
+                                  {(comm.author.displayName || 'U').charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              <span style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D' }}>
+                                {comm.author.displayName}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '11px', color: '#626F86' }}>
+                              📅 {commDate.dateStr} {commDate.timeStr && `a las ${commDate.timeStr}`}
+                            </span>
+                          </div>
+                          <div
+                            style={{ fontSize: '12.5px', lineHeight: '1.5', color: '#172B4D', paddingLeft: '30px' }}
+                            dangerouslySetInnerHTML={{ __html: commBodyHtml }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ padding: '1rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic', textAlign: 'center' }}>
+                    No hay comentarios registrados en esta {isEpic ? 'épica' : 'historia de usuario'}.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Columna Derecha / Panel Lateral de Metadatos (320px) */}
+            <div style={{ width: '320px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+              <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px' }}>
+                Detalles &amp; Metadatos
+              </div>
+
+              {/* 1. Estado del Flujo en Jira */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  🔄 ESTADO EN FLUJO JIRA
+                </div>
+                <div>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      color: wfColors.color,
+                      background: wfColors.bg,
+                      border: `1px solid ${wfColors.border}`,
+                      padding: '4px 10px',
+                      borderRadius: '4px'
+                    }}
+                  >
+                    {rawStatus}
+                  </span>
+                </div>
+              </div>
+
+              {/* 2. Persona Asignada */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  👤 PERSONA ASIGNADA
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                  {d.assignee?.avatarUrl ? (
+                    <img src={d.assignee.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
+                  ) : (
+                    <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: d.assignee ? '#0C66E4' : '#626F86', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
+                      {(d.assignee?.displayName || '?').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {d.assignee?.displayName || 'Sin asignar'}
+                    </span>
+                    {d.assignee?.email && (
+                      <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {d.assignee.email}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Informador (Reporter) */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  📣 INFORMADOR / REPORTER
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                  {d.reporter?.avatarUrl ? (
+                    <img src={d.reporter.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
+                  ) : (
+                    <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: '#5243AA', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
+                      {(d.reporter?.displayName || '?').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {d.reporter?.displayName || 'Sin especificar'}
+                    </span>
+                    {d.reporter?.email && (
+                      <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {d.reporter.email}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 4. Prioridad */}
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                  ⚡ PRIORIDAD
+                </div>
+                <div style={{ background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0', fontSize: '12px', fontWeight: 700, color: '#172B4D' }}>
+                  {d.priority || 'Media'}
+                </div>
+              </div>
+
+              {/* 5. Épica Padre (si es Historia) */}
+              {!isEpic && (
+                <div>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                    ⚡ ÉPICA PADRE
+                  </div>
+                  <div style={{ background: '#FFFFFF', padding: '8px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                    {parentEpicKey ? (
+                      <div
+                        onClick={() => openTraceabilityItemModal('epic', parentEpicKey, { summary: parentEpicSummary })}
+                        style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '3px' }}
+                      >
+                        <span style={{ fontSize: '11px', fontWeight: 700, color: '#6554C0', background: '#EAE6FF', padding: '2px 7px', borderRadius: '4px', width: 'fit-content' }}>
+                          ⚡ {parentEpicKey}
+                        </span>
+                        {parentEpicSummary && (
+                          <span style={{ fontSize: '11.5px', color: '#172B4D', fontWeight: 500 }}>
+                            {parentEpicSummary}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>Sin Épica vinculada</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 6. Versiones / Releases */}
+              {versionsList.length > 0 && (
+                <div>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                    🏷️ VERSIÓN / RELEASE
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', background: '#FFFFFF', padding: '8px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                    {versionsList.map((v, i) => (
+                      <span key={i} style={{ backgroundColor: '#E9F2FF', color: '#0C66E4', border: '1px solid #B3D4FF', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 700 }}>
+                        {v}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 7. Etiquetas (Labels) */}
+              {Array.isArray(d.labels) && d.labels.length > 0 && (
+                <div>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
+                    🔖 ETIQUETAS
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', background: '#FFFFFF', padding: '8px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                    {d.labels.map((lbl, i) => (
+                      <span key={i} style={{ backgroundColor: '#F1F2F4', color: '#44546F', padding: '2px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 600 }}>
+                        {lbl}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 8. Fechas */}
+              <div style={{ borderTop: '1px solid #EBECF0', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px', color: '#626F86' }}>
+                <div><strong>Creado:</strong> {createdFmt.dateStr} {createdFmt.timeStr}</div>
+                {updatedFmt && <div><strong>Actualizado:</strong> {updatedFmt.dateStr} {updatedFmt.timeStr}</div>}
+                {resDate && <div><strong>Resuelto:</strong> {formatBugCreatedDate(resDate).dateStr}</div>}
+              </div>
+            </div>
+          </div>
+
+          {/* Modal Footer */}
+          <div style={{ padding: '0.75rem 1.5rem', borderTop: '1px solid #DCDFE4', backgroundColor: '#FFFFFF', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+            <span style={{ fontSize: '11px', color: '#626F86' }}>
+              Test Pulse QA Engine • {isEpic ? 'Épica' : 'Historia de Usuario'} {itemKey}
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setSelectedTraceabilityItem(null)}
+                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem' }}
+              >
+                Cerrar
+              </button>
+              <button
+                className="btn-primary"
+                onClick={() => router.open('/browse/' + itemKey)}
                 style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
               >
                 <span>Abrir en Jira</span>
@@ -8013,7 +8433,7 @@ const renderPlanningTab = () => {
           {/* Sidebar Footer Button */}
           <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC' }}>
             <button 
-              onClick={() => setIsCreateCycleOpen(true)}
+              onClick={handleCreateIssue}
               className="btn-secondary"
               style={{ width: '100%', justifyContent: 'center', fontSize: '12px', height: '32px' }}
             >
@@ -8829,7 +9249,7 @@ const renderPlanningTab = () => {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', letterSpacing: '0.04em', textTransform: 'uppercase' }}>TEST PLANS</span>
                     <button
-                      onClick={() => setIsCreatePlanOpen(true)}
+                      onClick={handleCreateIssue}
                       style={{ fontSize: '11px', fontWeight: 600, color: '#0C66E4', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                       className="hover:underline"
                     >
@@ -8932,7 +9352,7 @@ const renderPlanningTab = () => {
           {/* Bottom Persistent Action: + New Execution Cycle */}
           <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
             <button
-              onClick={() => setIsCreateCycleOpen(true)}
+              onClick={handleCreateIssue}
               style={{
                 width: '100%',
                 padding: '0.45rem 0.75rem',
@@ -12406,8 +12826,22 @@ const renderPlanningTab = () => {
     const donutSegments = allDonutSegments.filter(s => s.enabled);
     const visibleSevOpenTotal = donutSegments.reduce((sum, seg) => sum + seg.count, 0);
 
-    // ── Traceability matrix rows ──
+    // ── Traceability matrix rows (Top-Down: Épica ➔ Historia ➔ Plan de Pruebas / Ciclo / Estado / Defectos) ──
     const traceabilityRows = [];
+
+    // 1. Index all Cycle Executions (Test Runs) by Test Case Key and ID
+    const tcExecutionsMap = new Map(); // tcKeyOrId -> Array<{ cycleId, cycleName, planId, planName, planKey, status, bugs, tcKey, tcId }>
+    const addTcExecution = (k, execObj) => {
+      if (!k) return;
+      const keyStr = String(k).trim().toUpperCase();
+      if (!keyStr) return;
+      if (!tcExecutionsMap.has(keyStr)) tcExecutionsMap.set(keyStr, []);
+      const list = tcExecutionsMap.get(keyStr);
+      if (!list.some(item => String(item.cycleId) === String(execObj.cycleId))) {
+        list.push(execObj);
+      }
+    };
+
     filteredCycles.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
@@ -12417,86 +12851,317 @@ const renderPlanningTab = () => {
         const planKey = cyclePlan?.key || null;
 
         cycle.execution.forEach((ex, idx) => {
-          const tc = findTc(ex.id) || (ex.key ? findTc(ex.key) : undefined);
-          const tcKey = tc ? tc.key : (ex.key || `TC-${ex.id}`);
-          const tcId = String(ex.id || ex.testCaseId || '');
+          const tc = findTc(ex.testCaseId) || findTc(ex.testCaseKey) || findTc(ex.id) || (ex.key ? findTc(ex.key) : undefined);
+          const tcKey = tc ? tc.key : (ex.testCaseKey || ex.key || null);
+          const tcId = String(tc?.id || ex.testCaseId || ex.id || '');
           const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
           if (seenTcInCycle.has(dedupeKey)) return;
           seenTcInCycle.add(dedupeKey);
 
-          const tcSummary = tc ? tc.summary : (ex.summary || 'Caso de prueba');
-          const folderObj = folders.find(f => String(f.id) === String(tc?.folderId || tc?.folder));
-          const folderName = folderObj?.name || tc?.folderName || tc?.folder || 'General';
-          const exType = ex.executionType || tc?.executionType || 'Manual';
-
-          // 1. Top-down hierarchy lookup: Epic -> Story -> Test Case
-          const hier = (tcKey && traceabilityHierarchy?.tcMap?.[tcKey]) ||
-                       (tcId && traceabilityHierarchy?.tcMap?.[tcId]) ||
-                       (ex.key && traceabilityHierarchy?.tcMap?.[ex.key]) ||
-                       (ex.id && traceabilityHierarchy?.tcMap?.[String(ex.id)]) ||
-                       null;
-
-          let epicKey = hier?.epicKey || null;
-          let epicSummary = hier?.epicSummary || null;
-          let reqKey = hier?.storyKey || null;
-          let reqSummary = hier?.storySummary || null;
-
-          // 2. Direct inspection fallback on tc
-          if (!epicKey || !reqKey) {
-            const fallback = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
-            if (!epicKey && fallback.epicKey) {
-              epicKey = fallback.epicKey;
-              epicSummary = fallback.epicSummary;
-            }
-            if (!reqKey && fallback.reqKey) {
-              reqKey = fallback.reqKey;
-              reqSummary = fallback.reqSummary;
-            }
-          }
-
-          // Guard against test runs or non-requirement keys
-          if (reqKey && typeof reqKey === 'string') {
-            const lowerReq = reqKey.toLowerCase();
-            if (lowerReq.includes('run') || (tc?.testRunKey && reqKey === tc.testRunKey)) {
-              reqKey = null;
-              reqSummary = null;
-            }
-          }
-
-          // 3. Reconcile Story -> Epic from stories list if epic still missing
-          if (!epicKey && reqKey && Array.isArray(traceabilityHierarchy?.stories)) {
-            const st = traceabilityHierarchy.stories.find(s => s.key === reqKey);
-            if (st) {
-              epicKey = st.parent?.key || (typeof st.customfield_10014 === 'string' ? st.customfield_10014 : null);
-              epicSummary = st.parent?.fields?.summary || null;
-            }
-          }
-
           const exBugs = (ex.linkedBugs && Array.isArray(ex.linkedBugs)) ? ex.linkedBugs.filter(isActualBug) : [];
-
-          traceabilityRows.push({
-            id: `${cycle.id}-${ex.id}`,
+          const execEntry = {
             cycleId: cycle.id,
-            cycleName: cycle.summary,
-            planId: cycle.planId || null,
-            planName: planName,
-            planKey: planKey,
-            testCaseId: ex.id,
-            testCaseKey: tcKey,
-            testCaseSummary: tcSummary,
-            folderName: folderName,
-            executionType: exType,
+            cycleName: cycle.summary || cycle.key || `Ciclo-${cycle.id}`,
+            planId: cyclePlan?.id || cPlanId || null,
+            planName,
+            planKey,
             status: ex.status || 'NOT_RUN',
-            epic: epicKey,
-            epicKey: epicKey,
-            epicSummary: epicSummary,
-            requirement: reqKey,
-            requirementKey: reqKey,
-            requirementSummary: reqSummary,
-            bugs: exBugs
+            bugs: exBugs,
+            tcKey,
+            tcId
+          };
+
+          if (tcKey) addTcExecution(tcKey, execEntry);
+          if (tcId) addTcExecution(tcId, execEntry);
+          if (ex.testCaseKey && ex.testCaseKey !== tcKey) addTcExecution(ex.testCaseKey, execEntry);
+          if (ex.key && ex.key !== tcKey) addTcExecution(ex.key, execEntry);
+        });
+      }
+    });
+
+    // 2. Consolidate all Epics and Stories from traceabilityHierarchy + requirementsMap + testCases
+    const consolidatedEpicsMap = new Map(); // epicKeyUpper -> { key, summary, workflowStatus, workflowStatusCategory }
+    const consolidatedStoriesMap = new Map(); // storyKeyUpper -> { key, summary, workflowStatus, workflowStatusCategory, epicKey, epicSummary, tcRefSet: Set<string> }
+
+    (traceabilityHierarchy?.epics || []).forEach(ep => {
+      if (ep?.key) {
+        consolidatedEpicsMap.set(ep.key.toUpperCase(), {
+          key: ep.key,
+          summary: ep.summary || '',
+          workflowStatus: ep.status || '',
+          workflowStatusCategory: ep.statusCategory || ''
+        });
+      }
+    });
+
+    const ensureStoryEntry = (sKey, sSummary, eKey, eSummary, sWorkflowStatus = '', sWorkflowCategory = '') => {
+      if (!sKey) return null;
+      const sUpper = sKey.toUpperCase();
+      if (consolidatedEpicsMap.has(sUpper)) return null; // Never treat an Epic as a Story
+      if (!consolidatedStoriesMap.has(sUpper)) {
+        consolidatedStoriesMap.set(sUpper, {
+          key: sKey,
+          summary: sSummary || '',
+          workflowStatus: sWorkflowStatus || '',
+          workflowStatusCategory: sWorkflowCategory || '',
+          epicKey: eKey || null,
+          epicSummary: eSummary || null,
+          tcRefSet: new Set()
+        });
+      } else {
+        const cur = consolidatedStoriesMap.get(sUpper);
+        if (!cur.summary && sSummary) cur.summary = sSummary;
+        if (!cur.workflowStatus && sWorkflowStatus) cur.workflowStatus = sWorkflowStatus;
+        if (!cur.workflowStatusCategory && sWorkflowCategory) cur.workflowStatusCategory = sWorkflowCategory;
+        if (!cur.epicKey && eKey) cur.epicKey = eKey;
+        if (!cur.epicSummary && eSummary) cur.epicSummary = eSummary;
+      }
+      if (eKey) {
+        const eUpper = eKey.toUpperCase();
+        if (!consolidatedEpicsMap.has(eUpper)) {
+          consolidatedEpicsMap.set(eUpper, { key: eKey, summary: eSummary || '', workflowStatus: '', workflowStatusCategory: '' });
+        } else if (!consolidatedEpicsMap.get(eUpper).summary && eSummary) {
+          consolidatedEpicsMap.get(eUpper).summary = eSummary;
+        }
+      }
+      return consolidatedStoriesMap.get(sUpper);
+    };
+
+    (traceabilityHierarchy?.stories || []).forEach(st => {
+      if (!st?.key) return;
+      const entry = ensureStoryEntry(st.key, st.summary, st.epicKey, st.epicSummary, st.status || '', st.statusCategory || '');
+      if (entry && Array.isArray(st.linkedTestCases)) {
+        st.linkedTestCases.forEach(tc => {
+          if (tc?.key) entry.tcRefSet.add(tc.key.toUpperCase());
+          if (tc?.id) entry.tcRefSet.add(String(tc.id).toUpperCase());
+        });
+      }
+    });
+
+    Object.values(requirementsMap || {}).forEach(req => {
+      if (!req?.key) return;
+      const rType = (req.issueType || '').toLowerCase();
+      if (rType === 'epic' || rType === 'épica' || rType.includes('epic') || rType.includes('épica')) {
+        const eUpper = req.key.toUpperCase();
+        if (!consolidatedEpicsMap.has(eUpper)) {
+          consolidatedEpicsMap.set(eUpper, {
+            key: req.key,
+            summary: req.summary || '',
+            workflowStatus: req.status || '',
+            workflowStatusCategory: req.statusCategory || ''
+          });
+        } else {
+          const epCur = consolidatedEpicsMap.get(eUpper);
+          if (!epCur.workflowStatus && req.status) epCur.workflowStatus = req.status;
+          if (!epCur.workflowStatusCategory && req.statusCategory) epCur.workflowStatusCategory = req.statusCategory;
+        }
+      } else {
+        ensureStoryEntry(req.key, req.summary, req.epicKey, req.epicSummary, req.status || '', req.statusCategory || '');
+      }
+    });
+
+    // Also inspect tcMap from traceabilityHierarchy and frontend testCases to ensure all TC <-> Story links are captured
+    Object.entries(traceabilityHierarchy?.tcMap || {}).forEach(([tcRef, info]) => {
+      if (info?.storyKey) {
+        const stEntry = ensureStoryEntry(
+          info.storyKey,
+          info.storySummary,
+          info.epicKey,
+          info.epicSummary,
+          info.storyStatus || '',
+          info.storyStatusCategory || ''
+        );
+        if (stEntry) stEntry.tcRefSet.add(String(tcRef).toUpperCase());
+      }
+    });
+
+    (testCases || []).forEach(tc => {
+      if (!tc) return;
+      const extracted = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
+      if (extracted?.reqKey) {
+        const reqFromMap = requirementsMap?.[extracted.reqKey];
+        const stEntry = ensureStoryEntry(
+          extracted.reqKey,
+          extracted.reqSummary,
+          extracted.epicKey,
+          extracted.epicSummary,
+          reqFromMap?.status || '',
+          reqFromMap?.statusCategory || ''
+        );
+        if (stEntry) {
+          if (tc.key) stEntry.tcRefSet.add(tc.key.toUpperCase());
+          if (tc.id) stEntry.tcRefSet.add(String(tc.id).toUpperCase());
+        }
+      }
+    });
+
+    // Resolve any missing Epic summaries on Stories
+    consolidatedStoriesMap.forEach(st => {
+      if (st.epicKey && !st.epicSummary) {
+        const ep = consolidatedEpicsMap.get(st.epicKey.toUpperCase());
+        if (ep?.summary) st.epicSummary = ep.summary;
+      }
+    });
+
+    // Group Stories by Epic (and collect Stories without Epic)
+    const storiesByEpicUpper = new Map(); // epicKeyUpper -> Array<story>
+    const storiesWithoutEpic = [];
+
+    consolidatedStoriesMap.forEach(st => {
+      if (st.epicKey) {
+        const eUpper = st.epicKey.toUpperCase();
+        if (!storiesByEpicUpper.has(eUpper)) storiesByEpicUpper.set(eUpper, []);
+        storiesByEpicUpper.get(eUpper).push(st);
+      } else {
+        storiesWithoutEpic.push(st);
+      }
+    });
+
+    const hasActivePlanOrCycleFilter =
+      (reportSelectedPlans && reportSelectedPlans.length > 0) ||
+      (reportSelectedCycles && reportSelectedCycles.length > 0);
+
+    // Status aggregation helper when a Story has multiple Test Cases executed in the same Cycle
+    const aggregateCycleStatus = (statuses) => {
+      if (!statuses || statuses.length === 0) return 'NOT_RUN';
+      const norms = statuses.map(s => normalizeUiStatus(s));
+      if (norms.includes('Failed')) return 'FAILED';
+      if (norms.includes('Blocked')) return 'BLOCKED';
+      if (norms.every(n => n === 'Passed')) return 'PASSED';
+      if (norms.some(n => n === 'Passed')) return 'IN_PROGRESS';
+      return 'NOT_RUN';
+    };
+
+    const emitStoryRows = (epicObj, storyObj, forceEmit = false) => {
+      const epicKey = epicObj?.key || storyObj?.epicKey || null;
+      const epicSummary = epicObj?.summary || storyObj?.epicSummary || null;
+      const epicWorkflowStatus = epicObj?.workflowStatus || '';
+      const reqKey = storyObj?.key || null;
+      const reqSummary = storyObj?.summary || null;
+      const reqWorkflowStatus = storyObj?.workflowStatus || '';
+      const reqWorkflowStatusCategory = storyObj?.workflowStatusCategory || '';
+
+      // Gather all cycle executions for Test Cases linked to this Story
+      const cycleExecutionsForStory = new Map(); // cycleId -> { cycleId, cycleName, planId, planName, planKey, statuses: [], bugsMap: Map, tcCount: number }
+      if (storyObj && storyObj.tcRefSet && storyObj.tcRefSet.size > 0) {
+        storyObj.tcRefSet.forEach(tcRef => {
+          const execs = tcExecutionsMap.get(tcRef) || [];
+          execs.forEach(ex => {
+            const cIdStr = String(ex.cycleId);
+            if (!cycleExecutionsForStory.has(cIdStr)) {
+              cycleExecutionsForStory.set(cIdStr, {
+                cycleId: ex.cycleId,
+                cycleName: ex.cycleName,
+                planId: ex.planId,
+                planName: ex.planName,
+                planKey: ex.planKey,
+                statuses: [],
+                bugsMap: new Map(),
+                tcKeys: new Set()
+              });
+            }
+            const group = cycleExecutionsForStory.get(cIdStr);
+            const tcDedup = ex.tcKey || ex.tcId || tcRef;
+            if (!group.tcKeys.has(tcDedup)) {
+              group.tcKeys.add(tcDedup);
+              group.statuses.push(ex.status);
+            }
+            (ex.bugs || []).forEach(b => {
+              if (b?.key && !group.bugsMap.has(b.key)) {
+                group.bugsMap.set(b.key, b);
+              }
+            });
           });
         });
       }
+
+      if (cycleExecutionsForStory.size > 0) {
+        cycleExecutionsForStory.forEach(group => {
+          traceabilityRows.push({
+            id: `story-${reqKey || 'no-req'}-cycle-${group.cycleId}`,
+            epic: epicKey,
+            epicKey,
+            epicSummary,
+            epicWorkflowStatus,
+            requirement: reqKey,
+            requirementKey: reqKey,
+            requirementSummary: reqSummary,
+            requirementWorkflowStatus: reqWorkflowStatus,
+            requirementWorkflowStatusCategory: reqWorkflowStatusCategory,
+            planId: group.planId,
+            planName: group.planName,
+            planKey: group.planKey,
+            cycleId: group.cycleId,
+            cycleName: group.cycleName,
+            status: aggregateCycleStatus(group.statuses),
+            linkedTcCount: storyObj?.tcRefSet?.size || 0,
+            executedTcCount: group.tcKeys.size,
+            bugs: Array.from(group.bugsMap.values())
+          });
+        });
+      } else if (!hasActivePlanOrCycleFilter || forceEmit) {
+        // Show the Epic + Story even if its Test Cases haven't been added to a Cycle yet (or if it has no Test Cases yet)
+        const hasLinkedTcs = storyObj && storyObj.tcRefSet && storyObj.tcRefSet.size > 0;
+        traceabilityRows.push({
+          id: `story-${reqKey || epicKey || Math.random()}`,
+          epic: epicKey,
+          epicKey,
+          epicSummary,
+          epicWorkflowStatus,
+          requirement: reqKey,
+          requirementKey: reqKey,
+          requirementSummary: reqSummary,
+          requirementWorkflowStatus: reqWorkflowStatus,
+          requirementWorkflowStatusCategory: reqWorkflowStatusCategory,
+          planId: null,
+          planName: hasLinkedTcs ? 'Sin plan asignado' : 'Sin casos vinculados',
+          planKey: null,
+          cycleId: null,
+          cycleName: hasLinkedTcs ? 'Sin ciclo de ejecución' : 'Pendiente de cobertura',
+          status: 'NOT_RUN',
+          linkedTcCount: storyObj?.tcRefSet?.size || 0,
+          executedTcCount: 0,
+          bugs: []
+        });
+      }
+    };
+
+    // 3. Emit rows starting from Epics -> Linked Stories
+    consolidatedEpicsMap.forEach((epicObj, epicKeyUpper) => {
+      const linkedStories = storiesByEpicUpper.get(epicKeyUpper) || [];
+      if (linkedStories.length > 0) {
+        linkedStories.forEach(storyObj => {
+          emitStoryRows(epicObj, storyObj);
+        });
+      } else if (!hasActivePlanOrCycleFilter) {
+        // Epic exists in Jira but has no Stories linked yet
+        traceabilityRows.push({
+          id: `epic-only-${epicObj.key}`,
+          epic: epicObj.key,
+          epicKey: epicObj.key,
+          epicSummary: epicObj.summary,
+          epicWorkflowStatus: epicObj.workflowStatus || '',
+          requirement: null,
+          requirementKey: null,
+          requirementSummary: null,
+          requirementWorkflowStatus: '',
+          requirementWorkflowStatusCategory: '',
+          planId: null,
+          planName: 'Sin plan asignado',
+          planKey: null,
+          cycleId: null,
+          cycleName: 'Sin historias vinculadas',
+          status: 'NOT_RUN',
+          linkedTcCount: 0,
+          executedTcCount: 0,
+          bugs: []
+        });
+      }
+    });
+
+    // 4. Emit rows for Stories in the project that don't have an Epic assigned yet (Orphan Stories)
+    storiesWithoutEpic.forEach(storyObj => {
+      emitStoryRows(null, storyObj, true);
     });
 
     const filteredBugsList = criticalCycleBugs.filter(bug => {
@@ -12546,15 +13211,13 @@ const renderPlanningTab = () => {
       if (!dashboardTraceabilitySearch) return true;
       const q = dashboardTraceabilitySearch.toLowerCase().trim();
       return (
-        (row.testCaseKey && row.testCaseKey.toLowerCase().includes(q)) ||
-        (row.testCaseSummary && row.testCaseSummary.toLowerCase().includes(q)) ||
         (row.planName && row.planName.toLowerCase().includes(q)) ||
         (row.cycleName && row.cycleName.toLowerCase().includes(q)) ||
-        (row.folderName && row.folderName.toLowerCase().includes(q)) ||
         (row.epicKey && row.epicKey.toLowerCase().includes(q)) ||
         (row.epicSummary && row.epicSummary.toLowerCase().includes(q)) ||
         (row.requirementKey && row.requirementKey.toLowerCase().includes(q)) ||
         (row.requirementSummary && row.requirementSummary.toLowerCase().includes(q)) ||
+        (row.requirementWorkflowStatus && row.requirementWorkflowStatus.toLowerCase().includes(q)) ||
         row.bugs.some(b => (b.key && b.key.toLowerCase().includes(q)) || (b.summary && b.summary.toLowerCase().includes(q)))
       );
     });
@@ -12999,11 +13662,11 @@ const renderPlanningTab = () => {
                   <span>Traceability</span>
                 </div>
                 <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', fontWeight: 700 }}>
-                  {traceabilityRows.length}
+                  {consolidatedStoriesMap.size}
                 </span>
               </div>
               <div style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)', paddingLeft: '23px', fontWeight: 500 }}>
-                Épicas &amp; Historias
+                {consolidatedEpicsMap.size} {consolidatedEpicsMap.size === 1 ? 'épica' : 'épicas'} · {consolidatedStoriesMap.size} {consolidatedStoriesMap.size === 1 ? 'historia' : 'historias'}
               </div>
             </div>
           </div>
@@ -14756,239 +15419,859 @@ const renderPlanningTab = () => {
           {/* ═══════════════════════════════════════════════════════ */}
           {/* ─── SUBVIEW 3: TRACEABILITY ─── */}
           {/* ═══════════════════════════════════════════════════════ */}
-          {dashboardSubView === 'traceability' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {/* Traceability KPI Scorecard */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ color: '#0C66E4', fontWeight: 700 }}>🎯 COBERTURA TOTAL</span>
-                    <span className="dashboard-kpi-pill blue">{coverageRate}%</span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
-                    {coverageRate}%
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>{ejecutados} de {allTotal} casos evaluados</span>
-                  </div>
-                </div>
+          {dashboardSubView === 'traceability' && (() => {
+            const totalEpicsCount = consolidatedEpicsMap.size;
+            const totalStoriesCount = consolidatedStoriesMap.size;
+            const coveredStoriesCount = Array.from(consolidatedStoriesMap.values()).filter(
+              (s) => (s.tcRefSet && s.tcRefSet.size > 0) || traceabilityRows.some((r) => r.requirementKey === s.key && r.cycleId !== null)
+            ).length;
+            const storiesCoveragePct = totalStoriesCount > 0 ? Math.round((coveredStoriesCount / totalStoriesCount) * 100) : 0;
+            const orphanStoriesCount = Array.from(consolidatedStoriesMap.values()).filter((s) => !s.epicKey).length;
+            const orphanStoriesPct = totalStoriesCount > 0 ? Math.round((orphanStoriesCount / totalStoriesCount) * 100) : 0;
+            const rowsWithIssuesCount = traceabilityRows.filter(
+              (r) => r.status === 'FAILED' || r.status === 'BLOCKED' || (r.bugs && r.bugs.length > 0)
+            ).length;
 
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ color: '#006644', fontWeight: 700 }}>🧪 CASOS MAPEADOS</span>
-                    <span className="dashboard-kpi-pill green">Total</span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#006644' }}>
-                    {traceabilityRows.length}
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>Ejecuciones en ciclo(s)</span>
-                  </div>
-                </div>
+            // Group filteredTraceabilityRows hierarchically by Epic
+            const epicGroupsMap = new Map();
+            filteredTraceabilityRows.forEach((row) => {
+              const groupKey = row.epicKey || '__UNLINKED_EPIC__';
+              if (!epicGroupsMap.has(groupKey)) {
+                epicGroupsMap.set(groupKey, {
+                  groupKey,
+                  epicKey: row.epicKey || null,
+                  epicSummary: row.epicKey
+                    ? (row.epicSummary || '')
+                    : '⚠️ Incumplimiento de proceso: Historias de usuario sin Épica padre vinculada en Jira',
+                  rows: [],
+                  storyRows: [],
+                  storiesMap: new Map(),
+                  plansMap: new Map(),
+                  cyclesSet: new Set(),
+                  bugsMap: new Map()
+                });
+              }
+              const grp = epicGroupsMap.get(groupKey);
+              if (row.epicSummary && (!grp.epicSummary || grp.epicSummary === row.epicKey)) {
+                grp.epicSummary = row.epicSummary;
+              }
+              grp.rows.push(row);
 
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ color: '#DE350B', fontWeight: 700 }}>⚠️ CASOS CON INCIDENCIA</span>
-                    <span className="dashboard-kpi-pill red">{failed + blocked} Casos</span>
-                  </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
-                    {failed + blocked}
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>{failed} Fallados · {blocked} Bloqueados</span>
-                  </div>
-                </div>
-              </div>
+              if (row.requirementKey) {
+                grp.storyRows.push(row);
+                if (!grp.storiesMap.has(row.requirementKey)) {
+                  grp.storiesMap.set(row.requirementKey, {
+                    key: row.requirementKey,
+                    summary: row.requirementSummary || '',
+                    linkedTcCount: row.linkedTcCount || 0,
+                    executedTcCount: 0,
+                    hasCycle: false,
+                    statuses: []
+                  });
+                }
+                const stEntry = grp.storiesMap.get(row.requirementKey);
+                if ((row.linkedTcCount || 0) > stEntry.linkedTcCount) {
+                  stEntry.linkedTcCount = row.linkedTcCount;
+                }
+                if (row.cycleId !== null) {
+                  stEntry.hasCycle = true;
+                  stEntry.executedTcCount += (row.executedTcCount || 0);
+                }
+                stEntry.statuses.push(String(row.status || 'NOT_RUN').toUpperCase());
+              }
 
-              {/* Traceability Matrix Card */}
-              <div className="dashboard-card" style={{ overflowX: 'auto' }}>
-                <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
-                  <div>
-                    <div className="dashboard-card-title">
-                      <span style={{ color: '#0C66E4' }}>🔗</span>
-                      <span>Matriz de Trazabilidad y Cobertura (Traceability Matrix)</span>
+              if (row.planKey || (row.planName && row.planName !== 'Sin plan asignado' && row.planName !== 'Sin casos vinculados')) {
+                grp.plansMap.set(row.planKey || row.planName, row.planName);
+              }
+              if (row.cycleId !== null && row.cycleName) {
+                grp.cyclesSet.add(row.cycleName);
+              }
+              if (Array.isArray(row.bugs)) {
+                row.bugs.forEach((b) => {
+                  if (b && b.key) grp.bugsMap.set(b.key, b);
+                });
+              }
+            });
+
+            const epicGroups = Array.from(epicGroupsMap.values()).map((grp) => {
+              const storiesArr = Array.from(grp.storiesMap.values());
+              const totalStories = storiesArr.length;
+              const coveredStories = storiesArr.filter((s) => s.linkedTcCount > 0 || s.hasCycle).length;
+              const executedStories = storiesArr.filter((s) =>
+                s.statuses.some((st) => st === 'PASSED' || st === 'FAILED' || st === 'BLOCKED' || st === 'IN_PROGRESS')
+              ).length;
+              const coveragePct = totalStories > 0 ? Math.round((coveredStories / totalStories) * 100) : 0;
+
+              // Aggregate Epic status across all its story rows
+              const allStatuses = grp.storyRows.map((r) => String(r.status || 'NOT_RUN').toUpperCase());
+              let epicStatus = 'NOT_RUN';
+              if (allStatuses.length > 0) {
+                if (allStatuses.includes('FAILED')) epicStatus = 'FAILED';
+                else if (allStatuses.includes('BLOCKED')) epicStatus = 'BLOCKED';
+                else if (allStatuses.includes('IN_PROGRESS')) epicStatus = 'IN_PROGRESS';
+                else if (allStatuses.every((s) => s === 'PASSED')) epicStatus = 'PASSED';
+                else if (allStatuses.includes('PASSED')) epicStatus = 'IN_PROGRESS';
+              }
+
+              return {
+                ...grp,
+                totalStories,
+                coveredStories,
+                executedStories,
+                coveragePct,
+                epicStatus,
+                uniquePlans: Array.from(grp.plansMap.values()),
+                uniqueCycles: Array.from(grp.cyclesSet.values()),
+                uniqueBugs: Array.from(grp.bugsMap.values())
+              };
+            });
+
+            const isSearching = Boolean(dashboardTraceabilitySearch && dashboardTraceabilitySearch.trim().length > 0);
+            const isGroupExpanded = (groupKey) => {
+              if (isSearching) return true;
+              if (Object.prototype.hasOwnProperty.call(expandedTraceabilityEpics, groupKey)) {
+                return Boolean(expandedTraceabilityEpics[groupKey]);
+              }
+              // Auto-expand orphan stories group by default so process non-compliance is immediately visible
+              return groupKey === '__UNLINKED_EPIC__';
+            };
+            const toggleEpicExpand = (groupKey) => {
+              setExpandedTraceabilityEpics((prev) => ({
+                ...prev,
+                [groupKey]: !isGroupExpanded(groupKey)
+              }));
+            };
+            const expandAllEpics = () => {
+              const next = {};
+              epicGroups.forEach((g) => { next[g.groupKey] = true; });
+              setExpandedTraceabilityEpics(next);
+            };
+            const collapseAllEpics = () => {
+              const next = {};
+              epicGroups.forEach((g) => { next[g.groupKey] = false; });
+              setExpandedTraceabilityEpics(next);
+            };
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                {/* Traceability KPI Scorecard */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '1rem' }}>
+                  <div className="dashboard-kpi-card">
+                    <div className="dashboard-kpi-header">
+                      <span style={{ color: '#6554C0', fontWeight: 700 }}>⚡ ÉPICAS E HISTORIAS</span>
+                      <span className="dashboard-kpi-pill blue">{totalEpicsCount} Épicas</span>
                     </div>
-                    <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
-                      Relación de extremo a extremo: Épica ➔ Historia de Usuario ➔ Plan de Pruebas ➔ Ciclo ➔ Defectos
+                    <div className="dashboard-kpi-value" style={{ color: '#6554C0' }}>
+                      {totalStoriesCount}
+                    </div>
+                    <div className="dashboard-kpi-footer">
+                      <span>{totalEpicsCount} Épicas · {totalStoriesCount} Historias en el proyecto</span>
                     </div>
                   </div>
 
-                  {/* Search filter */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input
-                      type="text"
-                      placeholder="Buscar por épica, historia, plan, ciclo o bug..."
-                      value={dashboardTraceabilitySearch}
-                      onChange={(e) => setDashboardTraceabilitySearch(e.target.value)}
-                      style={{
-                        padding: '6px 12px',
-                        fontSize: '12px',
-                        border: '1px solid var(--jira-border, #DCDFE4)',
-                        borderRadius: '6px',
-                        width: '280px'
-                      }}
-                    />
-                    {dashboardTraceabilitySearch && (
+                  <div className="dashboard-kpi-card">
+                    <div className="dashboard-kpi-header">
+                      <span style={{ color: '#0C66E4', fontWeight: 700 }}>🎯 COBERTURA DE HISTORIAS</span>
+                      <span className="dashboard-kpi-pill green">{storiesCoveragePct}%</span>
+                    </div>
+                    <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
+                      {storiesCoveragePct}%
+                    </div>
+                    <div className="dashboard-kpi-footer">
+                      <span>{coveredStoriesCount} de {totalStoriesCount} historias vinculadas a pruebas</span>
+                    </div>
+                  </div>
+
+                  <div
+                    className="dashboard-kpi-card"
+                    style={
+                      orphanStoriesCount > 0
+                        ? { border: '1px solid #FFD5D2', background: 'linear-gradient(180deg, #FFFDFC 0%, #FFF7F5 100%)' }
+                        : undefined
+                    }
+                  >
+                    <div className="dashboard-kpi-header">
+                      <span style={{ color: orphanStoriesCount > 0 ? '#DE350B' : '#1F845A', fontWeight: 700 }}>
+                        🚨 HISTORIAS HUÉRFANAS
+                      </span>
+                      <span className={`dashboard-kpi-pill ${orphanStoriesCount > 0 ? 'red' : 'green'}`}>
+                        {orphanStoriesCount > 0 ? `⚠️ ${orphanStoriesPct}% Sin Épica` : '✓ Proceso OK'}
+                      </span>
+                    </div>
+                    <div className="dashboard-kpi-value" style={{ color: orphanStoriesCount > 0 ? '#DE350B' : '#1F845A' }}>
+                      {orphanStoriesCount}
+                    </div>
+                    <div className="dashboard-kpi-footer">
+                      <span>
+                        {orphanStoriesCount > 0
+                          ? `${orphanStoriesCount} de ${totalStoriesCount} historias sin Épica padre (incumplimiento)`
+                          : 'Todas las historias tienen Épica padre vinculada'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="dashboard-kpi-card">
+                    <div className="dashboard-kpi-header">
+                      <span style={{ color: '#DE350B', fontWeight: 700 }}>⚠️ HISTORIAS CON INCIDENCIA</span>
+                      <span className="dashboard-kpi-pill red">{rowsWithIssuesCount} Registros</span>
+                    </div>
+                    <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
+                      {rowsWithIssuesCount}
+                    </div>
+                    <div className="dashboard-kpi-footer">
+                      <span>{failed} Fallados · {blocked} Bloqueados en ciclos</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Traceability Matrix Card */}
+                <div className="dashboard-card" style={{ overflowX: 'auto' }}>
+                  <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
+                    <div>
+                      <div className="dashboard-card-title">
+                        <span style={{ color: '#0C66E4' }}>🔗</span>
+                        <span>Matriz Jerárquica de Trazabilidad y Cobertura</span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
+                        Haz clic en una Épica para desplegar sus Historias de Usuario, porcentaje de cobertura, Plan, Ciclo, Estado y Defectos
+                      </div>
+                    </div>
+
+                    {/* Controls: Expand/Collapse + Search filter */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       <button
-                        onClick={() => setDashboardTraceabilitySearch('')}
-                        style={{ padding: '4px 8px', fontSize: '11px', background: '#F1F2F4', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                        type="button"
+                        onClick={expandAllEpics}
+                        style={{
+                          padding: '5px 10px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: '#0C66E4',
+                          background: '#E9F2FF',
+                          border: '1px solid #CCE0FF',
+                          borderRadius: '6px',
+                          cursor: 'pointer'
+                        }}
                       >
-                        Limpiar
+                        ▼ Expandir Épicas
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        onClick={collapseAllEpics}
+                        style={{
+                          padding: '5px 10px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: '#44546F',
+                          background: '#F1F2F4',
+                          border: '1px solid #DCDFE4',
+                          borderRadius: '6px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        ▶ Colapsar Épicas
+                      </button>
+                      <input
+                        type="text"
+                        placeholder="Buscar por épica, historia, plan, ciclo o bug..."
+                        value={dashboardTraceabilitySearch}
+                        onChange={(e) => setDashboardTraceabilitySearch(e.target.value)}
+                        style={{
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          border: '1px solid var(--jira-border, #DCDFE4)',
+                          borderRadius: '6px',
+                          width: '260px'
+                        }}
+                      />
+                      {dashboardTraceabilitySearch && (
+                        <button
+                          onClick={() => setDashboardTraceabilitySearch('')}
+                          style={{ padding: '4px 8px', fontSize: '11px', background: '#F1F2F4', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                        >
+                          Limpiar
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
 
-                {filteredTraceabilityRows.length > 0 ? (
-                  <table className="dashboard-defects-table">
-                    <thead>
-                      <tr>
-                        <th>Épica de Jira</th>
-                        <th>Historia de Usuario (Requisito)</th>
-                        <th>Plan de Pruebas</th>
-                        <th>Ciclo de Pruebas</th>
-                        <th>Estado Ejecución</th>
-                        <th>Defectos Vinculados</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredTraceabilityRows.map((row) => (
-                        <tr key={row.id}>
-                          {/* 1. Épica de Jira */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {row.epicKey ? (
-                              <a
-                                href={`/browse/${row.epicKey}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + row.epicKey); }}
-                                className="ads-lozenge ads-lozenge-subtle"
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  fontWeight: 700,
-                                  color: '#6554C0',
-                                  background: '#EAE6FF',
-                                  padding: '2px 8px',
-                                  borderRadius: '4px',
-                                  textDecoration: 'none',
-                                  cursor: 'pointer'
-                                }}
-                                title={row.epicSummary ? `${row.epicKey}: ${row.epicSummary}` : row.epicKey}
-                              >
-                                ⚡ {row.epicKey}
-                              </a>
-                            ) : (
-                              <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
-                                ⚡ Por vincular
-                              </span>
-                            )}
-                          </td>
-
-                          {/* 2. Historia de Usuario (Requisito) */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            {row.requirementKey ? (
-                              <a
-                                href={`/browse/${row.requirementKey}`}
-                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + row.requirementKey); }}
-                                className="ads-lozenge ads-lozenge-subtle"
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  fontWeight: 700,
-                                  color: '#0065FF',
-                                  background: '#DEEBFF',
-                                  padding: '2px 8px',
-                                  borderRadius: '4px',
-                                  textDecoration: 'none',
-                                  cursor: 'pointer'
-                                }}
-                                title={row.requirementSummary ? `${row.requirementKey}: ${row.requirementSummary}` : row.requirementKey}
-                              >
-                                📖 {row.requirementKey}
-                              </a>
-                            ) : (
-                              <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
-                                📖 Por vincular
-                              </span>
-                            )}
-                          </td>
-
-                          {/* 3. Plan de Pruebas */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            <span
-                              className="ads-lozenge ads-lozenge-subtle"
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontWeight: 700,
-                                color: row.planKey ? '#1D7F54' : '#626F86',
-                                background: row.planKey ? '#E3FCEF' : '#F1F2F4',
-                                padding: '2px 8px',
-                                borderRadius: '4px',
-                                fontSize: '11px',
-                                width: 'fit-content'
-                              }}
-                              title={row.planName}
-                            >
-                              📋 {row.planName}
-                            </span>
-                          </td>
-
-                          {/* 4. Ciclo de Pruebas */}
-                          <td style={{ whiteSpace: 'nowrap', fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600 }}>
-                            🔄 {row.cycleName}
-                          </td>
-
-                          {/* 5. Estado Ejecución */}
-                          <td style={{ whiteSpace: 'nowrap' }}>
-                            <AtlaskitStatusLozenge status={row.status} />
-                          </td>
-
-                          {/* 6. Defectos Vinculados */}
-                          <td>
-                            {row.bugs.length > 0 ? (
-                              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                {row.bugs.map((b, idx) => (
-                                  <a
-                                    key={idx}
-                                    href={`/browse/${b.key}`}
-                                    onClick={(e) => { e.preventDefault(); router.open('/browse/' + b.key); }}
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '3px',
-                                      fontSize: '11px',
-                                      fontWeight: 700,
-                                      color: '#DE350B',
-                                      background: '#FFEBE6',
-                                      padding: '2px 6px',
-                                      borderRadius: '4px',
-                                      textDecoration: 'none'
-                                    }}
-                                    title={b.summary || b.key}
-                                  >
-                                    <span style={{ fontSize: '9px' }}>🐞</span> {b.key}
-                                  </a>
-                                ))}
-                              </div>
-                            ) : (
-                              <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
-                            )}
-                          </td>
+                  {epicGroups.length > 0 ? (
+                    <table className="dashboard-defects-table">
+                      <thead>
+                        <tr>
+                          <th style={{ minWidth: '300px' }}>Jerarquía (Épica ➔ Historias de Usuario)</th>
+                          <th style={{ minWidth: '175px' }}>Cobertura de Pruebas</th>
+                          <th>Plan de Pruebas</th>
+                          <th>Ciclo de Pruebas</th>
+                          <th>Estado Ejecución</th>
+                          <th>Defectos Vinculados</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
-                    {dashboardTraceabilitySearch ? '🔍 No se encontraron registros de trazabilidad con ese criterio de búsqueda.' : 'No hay datos de ejecución para trazar.'}
-                  </div>
-                )}
+                      </thead>
+                      <tbody>
+                        {epicGroups.map((grp) => {
+                          const isExpanded = isGroupExpanded(grp.groupKey);
+                          const isOrphanGroup = !grp.epicKey;
+                          const barColor =
+                            grp.coveragePct === 100
+                              ? '#1F845A'
+                              : grp.coveragePct > 0
+                                ? '#0C66E4'
+                                : '#8590A2';
+
+                          return (
+                            <React.Fragment key={grp.groupKey}>
+                              {/* ── FILA PADRE: ÉPICA (O GRUPO DE HISTORIAS HUÉRFANAS) ── */}
+                              <tr
+                                onClick={() => toggleEpicExpand(grp.groupKey)}
+                                style={{
+                                  background: isOrphanGroup
+                                    ? (isExpanded ? '#FFF4E5' : '#FFF8EE')
+                                    : (isExpanded ? '#F7F8F9' : '#FFFFFF'),
+                                  cursor: 'pointer',
+                                  borderTop: isOrphanGroup ? '2px solid #FFAB00' : '2px solid #EAECEF',
+                                  borderLeft: isOrphanGroup ? '4px solid #DE350B' : undefined,
+                                  transition: 'background 0.15s ease'
+                                }}
+                              >
+                                {/* 1. Épica Header */}
+                                <td style={{ maxWidth: '360px', padding: '10px 12px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                                    <span
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        width: '20px',
+                                        height: '20px',
+                                        borderRadius: '4px',
+                                        background: isOrphanGroup
+                                          ? '#FFEBE6'
+                                          : (isExpanded ? '#EAE6FF' : '#F1F2F4'),
+                                        color: isOrphanGroup
+                                          ? '#DE350B'
+                                          : (isExpanded ? '#6554C0' : '#44546F'),
+                                        fontSize: '10px',
+                                        fontWeight: 800,
+                                        flexShrink: 0,
+                                        marginTop: '1px'
+                                      }}
+                                    >
+                                      {isExpanded ? '▼' : '▶'}
+                                    </span>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                        {grp.epicKey ? (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              e.preventDefault();
+                                              openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
+                                            }}
+                                            className="ads-lozenge ads-lozenge-subtle"
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              gap: '4px',
+                                              fontWeight: 700,
+                                              color: '#6554C0',
+                                              background: '#EAE6FF',
+                                              padding: '2px 8px',
+                                              borderRadius: '4px',
+                                              border: '1px solid #DFD8FD',
+                                              textDecoration: 'none',
+                                              cursor: 'pointer',
+                                              whiteSpace: 'nowrap',
+                                              fontFamily: 'inherit'
+                                            }}
+                                            title={`Ver detalle de la Épica ${grp.epicKey} en Test Pulse`}
+                                          >
+                                            ⚡ {grp.epicKey}
+                                          </button>
+                                        ) : (
+                                          <span
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              gap: '4px',
+                                              fontWeight: 800,
+                                              color: '#AE2E24',
+                                              background: '#FFEBE6',
+                                              border: '1px solid #FFD5D2',
+                                              padding: '2px 8px',
+                                              borderRadius: '4px',
+                                              fontSize: '11px',
+                                              whiteSpace: 'nowrap'
+                                            }}
+                                            title="Incumplimiento de proceso: Estas historias de usuario no están vinculadas a ninguna Épica"
+                                          >
+                                            ⚠️ SIN ÉPICA · HISTORIAS HUÉRFANAS
+                                          </span>
+                                        )}
+
+                                        <span
+                                          style={{
+                                            fontSize: '10px',
+                                            fontWeight: 700,
+                                            color: isOrphanGroup ? '#AE2E24' : '#0055CC',
+                                            background: isOrphanGroup ? '#FFEBE6' : '#E9F2FF',
+                                            border: isOrphanGroup ? '1px solid #FFD5D2' : undefined,
+                                            padding: '1px 7px',
+                                            borderRadius: '10px',
+                                            whiteSpace: 'nowrap'
+                                          }}
+                                        >
+                                          {grp.totalStories} {grp.totalStories === 1 ? 'Historia Huérfana' : (isOrphanGroup ? 'Historias Huérfanas' : 'Historias')}
+                                        </span>
+                                      </div>
+
+                                      {grp.epicSummary && (
+                                        <span
+                                          onClick={(e) => {
+                                            if (grp.epicKey) {
+                                              e.stopPropagation();
+                                              openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
+                                            }
+                                          }}
+                                          style={{
+                                            fontSize: '12px',
+                                            color: isOrphanGroup ? '#AE2E24' : 'var(--jira-dark, #172B4D)',
+                                            fontWeight: 700,
+                                            lineHeight: 1.35,
+                                            cursor: grp.epicKey ? 'pointer' : 'inherit'
+                                          }}
+                                          title={grp.epicKey ? `Clic para ver detalle de ${grp.epicKey}: ${grp.epicSummary}` : grp.epicSummary}
+                                        >
+                                          {grp.epicSummary}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </td>
+
+                                {/* 2. Cobertura de la Épica */}
+                                <td style={{ minWidth: '175px' }}>
+                                  {grp.totalStories > 0 ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
+                                        <span style={{ fontWeight: 700, color: barColor }}>
+                                          {grp.coveragePct}% Cobertura
+                                        </span>
+                                        <span style={{ color: '#626F86', fontSize: '10px' }}>
+                                          {grp.coveredStories}/{grp.totalStories} hist.
+                                        </span>
+                                      </div>
+                                      <div
+                                        style={{
+                                          width: '100%',
+                                          height: '6px',
+                                          background: '#EAECEF',
+                                          borderRadius: '999px',
+                                          overflow: 'hidden'
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            width: `${grp.coveragePct}%`,
+                                            height: '100%',
+                                            background: barColor,
+                                            borderRadius: '999px',
+                                            transition: 'width 0.25s ease'
+                                          }}
+                                        />
+                                      </div>
+                                      <span style={{ fontSize: '10px', color: '#626F86' }}>
+                                        {grp.executedStories} de {grp.totalStories} con ejecución en ciclo
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span style={{ fontSize: '11px', color: '#626F86', fontStyle: 'italic' }}>
+                                      0% · Sin historias ligadas
+                                    </span>
+                                  )}
+                                </td>
+
+                                {/* 3. Planes de la Épica */}
+                                <td style={{ whiteSpace: 'nowrap' }}>
+                                  {grp.uniquePlans.length > 0 ? (
+                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                      {grp.uniquePlans.slice(0, 2).map((pName, i) => (
+                                        <span
+                                          key={i}
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '4px',
+                                            fontWeight: 700,
+                                            color: '#1D7F54',
+                                            background: '#E3FCEF',
+                                            padding: '2px 8px',
+                                            borderRadius: '4px',
+                                            fontSize: '11px'
+                                          }}
+                                        >
+                                          📋 {pName}
+                                        </span>
+                                      ))}
+                                      {grp.uniquePlans.length > 2 && (
+                                        <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>
+                                          +{grp.uniquePlans.length - 2} más
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span style={{ fontSize: '11px', color: '#626F86' }}>Sin plan asignado</span>
+                                  )}
+                                </td>
+
+                                {/* 4. Ciclos de la Épica */}
+                                <td style={{ whiteSpace: 'nowrap', fontSize: '11px', color: '#44546F', fontWeight: 600 }}>
+                                  {grp.uniqueCycles.length > 0
+                                    ? `🔄 ${grp.uniqueCycles.join(', ')}`
+                                    : 'Sin ciclo asignado'}
+                                </td>
+
+                                {/* 5. Estado Consolidado de la Épica */}
+                                <td style={{ whiteSpace: 'nowrap' }}>
+                                  <AtlaskitStatusLozenge status={grp.epicStatus} />
+                                </td>
+
+                                {/* 6. Defectos Consolidados de la Épica */}
+                                <td onClick={(e) => e.stopPropagation()}>
+                                  {grp.uniqueBugs.length > 0 ? (
+                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                      {grp.uniqueBugs.map((b, idx) => (
+                                        <button
+                                          key={idx}
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            e.preventDefault();
+                                            setSelectedBug(b);
+                                          }}
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '3px',
+                                            fontSize: '11px',
+                                            fontWeight: 700,
+                                            color: '#DE350B',
+                                            background: '#FFEBE6',
+                                            padding: '2px 6px',
+                                            borderRadius: '4px',
+                                            border: '1px solid #FFD5D2',
+                                            textDecoration: 'none',
+                                            cursor: 'pointer',
+                                            fontFamily: 'inherit'
+                                          }}
+                                          title={`Ver detalle del defecto ${b.key} en Test Pulse`}
+                                        >
+                                          <span style={{ fontSize: '9px' }}>🐞</span> {b.key}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
+                                  )}
+                                </td>
+                              </tr>
+
+                              {/* ── FILAS HIJAS: HISTORIAS DE USUARIO DE ESTA ÉPICA ── */}
+                              {isExpanded && (
+                                grp.storyRows.length > 0 ? (
+                                  grp.storyRows.map((row) => {
+                                    const isCovered = (row.linkedTcCount || 0) > 0 || row.cycleId !== null;
+                                    const wfStatus = (row.requirementWorkflowStatus || '').trim();
+                                    const wfCat = (row.requirementWorkflowStatusCategory || '').toLowerCase().trim();
+                                    const wfLower = wfStatus.toLowerCase();
+
+                                    let wfColors = {
+                                      color: '#44546F',
+                                      bg: '#F1F2F4',
+                                      border: '#DCDFE4'
+                                    };
+                                    if (
+                                      wfCat === 'done' ||
+                                      wfLower.includes('finaliz') ||
+                                      wfLower.includes('cerrad') ||
+                                      wfLower.includes('done') ||
+                                      wfLower.includes('complet') ||
+                                      wfLower.includes('resuelt') ||
+                                      wfLower.includes('aprob') ||
+                                      wfLower.includes('producc') ||
+                                      wfLower.includes('liber')
+                                    ) {
+                                      wfColors = { color: '#1F845A', bg: '#DCFFF1', border: '#BAF3DB' };
+                                    } else if (
+                                      wfLower.includes('bloque') ||
+                                      wfLower.includes('imped') ||
+                                      wfLower.includes('rechaz') ||
+                                      wfLower.includes('cancel')
+                                    ) {
+                                      wfColors = { color: '#AE2E24', bg: '#FFECEB', border: '#FFD5D2' };
+                                    } else if (
+                                      wfCat === 'indeterminate' ||
+                                      wfLower.includes('curso') ||
+                                      wfLower.includes('progres') ||
+                                      wfLower.includes('prueb') ||
+                                      wfLower.includes('qa') ||
+                                      wfLower.includes('test') ||
+                                      wfLower.includes('revis') ||
+                                      wfLower.includes('review') ||
+                                      wfLower.includes('desarroll') ||
+                                      wfLower.includes('validac') ||
+                                      wfLower.includes('uat')
+                                    ) {
+                                      wfColors = { color: '#0055CC', bg: '#E9F2FF', border: '#CCE0FF' };
+                                    }
+
+                                    return (
+                                      <tr
+                                        key={row.id}
+                                        style={{
+                                          background: isOrphanGroup ? '#FFFDF9' : '#FAFBFC',
+                                          borderLeft: isOrphanGroup ? '3px solid #DE350B' : '3px solid #6554C0'
+                                        }}
+                                      >
+                                        {/* 1. Historia de Usuario indentada + Estado del Flujo Jira al lado del ID */}
+                                        <td style={{ maxWidth: '380px', paddingLeft: '36px' }}>
+                                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+                                            <span style={{ color: isOrphanGroup ? '#DE350B' : '#8590A2', fontWeight: 700, fontSize: '12px', marginTop: '1px' }}>
+                                              ↳
+                                            </span>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    e.preventDefault();
+                                                    openTraceabilityItemModal('story', row.requirementKey, row.requirementSummary);
+                                                  }}
+                                                  className="ads-lozenge ads-lozenge-subtle"
+                                                  style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px',
+                                                    fontWeight: 700,
+                                                    color: '#0065FF',
+                                                    background: '#DEEBFF',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '4px',
+                                                    border: '1px solid #B3D4FF',
+                                                    textDecoration: 'none',
+                                                    cursor: 'pointer',
+                                                    width: 'fit-content',
+                                                    whiteSpace: 'nowrap',
+                                                    fontFamily: 'inherit'
+                                                  }}
+                                                  title={`Ver detalle de la Historia ${row.requirementKey} en Test Pulse`}
+                                                >
+                                                  📖 {row.requirementKey}
+                                                </button>
+                                                {wfStatus && (
+                                                  <span
+                                                    style={{
+                                                      display: 'inline-flex',
+                                                      alignItems: 'center',
+                                                      fontSize: '10px',
+                                                      fontWeight: 700,
+                                                      textTransform: 'uppercase',
+                                                      letterSpacing: '0.02em',
+                                                      color: wfColors.color,
+                                                      background: wfColors.bg,
+                                                      border: `1px solid ${wfColors.border}`,
+                                                      padding: '1px 7px',
+                                                      borderRadius: '4px',
+                                                      whiteSpace: 'nowrap'
+                                                    }}
+                                                    title={`Estado en flujo de Jira: ${wfStatus}`}
+                                                  >
+                                                    {wfStatus}
+                                                  </span>
+                                                )}
+                                                {isOrphanGroup && (
+                                                  <span
+                                                    style={{
+                                                      display: 'inline-flex',
+                                                      alignItems: 'center',
+                                                      gap: '3px',
+                                                      fontSize: '10px',
+                                                      fontWeight: 700,
+                                                      color: '#AE2E24',
+                                                      background: '#FFEBE6',
+                                                      border: '1px solid #FFD5D2',
+                                                      padding: '1px 6px',
+                                                      borderRadius: '4px',
+                                                      whiteSpace: 'nowrap'
+                                                    }}
+                                                    title="Incumplimiento de proceso: Esta historia no tiene una Épica padre asignada en Jira"
+                                                  >
+                                                    ⚠️ Huérfana (Sin Épica)
+                                                  </span>
+                                                )}
+                                              </div>
+                                              {row.requirementSummary && (
+                                                <span
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    openTraceabilityItemModal('story', row.requirementKey, row.requirementSummary);
+                                                  }}
+                                                  style={{
+                                                    fontSize: '11px',
+                                                    color: 'var(--jira-dark, #172B4D)',
+                                                    fontWeight: 500,
+                                                    lineHeight: 1.3,
+                                                    cursor: 'pointer'
+                                                  }}
+                                                  title={`Clic para ver detalle de ${row.requirementKey}: ${row.requirementSummary}`}
+                                                >
+                                                  {row.requirementSummary}
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        </td>
+
+                                        {/* 2. Cobertura individual de la Historia */}
+                                        <td style={{ whiteSpace: 'nowrap' }}>
+                                          {isCovered ? (
+                                            <span
+                                              style={{
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '4px',
+                                                fontSize: '11px',
+                                                fontWeight: 700,
+                                                color: '#1F845A',
+                                                background: '#DCFFF1',
+                                                padding: '2px 8px',
+                                                borderRadius: '999px'
+                                              }}
+                                              title="Historia cubierta mediante casos de prueba vinculados"
+                                            >
+                                              ✓ Cubierta ({row.linkedTcCount || row.executedTcCount || 1} {(row.linkedTcCount || row.executedTcCount || 1) === 1 ? 'caso' : 'casos'})
+                                            </span>
+                                          ) : (
+                                            <span
+                                              style={{
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '4px',
+                                                fontSize: '11px',
+                                                fontWeight: 600,
+                                                color: '#974F0C',
+                                                background: '#FFF7D6',
+                                                padding: '2px 8px',
+                                                borderRadius: '999px'
+                                              }}
+                                              title="Esta historia aún no tiene casos de prueba vinculados"
+                                            >
+                                              ⚠️ Sin cobertura (0 casos)
+                                            </span>
+                                          )}
+                                        </td>
+
+                                        {/* 3. Plan de Pruebas */}
+                                        <td style={{ whiteSpace: 'nowrap' }}>
+                                          <span
+                                            className="ads-lozenge ads-lozenge-subtle"
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              gap: '4px',
+                                              fontWeight: 700,
+                                              color: row.planKey ? '#1D7F54' : '#626F86',
+                                              background: row.planKey ? '#E3FCEF' : '#F1F2F4',
+                                              padding: '2px 8px',
+                                              borderRadius: '4px',
+                                              fontSize: '11px',
+                                              width: 'fit-content'
+                                            }}
+                                            title={row.planName}
+                                          >
+                                            📋 {row.planName}
+                                          </span>
+                                        </td>
+
+                                        {/* 4. Ciclo de Pruebas */}
+                                        <td style={{ whiteSpace: 'nowrap', fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600 }}>
+                                          🔄 {row.cycleName}
+                                        </td>
+
+                                        {/* 5. Estado Ejecución */}
+                                        <td style={{ whiteSpace: 'nowrap' }}>
+                                          <AtlaskitStatusLozenge status={row.status} />
+                                        </td>
+
+                                        {/* 6. Defectos Vinculados */}
+                                        <td>
+                                          {row.bugs.length > 0 ? (
+                                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                              {row.bugs.map((b, idx) => (
+                                                <button
+                                                  key={idx}
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    e.preventDefault();
+                                                    setSelectedBug(b);
+                                                  }}
+                                                  style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '3px',
+                                                    fontSize: '11px',
+                                                    fontWeight: 700,
+                                                    color: '#DE350B',
+                                                    background: '#FFEBE6',
+                                                    padding: '2px 6px',
+                                                    borderRadius: '4px',
+                                                    border: '1px solid #FFD5D2',
+                                                    textDecoration: 'none',
+                                                    cursor: 'pointer',
+                                                    fontFamily: 'inherit'
+                                                  }}
+                                                  title={`Ver detalle del defecto ${b.key} en Test Pulse`}
+                                                >
+                                                  <span style={{ fontSize: '9px' }}>🐞</span> {b.key}
+                                                </button>
+                                              ))}
+                                            </div>
+                                          ) : (
+                                            <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })
+                                ) : (
+                                  <tr style={{ background: '#FAFBFC', borderLeft: '3px solid #6554C0' }}>
+                                    <td colSpan={6} style={{ paddingLeft: '38px', fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                                      ↳ Esta épica aún no tiene Historias de Usuario vinculadas en Jira.
+                                    </td>
+                                  </tr>
+                                )
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
+                      {traceabilityHierarchyLoading
+                        ? '⏳ Cargando épicas e historias de usuario del proyecto...'
+                        : dashboardTraceabilitySearch
+                          ? '🔍 No se encontraron registros de trazabilidad con ese criterio de búsqueda.'
+                          : 'No se encontraron épicas ni historias de usuario en este proyecto.'}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ─── Add Widget Catalog Modal ─── */}
           {showAddWidgetModal && (
@@ -15434,7 +16717,11 @@ const renderPlanningTab = () => {
     );
   };
 
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [backupProgress, setBackupProgress] = useState(null);
+
   const handleDownloadFullBackup = async () => {
+    if (isBackingUp) return;
     if (!selectedProjectId) {
       addNotification({ type: 'warning', title: 'Selecciona un proyecto', description: 'Debes seleccionar un proyecto para exportar su copia de seguridad.' });
       return;
@@ -15448,15 +16735,16 @@ const renderPlanningTab = () => {
       const currentProj = projects.find(p => String(p.id) === String(selectedProjectId));
       const projKey = currentProj?.key || selectedProjectId;
 
-      // 1. Fetch Structural Data
+      // 1. Fetch Structural Data (using fetchAllTestCases so all paginated test cases are included)
       const [fetchedFolders, fetchedPlans, fetchedCycles, fetchedCases] = await Promise.all([
         invoke('getFolders', { projectId: selectedProjectId }).catch(() => []),
         invoke('getTestPlans', { projectId: selectedProjectId, config }).catch(() => []),
         invoke('getTestCycles', { projectId: selectedProjectId, config }).catch(() => []),
-        invoke('getTestCases', { projectId: selectedProjectId, config }).catch(() => [])
+        fetchAllTestCases({ folderId: null, projectId: selectedProjectId, config }).catch(() => [])
       ]);
 
-      const casesArray = Array.isArray(fetchedCases) ? fetchedCases : (testCases || []);
+      const resolvedCases = Array.isArray(fetchedCases) ? fetchedCases : (Array.isArray(fetchedCases?.issues) ? fetchedCases.issues : []);
+      const casesArray = resolvedCases.length > 0 ? resolvedCases : (testCases || []);
       const cyclesArray = Array.isArray(fetchedCycles) ? fetchedCycles : (testCycles || []);
       const plansArray = Array.isArray(fetchedPlans) ? fetchedPlans : (testPlans || []);
       const foldersArray = Array.isArray(fetchedFolders) ? fetchedFolders : (folders || []);
@@ -17505,6 +18793,7 @@ const renderPlanningTab = () => {
       />
       {renderReportAutomationModal()}
       {renderBugSlidePanel()}
+      {renderTraceabilityItemSlidePanel()}
       {renderMediaModal()}
       {renderQrModal()}
     </>

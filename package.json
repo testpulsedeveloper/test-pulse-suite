@@ -1,9 +1,14 @@
 {
   "name": "jira-project-page-custom-ui",
-  "version": "3.12.1",
+  "version": "3.12.4",
   "main": "index.js",
   "license": "MIT",
   "private": true,
+  "scripts": {
+    "build": "npm --prefix static/hello-world run build",
+    "deploy": "forge deploy --non-interactive",
+    "deploy:prod": "forge deploy -e production --non-interactive"
+  },
   "devDependencies": {
     "eslint": "^8.56.0",
     "eslint-plugin-react-hooks": "^4.6.0"

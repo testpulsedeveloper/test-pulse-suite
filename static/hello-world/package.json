@@ -1,6 +1,6 @@
 {
   "name": "jira-project-page-custom-ui-static",
-  "version": "3.12.1",
+  "version": "3.12.4",
   "private": true,
   "homepage": ".",
   "dependencies": {
@@ -16,14 +16,16 @@
     "@forge/bridge": "6.3.1",
     "@forge/jira-bridge": "^1.0.0",
     "qrcode": "^1.5.4",
+    "@tanstack/react-query": "^5.62.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.22.3"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "eject": "react-scripts eject"
+    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "browserslist": {
     "production": [
@@ -38,6 +40,7 @@
     ]
   },
   "devDependencies": {
-    "react-scripts": "^5.0.1"
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
   }
 }

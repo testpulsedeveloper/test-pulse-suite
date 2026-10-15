@@ -2,6 +2,18 @@ import Resolver from '@forge/resolver';
 import api, { route, fetch, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { getBusinessMilliseconds } from './utils/slaHelpers.js';
+import {
+  getIterationEvidenceKeys,
+  dedupeEvidences,
+  filterNonIterationEvidences,
+  ensureValidAdf,
+  normalizeJiraStatus
+} from './utils/statusAndAdfHelpers.js';
+import {
+  generateMobileErrorHtml,
+  generateMobileUploadHtml
+} from './utils/mobileUploadTemplates.js';
 
 // ── Perf instrumentation (Fase 0) ──
 // Counts real Jira REST calls (and 429s) made during each resolver invocation. Output in `forge logs`:
@@ -187,89 +199,6 @@ resolver.define('probeAPI', async () => {
     }
 });
 
-
-// === Evidences Deduplication & Isolation Helpers ===
-const getIterationEvidenceKeys = (iterations) => {
-  const keys = new Set();
-  if (Array.isArray(iterations)) {
-    for (const iter of iterations) {
-      if (Array.isArray(iter?.evidences)) {
-        for (const ev of iter.evidences) {
-          if (!ev) continue;
-          if (typeof ev === 'object') {
-            if (ev.id) keys.add(String(ev.id));
-            if (ev.filename) keys.add(String(ev.filename));
-            if (ev.url) keys.add(String(ev.url));
-          } else {
-            keys.add(String(ev));
-          }
-        }
-      }
-    }
-  }
-  return keys;
-};
-
-const dedupeEvidences = (list) => {
-  if (!Array.isArray(list)) return [];
-  const seen = new Set();
-  const result = [];
-  for (const ev of list) {
-    if (!ev) continue;
-    const evId = typeof ev === 'string' ? ev : (ev.id ? String(ev.id) : null);
-    const evUrl = typeof ev === 'object' && ev.url ? String(ev.url) : null;
-    const evName = typeof ev === 'object' && ev.filename ? String(ev.filename) : (typeof ev === 'string' ? ev : null);
-    
-    const key = evId ? `id:${evId}` : (evUrl ? `url:${evUrl}` : (evName ? `name:${evName}` : JSON.stringify(ev)));
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(typeof ev === 'string' ? { id: ev, filename: `evidence_${ev}.jpg` } : ev);
-    }
-  }
-  return result;
-};
-
-const filterNonIterationEvidences = (evidencesList, iterationKeys) => {
-  if (!Array.isArray(evidencesList)) return [];
-  const deduped = dedupeEvidences(evidencesList);
-  if (!iterationKeys || iterationKeys.size === 0) return deduped;
-  return deduped.filter(ev => {
-    if (!ev) return false;
-    const evId = typeof ev === 'object' ? (ev.id ? String(ev.id) : null) : String(ev);
-    const evUrl = typeof ev === 'object' && ev.url ? String(ev.url) : null;
-    const evName = typeof ev === 'object' && ev.filename ? String(ev.filename) : (typeof ev === 'string' ? ev : null);
-    if (evId && iterationKeys.has(evId)) return false;
-    if (evUrl && iterationKeys.has(evUrl)) return false;
-    if (evName && iterationKeys.has(evName)) return false;
-    return true;
-  });
-};
-
-// === Atlassian Document Format (ADF) Helper ===
-const ensureValidAdf = (desc, fallbackText = '') => {
-  if (desc && typeof desc === 'object' && desc.type === 'doc' && Array.isArray(desc.content)) {
-    return desc;
-  }
-  let text = fallbackText;
-  if (typeof desc === 'string' && desc.trim()) {
-    text = desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  }
-  return {
-    type: 'doc',
-    version: 1,
-    content: [
-      {
-        type: 'paragraph',
-        content: [
-          {
-            type: 'text',
-            text: text || 'Snapshot del caso de prueba'
-          }
-        ]
-      }
-    ]
-  };
-};
 
 // === Folder Management (Jira Entity Properties) ===
 const getProjectFolders = async (projectId) => {
@@ -501,7 +430,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
   try {
     const { projectId, config } = payload;
     const cycleType = config?.testCycleType;
-    const projectJql = projectId ? `project = ${projectId} AND ` : '';
+    const projectJql = projectId ? `project = "${projectId}" AND ` : '';
     
     const validCycleTypes = Array.from(new Set([
       cycleType,
@@ -521,8 +450,11 @@ resolver.define('getTestCycles', async ({ payload }) => {
       let totalTests = 0;
       const seenIds = new Set();
 
-      const meta = props['execution-meta'];
-      const hasMeta = meta && typeof meta === 'object' && typeof meta.total === 'number';
+      const rawMeta = props['execution-meta'];
+      const meta = (rawMeta && typeof rawMeta === 'object' && typeof rawMeta.total === 'number')
+        ? rawMeta
+        : (rawMeta?.value && typeof rawMeta.value === 'object' && typeof rawMeta.value.total === 'number' ? rawMeta.value : null);
+      const hasMeta = Boolean(meta);
       
       const rawExec = props['execution'];
       const execVal = Array.isArray(rawExec) ? rawExec : (Array.isArray(rawExec?.value) ? rawExec.value : null);
@@ -585,7 +517,8 @@ resolver.define('getTestCycles', async ({ payload }) => {
         versions: affectsVersions,
         fixVersions: fixVersions,
         rawFields: issue.fields,
-        testCount: totalTests
+        testCount: totalTests,
+        executionMeta: hasMeta ? meta : null
       };
     });
   } catch (e) {
@@ -683,7 +616,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   const { folderId, projectId, config, nextPageToken } = payload;
   const tcType = config?.testCaseType;
   
-  const projectJql = projectId ? `project = ${projectId} AND ` : '';
+  const projectJql = projectId ? `project = "${projectId}" AND ` : '';
   const validTcTypes = Array.from(new Set([
     tcType,
     'Test Case',
@@ -734,27 +667,91 @@ resolver.define('getRequirements', async ({ payload, context }) => {
     const projectId = payload?.projectId || context?.extension?.project?.id;
     let requirementTypes = payload?.config?.requirementIssueTypes || [];
     const issueKeys = Array.isArray(payload?.issueKeys)
-      ? payload.issueKeys.filter(k => typeof k === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(k.trim())).map(k => k.trim())
+      ? Array.from(new Set(payload.issueKeys.filter(k => typeof k === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(k.trim())).map(k => k.trim().toUpperCase())))
       : [];
 
-    let jql = '';
+    let allIssues = [];
+    const fields = ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'];
+
     if (issueKeys.length > 0) {
-      const keyList = issueKeys.slice(0, 100).map(k => `"${k}"`).join(', ');
-      jql = `issueKey IN (${keyList})`;
+      for (let i = 0; i < Math.min(issueKeys.length, 500); i += 100) {
+        const chunk = issueKeys.slice(i, i + 100);
+        const keyList = chunk.map(k => `"${k}"`).join(', ');
+        const jql = `issueKey IN (${keyList})`;
+        const pageData = await fetchJqlPage(jql, fields, null, null, null, 100);
+        if (!pageData?.error && Array.isArray(pageData?.issues)) {
+          allIssues = allIssues.concat(pageData.issues);
+        }
+      }
     } else {
       if (!requirementTypes || requirementTypes.length === 0) {
         requirementTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea', 'Epic', 'Épica'];
       }
-      const projectJql = projectId ? `project = ${projectId} AND ` : '';
+      const projectJql = projectId ? `project = "${projectId}" AND ` : '';
       const typeList = requirementTypes.map(t => `"${t}"`).join(', ');
-      jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
+      const jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
+      allIssues = await fetchAllIssues(jql, fields, null, null, 5);
     }
 
-    const pageData = await fetchJqlPage(jql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status'], null, null, null, 100);
-    if (pageData?.error) {
-      return [];
+    // Resolve any Epic keys from customfield_10014 or parent where summary is missing
+    const knownSummaries = {};
+    allIssues.forEach(iss => {
+      if (iss?.key && iss?.fields?.summary) {
+        knownSummaries[iss.key.toUpperCase()] = iss.fields.summary;
+      }
+    });
+
+    const missingEpicKeys = new Set();
+    allIssues.forEach(iss => {
+      const p = iss?.fields?.parent;
+      const cf10014 = iss?.fields?.customfield_10014;
+      if (p?.key) {
+        if (p.fields?.summary) {
+          knownSummaries[p.key.toUpperCase()] = p.fields.summary;
+        } else if (!knownSummaries[p.key.toUpperCase()]) {
+          missingEpicKeys.add(p.key.toUpperCase());
+        }
+      } else if (typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
+        const ek = cf10014.trim().toUpperCase();
+        if (!knownSummaries[ek]) {
+          missingEpicKeys.add(ek);
+        }
+      }
+    });
+
+    if (missingEpicKeys.size > 0) {
+      const missingArr = Array.from(missingEpicKeys).slice(0, 100);
+      const epJql = `issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`;
+      const epPage = await fetchJqlPage(epJql, ['summary'], null, null, null, 100);
+      if (!epPage?.error && Array.isArray(epPage?.issues)) {
+        epPage.issues.forEach(ep => {
+          if (ep?.key) knownSummaries[ep.key.toUpperCase()] = ep.fields?.summary || '';
+        });
+      }
     }
-    return pageData?.issues || [];
+
+    // Enrich each issue with resolved epicKey and epicSummary for direct consumption
+    return allIssues.map(iss => {
+      const p = iss?.fields?.parent;
+      const cf10014 = iss?.fields?.customfield_10014;
+      let epicKey = null;
+      let epicSummary = null;
+      if (p?.key) {
+        epicKey = p.key;
+        epicSummary = p.fields?.summary || knownSummaries[p.key.toUpperCase()] || null;
+      } else if (typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
+        epicKey = cf10014.trim().toUpperCase();
+        epicSummary = knownSummaries[epicKey] || null;
+      } else if (cf10014 && typeof cf10014 === 'object' && cf10014.key) {
+        epicKey = cf10014.key;
+        epicSummary = cf10014.summary || knownSummaries[cf10014.key.toUpperCase()] || null;
+      }
+      return {
+        ...iss,
+        epicKey,
+        epicSummary
+      };
+    });
   } catch (e) {
     console.error("getRequirements exception:", e);
     return [];
@@ -764,42 +761,54 @@ resolver.define('getRequirements', async ({ payload, context }) => {
 resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
   try {
     const projectId = payload?.projectId || context?.extension?.project?.id;
-    if (!projectId) return { epics: [], stories: [], storiesByEpic: {}, tcMap: {} };
+    if (!projectId) return { epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {} };
 
-    // Step 0: Get project issue types to identify exact Epic and Requirement type names
-    let epicTypeName = 'Epic';
+    // Step 0: Get project issue types to identify exact Epic and Requirement type IDs and names
+    let epicTypeNames = [];
+    let epicTypeIds = [];
     let availableTypes = [];
+    let resolvedProjectKey = projectId;
     try {
       const pResp = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
       if (pResp.ok) {
         const pData = await pResp.json();
+        if (pData && pData.key) resolvedProjectKey = pData.key;
         if (Array.isArray(pData.issueTypes)) {
           availableTypes = pData.issueTypes;
-          const foundEpic = pData.issueTypes.find(t => {
-            const nl = (t.name || '').toLowerCase();
-            return nl === 'epic' || nl === 'épica' || nl === 'epica' || t.hierarchyLevel === 1;
+          const foundEpics = pData.issueTypes.filter(t => {
+            const nl = (t.name || '').toLowerCase().trim();
+            return nl === 'epic' || nl === 'épica' || nl === 'epica' || nl.includes('epic') || nl.includes('épica') || t.hierarchyLevel === 1;
           });
-          if (foundEpic) {
-            epicTypeName = foundEpic.name;
+          if (foundEpics.length > 0) {
+            epicTypeNames = foundEpics.map(t => t.name);
+            epicTypeIds = foundEpics.map(t => t.id).filter(Boolean);
           }
         }
       }
     } catch (_) {}
 
-    // Step 1: Traer las ÉPICAS del proyecto
-    const epicsJql = `project = ${projectId} AND issuetype = "${epicTypeName}" ORDER BY created DESC`;
-    const epicsPage = await fetchJqlPage(epicsJql, ['summary', 'status', 'issuelinks'], null, null, null, 100);
-    const epics = (epicsPage?.issues || []).map(issue => ({
+    if (epicTypeNames.length === 0) {
+      epicTypeNames = ['Epic', 'Épica'];
+    }
+
+    // Step 1: Traer las ÉPICAS del proyecto (hasta 500 épicas)
+    const epicTypeSelector = epicTypeIds.length > 0
+      ? epicTypeIds.join(', ')
+      : epicTypeNames.map(t => `"${t}"`).join(', ');
+    const epicsJql = `project = "${resolvedProjectKey}" AND issuetype IN (${epicTypeSelector}) ORDER BY created DESC`;
+    const rawEpics = await fetchAllIssues(epicsJql, ['summary', 'status', 'issuelinks'], null, null, 5);
+    const epics = (rawEpics || []).map(issue => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields?.summary || '',
       status: issue.fields?.status?.name || '',
+      statusCategory: issue.fields?.status?.statusCategory?.key || '',
       issuelinks: issue.fields?.issuelinks || []
     }));
 
     const epicMap = {};
     epics.forEach(e => {
-      epicMap[e.key] = e;
+      if (e.key) epicMap[e.key.toUpperCase()] = e;
     });
 
     // Define all issue types that belong to test management or defects and must NEVER be treated as requirements
@@ -809,7 +818,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       'test plan', 'testplan', 'plan de prueba', 'plan de pruebas', 'test set', 'testset',
       'test run', 'testrun', 'ejecución', 'ejecucion',
       'bug', 'defecto', 'error', 'incidencia',
-      (epicTypeName || '').toLowerCase().trim(),
+      ...epicTypeNames.map(n => (n || '').toLowerCase().trim()),
       (payload?.config?.testCaseType || '').toLowerCase().trim(),
       (payload?.config?.testCycleType || '').toLowerCase().trim(),
       (payload?.config?.planIssueType || '').toLowerCase().trim(),
@@ -822,72 +831,124 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       return blacklistWords.some(w => lower === w || lower.includes(w));
     };
 
-    // Step 2: Traer las HISTORIAS ligadas a esas Épicas
+    // Step 2: Traer TODAS las HISTORIAS / REQUISITOS del proyecto (incluyendo historias huérfanas sin épica)
     let configuredReqTypes = (payload?.config?.requirementIssueTypes || []).filter(Boolean);
     configuredReqTypes = configuredReqTypes.filter(t => !isBlacklistedType(t));
 
-    let reqTypes = [];
-    if (configuredReqTypes.length > 0) {
-      reqTypes = configuredReqTypes;
-    } else {
-      if (availableTypes.length > 0) {
-        const preferredTerms = ['story', 'historia', 'requisito', 'requirement', 'user story', 'task', 'tarea', 'feature', 'enabler'];
-        reqTypes = availableTypes
-          .filter(t => !t.subtask && !isBlacklistedType(t.name))
-          .map(t => t.name)
-          .filter(name => preferredTerms.some(term => name.toLowerCase().includes(term)));
-
-        if (reqTypes.length === 0) {
-          reqTypes = availableTypes
-            .filter(t => !t.subtask && !isBlacklistedType(t.name))
-            .map(t => t.name);
-        }
-      }
-      if (reqTypes.length === 0) {
-        reqTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
-      }
-    }
-
-    let safeReqTypes = reqTypes;
+    let validProjectTypes = [];
     if (availableTypes.length > 0) {
-      const availNames = new Set(availableTypes.map(t => t.name.toLowerCase()));
-      const filtered = reqTypes.filter(t => availNames.has(t.toLowerCase()) && !isBlacklistedType(t));
-      if (filtered.length > 0) safeReqTypes = filtered;
+      validProjectTypes = availableTypes.filter(
+        t => !t.subtask && t.hierarchyLevel !== 1 && !isBlacklistedType(t.name)
+      );
     }
 
-    const typeList = safeReqTypes.map(t => `"${t}"`).join(', ');
-    const storiesJql = `project = ${projectId} AND issuetype IN (${typeList}) ORDER BY created DESC`;
-    const storiesPage = await fetchJqlPage(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
-    
-    const stories = (storiesPage?.issues || []).filter(issue => !isBlacklistedType(issue.fields?.issuetype?.name)).map(issue => ({
-      id: issue.id,
-      key: issue.key,
-      summary: issue.fields?.summary || '',
-      status: issue.fields?.status?.name || '',
-      issuetype: issue.fields?.issuetype?.name || '',
-      parent: issue.fields?.parent || null,
-      customfield_10014: issue.fields?.customfield_10014 || null,
-      issuelinks: issue.fields?.issuelinks || []
-    }));
+    let rawStories = [];
+    if (validProjectTypes.length > 0) {
+      const validTypeIds = validProjectTypes.map(t => t.id).filter(Boolean);
+      const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${validTypeIds.join(', ')}) ORDER BY created DESC`;
+      rawStories = await fetchAllIssues(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+    } else {
+      let reqTypes = configuredReqTypes.length > 0
+        ? configuredReqTypes
+        : ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
+      const typeList = reqTypes.map(t => `"${t}"`).join(', ');
+      const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${typeList}) ORDER BY created DESC`;
+      rawStories = await fetchAllIssues(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+    }
 
-    // If epics exist, also find any issues directly having parent in epics (in case they have an issue type not in typeList)
+    // Fallback: si la consulta por issuetype devolvió vacío, consultar issues del proyecto y filtrar en memoria
+    if (!rawStories || rawStories.length === 0) {
+      const fallbackJql = `project = "${resolvedProjectKey}" ORDER BY created DESC`;
+      rawStories = await fetchAllIssues(fallbackJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+    }
+
+    const stories = (rawStories || [])
+      .filter(issue => !issue.fields?.issuetype?.subtask && !isBlacklistedType(issue.fields?.issuetype?.name))
+      .map(issue => ({
+        id: issue.id,
+        key: issue.key,
+        summary: issue.fields?.summary || '',
+        status: issue.fields?.status?.name || '',
+        statusCategory: issue.fields?.status?.statusCategory?.key || '',
+        issuetype: issue.fields?.issuetype?.name || '',
+        parent: issue.fields?.parent || null,
+        customfield_10014: issue.fields?.customfield_10014 || null,
+        issuelinks: issue.fields?.issuelinks || []
+      }));
+
+    // If epics exist, also find any issues directly having parent in epics (in chunks of 50 epics)
     if (epics.length > 0) {
-      const epicKeysList = epics.slice(0, 50).map(e => `"${e.key}"`).join(', ');
+      const seenKeys = new Set(stories.map(s => s.key));
+      for (let i = 0; i < Math.min(epics.length, 200); i += 50) {
+        const epicChunk = epics.slice(i, i + 50).map(e => `"${e.key}"`).join(', ');
+        try {
+          const childrenJql = `parent IN (${epicChunk}) ORDER BY created DESC`;
+          const childrenIssues = await fetchAllIssues(childrenJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 3);
+          if (Array.isArray(childrenIssues)) {
+            childrenIssues.forEach(issue => {
+              const issueType = issue.fields?.issuetype?.name || '';
+              if (isBlacklistedType(issueType)) return;
+              if (!seenKeys.has(issue.key)) {
+                seenKeys.add(issue.key);
+                stories.push({
+                  id: issue.id,
+                  key: issue.key,
+                  summary: issue.fields?.summary || '',
+                  status: issue.fields?.status?.name || '',
+                  statusCategory: issue.fields?.status?.statusCategory?.key || '',
+                  issuetype: issueType,
+                  parent: issue.fields?.parent || null,
+                  customfield_10014: issue.fields?.customfield_10014 || null,
+                  issuelinks: issue.fields?.issuelinks || []
+                });
+              }
+            });
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Step 2b: Check epic.issuelinks for any Stories linked to Epics via standard Jira issue links
+    const epicLinkedStoryMap = {}; // storyKeyUpper -> { epicKey, epicSummary }
+    const unseenStoryKeys = new Set();
+    const seenStoryKeysUpper = new Set(stories.map(s => (s.key || '').toUpperCase()));
+
+    epics.forEach(epic => {
+      if (Array.isArray(epic.issuelinks)) {
+        epic.issuelinks.forEach(link => {
+          const cand = link.inwardIssue || link.outwardIssue;
+          if (!cand || !cand.key) return;
+          const candKeyUpper = cand.key.toUpperCase();
+          const candType = cand.fields?.issuetype?.name || '';
+          if (isBlacklistedType(candType)) return;
+          if (epicMap[candKeyUpper]) return; // Ignore epic-to-epic links
+          if (!epicLinkedStoryMap[candKeyUpper]) {
+            epicLinkedStoryMap[candKeyUpper] = { epicKey: epic.key, epicSummary: epic.summary };
+          }
+          if (!seenStoryKeysUpper.has(candKeyUpper)) {
+            unseenStoryKeys.add(candKeyUpper);
+          }
+        });
+      }
+    });
+
+    if (unseenStoryKeys.size > 0) {
+      const unseenArr = Array.from(unseenStoryKeys).slice(0, 100);
       try {
-        const childrenJql = `project = ${projectId} AND parent IN (${epicKeysList}) ORDER BY created DESC`;
-        const childrenPage = await fetchJqlPage(childrenJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
-        if (childrenPage?.issues && Array.isArray(childrenPage.issues)) {
-          const seenKeys = new Set(stories.map(s => s.key));
-          childrenPage.issues.forEach(issue => {
+        const stPage = await fetchJqlPage(`issueKey IN (${unseenArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
+        if (!stPage?.error && Array.isArray(stPage?.issues)) {
+          stPage.issues.forEach(issue => {
             const issueType = issue.fields?.issuetype?.name || '';
             if (isBlacklistedType(issueType)) return;
-            if (!seenKeys.has(issue.key)) {
-              seenKeys.add(issue.key);
+            const kUpper = (issue.key || '').toUpperCase();
+            if (!seenStoryKeysUpper.has(kUpper)) {
+              seenStoryKeysUpper.add(kUpper);
               stories.push({
                 id: issue.id,
                 key: issue.key,
                 summary: issue.fields?.summary || '',
                 status: issue.fields?.status?.name || '',
+                statusCategory: issue.fields?.status?.statusCategory?.key || '',
                 issuetype: issueType,
                 parent: issue.fields?.parent || null,
                 customfield_10014: issue.fields?.customfield_10014 || null,
@@ -899,8 +960,59 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       } catch (_) {}
     }
 
+    // Step 2c: Resolve any missing Epic summaries (e.g. cross-project Epics or customfield_10014 links)
+    const missingEpicKeys = new Set();
+    stories.forEach(story => {
+      if (story.parent?.key) {
+        const pk = story.parent.key.toUpperCase();
+        if (!epicMap[pk]) {
+          if (story.parent.fields?.summary) {
+            const entry = {
+              id: story.parent.id || pk,
+              key: story.parent.key,
+              summary: story.parent.fields.summary,
+              status: story.parent.fields?.status?.name || '',
+              statusCategory: story.parent.fields?.status?.statusCategory?.key || '',
+              issuelinks: []
+            };
+            epicMap[pk] = entry;
+            epics.push(entry);
+          } else {
+            missingEpicKeys.add(pk);
+          }
+        }
+      } else if (typeof story.customfield_10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(story.customfield_10014.trim())) {
+        const ek = story.customfield_10014.trim().toUpperCase();
+        if (!epicMap[ek]) missingEpicKeys.add(ek);
+      }
+    });
+
+    if (missingEpicKeys.size > 0) {
+      const missingArr = Array.from(missingEpicKeys).slice(0, 100);
+      try {
+        const epPage = await fetchJqlPage(`issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'status'], null, null, null, 100);
+        if (!epPage?.error && Array.isArray(epPage?.issues)) {
+          epPage.issues.forEach(ep => {
+            if (ep?.key) {
+              const entry = {
+                id: ep.id,
+                key: ep.key,
+                summary: ep.fields?.summary || '',
+                status: ep.fields?.status?.name || '',
+                statusCategory: ep.fields?.status?.statusCategory?.key || '',
+                issuelinks: []
+              };
+              epicMap[ep.key.toUpperCase()] = entry;
+              epics.push(entry);
+            }
+          });
+        }
+      } catch (_) {}
+    }
+
     // Step 3: En las Historias, mapear los CASOS DE PRUEBA ligados
-    const tcMap = {}; // testCaseKeyOrId -> { epicKey, epicSummary, storyKey, storySummary }
+    const tcMap = {}; // testCaseKeyOrId -> { epicKey, epicSummary, storyKey, storySummary, storyStatus, storyStatusCategory }
+    const storyMap = {}; // storyKey -> { key, summary, status, statusCategory, epicKey, epicSummary, linkedTestCases }
     const storiesByEpic = {};
 
     stories.forEach(story => {
@@ -911,16 +1023,50 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
 
       if (story.parent?.key) {
         epicKey = story.parent.key;
-        epicSummary = story.parent.fields?.summary || epicMap[epicKey]?.summary || null;
+        epicSummary = story.parent.fields?.summary || epicMap[epicKey.toUpperCase()]?.summary || null;
       } else if (typeof story.customfield_10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(story.customfield_10014.trim())) {
-        epicKey = story.customfield_10014.trim();
+        epicKey = story.customfield_10014.trim().toUpperCase();
         epicSummary = epicMap[epicKey]?.summary || null;
+      } else if (story.customfield_10014 && typeof story.customfield_10014 === 'object' && story.customfield_10014.key) {
+        epicKey = story.customfield_10014.key;
+        epicSummary = story.customfield_10014.summary || epicMap[epicKey.toUpperCase()]?.summary || null;
       }
 
-      if (epicKey) {
-        if (!storiesByEpic[epicKey]) storiesByEpic[epicKey] = [];
-        storiesByEpic[epicKey].push(story.key);
+      // Check if an Epic linked to this Story via epic.issuelinks
+      if (!epicKey && story.key && epicLinkedStoryMap[story.key.toUpperCase()]) {
+        epicKey = epicLinkedStoryMap[story.key.toUpperCase()].epicKey;
+        epicSummary = epicLinkedStoryMap[story.key.toUpperCase()].epicSummary;
       }
+
+      // Also check if story has an issuelink directly to an Epic
+      if (!epicKey && Array.isArray(story.issuelinks)) {
+        for (const link of story.issuelinks) {
+          const cand = link.inwardIssue || link.outwardIssue;
+          if (cand?.key) {
+            const cType = (cand.fields?.issuetype?.name || '').toLowerCase().trim();
+            if (cType === 'epic' || cType === 'épica' || cType.includes('epic') || cType.includes('épica') || epicMap[cand.key.toUpperCase()]) {
+              epicKey = cand.key;
+              epicSummary = cand.fields?.summary || epicMap[cand.key.toUpperCase()]?.summary || null;
+              if (!epicMap[cand.key.toUpperCase()]) {
+                const entry = {
+                  id: cand.id || cand.key,
+                  key: cand.key,
+                  summary: epicSummary || '',
+                  status: cand.fields?.status?.name || '',
+                  statusCategory: cand.fields?.status?.statusCategory?.key || '',
+                  issuelinks: []
+                };
+                epicMap[cand.key.toUpperCase()] = entry;
+                epics.push(entry);
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      const linkedTestCases = [];
+      const seenTc = new Set();
 
       // Read linked test cases in this story's issuelinks
       if (Array.isArray(story.issuelinks)) {
@@ -928,25 +1074,61 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
           const cand = link.inwardIssue || link.outwardIssue;
           if (cand && cand.key) {
             const candType = (cand.fields?.issuetype?.name || '').toLowerCase().trim();
-            // Never treat test runs, bugs, or other epics as test cases
+            // Never treat test runs, bugs, cycles, plans, or epics as test cases
             if (candType && (
               candType.includes('test run') || candType.includes('testrun') || candType.includes('ejecuc') ||
-              candType.includes('bug') || candType.includes('defecto') ||
+              candType.includes('test cycle') || candType.includes('testcycle') || candType.includes('ciclo') ||
+              candType.includes('test plan') || candType.includes('testplan') || candType.includes('test set') || candType.includes('plan de prueba') ||
+              candType.includes('bug') || candType.includes('defecto') || candType.includes('error') ||
               candType.includes('epic') || candType.includes('épica')
             )) {
               return;
             }
-            tcMap[cand.key] = {
-              epicKey,
-              epicSummary,
-              storyKey: story.key,
-              storySummary: story.summary
-            };
+            if (!seenTc.has(cand.key)) {
+              seenTc.add(cand.key);
+              linkedTestCases.push({
+                id: cand.id ? String(cand.id) : null,
+                key: cand.key,
+                summary: cand.fields?.summary || ''
+              });
+            }
+            const existing = tcMap[cand.key];
+            if (!existing || (!existing.epicKey && epicKey)) {
+              tcMap[cand.key] = {
+                epicKey: epicKey || existing?.epicKey || null,
+                epicSummary: epicSummary || existing?.epicSummary || null,
+                storyKey: story.key,
+                storySummary: story.summary,
+                storyStatus: story.status || '',
+                storyStatusCategory: story.statusCategory || ''
+              };
+            }
             if (cand.id) {
               tcMap[String(cand.id)] = tcMap[cand.key];
             }
           }
         });
+      }
+
+      story.epicKey = epicKey;
+      story.epicSummary = epicSummary;
+      story.linkedTestCases = linkedTestCases;
+
+      storyMap[story.key] = {
+        key: story.key,
+        summary: story.summary,
+        status: story.status || '',
+        statusCategory: story.statusCategory || '',
+        epicKey,
+        epicSummary,
+        linkedTestCases
+      };
+
+      if (epicKey) {
+        if (!storiesByEpic[epicKey]) storiesByEpic[epicKey] = [];
+        if (!storiesByEpic[epicKey].includes(story.key)) {
+          storiesByEpic[epicKey].push(story.key);
+        }
       }
     });
 
@@ -978,12 +1160,13 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     return {
       epics,
       stories,
+      storyMap,
       storiesByEpic,
       tcMap
     };
   } catch (err) {
     console.error("getTraceabilityHierarchy exception:", err);
-    return { epics: [], stories: [], storiesByEpic: {}, tcMap: {} };
+    return { epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {} };
   }
 });
 
@@ -1168,9 +1351,17 @@ resolver.define('linkTestToFolder', async ({ payload }) => {
 resolver.define('createTestCycle', async (req) => {
   const { summary, description, projectId } = req.payload;
   
-  // Fetch configured testCycleType
-  const configResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-config`);
-  const config = configResponse.status === 200 ? (await configResponse.json()).value : {};
+  // Fetch configured testCycleType (primary key: testops-config, legacy fallback: testpulse-config)
+  let config = {};
+  const configResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+  if (configResponse.status === 200) {
+    config = (await configResponse.json()).value || {};
+  } else {
+    const legacyResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-config`);
+    if (legacyResponse.status === 200) {
+      config = (await legacyResponse.json()).value || {};
+    }
+  }
   const cycleType = config?.testCycleType || 'Test Cycle';
 
   const body = {
@@ -1411,50 +1602,6 @@ const deleteCycleIndex = async (cycleId) => {
   await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, { method: 'DELETE' }).catch(() => null);
 };
 
-
-function normalizeJiraStatus(status) {
-  if (!status) return 'Not Run';
-  const s = String(status).trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // removes accents: éxito -> exito, ejecución -> ejecucion
-    
-  // 1. PASSED / LISTO / ÉXITO / APROBADO / RESUELTO / FINALIZADO
-  if ([
-    'passed', 'pass', 'listo', 'done', 'aprobado', 'aprobada', 'exito', 'exitoso', 'exitosa',
-    'finalizado', 'finalizada', 'completado', 'completada', 'terminado', 'terminada',
-    'resuelto', 'resuelta', 'resolved', 'closed', 'cerrado', 'cerrada', 'ok',
-    'satisfactorio', 'satisfactoria', 'superado', 'superada', 'conforme', 'validated',
-    'validado', 'validada', 'accepted', 'aceptado', 'aceptada', 'success', 'successful'
-  ].includes(s)) return 'Passed';
-
-  // 2. FAILED / FALLIDO / RECHAZADO / ERROR
-  if ([
-    'failed', 'fail', 'fallido', 'fallida', 'fallo', 'rechazado', 'rechazada',
-    'error', 'defectuoso', 'defectuosa', 'no superado', 'no superada', 'no conforme',
-    'no paso', 'rejected', 'failing', 'bug', 'descartado', 'descartada'
-  ].includes(s)) return 'Failed';
-
-  // 3. BLOCKED / BLOQUEADO / IMPEDIDO
-  if ([
-    'blocked', 'block', 'bloqueado', 'bloqueada', 'bloqueo', 'impedido', 'impedida',
-    'detenido', 'detenida', 'pausado', 'pausada', 'on hold', 'hold', 'detener', 'bloq'
-  ].includes(s)) return 'Blocked';
-
-  // 4. IN PROGRESS / EN CURSO / EN PROGRESO / TESTING
-  if ([
-    'in progress', 'en curso', 'en progreso', 'running', 'en desarrollo', 'en pruebas',
-    'en ejecucion', 'en revision', 'testing', 'qa', 'in review', 'ejecutando',
-    'en proceso', 'work in progress', 'wip'
-  ].includes(s)) return 'In Progress';
-
-  // 5. NOT RUN / TO DO / POR HACER / PENDIENTE / ABIERTO
-  if ([
-    'not run', 'to do', 'por hacer', 'pendiente', 'abierto', 'open', 'backlog',
-    'nuevo', 'new', 'sin ejecutar', 'none', 'unexecuted', 'draft', 'borrador',
-    'por probar', 'to test', 'untested'
-  ].includes(s)) return 'Not Run';
-
-  return status;
-}
 
 // Helper: Safely unlinks a Test Run issue from a Cycle issue (without deleting the Test Run)
 async function unlinkIssueFromCycle(runIssueId, cycleId) {
@@ -2015,16 +2162,16 @@ const getCycleExecutionSummary = async (cycleId) => {
             if (prevRunId) knownIds.add(prevRunId);
             if (prevRunKey) knownIds.add(prevRunKey);
 
-            // Auto-heal missing Jira issue link to cycle in the background
+            // Auto-heal missing Jira issue link to cycle
             const targetRunRef = prev.testRunId || prev.testRunKey;
             if (targetRunRef) {
-              linkTwoIssues(targetRunRef, cycleId, 'Relates').catch(() => {});
+              await linkTwoIssues(targetRunRef, cycleId, 'Relates').catch(() => {});
             }
           }
         }
 
-        // Reconcile cycle sharded index in background so getTestCycles and Dashboard match live Jira runs
-        writeCycleIndex(cycleId, cleanEntries.map(e => ({
+        // Reconcile cycle sharded index before returning so Forge runtime does not freeze mid-write
+        await writeCycleIndex(cycleId, cleanEntries.map(e => ({
           id: String(e.id),
           key: e.key,
           testCaseKey: e.testCaseKey || e.key,
@@ -2115,7 +2262,7 @@ const fetchBugsBatch = async (keys = []) => {
   for (let i = 0; i < uniqueKeys.length; i += CHUNK_SIZE) {
     const chunk = uniqueKeys.slice(i, i + CHUNK_SIZE);
     try {
-      const jql = `key in (${chunk.join(',')})`;
+      const jql = `key in (${chunk.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`;
       let resp = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -2193,8 +2340,9 @@ const fetchBugsBatch = async (keys = []) => {
 resolver.define('getExecutionReport', async ({ payload }) => {
   const { projectId, config, limit = 8, offset = 0, fetchAll = false } = payload || {};
   const cycleType = config?.testCycleType || 'Test Cycle';
+  const cycleTypes = Array.from(new Set([cycleType, 'Test Cycle', 'Ciclo de Pruebas', 'Ciclo de Prueba'])).map(t => `"${t}"`).join(', ');
   
-  const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+  const jql = `project = "${projectId}" AND issuetype in (${cycleTypes}) ORDER BY created DESC`;
   let allIssues = [];
   let token = null;
   let isLast = false;
@@ -2330,14 +2478,10 @@ resolver.define('getTestExecution', async ({ payload }) => {
     let targetRunId = testRunId;
     if (!targetRunId) {
       try {
-        const cycleRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=testpulse-cycle-index`);
-        if (cycleRes.ok) {
-          const cData = await cycleRes.json();
-          const items = cData.properties?.['testpulse-cycle-index'] || [];
-          const matched = items.find(i => String(i.id) === String(testId) || i.key === String(testId) || (i.testCaseId && String(i.testCaseId) === String(testId)) || (i.testCaseKey && i.testCaseKey === String(testId)));
-          if (matched && matched.testRunId) {
-            targetRunId = matched.testRunId;
-          }
+        const items = (await readCycleIndex(cycleId)) || [];
+        const matched = items.find(i => String(i.id) === String(testId) || i.key === String(testId) || (i.testCaseId && String(i.testCaseId) === String(testId)) || (i.testCaseKey && i.testCaseKey === String(testId)));
+        if (matched && (matched.testRunId || matched.testRunKey)) {
+          targetRunId = matched.testRunId || matched.testRunKey;
         }
       } catch (e) {}
     }
@@ -3375,112 +3519,6 @@ resolver.define('getAttachmentContent', async ({ payload }) => {
   }
 });
 
-// === SLA & Business Hours Helpers ===
-function getEaster(year) {
-  const a = year % 19;
-  const b = Math.floor(year / 100);
-  const c = year % 100;
-  const d = Math.floor(b / 4);
-  const e = b % 4;
-  const f = Math.floor((b + 8) / 25);
-  const g = Math.floor((b - f + 1) / 3);
-  const h = (19 * a + b - d - g + 15) % 30;
-  const i = Math.floor(c / 4);
-  const k = c % 4;
-  const l = (32 + 2 * e + 2 * i - h - k) % 7;
-  const m = Math.floor((a + 11 * h + 22 * l) / 451);
-  const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
-  const day = ((h + l - 7 * m + 114) % 31) + 1;
-  return new Date(year, month, day);
-}
-
-function getNthDayOfMonth(year, month, dayOfWeek, n) {
-  let d = new Date(year, month, 1);
-  let count = 0;
-  while (d.getMonth() === month) {
-    if (d.getDay() === dayOfWeek) {
-      count++;
-      if (count === n) return d.getDate();
-    }
-    d.setDate(d.getDate() + 1);
-  }
-  return null;
-}
-
-function isHoliday(date) {
-  const year = date.getFullYear();
-  const month = date.getMonth(); // 0-11
-  const day = date.getDate();
-  
-  // Fijos Oficiales + Navidad/Fin de año
-  if (month === 0 && day === 1) return true; // 1 Ene
-  if (month === 4 && day === 1) return true; // 1 May
-  if (month === 8 && day === 16) return true; // 16 Sep
-  if (month === 11 && day === 24) return true; // 24 Dic
-  if (month === 11 && day === 25) return true; // 25 Dic
-  if (month === 11 && day === 31) return true; // 31 Dic
-  
-  // Móviles
-  if (month === 1 && day === getNthDayOfMonth(year, 1, 1, 1)) return true; // 1er Lunes Feb (5 Feb)
-  if (month === 2 && day === getNthDayOfMonth(year, 2, 1, 3)) return true; // 3er Lunes Mar (21 Mar)
-  if (month === 10 && day === getNthDayOfMonth(year, 10, 1, 3)) return true; // 3er Lunes Nov (20 Nov)
-  
-  // Jueves y Viernes Santo (Liverpool)
-  const easter = getEaster(year);
-  const juevesSanto = new Date(easter); juevesSanto.setDate(juevesSanto.getDate() - 3);
-  const viernesSanto = new Date(easter); viernesSanto.setDate(viernesSanto.getDate() - 2);
-  
-  if (month === juevesSanto.getMonth() && day === juevesSanto.getDate()) return true;
-  if (month === viernesSanto.getMonth() && day === viernesSanto.getDate()) return true;
-  
-  return false;
-}
-
-function getBusinessMilliseconds(startMs, endMs) {
-  if (!startMs || !endMs || startMs >= endMs) return 0;
-  
-  // Assume server time / issue time is mostly UTC or close to it,
-  // we adjust by treating the epoch as Mexico City time (UTC-6)
-  const tzOffsetMs = 6 * 60 * 60 * 1000; 
-  
-  const start = new Date(startMs - tzOffsetMs);
-  const end = new Date(endMs - tzOffsetMs);
-  
-  let current = new Date(start.getTime());
-  let totalMs = 0;
-  
-  while (current < end) {
-    const year = current.getUTCFullYear();
-    const month = current.getUTCMonth();
-    const date = current.getUTCDate();
-    const dayOfWeek = current.getUTCDay(); // 0=Sun, 1=Mon...
-    
-    let nextDay = new Date(Date.UTC(year, month, date + 1, 0, 0, 0));
-    let stepEnd = end < nextDay ? end : nextDay;
-    
-    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Not weekend
-      const localSimDate = new Date(year, month, date);
-      if (!isHoliday(localSimDate)) {
-        const startHour = 7;
-        const endHour = dayOfWeek === 5 ? 13 : 18; // Vie = 13:00, L-J = 18:00
-        
-        const workStart = new Date(Date.UTC(year, month, date, startHour, 0, 0));
-        const workEnd = new Date(Date.UTC(year, month, date, endHour, 0, 0));
-        
-        const overlapStart = current > workStart ? current : workStart;
-        const overlapEnd = stepEnd < workEnd ? stepEnd : workEnd;
-        
-        if (overlapStart < overlapEnd) {
-          totalMs += (overlapEnd - overlapStart);
-        }
-      }
-    }
-    current = nextDay;
-  }
-  
-  return totalMs;
-}
-
 // === Bug Resolution Time ===
 resolver.define('getBugsResolutionTime', async ({ payload }) => {
   const { bugKeys } = payload;
@@ -3815,7 +3853,7 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       'summary', 'description', 'attachment', 'comment', 'assignee', 'reporter',
       'creator', 'priority', 'status', 'resolution', 'created', 'updated',
       'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions',
-      'issuetype', 'customfield_10238', 'customfield_10763', 'labels', 'issuelinks'
+      'issuetype', 'parent', 'customfield_10238', 'customfield_10763', 'labels', 'issuelinks'
     ].join(',');
 
     const response = await api.asUser().requestJira(
@@ -3886,6 +3924,13 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     return {
       id: data.id,
       key: data.key,
+      issueType: f.issuetype?.name || '',
+      parent: f.parent ? {
+        key: f.parent.key,
+        summary: f.parent.fields?.summary || '',
+        status: f.parent.fields?.status?.name || '',
+        issueType: f.parent.fields?.issuetype?.name || ''
+      } : null,
       summary: f.summary || '',
       descriptionRendered,
       descriptionRaw,
@@ -5869,330 +5914,7 @@ resolver.define('checkMobileUploadStatus', async ({ payload }) => {
   return { uploaded: false };
 });
 
-function generateMobileErrorHtml(title, message) {
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Test Pulse | Enlace no disponible</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background-color: #091E42; color: #FFFFFF; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-    .card { background: #FFFFFF; color: #172B4D; border-radius: 16px; padding: 28px 20px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 20px 40px rgba(0,0,0,0.3); }
-    .icon { font-size: 54px; margin-bottom: 16px; }
-    h1 { font-size: 20px; font-weight: 800; color: #BF2600; margin-bottom: 10px; }
-    p { font-size: 14px; color: #44546F; line-height: 1.5; margin-bottom: 20px; }
-    .badge { display: inline-block; background: #F1F2F4; color: #172B4D; font-weight: 700; font-size: 12px; padding: 4px 12px; border-radius: 20px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">⚠️</div>
-    <h1>${title}</h1>
-    <p>${message}</p>
-    <div class="badge">Test Pulse Companion</div>
-  </div>
-</body>
-</html>`;
-}
-
-function generateMobileUploadHtml(session) {
-  const testRunKey = session.testRunKey || session.testRunId || session.testKey || 'TEST-RUN';
-  const testCaseKey = session.testKey || '';
-  const testSummary = session.testSummary || 'Ejecución de Prueba';
-  const iterInfo = session.iterName ? `Paso / Iteración: ${session.iterName}` : 'Evidencia General de la Ejecución';
-  const sessionId = session.sessionId;
-
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>⚡ Test Pulse | Captura Móvil</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
-    body { background: linear-gradient(135deg, #091E42 0%, #172B4D 100%); color: #172B4D; min-height: 100vh; padding: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-    .container { width: 100%; max-width: 460px; background: #FFFFFF; border-radius: 20px; box-shadow: 0 24px 48px rgba(0,0,0,0.35); overflow: hidden; display: flex; flex-direction: column; }
-    .header { background: #E1007A; background: linear-gradient(135deg, #E1007A 0%, #B0005E 100%); color: #FFFFFF; padding: 20px; text-align: center; }
-    .header .logo { font-size: 13px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; opacity: 0.9; margin-bottom: 4px; }
-    .header h1 { font-size: 18px; font-weight: 800; }
-    .body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
-    .meta-box { background: #F7F8F9; border: 1px solid #DCDFE4; border-radius: 12px; padding: 12px 14px; }
-    .meta-tag { display: inline-flex; align-items: center; gap: 4px; background: #E9F2FF; color: #0C66E4; font-weight: 800; font-size: 12px; padding: 2px 8px; border-radius: 6px; margin-bottom: 6px; }
-    .meta-title { font-size: 13px; font-weight: 700; color: #172B4D; line-height: 1.4; }
-    .meta-sub { font-size: 11px; color: #626F86; font-weight: 500; margin-top: 4px; }
-    
-    .actions-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
-    .btn-camera { background: #E1007A; background: linear-gradient(135deg, #E1007A 0%, #C20066 100%); color: #FFFFFF; border: none; border-radius: 14px; padding: 18px; font-size: 16px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; box-shadow: 0 6px 16px rgba(225, 0, 122, 0.35); transition: transform 0.1s; }
-    .btn-camera:active { transform: scale(0.98); }
-    .btn-gallery { background: #F1F2F4; color: #172B4D; border: 1px solid #DCDFE4; border-radius: 12px; padding: 13px; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; }
-    .btn-gallery:active { background: #E4E6EA; }
-    
-    .preview-card { border: 2px dashed #0C66E4; border-radius: 14px; background: #F8FAFD; padding: 12px; text-align: center; position: relative; }
-    .preview-card img, .preview-card video { width: 100%; max-height: 240px; object-fit: contain; border-radius: 8px; background: #000; }
-    .preview-info { font-size: 11px; color: #626F86; margin-top: 6px; font-weight: 600; }
-    .btn-remove-preview { position: absolute; top: 18px; right: 18px; background: rgba(0,0,0,0.7); color: #fff; border: none; border-radius: 50%; width: 28px; height: 28px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; }
-
-    .note-input { width: 100%; border: 1px solid #DCDFE4; border-radius: 10px; padding: 10px 12px; font-size: 13px; outline: none; resize: none; color: #172B4D; background: #FAFBFC; }
-    .note-input:focus { border-color: #0C66E4; background: #FFF; }
-
-    .btn-submit { background: #006644; background: linear-gradient(135deg, #1F845A 0%, #006644 100%); color: #FFFFFF; border: none; border-radius: 14px; padding: 16px; font-size: 16px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; box-shadow: 0 6px 16px rgba(0, 102, 68, 0.3); }
-    .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-
-    .success-view { display: none; padding: 36px 20px; text-align: center; }
-    .success-icon { font-size: 64px; animation: bounce 0.6s ease; }
-    .success-title { font-size: 20px; font-weight: 800; color: #1F845A; margin: 12px 0 8px 0; }
-    .success-msg { font-size: 13.5px; color: #44546F; line-height: 1.5; margin-bottom: 24px; }
-    .btn-again { background: #E1007A; color: #FFFFFF; border: none; border-radius: 12px; padding: 14px 24px; font-size: 14px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
-
-    .loading-overlay { display: none; position: absolute; inset: 0; background: rgba(255,255,255,0.92); z-index: 10; border-radius: 20px; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
-    .spinner { width: 44px; height: 44px; border: 4px solid #E1007A; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
-    
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes bounce { 0% { transform: scale(0.3); } 50% { transform: scale(1.15); } 100% { transform: scale(1); } }
-  </style>
-</head>
-<body>
-  <div class="container" style="position: relative;">
-    
-    <!-- Loading Overlay -->
-    <div id="loadingOverlay" class="loading-overlay">
-      <div class="spinner"></div>
-      <div id="loadingText" style="font-size: 14px; font-weight: 700; color: #172B4D;">Optimizando y enviando evidencia...</div>
-    </div>
-
-    <!-- Header -->
-    <div class="header">
-      <div class="logo">⚡ Test Pulse Companion</div>
-      <h1>📸 Captura Móvil de Evidencia</h1>
-    </div>
-
-    <!-- Main Upload Form -->
-    <div id="uploadFormContainer" class="body">
-      <!-- Target Info -->
-      <div class="meta-box">
-        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
-          <span class="meta-tag" style="margin-bottom: 0;">🏃 Test Run: ${testRunKey}</span>
-          ${testCaseKey && testCaseKey !== testRunKey ? `<span style="font-size: 11px; background: #E4E6EA; color: #44546F; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🧪 Caso: ${testCaseKey}</span>` : ''}
-        </div>
-        <div class="meta-title">${testSummary}</div>
-        <div class="meta-sub">📁 ${iterInfo}</div>
-      </div>
-
-      <!-- Hidden inputs for Camera and Gallery -->
-      <input type="file" id="cameraInput" accept="image/*" capture="environment" style="display:none;" />
-      <input type="file" id="galleryInput" accept="image/*,video/*" style="display:none;" />
-
-      <!-- Step 1: Action Buttons (when no file selected) -->
-      <div id="initialActions" class="actions-grid">
-        <button type="button" class="btn-camera" onclick="document.getElementById('cameraInput').click();">
-          <span style="font-size: 22px;">📷</span>
-          <span>TOMAR FOTO CON CÁMARA</span>
-        </button>
-        <button type="button" class="btn-gallery" onclick="document.getElementById('galleryInput').click();">
-          <span>🖼️ Galería o Video</span>
-        </button>
-      </div>
-
-      <!-- Step 2: Preview Area (when file selected) -->
-      <div id="previewArea" style="display: none; flex-direction: column; gap: 12px;">
-        <div class="preview-card">
-          <button type="button" class="btn-remove-preview" onclick="resetSelectedFile();" title="Quitar">✕</button>
-          <div id="previewMediaContainer"></div>
-          <div id="previewInfo" class="preview-info"></div>
-        </div>
-
-        <textarea id="noteInput" class="note-input" rows="2" placeholder="Comentario o nota sobre esta captura (opcional)..."></textarea>
-
-        <button type="button" id="submitBtn" class="btn-submit" onclick="submitEvidence();">
-          <span>🚀 ENVIAR A LA PANTALLA</span>
-        </button>
-
-        <button type="button" class="btn-gallery" onclick="document.getElementById('cameraInput').click();" style="padding: 10px; font-size: 12px;">
-          <span>🔄 Cambiar Foto</span>
-        </button>
-      </div>
-    </div>
-
-    <!-- Success Screen -->
-    <div id="successView" class="success-view">
-      <div class="success-icon">✅</div>
-      <div class="success-title">¡Evidencia Enviada!</div>
-      <div class="success-msg">
-        La captura ya se encuentra adjunta al Test Run en la pantalla de tu computadora.
-      </div>
-      <button type="button" class="btn-again" onclick="takeAnother();">
-        <span>📸 Tomar Otra Foto</span>
-      </button>
-    </div>
-
-  </div>
-
-  <script>
-    const SESSION_ID = "${sessionId}";
-    let currentFile = null;
-    let currentBase64 = null;
-    let currentMime = 'image/jpeg';
-
-    const cameraInput = document.getElementById('cameraInput');
-    const galleryInput = document.getElementById('galleryInput');
-
-    cameraInput.addEventListener('change', handleFileSelect);
-    galleryInput.addEventListener('change', handleFileSelect);
-
-    async function handleFileSelect(e) {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-
-      currentFile = file;
-      currentMime = file.type || 'image/jpeg';
-      showLoading('Procesando vista previa...');
-
-      try {
-        const isImage = file.type.startsWith('image/');
-        const isVideo = file.type.startsWith('video/');
-
-        if (isImage) {
-          // Client-side canvas downscale / compression
-          const compressed = await compressImage(file, 1920, 0.85);
-          currentBase64 = compressed.base64;
-          currentMime = compressed.mime;
-
-          const container = document.getElementById('previewMediaContainer');
-          container.innerHTML = '<img src="' + currentBase64 + '" alt="Vista Previa" />';
-          
-          const origSize = (file.size / 1024 / 1024).toFixed(2);
-          const compSize = (compressed.size / 1024 / 1024).toFixed(2);
-          document.getElementById('previewInfo').innerText = file.name + ' • ' + compSize + ' MB (Optimizado)';
-        } else if (isVideo) {
-          currentBase64 = await readFileAsBase64(file);
-          const container = document.getElementById('previewMediaContainer');
-          container.innerHTML = '<video controls src="' + currentBase64 + '"></video>';
-          const sz = (file.size / 1024 / 1024).toFixed(2);
-          document.getElementById('previewInfo').innerText = file.name + ' • ' + sz + ' MB (Video)';
-        }
-
-        document.getElementById('initialActions').style.display = 'none';
-        document.getElementById('previewArea').style.display = 'flex';
-      } catch (err) {
-        alert('Error al leer el archivo: ' + err.message);
-      } finally {
-        hideLoading();
-      }
-    }
-
-    function resetSelectedFile() {
-      currentFile = null;
-      currentBase64 = null;
-      cameraInput.value = '';
-      galleryInput.value = '';
-      document.getElementById('previewArea').style.display = 'none';
-      document.getElementById('initialActions').style.display = 'flex';
-    }
-
-    function takeAnother() {
-      resetSelectedFile();
-      document.getElementById('successView').style.display = 'none';
-      document.getElementById('uploadFormContainer').style.display = 'flex';
-      document.getElementById('noteInput').value = '';
-    }
-
-    async function submitEvidence() {
-      if (!currentBase64) {
-        alert('Por favor toma una foto primero.');
-        return;
-      }
-
-      showLoading('Subiendo evidencia a Jira... 🚀');
-      const note = document.getElementById('noteInput').value.trim();
-
-      try {
-        const response = await fetch(window.location.href, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: SESSION_ID,
-            filename: currentFile ? currentFile.name : ('foto_' + Date.now() + '.jpg'),
-            mimeType: currentMime,
-            base64Data: currentBase64,
-            note: note
-          })
-        });
-
-        const result = await response.json();
-        if (result.success) {
-          document.getElementById('uploadFormContainer').style.display = 'none';
-          document.getElementById('successView').style.display = 'block';
-        } else {
-          alert('Error: ' + (result.error || 'No se pudo subir la evidencia'));
-        }
-      } catch (err) {
-        alert('Error de conexión al subir la evidencia: ' + err.message);
-      } finally {
-        hideLoading();
-      }
-    }
-
-    function compressImage(file, maxDimension, quality) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-          const img = new Image();
-          img.onload = function() {
-            let width = img.width;
-            let height = img.height;
-
-            if (width > maxDimension || height > maxDimension) {
-              if (width > height) {
-                height = Math.round((height * maxDimension) / width);
-                width = maxDimension;
-              } else {
-                width = Math.round((width * maxDimension) / height);
-                height = maxDimension;
-              }
-            }
-
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-
-            const mime = 'image/jpeg';
-            const base64 = canvas.toDataURL(mime, quality);
-            const byteString = atob(base64.split(',')[1]);
-            resolve({ base64, mime, size: byteString.length });
-          };
-          img.onerror = reject;
-          img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function readFileAsBase64(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function showLoading(text) {
-      document.getElementById('loadingText').innerText = text || 'Cargando...';
-      document.getElementById('loadingOverlay').style.display = 'flex';
-    }
-
-    function hideLoading() {
-      document.getElementById('loadingOverlay').style.display = 'none';
-    }
-  </script>
-</body>
-</html>`;
-}
+const QR_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 export async function mobileUploadHandler(request) {
   const method = request.method ? request.method.toUpperCase() : 'GET';
@@ -6234,7 +5956,9 @@ export async function mobileUploadHandler(request) {
     }
 
     const session = await storage.get('qrsession_' + sessionId);
-    if (!session) {
+    const isExpired = session?.createdAt && (Date.now() - session.createdAt > QR_SESSION_TTL_MS);
+    if (!session || isExpired) {
+      if (isExpired) await storage.delete('qrsession_' + sessionId).catch(() => {});
       return {
         statusCode: 404,
         headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
@@ -6273,7 +5997,9 @@ export async function mobileUploadHandler(request) {
       }
 
       const session = await storage.get('qrsession_' + sessionId);
-      if (!session) {
+      const isExpired = session?.createdAt && (Date.now() - session.createdAt > QR_SESSION_TTL_MS);
+      if (!session || isExpired) {
+        if (isExpired) await storage.delete('qrsession_' + sessionId).catch(() => {});
         return {
           statusCode: 404,
           headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },

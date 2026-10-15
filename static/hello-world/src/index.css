@@ -544,7 +544,10 @@ body {
 }
 
 [data-theme='dark'] .modal-overlay,
-[data-theme='dark'] .ads-modal-overlay,
+[data-theme='dark'] .ads-modal-overlay {
+  background-color: rgba(9, 30, 66, 0.8);
+}
+
 @media (prefers-color-scheme: dark) {
   .modal-overlay,
   .ads-modal-overlay {
