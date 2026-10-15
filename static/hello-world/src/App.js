@@ -976,19 +976,167 @@ function LoadMoreSentinel({ onVisible, remaining }) {
   );
 }
 
+// Resolves Epic and Requirement/Story details from a test case, its Jira links, parent hierarchy, and requirements map
+const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
+  let epicKey = null;
+  let epicSummary = null;
+  let reqKey = null;
+  let reqSummary = null;
+
+  if (!tc) return { epicKey: null, epicSummary: null, reqKey: null, reqSummary: null };
+
+  const raw = tc.rawFields || {};
+  const reqTypesConfig = (config?.requirementIssueTypes || []).map(t => String(t).toLowerCase().trim());
+  const reqLinkTypeConfig = (config?.requirementLinkType && config.requirementLinkType !== 'ANY')
+    ? String(config.requirementLinkType).toLowerCase().trim()
+    : null;
+
+  const isReqType = (typeStr) => {
+    const t = String(typeStr || '').toLowerCase().trim();
+    if (!t) return false;
+    if (reqTypesConfig.length > 0) return reqTypesConfig.includes(t);
+    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'task', 'tarea', 'sub-task', 'subtask'].includes(t);
+  };
+
+  const isEpicType = (typeStr) => {
+    const t = String(typeStr || '').toLowerCase().trim();
+    return t === 'epic' || t === 'épica';
+  };
+
+  // 1. Explicit properties on tc
+  if (tc.epicKey || tc.epic) epicKey = tc.epicKey || tc.epic;
+  if (tc.epicName || tc.epicSummary) epicSummary = tc.epicName || tc.epicSummary;
+  if (tc.storyKey || tc.userStory || tc.requirement) reqKey = tc.storyKey || tc.userStory || tc.requirement;
+  if (tc.storySummary || tc.requirementSummary) reqSummary = tc.storySummary || tc.requirementSummary;
+
+  // 2. Customfield 10014 (standard Epic Link in Company-managed projects)
+  if (!epicKey && raw.customfield_10014) {
+    const val = raw.customfield_10014;
+    if (typeof val === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(val.trim())) {
+      epicKey = val.trim();
+    } else if (val && typeof val === 'object' && val.key) {
+      epicKey = val.key;
+      epicSummary = val.summary || null;
+    }
+  }
+
+  // 3. Parent field (modern Jira Cloud)
+  if (raw.parent) {
+    const pKey = raw.parent.key;
+    const pType = raw.parent.fields?.issuetype?.name || '';
+    const pSummary = raw.parent.fields?.summary || '';
+
+    if (isEpicType(pType)) {
+      if (!epicKey) {
+        epicKey = pKey;
+        epicSummary = pSummary;
+      }
+    } else if (isReqType(pType)) {
+      if (!reqKey) {
+        reqKey = pKey;
+        reqSummary = pSummary;
+      }
+    }
+  }
+
+  // 4. Issue Links (issuelinks)
+  if (Array.isArray(raw.issuelinks) && raw.issuelinks.length > 0) {
+    let matchedLinkReq = null;
+    let fallbackLinkReq = null;
+
+    for (const link of raw.issuelinks) {
+      const typeName = String(link.type?.name || '').toLowerCase().trim();
+      const inwardName = String(link.type?.inward || '').toLowerCase().trim();
+      const outwardName = String(link.type?.outward || '').toLowerCase().trim();
+      const isConfiguredLinkType = reqLinkTypeConfig && (
+        typeName === reqLinkTypeConfig || inwardName === reqLinkTypeConfig || outwardName === reqLinkTypeConfig
+      );
+
+      const candidates = [link.inwardIssue, link.outwardIssue].filter(Boolean);
+      for (const cand of candidates) {
+        const cKey = cand.key;
+        const cType = cand.fields?.issuetype?.name || cand.fields?.issuetype || '';
+        const cSummary = cand.fields?.summary || '';
+
+        // Candidate is Epic
+        if (isEpicType(cType)) {
+          if (!epicKey) {
+            epicKey = cKey;
+            epicSummary = cSummary;
+          }
+        }
+
+        // Candidate is Requirement / Story
+        if (isReqType(cType)) {
+          const reqItem = { key: cKey, summary: cSummary, parent: cand.fields?.parent };
+          if (isConfiguredLinkType && !matchedLinkReq) {
+            matchedLinkReq = reqItem;
+          } else if (!fallbackLinkReq) {
+            fallbackLinkReq = reqItem;
+          }
+        }
+      }
+    }
+
+    const chosenReq = matchedLinkReq || fallbackLinkReq;
+    if (chosenReq) {
+      if (!reqKey) {
+        reqKey = chosenReq.key;
+        reqSummary = chosenReq.summary;
+      }
+      if (!epicKey && chosenReq.parent) {
+        const cpType = chosenReq.parent.fields?.issuetype?.name || '';
+        if (isEpicType(cpType) || chosenReq.parent.key) {
+          epicKey = chosenReq.parent.key;
+          epicSummary = chosenReq.parent.fields?.summary || null;
+        }
+      }
+    }
+  }
+
+  // 5. Labels fallback (e.g. epic:PROJ-10, story:PROJ-20)
+  const allLabels = [...(Array.isArray(tc.labels) ? tc.labels : []), ...(Array.isArray(raw.labels) ? raw.labels : [])];
+  if (!epicKey && allLabels.length > 0) {
+    const epLabel = allLabels.find(l => String(l).toLowerCase().startsWith('epic:'));
+    if (epLabel) epicKey = epLabel.replace(/^epic:/i, '').trim();
+  }
+  if (!reqKey && allLabels.length > 0) {
+    const stLabel = allLabels.find(l => String(l).toLowerCase().startsWith('story:') || String(l).toLowerCase().startsWith('req:'));
+    if (stLabel) reqKey = stLabel.replace(/^(story|req):/i, '').trim();
+  }
+
+  // 6. If we have a Requirement key but NO Epic, check reqMap
+  if (!epicKey && reqKey && reqMap[reqKey]) {
+    const reqInfo = reqMap[reqKey];
+    if (reqInfo.epicKey) {
+      epicKey = reqInfo.epicKey;
+      epicSummary = reqInfo.epicSummary || null;
+    }
+    if (!reqSummary && reqInfo.summary) {
+      reqSummary = reqInfo.summary;
+    }
+  }
+
+  return { epicKey, epicSummary, reqKey, reqSummary };
+};
+
 function App() {
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
   
   // Design Tab State
   const [folders, setFolders] = useState([]);
   const [testCases, setTestCases] = useState([]);
-  // O(1) lookup by id — replaces repeated testCases.find(...) scans inside list renders
+  const [requirementsMap, setRequirementsMap] = useState({});
+  // O(1) lookup by id or key — replaces repeated testCases.find(...) scans inside list renders
   const testCasesById = useMemo(() => {
     const m = new Map();
-    for (const t of testCases) if (t && t.id != null) m.set(String(t.id), t);
+    for (const t of testCases) {
+      if (t && t.id != null) m.set(String(t.id), t);
+      if (t && t.key != null) m.set(String(t.key), t);
+    }
     return m;
   }, [testCases]);
-  const findTc = useCallback((id) => (id == null ? undefined : testCasesById.get(String(id))), [testCasesById]);
+  const findTc = useCallback((idOrKey) => (idOrKey == null ? undefined : testCasesById.get(String(idOrKey))), [testCasesById]);
   const [activeFolder, setActiveFolder] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
   const [isAllTestsExpanded, setIsAllTestsExpanded] = useState(true);
@@ -1626,6 +1774,59 @@ function App() {
       }
       return allIssues;
   };
+
+  const fetchLinkedRequirements = async (tests, projId, cfg) => {
+    const targetProjId = projId || selectedProjectId;
+    if (!targetProjId) return;
+    try {
+      const linkedKeys = new Set();
+      (tests || []).forEach(tc => {
+        const raw = tc?.rawFields;
+        if (raw?.parent?.key) linkedKeys.add(raw.parent.key);
+        if (Array.isArray(raw?.issuelinks)) {
+          raw.issuelinks.forEach(link => {
+            if (link?.inwardIssue?.key) linkedKeys.add(link.inwardIssue.key);
+            if (link?.outwardIssue?.key) linkedKeys.add(link.outwardIssue.key);
+          });
+        }
+      });
+
+      const issueKeysArray = Array.from(linkedKeys).filter(k => /^[A-Z][A-Z0-9]+-\d+$/i.test(k)).slice(0, 100);
+      const reqRes = await invoke('getRequirements', {
+        projectId: targetProjId,
+        config: cfg || projectConfig,
+        issueKeys: issueKeysArray.length > 0 ? issueKeysArray : undefined
+      });
+
+      if (Array.isArray(reqRes) && reqRes.length > 0) {
+        const reqMap = {};
+        reqRes.forEach(issue => {
+          if (!issue || !issue.key) return;
+          const p = issue.fields?.parent;
+          const cf10014 = issue.fields?.customfield_10014;
+          let epicKey = null;
+          let epicSummary = null;
+          if (p?.key) {
+            epicKey = p.key;
+            epicSummary = p.fields?.summary || null;
+          } else if (typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
+            epicKey = cf10014.trim();
+          }
+          reqMap[issue.key] = {
+            key: issue.key,
+            summary: issue.fields?.summary || '',
+            issueType: issue.fields?.issuetype?.name || '',
+            epicKey,
+            epicSummary
+          };
+        });
+        setRequirementsMap(prev => ({ ...prev, ...reqMap }));
+      }
+    } catch (e) {
+      console.warn("fetchLinkedRequirements error:", e);
+    }
+  };
+
   const loadData = async (currentProjectId = selectedProjectId) => {
     setLoading(true);
     setLoadError(null);
@@ -1752,6 +1953,7 @@ function App() {
           const { ts, data } = JSON.parse(raw);
           if (Date.now() - ts < 300_000 && Array.isArray(data) && data.length > 0) {
             setTestCases(data);
+            fetchLinkedRequirements(data, targetProjectId, config);
           }
         }
       } catch (e) {}
@@ -1761,6 +1963,7 @@ function App() {
         .then(tests => {
           setTestCases(tests || []);
           try { sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: tests || [] })); } catch (e) {}
+          fetchLinkedRequirements(tests || [], targetProjectId, config);
         })
         .catch(console.warn)
         .finally(() => {
@@ -4050,6 +4253,8 @@ Then el sistema valida la identidad.
       selectedTestCase.testType
     ) || 'Funcional';
 
+    const modalEpicReq = extractEpicAndRequirement(selectedTestCase, projectConfig, requirementsMap);
+
     return (
       <div 
         style={{
@@ -4114,6 +4319,30 @@ Then el sistema valida la identidad.
                 {isAuto && (
                   <span className="ads-lozenge ads-lozenge-purple" style={{ fontSize: '10px', padding: '1px 6px', fontWeight: 700, borderRadius: '4px' }}>
                     ⚡ Auto
+                  </span>
+                )}
+
+                {/* Epic Lozenge if present */}
+                {modalEpicReq.epicKey && (
+                  <span
+                    onClick={() => router.open('/browse/' + modalEpicReq.epicKey)}
+                    className="ads-lozenge ads-lozenge-subtle"
+                    style={{ fontSize: '10px', color: '#6554C0', background: '#EAE6FF', fontWeight: 700, cursor: 'pointer' }}
+                    title={modalEpicReq.epicSummary ? `${modalEpicReq.epicKey}: ${modalEpicReq.epicSummary}` : modalEpicReq.epicKey}
+                  >
+                    ⚡ {modalEpicReq.epicKey}
+                  </span>
+                )}
+
+                {/* Requirement / Story Lozenge if present */}
+                {modalEpicReq.reqKey && (
+                  <span
+                    onClick={() => router.open('/browse/' + modalEpicReq.reqKey)}
+                    className="ads-lozenge ads-lozenge-subtle"
+                    style={{ fontSize: '10px', color: '#0065FF', background: '#DEEBFF', fontWeight: 700, cursor: 'pointer' }}
+                    title={modalEpicReq.reqSummary ? `${modalEpicReq.reqKey}: ${modalEpicReq.reqSummary}` : modalEpicReq.reqKey}
+                  >
+                    📖 {modalEpicReq.reqKey}
                   </span>
                 )}
               </div>
@@ -12150,8 +12379,12 @@ const renderPlanningTab = () => {
           const folderObj = folders.find(f => String(f.id) === String(tc?.folderId || tc?.folder));
           const folderName = folderObj?.name || tc?.folderName || tc?.folder || 'General';
           const exType = ex.executionType || tc?.executionType || 'Manual';
-          const epicVal = tc?.epic || tc?.epicKey || tc?.epicName || (Array.isArray(tc?.labels) ? tc.labels.find(l => String(l).toLowerCase().startsWith('epic:'))?.replace(/^epic:/i, '') : null) || null;
-          const reqVal = tc?.requirement || tc?.storyKey || tc?.userStory || (Array.isArray(tc?.labels) ? tc.labels.find(l => String(l).toLowerCase().startsWith('story:'))?.replace(/^story:/i, '') : null) || null;
+
+          const extracted = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
+          const epicVal = extracted.epicKey || null;
+          const epicSummary = extracted.epicSummary || null;
+          const reqVal = extracted.reqKey || null;
+          const reqSummary = extracted.reqSummary || null;
           const exBugs = (ex.linkedBugs && Array.isArray(ex.linkedBugs)) ? ex.linkedBugs.filter(isActualBug) : [];
 
           traceabilityRows.push({
@@ -12165,7 +12398,11 @@ const renderPlanningTab = () => {
             executionType: exType,
             status: ex.status || 'NOT_RUN',
             epic: epicVal,
+            epicKey: extracted.epicKey,
+            epicSummary: epicSummary,
             requirement: reqVal,
+            requirementKey: extracted.reqKey,
+            requirementSummary: reqSummary,
             bugs: exBugs
           });
         });
@@ -12224,7 +12461,9 @@ const renderPlanningTab = () => {
         row.cycleName.toLowerCase().includes(q) ||
         row.folderName.toLowerCase().includes(q) ||
         (row.epic && row.epic.toLowerCase().includes(q)) ||
+        (row.epicSummary && row.epicSummary.toLowerCase().includes(q)) ||
         (row.requirement && row.requirement.toLowerCase().includes(q)) ||
+        (row.requirementSummary && row.requirementSummary.toLowerCase().includes(q)) ||
         row.bugs.some(b => (b.key && b.key.toLowerCase().includes(q)) || (b.summary && b.summary.toLowerCase().includes(q)))
       );
     });
@@ -14509,29 +14748,6 @@ const renderPlanningTab = () => {
                   </div>
                 </div>
 
-                {/* Construction notice banner */}
-                <div style={{
-                  margin: '0.5rem 1rem 1rem 1rem',
-                  background: '#FFFBE6',
-                  border: '1px solid #FFE380',
-                  borderRadius: '6px',
-                  padding: '10px 14px',
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '10px',
-                  color: '#172B4D'
-                }}>
-                  <span style={{ fontSize: '18px', lineHeight: 1 }}>🚧</span>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: '12px', color: '#172B4D' }}>
-                      Asociación de Épicas e Historias de Usuario (Requisitos) — En Construcción
-                    </div>
-                    <div style={{ fontSize: '11px', color: '#626F86', marginTop: '2px' }}>
-                      El detalle de casos se encuentra estructurado para vincular directamente las <strong>Épicas</strong> y <strong>Historias de Usuario</strong> con cada Caso de Prueba y sus resultados de ejecución en los ciclos.
-                    </div>
-                  </div>
-                </div>
-
                 {filteredTraceabilityRows.length > 0 ? (
                   <table className="dashboard-defects-table">
                     <thead>
@@ -14551,9 +14767,26 @@ const renderPlanningTab = () => {
                           {/* 1. Épica de Jira */}
                           <td style={{ whiteSpace: 'nowrap' }}>
                             {row.epic ? (
-                              <span className="ads-lozenge ads-lozenge-subtle" style={{ fontWeight: 700, color: '#6554C0', background: '#EAE6FF' }}>
-                                ⚡ {row.epic}
-                              </span>
+                              <a
+                                href={`/browse/${row.epicKey || row.epic}`}
+                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + (row.epicKey || row.epic)); }}
+                                className="ads-lozenge ads-lozenge-subtle"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  fontWeight: 700,
+                                  color: '#6554C0',
+                                  background: '#EAE6FF',
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  textDecoration: 'none',
+                                  cursor: 'pointer'
+                                }}
+                                title={row.epicSummary ? `${row.epicKey || row.epic}: ${row.epicSummary}` : (row.epicKey || row.epic)}
+                              >
+                                ⚡ {row.epicKey || row.epic}
+                              </a>
                             ) : (
                               <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
                                 ⚡ Por vincular
@@ -14564,9 +14797,26 @@ const renderPlanningTab = () => {
                           {/* 2. Historia de Usuario (Requisito) */}
                           <td style={{ whiteSpace: 'nowrap' }}>
                             {row.requirement ? (
-                              <span className="ads-lozenge ads-lozenge-subtle" style={{ fontWeight: 700, color: '#0065FF', background: '#DEEBFF' }}>
-                                📖 {row.requirement}
-                              </span>
+                              <a
+                                href={`/browse/${row.requirementKey || row.requirement}`}
+                                onClick={(e) => { e.preventDefault(); router.open('/browse/' + (row.requirementKey || row.requirement)); }}
+                                className="ads-lozenge ads-lozenge-subtle"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  fontWeight: 700,
+                                  color: '#0065FF',
+                                  background: '#DEEBFF',
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  textDecoration: 'none',
+                                  cursor: 'pointer'
+                                }}
+                                title={row.requirementSummary ? `${row.requirementKey || row.requirement}: ${row.requirementSummary}` : (row.requirementKey || row.requirement)}
+                              >
+                                📖 {row.requirementKey || row.requirement}
+                              </a>
                             ) : (
                               <span style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '11px', fontStyle: 'italic' }}>
                                 📁 {row.folderName}

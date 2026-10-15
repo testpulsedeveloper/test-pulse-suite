@@ -678,7 +678,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
 
   const jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
   
-  let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'customfield_10014', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'reporter', 'creator', 'assignee'];
+  let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'parent', 'customfield_10014', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'reporter', 'creator', 'assignee'];
   if (payload?.executionTypeFieldId) {
      fieldsToFetch.push(payload.executionTypeFieldId);
   }
@@ -714,34 +714,32 @@ resolver.define('getTestCases', async ({ payload, context }) => {
 resolver.define('getRequirements', async ({ payload, context }) => {
   try {
     const projectId = payload?.projectId || context?.extension?.project?.id;
-    const requirementTypes = payload?.config?.requirementIssueTypes || [];
-    
-    if (!requirementTypes || requirementTypes.length === 0) {
+    let requirementTypes = payload?.config?.requirementIssueTypes || [];
+    const issueKeys = Array.isArray(payload?.issueKeys)
+      ? payload.issueKeys.filter(k => typeof k === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(k.trim())).map(k => k.trim())
+      : [];
+
+    let jql = '';
+    if (issueKeys.length > 0) {
+      const keyList = issueKeys.slice(0, 100).map(k => `"${k}"`).join(', ');
+      jql = `issueKey IN (${keyList})`;
+    } else {
+      if (!requirementTypes || requirementTypes.length === 0) {
+        requirementTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea', 'Epic', 'Épica'];
+      }
+      const projectJql = projectId ? `project = ${projectId} AND ` : '';
+      const typeList = requirementTypes.map(t => `"${t}"`).join(', ');
+      jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
+    }
+
+    const pageData = await fetchJqlPage(jql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status'], null, null, null, 100);
+    if (pageData?.error) {
       return [];
     }
-    
-    const projectJql = projectId ? `project = ${projectId} AND ` : '';
-    const typeList = requirementTypes.map(t => `"${t}"`).join(', ');
-    const jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
-    
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql,
-        fields: ['summary', 'issuetype', 'parent', 'customfield_10014', 'status'],
-        maxResults: 100
-      })
-    });
-    
-    if (!response.ok) {
-      return { _isError: true, status: response.status };
-    }
-    const data = await response.json();
-    return data.issues || [];
+    return pageData?.issues || [];
   } catch (e) {
     console.error("getRequirements exception:", e);
-    return { _isError: true, message: String(e) };
+    return [];
   }
 });
 
