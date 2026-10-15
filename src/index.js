@@ -396,24 +396,103 @@ resolver.define('checkAdminPermission', async ({ payload }) => {
 });
 
 // === Test Issue Queries ===
+function filterValidIssueTypes(candidates, projectIssueTypes, primaryType) {
+  const cleanCandidates = Array.from(new Set(
+    (candidates || []).filter(t => typeof t === 'string' && t.trim().length > 0).map(t => t.trim())
+  ));
+  if (Array.isArray(projectIssueTypes) && projectIssueTypes.length > 0) {
+    const projectTypeMap = new Map();
+    for (const pt of projectIssueTypes) {
+      const name = typeof pt === 'string' ? pt : pt?.name;
+      if (name && typeof name === 'string') {
+        projectTypeMap.set(name.trim().toLowerCase(), name.trim());
+      }
+    }
+    const matched = [];
+    for (const cand of cleanCandidates) {
+      const exact = projectTypeMap.get(cand.toLowerCase());
+      if (exact && !matched.includes(exact)) {
+        matched.push(exact);
+      }
+    }
+    if (matched.length > 0) return matched;
+  }
+  return cleanCandidates;
+}
+
+async function fetchIssuesByCandidateTypes(projectId, projectJql, candidates, projectIssueTypes, primaryType, fields, expand, properties) {
+  let validTypes = filterValidIssueTypes(candidates, projectIssueTypes, primaryType);
+  if (validTypes.length === 0 && primaryType) validTypes = [primaryType];
+  if (validTypes.length === 0) return [];
+
+  const buildJql = (types) => `${projectJql}issuetype in (${types.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+  const firstPage = await fetchJqlPage(buildJql(validTypes), fields, expand, properties, null, 100);
+
+  if (firstPage.error) {
+    console.warn(`fetchIssuesByCandidateTypes multi-type JQL failed (${firstPage.error}), resolving valid project issue types...`);
+    let resolvedTypes = [];
+    if (projectId) {
+      try {
+        const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (projRes.ok) {
+          const projData = await projRes.json();
+          if (Array.isArray(projData.issueTypes) && projData.issueTypes.length > 0) {
+            resolvedTypes = filterValidIssueTypes(candidates, projData.issueTypes, primaryType);
+          }
+        }
+      } catch (_) {}
+    }
+    if (resolvedTypes.length === 0 || resolvedTypes.length === validTypes.length) {
+      resolvedTypes = primaryType ? [primaryType] : [validTypes[0]];
+    }
+    return await fetchAllIssues(buildJql(resolvedTypes), fields, expand, properties);
+  }
+
+  let allIssues = [...(firstPage.issues || [])];
+  let token = firstPage.nextPageToken;
+  let isLast = firstPage.isLast;
+  let pages = 1;
+  while (!isLast && token && pages < 35) {
+    await new Promise(r => setTimeout(r, 60));
+    const page = await fetchJqlPage(buildJql(validTypes), fields, expand, properties, token, 100);
+    if (page.error) break;
+    allIssues = allIssues.concat(page.issues);
+    token = page.nextPageToken;
+    isLast = page.isLast;
+    pages++;
+  }
+  return allIssues;
+}
+
 resolver.define('getTestPlans', async ({ payload }) => {
   try {
-    const { projectId, config } = payload;
+    const { projectId, config, projectIssueTypes } = payload || {};
     const planType = config?.planIssueType;
-    const projectJql = projectId ? `project = ${projectId} AND ` : '';
+    const projectJql = projectId ? `project = "${projectId}" AND ` : '';
     
-    const validPlanTypes = Array.from(new Set([
+    const candidatePlanTypes = [
       planType,
       'Test Plan',
       'Test Set',
-      'Plan de pruebas',
       'Plan de Pruebas',
+      'Plan de pruebas',
+      'Conjunto de Pruebas',
       'TestPlan',
       'TestSet'
-    ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+    ];
 
-    const jql = `${projectJql}issuetype in (${validPlanTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
-    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created'], null, null);
+    const allIssues = await fetchIssuesByCandidateTypes(
+      projectId,
+      projectJql,
+      candidatePlanTypes,
+      projectIssueTypes,
+      planType || 'Test Set',
+      ['summary', 'status', 'created'],
+      null,
+      null
+    );
     return allIssues.map(issue => ({
       id: issue.id,
       key: issue.key,
@@ -428,23 +507,32 @@ resolver.define('getTestPlans', async ({ payload }) => {
 
 resolver.define('getTestCycles', async ({ payload }) => {
   try {
-    const { projectId, config } = payload;
+    const { projectId, config, projectIssueTypes } = payload || {};
     const cycleType = config?.testCycleType;
     const projectJql = projectId ? `project = "${projectId}" AND ` : '';
     
-    const validCycleTypes = Array.from(new Set([
+    const candidateCycleTypes = [
       cycleType,
       'Test Cycle',
-      'Ciclo de prueba',
+      'Ciclo de Pruebas',
       'Ciclo de Prueba',
+      'Ciclo de prueba',
       'Ciclo',
       'TestCycle'
-    ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+    ];
 
-    const jql = `${projectJql}issuetype in (${validCycleTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
-    // Pass at most 4 properties (Jira allows max 5)
-    const propNames = ['testops-plan-link', 'execution', 'tests', 'execution-meta'];
-    const allIssues = await fetchAllIssues(jql, ['summary', 'status', 'created', 'versions', 'fixVersions', 'issuelinks', 'parent'], null, propNames);
+    // Pass at most 5 properties (Jira allows max 5)
+    const propNames = ['testops-plan-link', 'testpulse-v2', 'execution', 'tests', 'execution-meta'];
+    const allIssues = await fetchIssuesByCandidateTypes(
+      projectId,
+      projectJql,
+      candidateCycleTypes,
+      projectIssueTypes,
+      cycleType || 'Test Cycle',
+      ['summary', 'status', 'created', 'versions', 'fixVersions', 'issuelinks', 'parent'],
+      null,
+      propNames
+    );
     return allIssues.map(issue => {
       const props = issue.properties || {};
       let totalTests = 0;
@@ -488,11 +576,14 @@ resolver.define('getTestCycles', async ({ payload }) => {
       const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
 
       const planLink = props['testops-plan-link'];
-      let planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (props['testpulse-v2']?.planId || null));
+      const v2Prop = props['testpulse-v2']?.value || props['testpulse-v2'];
+      let planId = (planLink && typeof planLink === 'object')
+        ? (planLink.planId || planLink.value?.planId || null)
+        : (typeof planLink === 'string' ? planLink : (v2Prop?.planId || null));
       if (!planId && issue.fields?.parent) {
         const pType = (issue.fields.parent.fields?.issuetype?.name || '').toLowerCase();
         if (pType.includes('plan') || pType.includes('set')) {
-          planId = issue.fields.parent.key || issue.fields.parent.id;
+          planId = issue.fields.parent.id || issue.fields.parent.key;
         }
       }
       if (!planId && Array.isArray(issue.fields?.issuelinks)) {
@@ -501,7 +592,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
           if (cand) {
             const cType = (cand.fields?.issuetype?.name || '').toLowerCase();
             if (cType.includes('plan') || cType.includes('set')) {
-              planId = cand.key || cand.id;
+              planId = cand.id || cand.key;
               break;
             }
           }
@@ -614,10 +705,10 @@ resolver.define('getProjectIssueTypeFields', async ({ payload }) => {
 // === Test Case Management (Jira REST API) ===
 resolver.define('getTestCases', async ({ payload, context }) => {
   const { folderId, projectId, config, nextPageToken } = payload;
-  const tcType = config?.testCaseType;
+  const tcType = config?.testCaseType || 'Test Case';
   
   const projectJql = projectId ? `project = "${projectId}" AND ` : '';
-  const validTcTypes = Array.from(new Set([
+  const candidateTcTypes = [
     tcType,
     'Test Case',
     'Caso de prueba',
@@ -625,9 +716,10 @@ resolver.define('getTestCases', async ({ payload, context }) => {
     'Prueba',
     'Test',
     'TestCase'
-  ].filter(t => typeof t === 'string' && t.trim().length > 0)));
+  ];
+  const validTcTypes = filterValidIssueTypes(candidateTcTypes, payload?.projectIssueTypes, tcType);
 
-  const jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+  let jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
   
   let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'parent', 'customfield_10014', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'reporter', 'creator', 'assignee'];
   if (payload?.executionTypeFieldId) {
@@ -640,7 +732,27 @@ resolver.define('getTestCases', async ({ payload, context }) => {
      fieldsToFetch.push(config.testTypeFieldId);
   }
   
-  const pageData = await fetchJqlPage(jql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+  let pageData = await fetchJqlPage(jql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+  if (pageData.error && validTcTypes.length > 1) {
+     let fallbackTypes = [tcType];
+     if (projectId) {
+       try {
+         const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
+         if (projRes.ok) {
+           const projData = await projRes.json();
+           if (Array.isArray(projData.issueTypes) && projData.issueTypes.length > 0) {
+             fallbackTypes = filterValidIssueTypes(candidateTcTypes, projData.issueTypes, tcType);
+           }
+         }
+       } catch (e) { /* ignore */ }
+     }
+     const retryJql = `${projectJql}issuetype in (${fallbackTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+     pageData = await fetchJqlPage(retryJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+     if (pageData.error && fallbackTypes.length > 1) {
+       const singleJql = `${projectJql}issuetype = "${tcType}" ORDER BY created DESC`;
+       pageData = await fetchJqlPage(singleJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+     }
+  }
   if (pageData.error) {
      return [{ id: '999999', key: 'ERR-1', rawFields: { summary: pageData.error } }];
   }

@@ -1246,9 +1246,10 @@ function App() {
       const config = (configRes.status === 'fulfilled' && configRes.value)
         ? configRes.value
         : { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
+      const projectTypes = issueTypesRes.status === 'fulfilled' ? (issueTypesRes.value || []) : [];
       setIsAdmin(adminVal);
       setProjectConfig(config);
-      setProjectIssueTypes(issueTypesRes.status === 'fulfilled' ? (issueTypesRes.value || []) : []);
+      setProjectIssueTypes(projectTypes);
 
       invoke('getReportAutomationConfig', { projectId: targetProjectId }).then(autoRes => {
         if (autoRes && autoRes.success && autoRes.config) {
@@ -1264,26 +1265,33 @@ function App() {
       // Phase 2: parallel medium (~1.5s each)
       const [foldersRes, plansRes, cyclesRes] = await Promise.allSettled([
         invoke('getFolders', { projectId: targetProjectId }),
-        invoke('getTestPlans', { projectId: targetProjectId, config }),
-        invoke('getTestCycles', { projectId: targetProjectId, config }),
+        invoke('getTestPlans', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
+        invoke('getTestCycles', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
       ]);
       if (foldersRes.status === 'fulfilled') setFolders(foldersRes.value || []);
-      if (plansRes.status === 'fulfilled') {
-        const plans = Array.isArray(plansRes.value) ? plansRes.value : [];
-        setTestPlans(plans);
-        if (plans.length > 0) {
-          setSelectedPlanId(prev => (prev && plans.some(p => String(p.id) === String(prev))) ? prev : plans[0].id);
-        }
-      }
+      const loadedPlans = (plansRes.status === 'fulfilled' && Array.isArray(plansRes.value)) ? plansRes.value : [];
+      const loadedCycles = (cyclesRes.status === 'fulfilled' && Array.isArray(cyclesRes.value)) ? cyclesRes.value : [];
       if (cyclesRes.status === 'fulfilled') {
-        const cycs = Array.isArray(cyclesRes.value) ? cyclesRes.value : [];
-        setTestCycles(cycs);
+        setTestCycles(loadedCycles);
+      }
+      if (plansRes.status === 'fulfilled') {
+        setTestPlans(loadedPlans);
+        if (loadedPlans.length > 0) {
+          const planHasCycles = (plan) => loadedCycles.some(c =>
+            c.planId && (
+              String(c.planId) === String(plan.id) ||
+              (plan.key && String(c.planId).toUpperCase() === String(plan.key).toUpperCase())
+            )
+          );
+          const defaultPlan = loadedPlans.find(planHasCycles) || loadedPlans[0];
+          setSelectedPlanId(prev => (prev && loadedPlans.some(p => String(p.id) === String(prev))) ? prev : defaultPlan.id);
+        }
       }
       setRefreshTrigger(prev => prev + 1);
 
       // Phase 3: testCases + linkedRequirements (served in ~5ms from IndexedDB on re-entry)
       setIsFetchingTests(true);
-      fetchAllTestCases({ folderId: null, projectId: targetProjectId, config })
+      fetchAllTestCases({ folderId: null, projectId: targetProjectId, config, projectIssueTypes: projectTypes })
         .then(tests => {
           setTestCases(tests || []);
           fetchLinkedRequirements(tests || [], targetProjectId, config);
@@ -7785,17 +7793,35 @@ Then el sistema valida la identidad.
   const prevCycleIdRef = useRef(null);
   const prevRefreshRef = useRef(null);
 
+  const isCycleInPlan = useCallback((cycle, planId) => {
+    if (!cycle || !cycle.planId || !planId) return false;
+    if (String(cycle.planId) === String(planId)) return true;
+    const planObj = (testPlans || []).find(p => String(p.id) === String(planId) || String(p.key) === String(planId));
+    if (planObj) {
+      return (
+        String(cycle.planId) === String(planObj.id) ||
+        (planObj.key && String(cycle.planId).toUpperCase() === String(planObj.key).toUpperCase())
+      );
+    }
+    return false;
+  }, [testPlans]);
+
   // Auto-preload all cycles of selected test plan in background
   useEffect(() => {
-    if (!selectedPlanId || !testCycles || testCycles.length === 0) return;
-    const planCycles = testCycles.filter(c => String(c.planId) === String(selectedPlanId));
-    if (planCycles.length === 0) return;
-
-    // If no cycle selected or selected cycle doesn't belong to this plan, select first cycle
-    if (!selectedCycle || !planCycles.some(c => String(c.id) === String(selectedCycle.id))) {
-      handleCycleSelect(planCycles[0]);
+    if (!testCycles || testCycles.length === 0) return;
+    if (selectedPlanId) {
+      const planCycles = testCycles.filter(c => isCycleInPlan(c, selectedPlanId));
+      if (planCycles.length > 0) {
+        if (!selectedCycle || !planCycles.some(c => String(c.id) === String(selectedCycle.id))) {
+          handleCycleSelect(planCycles[0]);
+        }
+        return;
+      }
     }
-  }, [selectedPlanId, testCycles.length]);
+    if (!selectedCycle && !selectedPlanId && testCycles.length > 0) {
+      handleCycleSelect(testCycles[0]);
+    }
+  }, [selectedPlanId, testCycles, isCycleInPlan]);
 
   useEffect(() => {
     if ((activeTab === 'execution' || activeTab === 'planning') && selectedCycle) {
@@ -7834,7 +7860,7 @@ Then el sistema valida la identidad.
           // show blank key/summary without this join.
           const enriched = executionSummary.map(ex => {
             if (ex.key && ex.summary) return ex; // already enriched (old cycle)
-            const tc = findTc(ex.id);
+            const tc = findTc(ex.id || ex.testCaseId);
             return tc ? { ...ex, key: tc.key, summary: tc.summary } : ex;
           });
           // Filter out any tests deleted this session (avoids stale-read ghosts from Jira eventual consistency)
@@ -7862,6 +7888,31 @@ Then el sistema valida la identidad.
     // Reports tab: intentionally NOT loaded here — the dedicated Reports effect (activeTab === 'reports')
     // already triggers loadReportData. Having both caused a duplicate getExecutionReport burst on entering the tab.
   }, [activeTab, selectedCycle, refreshTrigger]);
+
+  // Re-enrich cached cycle tests and active cycleTests when Phase 3 (testCases) finishes loading
+  useEffect(() => {
+    if (!testCases || testCases.length === 0) return;
+    const cache = perCycleCacheRef.current || {};
+    Object.keys(cache).forEach(cid => {
+      const list = cache[cid];
+      if (Array.isArray(list) && list.some(ex => !ex.key || !ex.summary)) {
+        cache[cid] = list.map(ex => {
+          if (ex.key && ex.summary) return ex;
+          const tc = findTc(ex.id || ex.testCaseId);
+          return tc ? { ...ex, key: ex.key || tc.key, summary: ex.summary || tc.summary } : ex;
+        });
+      }
+    });
+    setCycleTests(prev => {
+      if (!Array.isArray(prev) || prev.length === 0) return prev;
+      if (!prev.some(ex => !ex.key || !ex.summary)) return prev;
+      return prev.map(ex => {
+        if (ex.key && ex.summary) return ex;
+        const tc = findTc(ex.id || ex.testCaseId);
+        return tc ? { ...ex, key: ex.key || tc.key, summary: ex.summary || tc.summary } : ex;
+      });
+    });
+  }, [testCases]);
 
 
   const handleCreateBug = (test) => {
@@ -8416,11 +8467,11 @@ const renderPlanningTab = () => {
                   <div className="planning-section-title">
                     <span>CYCLES IN THIS PLAN</span>
                     <span style={{ fontSize: '10px', fontWeight: 700, background: 'var(--jira-bg-subtle, #F1F2F4)', color: 'var(--jira-subtle, #626F86)', padding: '1px 6px', borderRadius: '10px' }}>
-                      {filteredTestCycles.filter(c => c.planId === selectedPlanId).length}
+                      {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length}
                     </span>
                   </div>
                   <div>
-                    {filteredTestCycles.filter(c => c.planId === selectedPlanId).map(cycle => {
+                    {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).map(cycle => {
                       const isActive = selectedCycle?.id === cycle.id;
                       return (
                         <div 
@@ -8458,7 +8509,7 @@ const renderPlanningTab = () => {
                         </div>
                       );
                     })}
-                    {filteredTestCycles.filter(c => c.planId === selectedPlanId).length === 0 && (
+                    {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length === 0 && (
                       <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', padding: '6px 0' }}>
                         No hay ciclos vinculados a este plan.
                       </div>
@@ -8473,11 +8524,11 @@ const renderPlanningTab = () => {
                   <div className="planning-section-title">
                     <span>AVAILABLE CYCLES</span>
                     <span style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)' }}>
-                      {filteredTestCycles.filter(c => c.planId !== selectedPlanId).length} listos
+                      {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).length} listos
                     </span>
                   </div>
                   <div>
-                    {filteredTestCycles.filter(c => c.planId !== selectedPlanId).map(cycle => (
+                    {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).map(cycle => (
                       <div key={cycle.id} className="planning-cycle-available-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#626F86" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -8507,7 +8558,7 @@ const renderPlanningTab = () => {
                         </div>
                       </div>
                     ))}
-                    {filteredTestCycles.filter(c => c.planId !== selectedPlanId).length === 0 && (
+                    {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).length === 0 && (
                       <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', padding: '4px 0' }}>
                         Todos los ciclos están vinculados.
                       </div>
@@ -9435,14 +9486,14 @@ const renderPlanningTab = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <span style={{ fontSize: '11px', fontWeight: 700, color: '#172B4D', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Active Cycles</span>
               <span style={{ fontSize: '10px', background: '#F1F2F4', color: '#626F86', padding: '1px 6px', borderRadius: '10px', fontWeight: 700 }}>
-                {selectedPlanId ? filteredTestCycles.filter(c => c.planId === selectedPlanId).length : filteredTestCycles.length}
+                {selectedPlanId ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length : filteredTestCycles.length}
               </span>
             </div>
           </div>
 
           {/* Active Cycles List */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            {(selectedPlanId ? filteredTestCycles.filter(c => c.planId === selectedPlanId) : filteredTestCycles).map(cycle => {
+            {(selectedPlanId ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)) : filteredTestCycles).map(cycle => {
               const isSelected = selectedCycle?.id === cycle.id;
               return (
                 <div
