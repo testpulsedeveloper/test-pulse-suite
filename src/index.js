@@ -1,6 +1,39 @@
 import Resolver from '@forge/resolver';
 import api, { route, fetch, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// ── Perf instrumentation (Fase 0) ──
+// Counts real Jira REST calls (and 429s) made during each resolver invocation. Output in `forge logs`:
+//   [perf] resolver=getExecutionReport jiraCalls=14 r429=0 ms=3120
+// AsyncLocalStorage keeps counts correct even if invocations overlap within one instance.
+// Fails open: if patching the api object isn't possible, the app keeps working uninstrumented.
+const __perfALS = new AsyncLocalStorage();
+try {
+  for (const m of ['asUser', 'asApp']) {
+    const orig = api[m];
+    if (typeof orig !== 'function') continue;
+    api[m] = (...args) => {
+      const requester = orig.apply(api, args);
+      try {
+        if (requester && typeof requester.requestJira === 'function' && !requester.__tpPerf) {
+          const origReq = requester.requestJira;
+          requester.requestJira = async (...reqArgs) => {
+            const store = __perfALS.getStore();
+            if (store) store.calls++;
+            const res = await origReq.apply(requester, reqArgs);
+            if (store && res && res.status === 429) store.r429++;
+            return res;
+          };
+          requester.__tpPerf = true;
+        }
+      } catch (_) { /* non-writable requester: skip instrumentation for this call */ }
+      return requester;
+    };
+  }
+} catch (e) {
+  console.warn('[perf] instrumentation disabled:', e?.message);
+}
 
 const getAppStorage = async (key) => {
   try {
@@ -125,6 +158,20 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
 }
 
 const resolver = new Resolver();
+
+// Wrap every resolver: run it inside a perf context and log one compact line when it finishes.
+{
+  const __origDefine = resolver.define.bind(resolver);
+  resolver.define = (name, fn) => __origDefine(name, async (req) => {
+    const store = { calls: 0, r429: 0 };
+    const t0 = Date.now();
+    try {
+      return await __perfALS.run(store, () => fn(req));
+    } finally {
+      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${Date.now() - t0}`);
+    }
+  });
+}
 
 resolver.define('probeAPI', async () => {
     try {

@@ -651,17 +651,81 @@ const RichTextEditor = ({ value, onChange, disabled }) => {
 };
 
 // Safe invoke that doesn't crash when running locally outside of Jira
-const invoke = async (...args) => {
+// ── Perf instrumentation (Fase 0) + in-flight dedupe (Fase 1) ──
+// Stats are kept in memory only. In the browser console run `tpStats()` to print a
+// per-resolver table (calls, deduped, cache hits, errors, avg ms) and `tpStats(true)` to reset.
+const TP_PERF = { startedAt: Date.now(), byName: {} };
+const _tpStat = (name) => (TP_PERF.byName[name] = TP_PERF.byName[name] || { calls: 0, deduped: 0, cached: 0, errors: 0, r429: 0, totalMs: 0 });
+if (typeof window !== 'undefined') {
+  window.tpStats = (reset = false) => {
+    if (reset) { TP_PERF.byName = {}; TP_PERF.startedAt = Date.now(); return 'reset'; }
+    const mins = ((Date.now() - TP_PERF.startedAt) / 60000).toFixed(1);
+    const rows = Object.entries(TP_PERF.byName)
+      .map(([name, s]) => ({ resolver: name, calls: s.calls, deduped: s.deduped, cached: s.cached, errors: s.errors, r429: s.r429, avgMs: s.calls ? Math.round(s.totalMs / s.calls) : 0 }))
+      .sort((a, b) => b.calls - a.calls);
+    const total = rows.reduce((acc, r) => acc + r.calls, 0);
+    console.log(`[tpStats] ${total} llamadas reales al backend en ${mins} min`);
+    console.table(rows);
+    return rows;
+  };
+}
+
+// Read-only resolvers: identical concurrent calls share ONE request (no stale data — only while in flight).
+const TP_DEDUPE_RESOLVERS = new Set([
+  'getProjects', 'isProjectAllowed', 'checkAdminPermission', 'getConfig', 'getProjectIssueTypes',
+  'getReportAutomationConfig', 'getFolders', 'getTestPlans', 'getTestCycles', 'getTestCases', 'getFields',
+  'getExecutionReport', 'getCycleExecutionSummary', 'getProjectUnlinkedBugs', 'getTestExecution'
+]);
+// Metadata that practically never changes during a session: short TTL cache.
+const TP_TTL_RESOLVERS = { getFields: 300_000, getProjectIssueTypes: 300_000 };
+const _tpInFlight = new Map();
+const _tpTtlCache = new Map();
+
+const _rawInvoke = async (name, payload) => {
+  const s = _tpStat(name);
+  s.calls++;
+  const t0 = Date.now();
   try {
-    return await forgeInvoke(...args);
+    return await forgeInvoke(name, payload);
   } catch (e) {
+    s.errors++;
+    if (e && (e.status === 429 || String(e.message || '').includes('429'))) s.r429++;
     console.warn("Forge invoke failed:", e);
     // Forge sometimes rejects with undefined or an object that isn't an Error.
     if (!e) {
       throw new Error("NEEDS_AUTHENTICATION_ERR");
     }
     throw e;
+  } finally {
+    s.totalMs += Date.now() - t0;
   }
+};
+
+const invoke = async (name, payload) => {
+  const isRead = TP_DEDUPE_RESOLVERS.has(name);
+  if (!isRead) {
+    // Any write may change metadata → drop TTL cache to never serve stale config/fields.
+    _tpTtlCache.clear();
+    return _rawInvoke(name, payload);
+  }
+  let key;
+  try { key = `${name}|${JSON.stringify(payload ?? null)}`; } catch (_) { return _rawInvoke(name, payload); }
+
+  const ttl = TP_TTL_RESOLVERS[name];
+  if (ttl) {
+    const hit = _tpTtlCache.get(key);
+    if (hit && Date.now() - hit.ts < ttl) { _tpStat(name).cached++; return hit.value; }
+  }
+  if (_tpInFlight.has(key)) { _tpStat(name).deduped++; return _tpInFlight.get(key); }
+
+  const p = _rawInvoke(name, payload)
+    .then(value => {
+      if (ttl && value && !value._isError && !value.error) _tpTtlCache.set(key, { ts: Date.now(), value });
+      return value;
+    })
+    .finally(() => { _tpInFlight.delete(key); });
+  _tpInFlight.set(key, p);
+  return p;
 };
 
 
@@ -1100,6 +1164,10 @@ function App() {
   
   // Reports State
   const [reportData, setReportData] = useState({ cycles: [] });
+  // Always-current mirror: the 15-min background sync runs from a closure created when the tab was
+  // entered, where `reportData` is stale. Reading the ref avoids misdetecting "no data" → full reload.
+  const reportDataRef = useRef(reportData);
+  reportDataRef.current = reportData;
   const [reportLoading, setReportLoading] = useState(false);
   const [isRefreshingReport, setIsRefreshingReport] = useState(false);
   const [isHydratingReport, setIsHydratingReport] = useState(false);
@@ -1702,8 +1770,7 @@ function App() {
       // 3b. Fields (bulk upload + execution type)
       invoke('getFields').then(processFields).catch(console.warn);
 
-      // 3c. Admin-only: allowed project list
-      if (adminVal) invoke('getAllowedProjects').then(a => setAllowedProjects(a)).catch(console.warn);
+      // 3c. (Removed) getAllowedProjects: its result (allowedProjects) is never read in the UI — saved 1 call per admin load.
 
       // Reports data is loaded on-demand when entering the Reports tab to save initial bandwidth and avoid Jira 429 rate limits
 
@@ -6671,7 +6738,8 @@ Then el sistema valida la identidad.
     }
 
     const currentSession = ++hydrationSessionRef.current;
-    const hasExistingData = reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0 && reportData._loadedAt;
+    const currentReport = reportDataRef.current;
+    const hasExistingData = currentReport && Array.isArray(currentReport.cycles) && currentReport.cycles.length > 0 && currentReport._loadedAt;
     if (!hasExistingData && !isSilent) {
       setReportLoading(true);
     } else {
@@ -6694,13 +6762,32 @@ Then el sistema valida la identidad.
       const initialBugMap = data?.bugMap || {};
       const totalCycles = data?.totalCycles || initialCycles.length;
 
-      setReportData({
-        cycles: initialCycles,
-        bugMap: initialBugMap,
-        totalCycles: totalCycles,
-        _loadedAt: Date.now(),
-        _isSnapshot: false
-      });
+      // Silent background sync with history already loaded: merge only the recent cycles into the
+      // existing data. Replacing would drop historical cycles and force a full re-hydration (N extra calls).
+      const isFullyHydrated = hasExistingData && currentReport.cycles.length >= (currentReport.totalCycles || 0);
+      const isIncrementalSync = isSilent && isFullyHydrated;
+      if (isIncrementalSync) {
+        setReportData(prev => {
+          const merged = new Map((prev?.cycles || []).map(c => [String(c.id), c]));
+          initialCycles.forEach(c => merged.set(String(c.id), c));
+          return {
+            ...prev,
+            cycles: Array.from(merged.values()),
+            bugMap: { ...(prev?.bugMap || {}), ...initialBugMap },
+            totalCycles: totalCycles,
+            _loadedAt: Date.now(),
+            _isSnapshot: false
+          };
+        });
+      } else {
+        setReportData({
+          cycles: initialCycles,
+          bugMap: initialBugMap,
+          totalCycles: totalCycles,
+          _loadedAt: Date.now(),
+          _isSnapshot: false
+        });
+      }
 
       try {
         if (initialCycles.length > 0) {
@@ -6763,7 +6850,8 @@ Then el sistema valida la identidad.
       setIsRefreshingReport(false);
 
       // Phase 2: Silent background hydration of historical cycles
-      if (data?.hasMore && data.nextOffset < totalCycles) {
+      // (skipped on incremental 15-min syncs: history is already complete and was merged above)
+      if (!isIncrementalSync && data?.hasMore && data.nextOffset < totalCycles) {
         setIsHydratingReport(true);
         setHydrationProgress({ loaded: initialCycles.length, total: totalCycles });
 
@@ -6958,11 +7046,9 @@ Then el sistema valida la identidad.
             setIsLoadingCycleTests(false);
           }
         });
-    } else if (activeTab === 'reports') {
-      if (!reportData._loadedAt || !reportData.cycles || reportData.cycles.length === 0) {
-        loadReportData(null, null, false);
-      }
     }
+    // Reports tab: intentionally NOT loaded here — the dedicated Reports effect (activeTab === 'reports')
+    // already triggers loadReportData. Having both caused a duplicate getExecutionReport burst on entering the tab.
   }, [activeTab, selectedCycle, refreshTrigger]);
 
 
