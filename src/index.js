@@ -2964,7 +2964,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
     }
 
     const currentExecutedBy = currentProp.executedBy || (runIssue?.fields?.assignee ? { accountId: runIssue.fields.assignee.accountId, displayName: runIssue.fields.assignee.displayName } : null);
-    if (!takeover && currentExecutedBy && userData && currentExecutedBy.accountId !== userData.accountId && !isAdmin) {
+    if (!takeover && iterations === undefined && currentExecutedBy && userData && currentExecutedBy.accountId !== userData.accountId && !isAdmin) {
       throw new Error('Solo el usuario que ejecutó la prueba original o un administrador puede modificarla.');
     }
 
@@ -2990,7 +2990,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       newEvidences = filterNonIterationEvidences([...newEvidences, evidence], iterKeys);
     }
     const newLinkedBugs = linkedBugs !== undefined ? linkedBugs : (currentProp.linkedBugs || []);
-    const newExecutedBy = executorInfo !== undefined ? executorInfo : currentExecutedBy;
+    const newExecutedBy = executorInfo !== undefined ? executorInfo : (currentExecutedBy || (userData ? { accountId: userData.accountId, displayName: userData.displayName } : null));
     const newLockedAt = TERMINAL.includes(newStatus) ? (currentProp.lockedAt || Date.now()) : (newStatus === 'Not Run' ? null : currentProp.lockedAt);
 
     updatedTest = {
@@ -3006,12 +3006,31 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       lockedAt: newLockedAt
     };
 
-    // 1. Transition status in Jira
+    // 1. Save testpulse-run-data property FIRST on the Test Run issue itself
+    // so any concurrent getTestExecution / getCycleExecutionSummary immediately reads the latest iterations.
+    const newProp = {
+      ...currentProp,
+      status: newStatus,
+      comment: newComment,
+      iterations: newIterations,
+      executedBy: newExecutedBy,
+      executedAt: Date.now(),
+      evidences: newEvidences,
+      linkedBugs: newLinkedBugs,
+      lockedAt: newLockedAt
+    };
+    await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(newProp)
+    }).catch(console.warn);
+
+    // 2. Transition status in Jira
     if (status !== undefined) {
       await transitionJiraIssue(targetRunId, newStatus).catch(console.warn);
     }
 
-    // 2. Assignee (Tester)
+    // 3. Assignee (Tester)
     if (newExecutedBy?.accountId) {
       await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/assignee`, {
         method: 'PUT',
@@ -3020,7 +3039,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       }).catch(console.warn);
     }
 
-    // 3. Execution comment in Jira
+    // 4. Execution comment in Jira
     if (newStatus !== 'Not Run' || newComment || (newIterations && newIterations.length > 0)) {
       const commentAdf = buildExecutionAdfComment({
         cycleKey: cycleId,
@@ -3033,7 +3052,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       await syncExecutionComment(targetRunId, commentAdf).catch(console.warn);
     }
 
-    // 4. Update status labels in Jira
+    // 5. Update status labels in Jira
     try {
       const issueRes = await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}?fields=labels`);
       if (issueRes.ok) {
@@ -3060,24 +3079,6 @@ resolver.define('updateTestStatus', async ({ payload }) => {
     } catch (e) {
       console.warn('[updateTestStatus] Labels sync error:', e.message);
     }
-
-    // 5. Save testpulse-run-data property on the Test Run issue itself
-    const newProp = {
-      ...currentProp,
-      status: newStatus,
-      comment: newComment,
-      iterations: newIterations,
-      executedBy: newExecutedBy,
-      executedAt: Date.now(),
-      evidences: newEvidences,
-      linkedBugs: newLinkedBugs,
-      lockedAt: newLockedAt
-    };
-    await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
-      method: 'PUT',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(newProp)
-    }).catch(console.warn);
 
     // 6. Update lightweight index on Cycle
     await updateLightweightIndex(cycleId, (lw) => {

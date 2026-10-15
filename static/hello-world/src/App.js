@@ -400,6 +400,28 @@ function App() {
   const deletedIdsRef = useRef(new Set()); // in-session deletions (current cycle)
   const perCycleDeletedRef = useRef({});   // { [cycleId]: Set<testId> } — persists across cycle switches
   const perCycleCacheRef = useRef({});     // { [cycleId]: Array<TestCase> } — in-memory cache for 0ms transitions
+  const deletedIterationIdsRef = useRef(new Set()); // in-session deleted iteration IDs
+  const iterationSaveTimersRef = useRef({}); // debounce timers for iteration input persistence
+
+  const mergeIterationsPreservingLocal = useCallback((localIters, remoteIters) => {
+    const deletedIters = deletedIterationIdsRef.current;
+    const localList = Array.isArray(localIters) ? localIters.filter(it => it && !deletedIters.has(it.id)) : [];
+    const remoteList = Array.isArray(remoteIters) ? remoteIters.filter(it => it && !deletedIters.has(it.id)) : [];
+    if (localList.length === 0) return remoteList;
+    if (remoteList.length === 0) return localList;
+    const byId = new Map();
+    // Remote first, then overwrite with local so local edits & newly added iterations always win
+    remoteList.forEach(it => {
+      if (it && it.id) byId.set(String(it.id), it);
+    });
+    localList.forEach(it => {
+      if (it && it.id) {
+        const prev = byId.get(String(it.id));
+        byId.set(String(it.id), prev ? { ...prev, ...it } : it);
+      }
+    });
+    return Array.from(byId.values());
+  }, []);
 
   const getCycleAuthoritativeCount = useCallback((cycle) => {
     if (!cycle) return 0;
@@ -447,7 +469,7 @@ function App() {
               ...existing,
               ...backendItem,
               description: backendItem.description || existing.description,
-              iterations: (backendItem.iterations && backendItem.iterations.length > 0) ? backendItem.iterations : (existing.iterations || []),
+              iterations: mergeIterationsPreservingLocal(existing.iterations, backendItem.iterations),
               evidences: (backendItem.evidences && backendItem.evidences.length > 0) ? backendItem.evidences : (existing.evidences || []),
               linkedBugs: (backendItem.linkedBugs && backendItem.linkedBugs.length > 0) ? backendItem.linkedBugs : (existing.linkedBugs || []),
               _detailLoaded: existing._detailLoaded || backendItem._detailLoaded || false
@@ -466,10 +488,13 @@ function App() {
           dedupedMap.set(dKey, item);
         } else {
           const existing = dedupedMap.get(dKey);
-          const hasExec = item.status && normalizeUiStatus(item.status) !== 'Not Run';
-          const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
+          const hasExec = (item.status && normalizeUiStatus(item.status) !== 'Not Run') || (item.iterations && item.iterations.length > 0);
+          const existingHasExec = (existing.status && normalizeUiStatus(existing.status) !== 'Not Run') || (existing.iterations && existing.iterations.length > 0);
+          const combinedIterations = mergeIterationsPreservingLocal(existing.iterations, item.iterations);
           if (hasExec && !existingHasExec) {
-            dedupedMap.set(dKey, item);
+            dedupedMap.set(dKey, { ...item, iterations: combinedIterations });
+          } else {
+            dedupedMap.set(dKey, { ...existing, iterations: combinedIterations });
           }
         }
       }
@@ -485,7 +510,7 @@ function App() {
       }
 
       return finalDedupedArray;
-  }, [selectedCycle]);
+  }, [selectedCycle, mergeIterationsPreservingLocal]);
 
   const [planningFolder, setPlanningFolder] = useState('');
   const [planningPriority, setPlanningPriority] = useState('');
@@ -6235,19 +6260,23 @@ Then el sistema valida la identidad.
           dedupedMap.set(dKey, item);
         } else {
           const existing = dedupedMap.get(dKey);
+          const mergedIters = mergeIterationsPreservingLocal(existing.iterations, item.iterations);
           const hasExec = item.status && normalizeUiStatus(item.status) !== 'Not Run';
           const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
           if (hasExec && !existingHasExec) {
-            dedupedMap.set(dKey, item);
+            dedupedMap.set(dKey, { ...item, iterations: mergedIters });
+          } else {
+            dedupedMap.set(dKey, { ...existing, iterations: mergedIters });
           }
         }
       });
       const finalTests = Array.from(dedupedMap.values());
 
-      perCycleCacheRef.current[cycleId] = finalTests;
       if (activeCycleIdRef.current === cycleId) {
-        setCycleTests(finalTests);
+        safeSetCycleTests(finalTests, cycleId);
         setSelectedCycle(prev => (prev && String(prev.id) === cycleId ? { ...prev, testCount: finalTests.length } : prev));
+      } else {
+        perCycleCacheRef.current[cycleId] = finalTests;
       }
       setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: finalTests.length } : c));
     } catch (err) {
@@ -6591,11 +6620,14 @@ Then el sistema valida la identidad.
 
   const handleAddIteration = async (testIdOrObj) => {
     if (!selectedCycle) return;
+    const cycleIdStr = String(selectedCycle.id);
     const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
-    const test = cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    const cachedList = perCycleCacheRef.current[cycleIdStr] || cycleTests;
+    const test = cachedList.find(t => String(t.id) === String(testId))
+      || cycleTests.find(t => String(t.id) === String(testId))
+      || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test) return;
 
-    const currentIterations = test.iterations || [];
     const newIteration = {
       id: generateUUID(),
       expectedData: '',
@@ -6606,25 +6638,39 @@ Then el sistema valida la identidad.
       evidences: []
     };
 
-    const newIterations = [...currentIterations, newIteration];
-    const newStatus = calculateOverallStatus(newIterations);
-    const cycleIdStr = String(selectedCycle.id);
+    const isRunning = !!runningTests[test.id];
+    let latestIterationsSnapshot = [...(test.iterations || []), newIteration];
+    const calcStatus = calculateOverallStatus(latestIterationsSnapshot);
+    const currentNormStatus = normalizeUiStatus(test.status);
+    // Preserve active status ('In Progress' when Play is active, or existing non-'Not Run' status when adding a fresh 'Not Run' iteration)
+    const newStatus = isRunning
+      ? 'In Progress'
+      : (calcStatus === 'Not Run' && currentNormStatus !== 'Not Run' ? test.status : calcStatus);
 
     setCycleTests(prev => {
-      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
-      if (perCycleCacheRef.current[cycleIdStr]) {
-        perCycleCacheRef.current[cycleIdStr] = updated;
-      }
+      const updated = prev.map(t => {
+        if (String(t.id) === String(test.id)) {
+          const baseIters = Array.isArray(t.iterations) ? t.iterations : (test.iterations || []);
+          const exists = baseIters.some(it => String(it?.id) === String(newIteration.id));
+          const mergedIters = exists ? baseIters : [...baseIters, newIteration];
+          latestIterationsSnapshot = mergedIters;
+          return { ...t, iterations: mergedIters, status: newStatus, _detailLoaded: true };
+        }
+        return t;
+      });
+      perCycleCacheRef.current[cycleIdStr] = updated;
       return updated;
     });
 
     try {
       const res = await invoke('updateTestStatus', {
+        projectId: selectedProjectId,
         cycleId: selectedCycle.id,
         testId: test.id,
         testRunId: test.testRunId || test.testRunKey,
-        iterations: newIterations,
-        status: newStatus
+        iterations: latestIterationsSnapshot,
+        status: newStatus,
+        takeover: true
       });
       // If backend created/returned a run ID, update local state and cache immediately
       if (res?.test?.testRunId) {
@@ -6632,9 +6678,7 @@ Then el sistema valida la identidad.
         const newRunKey = res.test.testRunKey || test.testRunKey;
         setCycleTests(prev => {
           const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, testRunId: newRunId, testRunKey: newRunKey, _detailLoaded: true } : t);
-          if (perCycleCacheRef.current[cycleIdStr]) {
-            perCycleCacheRef.current[cycleIdStr] = updated;
-          }
+          perCycleCacheRef.current[cycleIdStr] = updated;
           return updated;
         });
       }
@@ -6646,29 +6690,50 @@ Then el sistema valida la identidad.
 
   const handleDeleteIteration = async (testIdOrObj, iterId) => {
     if (!selectedCycle) return;
+    const cycleIdStr = String(selectedCycle.id);
+    if (iterId) {
+      deletedIterationIdsRef.current.add(String(iterId));
+    }
+    const timerKey = `${testIdOrObj?.id || testIdOrObj}_${iterId}`;
+    if (iterationSaveTimersRef.current[timerKey]) {
+      clearTimeout(iterationSaveTimersRef.current[timerKey]);
+      delete iterationSaveTimersRef.current[timerKey];
+    }
+
     const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
-    const test = cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    const cachedList = perCycleCacheRef.current[cycleIdStr] || cycleTests;
+    const test = cachedList.find(t => String(t.id) === String(testId))
+      || cycleTests.find(t => String(t.id) === String(testId))
+      || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test) return;
 
-    const newIterations = (test.iterations || []).filter(i => i.id !== iterId);
-    const newStatus = calculateOverallStatus(newIterations);
-    const cycleIdStr = String(selectedCycle.id);
+    let newIterations = (test.iterations || []).filter(i => String(i.id) !== String(iterId));
+    const isRunning = !!runningTests[test.id];
+    const calcStatus = calculateOverallStatus(newIterations);
+    const newStatus = isRunning ? 'In Progress' : calcStatus;
 
     setCycleTests(prev => {
-      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
-      if (perCycleCacheRef.current[cycleIdStr]) {
-        perCycleCacheRef.current[cycleIdStr] = updated;
-      }
+      const updated = prev.map(t => {
+        if (String(t.id) === String(test.id)) {
+          const filteredIters = (t.iterations || []).filter(i => String(i.id) !== String(iterId));
+          newIterations = filteredIters;
+          return { ...t, iterations: filteredIters, status: newStatus, _detailLoaded: true };
+        }
+        return t;
+      });
+      perCycleCacheRef.current[cycleIdStr] = updated;
       return updated;
     });
 
     try {
       await invoke('updateTestStatus', {
+        projectId: selectedProjectId,
         cycleId: selectedCycle.id,
         testId: test.id,
         testRunId: test.testRunId || test.testRunKey,
         iterations: newIterations,
-        status: newStatus
+        status: newStatus,
+        takeover: true
       });
     } catch (e) {
       console.error('Error deleting iteration:', e);
@@ -6676,73 +6741,116 @@ Then el sistema valida la identidad.
     }
   };
 
-  const handleIterationChange = async (testIdOrObj, iterId, field, value) => {
+  const handleIterationChange = async (testIdOrObj, iterId, field, value, options = {}) => {
     if (!selectedCycle) return;
+    const cycleIdStr = String(selectedCycle.id);
     const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
-    const test = cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    const cachedList = perCycleCacheRef.current[cycleIdStr] || cycleTests;
+    const test = cachedList.find(t => String(t.id) === String(testId))
+      || cycleTests.find(t => String(t.id) === String(testId))
+      || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test) return;
 
-    const newIterations = (test.iterations || []).map(i => {
-      if (i.id === iterId) {
-        return { ...i, [field]: value };
-      }
-      return i;
-    });
-
     const isRunning = !!runningTests[test.id];
-    const calculated = calculateOverallStatus(newIterations);
+    let latestIterationsSnapshot = (test.iterations || []).map(i =>
+      String(i.id) === String(iterId) ? { ...i, [field]: value } : i
+    );
+    const calculated = calculateOverallStatus(latestIterationsSnapshot);
+    const currentNormStatus = normalizeUiStatus(test.status);
     // Si la prueba está en ejecución activa (Play), mantenemos 'In Progress' en la UI para evitar saltos
-    const newStatus = isRunning ? 'In Progress' : calculated;
-    const cycleIdStr = String(selectedCycle.id);
+    const newStatus = isRunning
+      ? 'In Progress'
+      : (calculated === 'Not Run' && currentNormStatus !== 'Not Run' ? test.status : calculated);
 
     setCycleTests(prev => {
-      const updated = prev.map(t => String(t.id) === String(test.id) ? { ...t, iterations: newIterations, status: newStatus, _detailLoaded: true } : t);
-      if (perCycleCacheRef.current[cycleIdStr]) {
-        perCycleCacheRef.current[cycleIdStr] = updated;
-      }
+      const updated = prev.map(t => {
+        if (String(t.id) === String(test.id)) {
+          const baseIters = Array.isArray(t.iterations) && t.iterations.length > 0 ? t.iterations : (test.iterations || []);
+          const mappedIters = baseIters.map(i => String(i.id) === String(iterId) ? { ...i, [field]: value } : i);
+          latestIterationsSnapshot = mappedIters;
+          const calc = calculateOverallStatus(mappedIters);
+          const normT = normalizeUiStatus(t.status);
+          const statusToSet = isRunning
+            ? 'In Progress'
+            : (calc === 'Not Run' && normT !== 'Not Run' ? t.status : calc);
+          return { ...t, iterations: mappedIters, status: statusToSet, _detailLoaded: true };
+        }
+        return t;
+      });
+      perCycleCacheRef.current[cycleIdStr] = updated;
       return updated;
     });
 
-    try {
-      await invoke('updateTestStatus', {
-        cycleId: selectedCycle.id,
-        testId: test.id,
-        testRunId: test.testRunId || test.testRunKey,
-        iterations: newIterations,
-        status: newStatus
-      });
-    } catch (e) {
-      console.error('Error updating iteration:', e);
+    const timerKey = `${test.id}_${iterId}_${field}`;
+    const persistToBackend = async () => {
+      const freshList = perCycleCacheRef.current[cycleIdStr] || [];
+      const freshTest = freshList.find(t => String(t.id) === String(test.id)) || test;
+      const itersToSave = freshTest?.iterations || latestIterationsSnapshot;
+      const statusToSave = freshTest?.status || newStatus;
+      try {
+        await invoke('updateTestStatus', {
+          projectId: selectedProjectId,
+          cycleId: selectedCycle.id,
+          testId: test.id,
+          testRunId: freshTest?.testRunId || freshTest?.testRunKey || test.testRunId || test.testRunKey,
+          iterations: itersToSave,
+          status: statusToSave,
+          takeover: true
+        });
+      } catch (e) {
+        console.error('Error updating iteration:', e);
+      }
+    };
+
+    if (options.debounceMs) {
+      if (iterationSaveTimersRef.current[timerKey]) {
+        clearTimeout(iterationSaveTimersRef.current[timerKey]);
+      }
+      iterationSaveTimersRef.current[timerKey] = setTimeout(() => {
+        delete iterationSaveTimersRef.current[timerKey];
+        persistToBackend();
+      }, options.debounceMs);
+      return;
     }
+
+    if (iterationSaveTimersRef.current[timerKey]) {
+      clearTimeout(iterationSaveTimersRef.current[timerKey]);
+      delete iterationSaveTimersRef.current[timerKey];
+    }
+    await persistToBackend();
   };
 
   const handleStopExecution = async (testIdOrObj, testObj) => {
     const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
     setRunningTests(prev => ({ ...prev, [testId]: null }));
 
-    const test = testObj || cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
+    const cachedList = (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) || cycleTests;
+    const test = cachedList.find(t => String(t.id) === String(testId))
+      || testObj
+      || cycleTests.find(t => String(t.id) === String(testId))
+      || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test || !selectedCycle) return;
 
     // Consolidar estatus final si tiene iteraciones
     if (test.iterations && test.iterations.length > 0) {
       const finalStatus = calculateOverallStatus(test.iterations);
-      const cycleIdStr = String(selectedCycle.id);
 
       setCycleTests(prev => {
         const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, status: finalStatus, _detailLoaded: true } : t);
-        if (perCycleCacheRef.current[cycleIdStr]) {
-          perCycleCacheRef.current[cycleIdStr] = updated;
-        }
+        perCycleCacheRef.current[cycleIdStr] = updated;
         return updated;
       });
 
       try {
         await invoke('updateTestStatus', {
+          projectId: selectedProjectId,
           cycleId: selectedCycle.id,
           testId: test.id,
           testRunId: test.testRunId || test.testRunKey,
           iterations: test.iterations,
-          status: finalStatus
+          status: finalStatus,
+          takeover: true
         });
       } catch (e) {
         console.error('Error consolidating status upon stop:', e);
@@ -6752,19 +6860,29 @@ Then el sistema valida la identidad.
 
   const handleTakeover = async (testIdOrObj) => {
     if (!selectedCycle) return;
+    const cycleIdStr = String(selectedCycle.id);
     const testId = (typeof testIdOrObj === 'object' && testIdOrObj?.id) ? testIdOrObj.id : testIdOrObj;
-    const test = cycleTests.find(t => String(t.id) === String(testId)) || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
+    const cachedList = perCycleCacheRef.current[cycleIdStr] || cycleTests;
+    const test = cachedList.find(t => String(t.id) === String(testId))
+      || cycleTests.find(t => String(t.id) === String(testId))
+      || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test || !test.id) return;
 
     try {
       const updated = await invoke('updateTestStatus', {
+        projectId: selectedProjectId,
         cycleId: selectedCycle.id,
         testId: test.id,
         testRunId: test.testRunId || test.testRunKey,
+        iterations: Array.isArray(test.iterations) && test.iterations.length > 0 ? test.iterations : undefined,
         takeover: true
       });
       if (updated) {
-        setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, executedBy: updated.executedBy } : t));
+        setCycleTests(prev => {
+          const next = prev.map(t => String(t.id) === String(test.id) ? { ...t, executedBy: updated.executedBy } : t);
+          perCycleCacheRef.current[cycleIdStr] = next;
+          return next;
+        });
         addNotification({ type: 'success', title: 'Ejecución tomada', description: 'Ahora eres el ejecutor asignado.' });
       }
     } catch (e) {
@@ -7727,10 +7845,11 @@ Then el sistema valida la identidad.
             return !deletedForCycle.has(id) && (!key || !deletedForCycle.has(key));
           });
           
-          // Preserve exact order as added / linked
-          perCycleCacheRef.current[cycleId] = filteredEnriched;
+          // Preserve exact order as added / linked and preserve any local iterations
           if (activeCycleIdRef.current === cycleId) {
-            setCycleTests(filteredEnriched);
+            safeSetCycleTests(filteredEnriched, cycleId);
+          } else {
+            perCycleCacheRef.current[cycleId] = filteredEnriched;
           }
           setTestCycles(prev => prev.map(c => String(c.id) === cycleId ? { ...c, testCount: filteredEnriched.length } : c));
         })
@@ -9079,9 +9198,7 @@ const renderPlanningTab = () => {
         setCycleTests(prev => {
           const updated = prev.map(t => {
             if (String(t.id) === String(testId)) {
-              const mergedIterations = (fullExec?.iterations && fullExec.iterations.length > 0)
-                ? fullExec.iterations
-                : (t.iterations && t.iterations.length > 0 ? t.iterations : (fullExec?.iterations || []));
+              const mergedIterations = mergeIterationsPreservingLocal(t.iterations, fullExec?.iterations);
 
               const mergedEvidences = (fullExec?.evidences && fullExec.evidences.length > 0)
                 ? fullExec.evidences
@@ -9091,9 +9208,16 @@ const renderPlanningTab = () => {
                 ? fullExec.linkedBugs
                 : (t.linkedBugs && t.linkedBugs.length > 0 ? t.linkedBugs : (fullExec?.linkedBugs || []));
 
+              const isRunning = !!runningTests[testId];
+              const localHasMoreIters = (Array.isArray(t.iterations) ? t.iterations.length : 0) > (Array.isArray(fullExec?.iterations) ? fullExec.iterations.length : 0);
+              const preservedStatus = isRunning
+                ? 'In Progress'
+                : (localHasMoreIters && t.status ? t.status : (fullExec?.status || t.status));
+
               return {
                 ...t,
                 ...(fullExec || {}),
+                status: preservedStatus,
                 iterations: mergedIterations,
                 evidences: mergedEvidences,
                 linkedBugs: mergedBugs,
@@ -9103,7 +9227,7 @@ const renderPlanningTab = () => {
             }
             return t;
           });
-          if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+          if (cycleIdStr) {
             perCycleCacheRef.current[cycleIdStr] = updated;
           }
           return updated;
@@ -9127,10 +9251,13 @@ const renderPlanningTab = () => {
         uniqueCycleTestsMap.set(matchKey, test);
       } else {
         const existing = uniqueCycleTestsMap.get(matchKey);
+        const mergedIters = mergeIterationsPreservingLocal(existing.iterations, test.iterations);
         const hasExec = test.status && normalizeUiStatus(test.status) !== 'Not Run';
         const existingHasExec = existing.status && normalizeUiStatus(existing.status) !== 'Not Run';
         if (hasExec && !existingHasExec) {
-          uniqueCycleTestsMap.set(matchKey, test);
+          uniqueCycleTestsMap.set(matchKey, { ...test, iterations: mergedIters });
+        } else {
+          uniqueCycleTestsMap.set(matchKey, { ...existing, iterations: mergedIters });
         }
       }
     });
@@ -10491,8 +10618,9 @@ const renderPlanningTab = () => {
                                             type="text"
                                             className="execution-iteration-input"
                                             placeholder="Ej: Usuario=admin, Rol=Supervisor, Canal=POS"
-                                            defaultValue={iter.expectedData || ''}
-                                            onBlur={e => { if (e.target.value !== iter.expectedData) handleIterationChange(test, iter.id, 'expectedData', e.target.value); }}
+                                            value={iter.expectedData ?? ''}
+                                            onChange={e => handleIterationChange(test, iter.id, 'expectedData', e.target.value, { debounceMs: 600 })}
+                                            onBlur={e => handleIterationChange(test, iter.id, 'expectedData', e.target.value, { flush: true })}
                                           />
                                         </div>
 
@@ -10504,8 +10632,9 @@ const renderPlanningTab = () => {
                                             rows={2}
                                             className="execution-iteration-input"
                                             placeholder="Detalles del resultado obtenido en esta iteración..."
-                                            defaultValue={iter.actualResult || ''}
-                                            onBlur={e => { if (e.target.value !== iter.actualResult) handleIterationChange(test, iter.id, 'actualResult', e.target.value); }}
+                                            value={iter.actualResult ?? ''}
+                                            onChange={e => handleIterationChange(test, iter.id, 'actualResult', e.target.value, { debounceMs: 600 })}
+                                            onBlur={e => handleIterationChange(test, iter.id, 'actualResult', e.target.value, { flush: true })}
                                             style={{ resize: 'vertical' }}
                                           />
                                         </div>
