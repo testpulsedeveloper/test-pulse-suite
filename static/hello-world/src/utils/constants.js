@@ -219,7 +219,7 @@ export function formatBugAge(createdStr, resolutionDateStr, isDone, bugMeta = {}
       if (typeof bugMeta?.resolutionBusinessHours === 'number' && !isNaN(bugMeta.resolutionBusinessHours)) {
         businessHours = Math.max(0, bugMeta.resolutionBusinessHours);
       } else {
-        const effectiveResStr = resolutionDateStr || bugMeta?.lastTerminalAt || null;
+        const effectiveResStr = bugMeta?.lastTerminalAt || resolutionDateStr || null;
         if (effectiveResStr) {
           const resTime = new Date(effectiveResStr).getTime();
           if (!isNaN(resTime) && resTime >= effectiveStart) {
@@ -227,19 +227,32 @@ export function formatBugAge(createdStr, resolutionDateStr, isDone, bugMeta = {}
           }
         }
       }
-    } else if (typeof bugMeta?.activeBusinessHours === 'number' && !isNaN(bugMeta.activeBusinessHours)) {
-      // Backend pre-calculated net active business hours (already excludes ON HOLD & pre-reopen closed intervals)
-      businessHours = Math.max(0, bugMeta.activeBusinessHours);
-    } else {
-      // Frontend fallback calculation
-      let end = Date.now();
-      if (isOnHold && bugMeta?.onHoldSince) {
-        const holdMs = new Date(bugMeta.onHoldSince).getTime();
-        if (!isNaN(holdMs) && holdMs >= effectiveStart) {
-          end = holdMs;
+    } else if (isOnHold) {
+      // Bug is currently paused in ON HOLD: freeze clock at onHoldSince or use backend activeBusinessHours
+      if (Boolean(bugMeta?.isOnHold) && typeof bugMeta?.activeBusinessHours === 'number' && !isNaN(bugMeta.activeBusinessHours)) {
+        businessHours = Math.max(0, bugMeta.activeBusinessHours);
+      } else {
+        let end = Date.now();
+        if (bugMeta?.onHoldSince) {
+          const holdMs = new Date(bugMeta.onHoldSince).getTime();
+          if (!isNaN(holdMs) && holdMs >= effectiveStart) {
+            end = holdMs;
+          }
         }
+        const pausedHours = (typeof bugMeta?.onHoldBusinessHours === 'number' && !isNaN(bugMeta.onHoldBusinessHours))
+          ? Math.max(0, bugMeta.onHoldBusinessHours)
+          : 0;
+        businessHours = Math.max(0, getBusinessHoursBetween(effectiveStart, end) - pausedHours);
       }
-      businessHours = getBusinessHoursBetween(effectiveStart, end);
+    } else {
+      // Active open bug (including 'Abierto', 'En Progreso', 'Resuelta', 'Reabierto'):
+      // Always compute live business hours up to Date.now() from effectiveStart (reopenedAt or created),
+      // subtracting any time previously paused in ON HOLD during the current cycle.
+      const rawOpenHours = getBusinessHoursBetween(effectiveStart, Date.now());
+      const pausedHours = (typeof bugMeta?.onHoldBusinessHours === 'number' && !isNaN(bugMeta.onHoldBusinessHours))
+        ? Math.max(0, bugMeta.onHoldBusinessHours)
+        : 0;
+      businessHours = Math.max(0, rawOpenHours - pausedHours);
     }
 
     const bHoursFormatted = businessHours.toFixed(1);

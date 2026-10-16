@@ -13,7 +13,7 @@ export const queryClient = new QueryClient({
 });
 
 // ── IndexedDB + L1 Memory Cache (No 5 MB sessionStorage ceiling, non-blocking, 0 calls within TTL) ──
-const IDB_NAME = 'testpulse_cache_db_v5';
+const IDB_NAME = 'testpulse_cache_db_v6';
 const IDB_STORE = 'queries';
 const _l1Cache = new Map(); // key -> { ts, data }
 let _idbPromise = null;

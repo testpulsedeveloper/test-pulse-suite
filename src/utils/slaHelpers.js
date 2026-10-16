@@ -115,16 +115,11 @@ export function isTerminalStatus(statusStr) {
   if (!statusStr) return false;
   const s = String(statusStr).toLowerCase().trim();
   return (
-    s === 'done' ||
+    s === 'closed' ||
+    s === 'cerrado' ||
+    s === 'cerrada' ||
     s.includes('cerrad') ||
-    s.includes('closed') ||
-    s.includes('resuelt') ||
-    s.includes('resolved') ||
-    s.includes('finalizad') ||
-    s.includes('completad') ||
-    s.includes('cancelad') ||
-    s.includes('rechazad') ||
-    s.includes('descartad')
+    s.includes('closed')
   );
 }
 
@@ -154,10 +149,11 @@ export function isOnHoldStatus(statusStr) {
 
 /**
  * Inspects a Jira issue's changelog to compute accurate lifecycle metrics:
- * 1. Detects whether a bug was previously closed/resolved and later reopened (`isReopened`, `reopenedAt`, `reopenCount`).
+ * 1. Detects whether a bug was previously closed and later reopened (`isReopened`, `reopenedAt`, `reopenCount`).
  * 2. Detects whether the bug is currently in an ON HOLD status (`isOnHold`, `onHoldSince`) and pauses its clock.
  * 3. Calculates net active business hours (`activeBusinessHours` / `resolutionBusinessHours`) starting from the
  *    latest reopen date (if reopened) or creation date, excluding any time spent in ON HOLD or prior closed states.
+ *    NOTE: Strictly only 'Cerrado', 'Cerrada', and 'Closed' are terminal. States like 'Resuelta' remain open/active.
  *
  * @param {Object} issue - Raw Jira issue payload (with optional `changelog.histories` and `fields`)
  * @returns {Object} Lifecycle metadata to merge into the normalized bug object
@@ -167,8 +163,9 @@ export function analyzeBugChangelog(issue) {
   const createdStr = fields.created || null;
   const resolutionDateStr = fields.resolutiondate || null;
   const currentStatus = fields.status?.name || 'To Do';
-  const statusCategory = fields.status?.statusCategory?.key || 'new';
-  const isCurrentlyDone = statusCategory === 'done' || isTerminalStatus(currentStatus);
+  // Strict business rule: ONLY 'closed', 'cerrado', 'cerrada' are considered closed.
+  // Do NOT use statusCategory === 'done' because Jira maps 'Resuelta' to 'done' even though QA has not closed it yet.
+  const isCurrentlyDone = isTerminalStatus(currentStatus);
   const isOnHold = !isCurrentlyDone && isOnHoldStatus(currentStatus);
 
   const createdMs = createdStr ? new Date(createdStr).getTime() : NaN;
@@ -294,15 +291,15 @@ export function analyzeBugChangelog(issue) {
       endMs: Math.max(cursorMs, nowMs)
     });
 
-    // Determine effective end timestamp for resolved/closed bugs
+    // Determine effective end timestamp for closed bugs (prefer actual transition to Cerrada/Closed over Resuelta resolutiondate)
     let resolvedEndMs = nowMs;
     if (isCurrentlyDone) {
       const resFieldMs = resolutionDateStr ? new Date(resolutionDateStr).getTime() : NaN;
       const lastTermMs = lastTerminalAt ? new Date(lastTerminalAt).getTime() : NaN;
-      if (!isNaN(resFieldMs) && resFieldMs >= cycleStartMs) {
-        resolvedEndMs = resFieldMs;
-      } else if (!isNaN(lastTermMs) && lastTermMs >= cycleStartMs) {
+      if (!isNaN(lastTermMs) && lastTermMs >= cycleStartMs) {
         resolvedEndMs = lastTermMs;
+      } else if (!isNaN(resFieldMs) && resFieldMs >= cycleStartMs) {
+        resolvedEndMs = resFieldMs;
       } else {
         resolvedEndMs = cycleStartMs;
       }

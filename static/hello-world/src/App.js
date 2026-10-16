@@ -4580,15 +4580,6 @@ Then el sistema valida la identidad.
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button
-                className="btn-primary"
-                onClick={() => router.open('/browse/' + bugKey)}
-                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-                title="Abrir este defecto directamente en la vista nativa de Jira"
-              >
-                <span>Abrir en Jira</span>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-              </button>
-              <button
                 className="btn-icon"
                 onClick={() => setSelectedBug(null)}
                 style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '6px', borderRadius: '4px', color: '#626F86', fontSize: '16px', lineHeight: 1 }}
