@@ -103,3 +103,244 @@ export function getBusinessMilliseconds(startMs, endMs) {
 
   return totalMs;
 }
+
+/**
+ * Determines whether a Jira status name represents a terminal (Resolved / Closed / Done) state.
+ * Supports Spanish and English workflow naming conventions used across QA projects.
+ *
+ * @param {string} statusStr - Raw Jira status name
+ * @returns {boolean} True if the status is terminal
+ */
+export function isTerminalStatus(statusStr) {
+  if (!statusStr) return false;
+  const s = String(statusStr).toLowerCase().trim();
+  return (
+    s === 'done' ||
+    s.includes('cerrad') ||
+    s.includes('closed') ||
+    s.includes('resuelt') ||
+    s.includes('resolved') ||
+    s.includes('finalizad') ||
+    s.includes('completad') ||
+    s.includes('cancelad') ||
+    s.includes('rechazad') ||
+    s.includes('descartad')
+  );
+}
+
+/**
+ * Determines whether a Jira status name represents a paused / On Hold state
+ * where the SLA & resolution clock must stop ticking.
+ *
+ * @param {string} statusStr - Raw Jira status name
+ * @returns {boolean} True if the status is On Hold / paused
+ */
+export function isOnHoldStatus(statusStr) {
+  if (!statusStr) return false;
+  const s = String(statusStr).toLowerCase().trim();
+  return (
+    s.includes('on hold') ||
+    s.includes('on-hold') ||
+    s.includes('onhold') ||
+    s.includes('en espera') ||
+    s.includes('pausad') ||
+    s.includes('standby') ||
+    s.includes('stand by') ||
+    s === 'hold' ||
+    s.includes('pendiente cliente') ||
+    s.includes('pendiente de cliente')
+  );
+}
+
+/**
+ * Inspects a Jira issue's changelog to compute accurate lifecycle metrics:
+ * 1. Detects whether a bug was previously closed/resolved and later reopened (`isReopened`, `reopenedAt`, `reopenCount`).
+ * 2. Detects whether the bug is currently in an ON HOLD status (`isOnHold`, `onHoldSince`) and pauses its clock.
+ * 3. Calculates net active business hours (`activeBusinessHours` / `resolutionBusinessHours`) starting from the
+ *    latest reopen date (if reopened) or creation date, excluding any time spent in ON HOLD or prior closed states.
+ *
+ * @param {Object} issue - Raw Jira issue payload (with optional `changelog.histories` and `fields`)
+ * @returns {Object} Lifecycle metadata to merge into the normalized bug object
+ */
+export function analyzeBugChangelog(issue) {
+  const fields = issue?.fields || {};
+  const createdStr = fields.created || null;
+  const resolutionDateStr = fields.resolutiondate || null;
+  const currentStatus = fields.status?.name || 'To Do';
+  const statusCategory = fields.status?.statusCategory?.key || 'new';
+  const isCurrentlyDone = statusCategory === 'done' || isTerminalStatus(currentStatus);
+  const isOnHold = !isCurrentlyDone && isOnHoldStatus(currentStatus);
+
+  const createdMs = createdStr ? new Date(createdStr).getTime() : NaN;
+  const nowMs = Date.now();
+
+  if (isNaN(createdMs)) {
+    return {
+      isReopened: false,
+      reopenedAt: null,
+      reopenCount: 0,
+      isOnHold,
+      onHoldSince: null,
+      onHoldBusinessHours: 0,
+      activeBusinessHours: 0,
+      resolutionBusinessHours: null,
+      lastTerminalAt: resolutionDateStr || null
+    };
+  }
+
+  // Extract and chronologically sort all status transitions from the issue changelog
+  const histories = Array.isArray(issue?.changelog?.histories) ? issue.changelog.histories : [];
+  const statusChanges = [];
+
+  for (const h of histories) {
+    const changeMs = h?.created ? new Date(h.created).getTime() : NaN;
+    if (isNaN(changeMs)) continue;
+    const items = Array.isArray(h?.items) ? h.items : [];
+    for (const item of items) {
+      if (item.field === 'status' || String(item.field || '').toLowerCase() === 'status') {
+        statusChanges.push({
+          atMs: changeMs,
+          atIso: h.created,
+          from: item.fromString || '',
+          to: item.toString || ''
+        });
+      }
+    }
+  }
+
+  statusChanges.sort((a, b) => a.atMs - b.atMs);
+
+  let isReopened = false;
+  let reopenedAt = null;
+  let reopenCount = 0;
+  let lastTerminalAt = null;
+  let onHoldSince = null;
+
+  for (const ch of statusChanges) {
+    const fromTerm = isTerminalStatus(ch.from);
+    const toTerm = isTerminalStatus(ch.to);
+    const toLower = String(ch.to || '').toLowerCase();
+
+    // A reopen occurs when transitioning out of a terminal status into a non-terminal status,
+    // or when transitioning explicitly into a "Reopened / Reabierto" status.
+    if ((fromTerm && !toTerm) || (!toTerm && (toLower.includes('reabiert') || toLower.includes('reopen')))) {
+      isReopened = true;
+      reopenedAt = ch.atIso;
+      reopenCount++;
+    }
+
+    // Track the most recent transition into a terminal status (fallback when resolutiondate is null)
+    if (!fromTerm && toTerm) {
+      lastTerminalAt = ch.atIso;
+    }
+
+    // Track when the bug entered an On Hold status
+    if (isOnHoldStatus(ch.to) && !isOnHoldStatus(ch.from)) {
+      onHoldSince = ch.atIso;
+    } else if (!isOnHoldStatus(ch.to)) {
+      onHoldSince = null;
+    }
+  }
+
+  // Fallback if the current status name itself explicitly indicates reopened
+  const currentLower = String(currentStatus).toLowerCase();
+  if (!isReopened && (currentLower.includes('reabiert') || currentLower.includes('reopen'))) {
+    isReopened = true;
+  }
+
+  if (isOnHold && !onHoldSince) {
+    onHoldSince = createdStr;
+  }
+
+  // If the bug was reopened, the active timer resets at the most recent reopen timestamp
+  const reopenMs = isReopened && reopenedAt ? new Date(reopenedAt).getTime() : NaN;
+  const cycleStartMs = !isNaN(reopenMs) && reopenMs >= createdMs ? reopenMs : createdMs;
+
+  let activeMs = 0;
+  let onHoldMs = 0;
+  let resolutionMs = null;
+
+  if (statusChanges.length === 0) {
+    // No changelog history available: calculate directly from cycleStartMs
+    if (isCurrentlyDone) {
+      const resMs = resolutionDateStr ? new Date(resolutionDateStr).getTime() : NaN;
+      const effectiveEndMs = !isNaN(resMs) && resMs >= cycleStartMs ? resMs : cycleStartMs;
+      resolutionMs = getBusinessMilliseconds(cycleStartMs, effectiveEndMs);
+      activeMs = resolutionMs;
+    } else if (isOnHold) {
+      activeMs = 0;
+    } else {
+      activeMs = getBusinessMilliseconds(cycleStartMs, nowMs);
+    }
+  } else {
+    // Build contiguous status segments from creation to now
+    const segments = [];
+    let cursorMs = createdMs;
+    let cursorStatus = statusChanges[0].from || currentStatus;
+
+    for (const ch of statusChanges) {
+      const segEnd = Math.max(cursorMs, ch.atMs);
+      segments.push({
+        status: cursorStatus,
+        startMs: cursorMs,
+        endMs: segEnd
+      });
+      cursorMs = segEnd;
+      cursorStatus = ch.to;
+    }
+    segments.push({
+      status: cursorStatus,
+      startMs: cursorMs,
+      endMs: Math.max(cursorMs, nowMs)
+    });
+
+    // Determine effective end timestamp for resolved/closed bugs
+    let resolvedEndMs = nowMs;
+    if (isCurrentlyDone) {
+      const resFieldMs = resolutionDateStr ? new Date(resolutionDateStr).getTime() : NaN;
+      const lastTermMs = lastTerminalAt ? new Date(lastTerminalAt).getTime() : NaN;
+      if (!isNaN(resFieldMs) && resFieldMs >= cycleStartMs) {
+        resolvedEndMs = resFieldMs;
+      } else if (!isNaN(lastTermMs) && lastTermMs >= cycleStartMs) {
+        resolvedEndMs = lastTermMs;
+      } else {
+        resolvedEndMs = cycleStartMs;
+      }
+    }
+
+    const targetEndMs = isCurrentlyDone ? resolvedEndMs : nowMs;
+
+    for (const seg of segments) {
+      const sStart = Math.max(seg.startMs, cycleStartMs);
+      const sEnd = Math.min(seg.endMs, targetEndMs);
+      if (sEnd <= sStart) continue;
+
+      if (isOnHoldStatus(seg.status)) {
+        onHoldMs += getBusinessMilliseconds(sStart, sEnd);
+      } else if (!isTerminalStatus(seg.status)) {
+        activeMs += getBusinessMilliseconds(sStart, sEnd);
+      }
+    }
+
+    if (isCurrentlyDone) {
+      resolutionMs = activeMs;
+    }
+  }
+
+  const activeBusinessHours = Number((activeMs / (1000 * 60 * 60)).toFixed(2));
+  const onHoldBusinessHours = Number((onHoldMs / (1000 * 60 * 60)).toFixed(2));
+  const resolutionBusinessHours = resolutionMs !== null ? Number((resolutionMs / (1000 * 60 * 60)).toFixed(2)) : null;
+
+  return {
+    isReopened,
+    reopenedAt,
+    reopenCount,
+    isOnHold,
+    onHoldSince,
+    onHoldBusinessHours,
+    activeBusinessHours,
+    resolutionBusinessHours,
+    lastTerminalAt: resolutionDateStr || lastTerminalAt || null
+  };
+}
+

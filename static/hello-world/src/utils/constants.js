@@ -171,26 +171,83 @@ export function formatBugCreatedDate(createdStr) {
   }
 }
 
-export function formatBugAge(createdStr, resolutionDateStr, isDone) {
-  if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+/**
+ * Formats the business-time age or resolution time of a bug using the Mexico City / Liverpool business calendar.
+ *
+ * Key business rules:
+ * 1. Reopened bugs (`bugMeta.isReopened`):
+ *    - Counter resets from `bugMeta.reopenedAt` (or uses precomputed `bugMeta.activeBusinessHours`).
+ *    - Label uses `"Re abierto hace ..."` instead of `"Abierto hace ..."`.
+ * 2. On Hold bugs (`bugMeta.isOnHold` or status matching `ON HOLD` / `En espera` / `Pausado`):
+ *    - Clock is paused while in On Hold (`activeBusinessHours` excludes On Hold intervals, or stops at `onHoldSince`).
+ *    - Never marked in red (`tone = 'onhold'`).
+ * 3. Resolved / Closed bugs (`isDone`):
+ *    - Uses net active business hours (`bugMeta.resolutionBusinessHours`) or calculates from `reopenedAt || created`
+ *      to `resolutionDateStr || bugMeta.lastTerminalAt` without falling back to `Date.now()` when resolutionDate is missing.
+ *
+ * @param {string} createdStr - ISO creation date string
+ * @param {string|null} resolutionDateStr - ISO resolution date string (if resolved)
+ * @param {boolean} isDone - Whether the bug is in a terminal/resolved status
+ * @param {Object} [bugMeta={}] - Optional bug metadata (isReopened, reopenedAt, isOnHold, onHoldSince, activeBusinessHours, resolutionBusinessHours, status)
+ * @returns {{ label: string, tone: string, hours: number, days: number, bHoursFormatted: string, isReopened: boolean, isOnHold: boolean }}
+ */
+export function formatBugAge(createdStr, resolutionDateStr, isDone, bugMeta = {}) {
+  if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0', isReopened: false, isOnHold: false };
   try {
     const created = new Date(createdStr).getTime();
-    if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+    if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0', isReopened: false, isOnHold: false };
 
-    let end = Date.now();
-    if (isDone && resolutionDateStr) {
-      const resTime = new Date(resolutionDateStr).getTime();
-      if (!isNaN(resTime) && resTime >= created) {
-        end = resTime;
+    const statusLower = String(bugMeta?.status || '').toLowerCase().trim();
+    const isOnHold = !isDone && (
+      Boolean(bugMeta?.isOnHold) ||
+      statusLower.includes('on hold') ||
+      statusLower.includes('on-hold') ||
+      statusLower.includes('onhold') ||
+      statusLower.includes('en espera') ||
+      statusLower.includes('pausad') ||
+      statusLower === 'hold'
+    );
+    const isReopened = Boolean(bugMeta?.isReopened) || statusLower.includes('reabiert') || statusLower.includes('reopen');
+
+    // Determine effective start timestamp (reopenedAt resets the clock when present)
+    const reopenedMs = isReopened && bugMeta?.reopenedAt ? new Date(bugMeta.reopenedAt).getTime() : NaN;
+    const effectiveStart = !isNaN(reopenedMs) && reopenedMs >= created ? reopenedMs : created;
+
+    let businessHours = 0;
+
+    if (isDone) {
+      if (typeof bugMeta?.resolutionBusinessHours === 'number' && !isNaN(bugMeta.resolutionBusinessHours)) {
+        businessHours = Math.max(0, bugMeta.resolutionBusinessHours);
+      } else {
+        const effectiveResStr = resolutionDateStr || bugMeta?.lastTerminalAt || null;
+        if (effectiveResStr) {
+          const resTime = new Date(effectiveResStr).getTime();
+          if (!isNaN(resTime) && resTime >= effectiveStart) {
+            businessHours = getBusinessHoursBetween(effectiveStart, resTime);
+          }
+        }
       }
+    } else if (typeof bugMeta?.activeBusinessHours === 'number' && !isNaN(bugMeta.activeBusinessHours)) {
+      // Backend pre-calculated net active business hours (already excludes ON HOLD & pre-reopen closed intervals)
+      businessHours = Math.max(0, bugMeta.activeBusinessHours);
+    } else {
+      // Frontend fallback calculation
+      let end = Date.now();
+      if (isOnHold && bugMeta?.onHoldSince) {
+        const holdMs = new Date(bugMeta.onHoldSince).getTime();
+        if (!isNaN(holdMs) && holdMs >= effectiveStart) {
+          end = holdMs;
+        }
+      }
+      businessHours = getBusinessHoursBetween(effectiveStart, end);
     }
 
-    const businessHours = getBusinessHoursBetween(created, end);
     const bHoursFormatted = businessHours.toFixed(1);
     const bDays = Math.floor(businessHours / 10);
 
     let label = '';
     let tone = 'neutral';
+    const openPrefix = isReopened ? 'Re abierto hace' : 'Abierto hace';
 
     if (isDone) {
       if (businessHours < 1) {
@@ -203,28 +260,43 @@ export function formatBugAge(createdStr, resolutionDateStr, isDone) {
         label = `Resuelto en ${days}d hábiles (${bHoursFormatted}h)`;
       }
       tone = 'done';
+    } else if (isOnHold) {
+      // On Hold bugs freeze their clock and NEVER turn red
+      if (businessHours < 1) {
+        const mins = Math.max(0, Math.round(businessHours * 60));
+        label = `${openPrefix} ${mins}m hábiles · En pausa`;
+      } else if (businessHours < 10) {
+        label = `${openPrefix} ${bHoursFormatted}h hábiles · En pausa`;
+      } else {
+        const days = Math.floor(businessHours / 10);
+        const dayWord = days === 1 ? 'hábil' : 'hábiles';
+        label = `${openPrefix} ${days}d ${dayWord} (${bHoursFormatted}h) · En pausa`;
+      }
+      tone = 'onhold';
     } else {
       if (businessHours < 1) {
         const mins = Math.max(1, Math.round(businessHours * 60));
-        label = `Abierto hace ${mins}m hábiles`;
+        label = `${openPrefix} ${mins}m hábiles`;
         tone = 'green';
       } else if (businessHours <= 20) {
         const days = Math.floor(businessHours / 10);
-        label = days > 0 ? `Abierto hace ${days}d hábil (${bHoursFormatted}h)` : `Abierto hace ${bHoursFormatted}h hábiles`;
+        const dayWord = days === 1 ? 'hábil' : 'hábiles';
+        label = days > 0 ? `${openPrefix} ${days}d ${dayWord} (${bHoursFormatted}h)` : `${openPrefix} ${bHoursFormatted}h hábiles`;
         tone = 'green';
       } else if (businessHours <= 50) {
         const days = Math.floor(businessHours / 10);
-        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+        label = `${openPrefix} ${days}d hábiles (${bHoursFormatted}h)`;
         tone = 'orange';
       } else {
         const days = Math.floor(businessHours / 10);
-        label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
+        label = `${openPrefix} ${days}d hábiles (${bHoursFormatted}h)`;
         tone = 'red';
       }
     }
 
-    return { label, tone, hours: businessHours, days: bDays, bHoursFormatted };
+    return { label, tone, hours: businessHours, days: bDays, bHoursFormatted, isReopened, isOnHold };
   } catch (e) {
-    return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
+    return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0', isReopened: false, isOnHold: false };
   }
 }
+

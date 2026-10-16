@@ -2,7 +2,7 @@ import Resolver from '@forge/resolver';
 import api, { route, fetch, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getBusinessMilliseconds } from './utils/slaHelpers.js';
+import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import {
   getIterationEvidenceKeys,
   dedupeEvidences,
@@ -2381,6 +2381,7 @@ const fetchBugsBatch = async (keys = []) => {
         body: JSON.stringify({
           jql,
           fields: fieldsToFetch,
+          expand: 'changelog',
           maxResults: chunk.length
         })
       });
@@ -2392,6 +2393,7 @@ const fetchBugsBatch = async (keys = []) => {
           body: JSON.stringify({
             jql,
             fields: fieldsToFetch,
+            expand: 'changelog',
             maxResults: chunk.length
           })
         });
@@ -2421,23 +2423,26 @@ const fetchBugsBatch = async (keys = []) => {
           const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
           const estResDate = issue.fields?.[estResField] || issue.fields?.duedate || null;
+          const changelogMeta = analyzeBugChangelog(issue);
 
           bugMap[key] = {
             key,
             summary: issue.fields?.summary || '',
             status: issue.fields?.status?.name || '',
+            statusCategory: issue.fields?.status?.statusCategory?.key || '',
             assignee: issue.fields?.assignee?.displayName || 'Sin asignar',
             resolution: issue.fields?.resolution?.name || 'Unresolved',
             priority: issue.fields?.priority?.name || '',
             issuetype: issue.fields?.issuetype?.name || 'Bug',
             severity: sevVal,
             created: issue.fields?.created || null,
-            resolutiondate: issue.fields?.resolutiondate || null,
+            resolutiondate: issue.fields?.resolutiondate || changelogMeta.lastTerminalAt || null,
             duedate: estResDate,
             estimatedResolutionDate: estResDate,
             versions: affectsVersions,
             fixVersions: fixVersions,
             version: versionDisplay,
+            ...changelogMeta,
             rawFields: issue.fields
           };
         }
@@ -3661,8 +3666,8 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jql,
-        expand: ['changelog'],
-        fields: ['created'],
+        expand: 'changelog',
+        fields: ['created', 'status', 'resolutiondate'],
         maxResults: 100
       })
     });
@@ -3671,22 +3676,21 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
       const data = await response.json();
       for (const issue of (data.issues || [])) {
         const changelog = issue.changelog?.histories || [];
-        const createdTime = new Date(issue.fields?.created || Date.now()).getTime();
+        const changelogMeta = analyzeBugChangelog(issue);
+        const baseStartStr = (changelogMeta.isReopened && changelogMeta.reopenedAt)
+          ? changelogMeta.reopenedAt
+          : (issue.fields?.created || null);
+        const createdTime = new Date(baseStartStr || Date.now()).getTime();
         
         let times = { atencion: null, resuelta: null, cerrada: null };
-        let isReopened = false;
+        const isReopened = changelogMeta.isReopened;
         
         for (const history of changelog) {
-          const statusItem = history.items.find(item => item.field === 'status');
+          const time = new Date(history.created).getTime();
+          if (time < createdTime) continue; // Only measure phases within the active cycle (after reopen if reopened)
+          const statusItem = (history.items || []).find(item => item.field === 'status');
           if (statusItem) {
             const toString = (statusItem.toString || '').toLowerCase();
-            const fromString = (statusItem.fromString || '').toLowerCase();
-            const time = new Date(history.created).getTime();
-            
-            const isTerminal = (str) => str.includes('cerrada') || str.includes('closed') || str.includes('resuelta') || str.includes('resolved') || str.includes('done');
-            if (isTerminal(fromString) && !isTerminal(toString)) {
-              isReopened = true;
-            }
             
             if (toString.includes('analisis') || toString.includes('análisis') || toString.includes('curso') || toString === 'in progress' || toString.includes('revis') || toString.includes('review')) {
               if (!times.atencion || time < times.atencion) times.atencion = time;
@@ -3717,15 +3721,19 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
           cntCursoResuelta++;
         }
         
-        // Total (legacy or simple overall: Nuevo -> Resuelta/Cerrada)
         if (isReopened) {
           bugsReopened++;
         }
 
-        const finalTime = times.cerrada || times.resuelta;
-        if (finalTime && finalTime > createdTime) {
-          totalHours += getBusinessMilliseconds(createdTime, finalTime) / (1000 * 60 * 60);
+        if (typeof changelogMeta.resolutionBusinessHours === 'number' && !isNaN(changelogMeta.resolutionBusinessHours)) {
+          totalHours += changelogMeta.resolutionBusinessHours;
           countTotal++;
+        } else {
+          const finalTime = times.cerrada || times.resuelta;
+          if (finalTime && finalTime > createdTime) {
+            totalHours += getBusinessMilliseconds(createdTime, finalTime) / (1000 * 60 * 60);
+            countTotal++;
+          }
         }
       }
     }
@@ -3970,7 +3978,7 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     ].join(',');
 
     const response = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${issueIdOrKey}?fields=${fields}&expand=renderedFields`
+      route`/rest/api/3/issue/${issueIdOrKey}?fields=${fields}&expand=renderedFields,changelog`
     );
     if (!response.ok) {
       console.warn(`[getBugFullDetails] Failed to fetch bug ${issueIdOrKey}:`, response.status);
@@ -3979,6 +3987,7 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     const data = await response.json();
     const f = data.fields || {};
     const rf = data.renderedFields || {};
+    const changelogMeta = analyzeBugChangelog(data);
 
     // 1. Description: rendered HTML or raw ADF (sanitize broken Jira server tags)
     const descriptionRendered = rf.description
@@ -4070,11 +4079,12 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       fixVersions: fixVersions,
       created: f.created,
       updated: f.updated,
-      resolutiondate: f.resolutiondate || null,
+      resolutiondate: f.resolutiondate || changelogMeta.lastTerminalAt || null,
       duedate: estResDate,
       estimatedResolutionDate: estResDate,
       environment: environmentText,
       labels: f.labels || [],
+      ...changelogMeta,
       rawFields: f
     };
   } catch (e) {
@@ -4305,7 +4315,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   try {
     while (!isLast && pages < 10) {
-      const page = await fetchJqlPage(jql, fields, null, null, token, 100);
+      const page = await fetchJqlPage(jql, fields, 'changelog', null, token, 100);
       if (page.error) {
         console.warn(`[getProjectUnlinkedBugs] JQL search warning:`, page.error);
         break;
@@ -4334,6 +4344,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
     const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
     const estResDate = issue.fields?.customfield_10763 || issue.fields?.duedate || null;
+    const changelogMeta = analyzeBugChangelog(issue);
 
     // Inspect Jira issuelinks on the bug to see if it is linked to any test entity
     let isLinkedToTest = linkedSet.has(issue.key);
@@ -4383,7 +4394,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       resolution: issue.fields?.resolution?.name || null,
       reporter: issue.fields?.reporter?.displayName || null,
       created: issue.fields?.created || null,
-      resolutiondate: issue.fields?.resolutiondate || null,
+      resolutiondate: issue.fields?.resolutiondate || changelogMeta.lastTerminalAt || null,
       duedate: estResDate,
       estimatedResolutionDate: estResDate,
       versions: affectsVersions,
@@ -4393,6 +4404,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       project: issue.fields?.project?.key || '',
       isLinked: isLinkedToTest,
       linkedTests: linkedTests,
+      ...changelogMeta,
       rawFields: issue.fields
     };
   });

@@ -4456,10 +4456,10 @@ Then el sistema valida la identidad.
     const createdDate = b.created || selectedBug.created;
     const resDate = b.resolutiondate || selectedBug.resolutiondate;
     const { dateStr, timeStr } = formatBugCreatedDate(createdDate);
-    const age = formatBugAge(createdDate, resDate, isDone);
+    const age = formatBugAge(createdDate, resDate, isDone, { ...selectedBug, ...b, status: rawStatus });
 
-    const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
-    const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+    const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
+    const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
     // Due Date
     const dueDateStr = b.duedate || selectedBug.duedate || null;
@@ -11251,122 +11251,27 @@ const renderPlanningTab = () => {
       return ['closed', 'cerrado', 'cerrada'].includes(statusStr);
     };
 
-    // Business calendar calculation (Mexico: Mon-Thu 7-18h, Fri 7-13h, Sat/Sun/Holidays excluded)
-    const MX_HOLIDAYS_SET = new Set([
-      '2024-01-01', '2024-02-05', '2024-03-18', '2024-05-01', '2024-09-16', '2024-10-01', '2024-11-18', '2024-12-25',
-      '2025-01-01', '2025-02-03', '2025-03-17', '2025-05-01', '2025-09-16', '2025-11-17', '2025-12-25',
-      '2026-01-01', '2026-02-02', '2026-03-16', '2026-05-01', '2026-09-16', '2026-11-16', '2026-12-25',
-      '2027-01-01', '2027-02-01', '2027-03-15', '2027-05-01', '2027-09-16', '2027-11-15', '2027-12-25'
-    ]);
-
-    const getBusinessHoursBetween = (startMs, endMs) => {
-      if (!startMs || !endMs || startMs >= endMs) return 0;
-      let current = new Date(startMs);
-      const end = new Date(endMs);
-      let businessMinutes = 0;
-      const mxOffset = -6 * 60 * 60 * 1000;
-
-      while (current < end) {
-        const mxTime = new Date(current.getTime() + mxOffset);
-        const day = mxTime.getUTCDay();
-        const hour = mxTime.getUTCHours();
-        const dateString = mxTime.toISOString().split('T')[0];
-
-        let isBusiness = false;
-        if (!MX_HOLIDAYS_SET.has(dateString)) {
-          if (day >= 1 && day <= 4) {
-            if (hour >= 7 && hour < 18) isBusiness = true;
-          } else if (day === 5) {
-            if (hour >= 7 && hour < 13) isBusiness = true;
-          }
-        }
-        if (isBusiness) businessMinutes++;
-        current.setTime(current.getTime() + 60000);
-      }
-      return businessMinutes / 60;
-    };
-
-    const formatBugCreatedDate = (createdStr) => {
-      if (!createdStr) return { dateStr: 'Sin fecha', timeStr: '' };
-      try {
-        const d = new Date(createdStr);
-        if (isNaN(d.getTime())) return { dateStr: 'Sin fecha', timeStr: '' };
-        const dateStr = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
-        const timeStr = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-        return { dateStr, timeStr };
-      } catch (e) {
-        return { dateStr: 'Sin fecha', timeStr: '' };
-      }
-    };
-
-    const formatBugAge = (createdStr, resolutionDateStr, isDone) => {
-      if (!createdStr) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-      try {
-        const created = new Date(createdStr).getTime();
-        if (isNaN(created)) return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-
-        let end = Date.now();
-        if (isDone && resolutionDateStr) {
-          const resTime = new Date(resolutionDateStr).getTime();
-          if (!isNaN(resTime) && resTime >= created) {
-            end = resTime;
-          }
-        }
-
-        const businessHours = getBusinessHoursBetween(created, end);
-        const bHoursFormatted = businessHours.toFixed(1);
-        const bDays = Math.floor(businessHours / 10);
-
-        let label = '';
-        let tone = 'neutral';
-
-        if (isDone) {
-          if (businessHours < 1) {
-            const mins = Math.max(1, Math.round(businessHours * 60));
-            label = `Resuelto en ${mins}m hábiles`;
-          } else if (businessHours < 10) {
-            label = `Resuelto en ${bHoursFormatted}h hábiles`;
-          } else {
-            const days = Math.round(businessHours / 10);
-            label = `Resuelto en ${days}d hábiles (${bHoursFormatted}h)`;
-          }
-          tone = 'done';
-        } else {
-          if (businessHours < 1) {
-            const mins = Math.max(1, Math.round(businessHours * 60));
-            label = `Abierto hace ${mins}m hábiles`;
-            tone = 'green';
-          } else if (businessHours <= 20) {
-            const days = Math.floor(businessHours / 10);
-            label = days > 0 ? `Abierto hace ${days}d hábil (${bHoursFormatted}h)` : `Abierto hace ${bHoursFormatted}h hábiles`;
-            tone = 'green';
-          } else if (businessHours <= 50) {
-            const days = Math.floor(businessHours / 10);
-            label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
-            tone = 'orange';
-          } else {
-            const days = Math.floor(businessHours / 10);
-            label = `Abierto hace ${days}d hábiles (${bHoursFormatted}h)`;
-            tone = 'red';
-          }
-        }
-
-        return { label, tone, hours: businessHours, days: bDays, bHoursFormatted };
-      } catch (e) {
-        return { label: 'Sin registro', tone: 'neutral', hours: 0, days: 0, bHoursFormatted: '0' };
-      }
-    };
-
     const renderBugStatusLozenge = (statusStr, isDone) => {
       const st = (statusStr || '').trim();
       const low = st.toLowerCase();
       if (['closed', 'cerrada', 'cerrado'].includes(low) || isDone) {
         return <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Cerrado'}</span>;
       }
+      if (low.includes('on hold') || low.includes('on-hold') || low.includes('onhold') || low.includes('en espera') || low.includes('pausad') || low === 'hold') {
+        return (
+          <span
+            className="ads-lozenge ads-lozenge-subtle"
+            style={{ fontSize: '10px', fontWeight: 700, backgroundColor: '#E9F2FF', color: '#0C66E4', border: '1px solid #CCE0FF' }}
+            title="Reloj de atención en pausa (On Hold)"
+          >
+            ⏸️ {st || 'ON HOLD'}
+          </span>
+        );
+      }
       if (low.includes('prog') || low.includes('curs') || low.includes('desarr') || low.includes('dev')) {
         return <span className="ads-lozenge ads-lozenge-brand" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'En progreso'}</span>;
       }
-      if (low.includes('hold') || low.includes('espera') || low.includes('anal') || low.includes('rev') || low.includes('block') || low.includes('bloq') || low.includes('qa') || low.includes('test') || low.includes('resuel') || low.includes('resolv') || low.includes('done')) {
+      if (low.includes('anal') || low.includes('rev') || low.includes('block') || low.includes('bloq') || low.includes('qa') || low.includes('test') || low.includes('resuel') || low.includes('resolv') || low.includes('done')) {
         return <span className="ads-lozenge ads-lozenge-warning" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'En análisis'}</span>;
       }
       return <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '10px', fontWeight: 700 }}>{st || 'Abierto'}</span>;
@@ -11539,12 +11444,27 @@ const renderPlanningTab = () => {
                   created: bug.created || bug.rawFields?.created || null,
                   resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                   duedate: bug.duedate || null,
+                  isReopened: Boolean(bug.isReopened),
+                  reopenedAt: bug.reopenedAt || null,
+                  reopenCount: bug.reopenCount || 0,
+                  isOnHold: Boolean(bug.isOnHold),
+                  onHoldSince: bug.onHoldSince || null,
+                  onHoldBusinessHours: typeof bug.onHoldBusinessHours === 'number' ? bug.onHoldBusinessHours : null,
+                  activeBusinessHours: typeof bug.activeBusinessHours === 'number' ? bug.activeBusinessHours : null,
+                  resolutionBusinessHours: typeof bug.resolutionBusinessHours === 'number' ? bug.resolutionBusinessHours : null,
+                  lastTerminalAt: bug.lastTerminalAt || null,
                   cycles: shouldAddCycle ? new Set([cycleName]) : new Set(),
                   affectedCases: new Map()
                 });
 
                 if (isDone) {
-                  const bugAgeInfo = formatBugAge(bug.created || bug.rawFields?.created, bug.resolutiondate || bug.rawFields?.resolutiondate, true);
+                  // Pass `bug` metadata as 4th argument so MTTR excludes closed intervals and On Hold pauses
+                  const bugAgeInfo = formatBugAge(
+                    bug.created || bug.rawFields?.created,
+                    bug.resolutiondate || bug.rawFields?.resolutiondate,
+                    true,
+                    bug
+                  );
                   if (bugAgeInfo && typeof bugAgeInfo.hours === 'number' && bugAgeInfo.hours > 0) {
                     totalResolutionHours += bugAgeInfo.hours;
                     resolvedCount++;
@@ -11725,6 +11645,15 @@ const renderPlanningTab = () => {
                   created: bug.created || bug.rawFields?.created || null,
                   resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                   duedate: bug.duedate || null,
+                  isReopened: Boolean(bug.isReopened),
+                  reopenedAt: bug.reopenedAt || null,
+                  reopenCount: bug.reopenCount || 0,
+                  isOnHold: Boolean(bug.isOnHold),
+                  onHoldSince: bug.onHoldSince || null,
+                  onHoldBusinessHours: typeof bug.onHoldBusinessHours === 'number' ? bug.onHoldBusinessHours : null,
+                  activeBusinessHours: typeof bug.activeBusinessHours === 'number' ? bug.activeBusinessHours : null,
+                  resolutionBusinessHours: typeof bug.resolutionBusinessHours === 'number' ? bug.resolutionBusinessHours : null,
+                  lastTerminalAt: bug.lastTerminalAt || null,
                   cycles: new Set([cycleName]),
                   affectedCases: new Map()
                 });
@@ -11758,6 +11687,15 @@ const renderPlanningTab = () => {
                     created: bug.created || bug.rawFields?.created || null,
                     resolutiondate: bug.resolutiondate || bug.rawFields?.resolutiondate || null,
                     duedate: bug.duedate || null,
+                    isReopened: Boolean(bug.isReopened),
+                    reopenedAt: bug.reopenedAt || null,
+                    reopenCount: bug.reopenCount || 0,
+                    isOnHold: Boolean(bug.isOnHold),
+                    onHoldSince: bug.onHoldSince || null,
+                    onHoldBusinessHours: typeof bug.onHoldBusinessHours === 'number' ? bug.onHoldBusinessHours : null,
+                    activeBusinessHours: typeof bug.activeBusinessHours === 'number' ? bug.activeBusinessHours : null,
+                    resolutionBusinessHours: typeof bug.resolutionBusinessHours === 'number' ? bug.resolutionBusinessHours : null,
+                    lastTerminalAt: bug.lastTerminalAt || null,
                     cycles: new Set([cycleName]),
                     affectedCases: new Map()
                   });
@@ -11870,6 +11808,21 @@ const renderPlanningTab = () => {
         if (!existing.duedate) {
           existing.duedate = ub.duedate || ub.rawFields?.duedate || null;
         }
+        if (ub.isReopened && !existing.isReopened) {
+          existing.isReopened = true;
+          existing.reopenedAt = ub.reopenedAt || existing.reopenedAt;
+          existing.reopenCount = ub.reopenCount || existing.reopenCount;
+        }
+        if (ub.isOnHold && !existing.isOnHold) {
+          existing.isOnHold = true;
+          existing.onHoldSince = ub.onHoldSince || existing.onHoldSince;
+        }
+        if (typeof ub.activeBusinessHours === 'number' && typeof existing.activeBusinessHours !== 'number') {
+          existing.activeBusinessHours = ub.activeBusinessHours;
+        }
+        if (typeof ub.resolutionBusinessHours === 'number' && typeof existing.resolutionBusinessHours !== 'number') {
+          existing.resolutionBusinessHours = ub.resolutionBusinessHours;
+        }
       } else {
         // Bug is in the project but wasn't part of planAllBugsMap
         // ONLY include if it matched at least one target cycle in scope
@@ -11889,6 +11842,15 @@ const renderPlanningTab = () => {
             created: ub.created || ub.rawFields?.created || null,
             resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
             duedate: ub.duedate || ub.rawFields?.duedate || null,
+            isReopened: Boolean(ub.isReopened),
+            reopenedAt: ub.reopenedAt || null,
+            reopenCount: ub.reopenCount || 0,
+            isOnHold: Boolean(ub.isOnHold),
+            onHoldSince: ub.onHoldSince || null,
+            onHoldBusinessHours: typeof ub.onHoldBusinessHours === 'number' ? ub.onHoldBusinessHours : null,
+            activeBusinessHours: typeof ub.activeBusinessHours === 'number' ? ub.activeBusinessHours : null,
+            resolutionBusinessHours: typeof ub.resolutionBusinessHours === 'number' ? ub.resolutionBusinessHours : null,
+            lastTerminalAt: ub.lastTerminalAt || null,
             cycles: foundCycles,
             affectedCases: affectedMap
           });
@@ -12133,23 +12095,28 @@ const renderPlanningTab = () => {
             sevColor = '#403294';
           }
 
-          // Status styling
-          const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
-          const statusColor = bug.isDone ? '#006644' : '#BF2600';
-
-          // Dates, Aging & TTR
+          // Dates, Aging & TTR (pass `bug` metadata for reopened counter reset & On Hold pause)
           const bugCreated = formatBugCreatedDate(bug.created);
-          const bugAge = formatBugAge(bug.created, bug.resolutiondate, bug.isDone);
+          const bugAge = formatBugAge(bug.created, bug.resolutiondate, bug.isDone, bug);
           let resFormatted = null;
           if (bug.isDone && bug.resolutiondate) {
             resFormatted = formatBugCreatedDate(bug.resolutiondate);
           }
 
+          // Status styling (On Hold uses blue/paused badge instead of red)
+          const isBugOnHold = bugAge.tone === 'onhold';
+          const statusBg = bug.isDone ? '#E3FCEF' : (isBugOnHold ? '#E9F2FF' : '#FFEBE6');
+          const statusColor = bug.isDone ? '#006644' : (isBugOnHold ? '#0C66E4' : '#BF2600');
+
           let agePillBg = '#E3FCEF';
           let agePillColor = '#006644';
           let agePillBorder = '#ABF5D1';
           if (!bug.isDone) {
-            if (bugAge.tone === 'orange') {
+            if (bugAge.tone === 'onhold') {
+              agePillBg = '#E9F2FF';
+              agePillColor = '#0C66E4';
+              agePillBorder = '#CCE0FF';
+            } else if (bugAge.tone === 'orange') {
               agePillBg = '#FFF0B3';
               agePillColor = '#172B4D';
               agePillBorder = '#FFE380';
@@ -12185,7 +12152,7 @@ const renderPlanningTab = () => {
               </td>
               <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
                 <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
-                  ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
+                  ${isBugOnHold ? `⏸️ ${bug.status || 'ON HOLD'}` : (bug.status || (bug.isDone ? 'Cerrado' : 'Abierto'))}
                 </span>
               </td>
               <td style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
@@ -12193,7 +12160,7 @@ const renderPlanningTab = () => {
                   📅 <strong>Creado:</strong> ${bugCreated.dateStr}${bugCreated.timeStr ? ` ${bugCreated.timeStr}` : ''}
                 </div>
                 <div style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
-                  ${bug.isDone ? `✅ ${bugAge.label}` : `⏱️ ${bugAge.label}`}
+                  ${bug.isDone ? `✅ ${bugAge.label}` : (isBugOnHold ? `⏸️ ${bugAge.label}` : `⏱️ ${bugAge.label}`)}
                 </div>
                 ${bug.isDone && resFormatted?.dateStr ? `
                   <div style="color: #006644; font-size: 10px; margin-top: 3px;">
@@ -12228,23 +12195,28 @@ const renderPlanningTab = () => {
           const sevBg = '#FFEBE6';
           const sevColor = '#BF2600';
 
-          // Status styling
-          const statusBg = bug.isDone ? '#E3FCEF' : '#FFEBE6';
-          const statusColor = bug.isDone ? '#006644' : '#BF2600';
-
-          // Dates, Aging & TTR
+          // Dates, Aging & TTR (pass `bug` metadata for reopened counter reset & On Hold pause)
           const bugCreated = formatBugCreatedDate(bug.created);
-          const bugAge = formatBugAge(bug.created, bug.resolutiondate, bug.isDone);
+          const bugAge = formatBugAge(bug.created, bug.resolutiondate, bug.isDone, bug);
           let resFormatted = null;
           if (bug.isDone && bug.resolutiondate) {
             resFormatted = formatBugCreatedDate(bug.resolutiondate);
           }
 
+          // Status styling (On Hold uses blue/paused badge instead of red)
+          const isBugOnHold = bugAge.tone === 'onhold';
+          const statusBg = bug.isDone ? '#E3FCEF' : (isBugOnHold ? '#E9F2FF' : '#FFEBE6');
+          const statusColor = bug.isDone ? '#006644' : (isBugOnHold ? '#0C66E4' : '#BF2600');
+
           let agePillBg = '#E3FCEF';
           let agePillColor = '#006644';
           let agePillBorder = '#ABF5D1';
           if (!bug.isDone) {
-            if (bugAge.tone === 'orange') {
+            if (bugAge.tone === 'onhold') {
+              agePillBg = '#E9F2FF';
+              agePillColor = '#0C66E4';
+              agePillBorder = '#CCE0FF';
+            } else if (bugAge.tone === 'orange') {
               agePillBg = '#FFF0B3';
               agePillColor = '#172B4D';
               agePillBorder = '#FFE380';
@@ -12281,7 +12253,7 @@ const renderPlanningTab = () => {
               </td>
               <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
                 <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
-                  ${bug.status || (bug.isDone ? 'Cerrado' : 'Abierto')}
+                  ${isBugOnHold ? `⏸️ ${bug.status || 'ON HOLD'}` : (bug.status || (bug.isDone ? 'Cerrado' : 'Abierto'))}
                 </span>
               </td>
               <td style="border: 1px solid #DFE1E6; padding: 8px 6px; width: 15%; vertical-align: top; font-size: 11px; color: #44546F; word-break: break-word;">
@@ -12293,10 +12265,10 @@ const renderPlanningTab = () => {
                   📅 <strong>Creado:</strong> ${bugCreated.dateStr}${bugCreated.timeStr ? ` ${bugCreated.timeStr}` : ''}
                 </div>
                 <div style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
-                  ${bug.isDone ? `✅ ${bugAge.label}` : `⏱️ ${bugAge.label}`}
+                  ${bug.isDone ? `✅ ${bugAge.label}` : (isBugOnHold ? `⏸️ ${bugAge.label}` : `⏱️ ${bugAge.label}`)}
                 </div>
                 ${bug.isDone && resFormatted?.dateStr ? `
-                  <div style="color: #006644; font-size: 10px; margin-top: 3px;">
+                  <div style="color: #006644; font-size: 10px; margin-top: 2px;">
                     🏁 Resuelto: ${resFormatted.dateStr}${resFormatted.timeStr ? ` ${resFormatted.timeStr}` : ''}
                   </div>` : ''}
                 <div style="color: #44546F; font-size: 10px; margin-top: 4px;">
@@ -12721,18 +12693,19 @@ const renderPlanningTab = () => {
       };
     };
 
+    /**
+     * Generates and triggers a native PDF / Print dialog directly inside the
+     * Atlassian Forge Custom UI iframe without relying on `window.open('about:blank', '_blank')`,
+     * which is blocked by the Forge sandboxed iframe policy even when browser popups are allowed.
+     *
+     * Strategy 1 (Primary): Injects a hidden `<iframe>` into the Custom UI DOM, writes the
+     * print-ready HTML document, and invokes `iframe.contentWindow.print()`.
+     * Strategy 2 (Fallback): Injects a dedicated `@media print` container into `document.body`
+     * that isolates the executive report during `window.print()` and cleans up afterward.
+     */
     const handlePrintPdf = (reportHtml, docTitle) => {
-      const printWindow = window.open('about:blank', '_blank');
-      if (!printWindow) {
-        addNotification({
-          type: 'warning',
-          title: 'Ventana emergente bloqueada',
-          description: 'Por favor permite las ventanas emergentes en tu navegador para generar el PDF.'
-        });
-        return;
-      }
       const cleanTitle = (docTitle || 'Reporte Ejecutivo - Test Pulse').replace(/"/g, '&quot;');
-      printWindow.document.write(`
+      const fullPrintDocument = `
         <!DOCTYPE html>
         <html lang="es">
           <head>
@@ -12744,10 +12717,12 @@ const renderPlanningTab = () => {
                 margin: 10mm 12mm;
               }
               @media print {
-                body {
+                html, body {
                   -webkit-print-color-adjust: exact !important;
                   print-color-adjust: exact !important;
+                  color-adjust: exact !important;
                   background-color: #ffffff !important;
+                  margin: 0 !important;
                   padding: 0 !important;
                 }
                 .no-print {
@@ -12756,40 +12731,12 @@ const renderPlanningTab = () => {
               }
               body {
                 margin: 0;
-                padding: 24px;
-                background-color: #f4f5f7;
+                padding: 0;
+                background-color: #ffffff;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                 display: flex;
                 flex-direction: column;
                 align-items: center;
-              }
-              .print-toolbar {
-                width: 100%;
-                max-width: 800px;
-                background: #002D62;
-                color: #ffffff;
-                padding: 12px 20px;
-                border-radius: 8px;
-                margin-bottom: 20px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                box-sizing: border-box;
-              }
-              .print-btn {
-                background: #E1007A;
-                color: #ffffff;
-                border: none;
-                padding: 8px 18px;
-                font-size: 13px;
-                font-weight: 700;
-                border-radius: 6px;
-                cursor: pointer;
-                transition: opacity 0.2s;
-              }
-              .print-btn:hover {
-                opacity: 0.9;
               }
               .report-container {
                 width: 100%;
@@ -12800,27 +12747,150 @@ const renderPlanningTab = () => {
             </style>
           </head>
           <body>
-            <div class="print-toolbar no-print">
-              <span style="font-weight: 600; font-size: 14px;">📄 Vista Previa de Impresión / Guardar como PDF</span>
-              <div>
-                <button class="print-btn" onclick="window.print()">🖨️ Guardar como PDF / Imprimir</button>
-                <button style="background:transparent; border:1px solid rgba(255,255,255,0.4); color:#fff; padding:8px 14px; border-radius:6px; margin-left:8px; cursor:pointer;" onclick="window.close()">Cerrar</button>
-              </div>
-            </div>
             <div class="report-container">
               ${reportHtml}
             </div>
-            <script>
-              window.onload = function() {
-                setTimeout(function() {
-                  window.print();
-                }, 400);
-              };
-            </script>
           </body>
         </html>
-      `);
-      printWindow.document.close();
+      `;
+
+      // Helper for Fallback Strategy: Direct @media print DOM container on current window
+      const triggerDirectDomPrintFallback = () => {
+        try {
+          const prevTitle = document.title;
+          document.title = docTitle || 'Reporte Ejecutivo - Test Pulse';
+
+          const existingStyle = document.getElementById('tp-print-direct-style');
+          if (existingStyle) existingStyle.remove();
+          const existingContainer = document.getElementById('tp-print-direct-container');
+          if (existingContainer) existingContainer.remove();
+
+          const printStyle = document.createElement('style');
+          printStyle.id = 'tp-print-direct-style';
+          printStyle.innerHTML = `
+            @media screen {
+              #tp-print-direct-container {
+                display: none !important;
+              }
+            }
+            @media print {
+              @page {
+                size: letter portrait;
+                margin: 10mm 12mm;
+              }
+              html, body {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+                background: #ffffff !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              body > *:not(#tp-print-direct-container) {
+                display: none !important;
+              }
+              #tp-print-direct-container {
+                display: block !important;
+                width: 100% !important;
+                max-width: 800px !important;
+                margin: 0 auto !important;
+                background: #ffffff !important;
+              }
+            }
+          `;
+
+          const printContainer = document.createElement('div');
+          printContainer.id = 'tp-print-direct-container';
+          printContainer.innerHTML = reportHtml;
+
+          document.head.appendChild(printStyle);
+          document.body.appendChild(printContainer);
+
+          const cleanupDirectPrint = () => {
+            document.title = prevTitle;
+            if (printStyle.parentNode) printStyle.parentNode.removeChild(printStyle);
+            if (printContainer.parentNode) printContainer.parentNode.removeChild(printContainer);
+            window.removeEventListener('afterprint', cleanupDirectPrint);
+          };
+
+          window.addEventListener('afterprint', cleanupDirectPrint);
+          window.focus();
+          window.print();
+          // Safety cleanup in case afterprint does not fire in some browsers
+          setTimeout(cleanupDirectPrint, 60000);
+        } catch (fallbackErr) {
+          console.error('[Test Pulse] Error en impresión directa de PDF:', fallbackErr);
+          addNotification({
+            type: 'error',
+            title: 'Error al generar PDF',
+            description: 'No se pudo iniciar el diálogo de impresión del navegador.'
+          });
+        }
+      };
+
+      try {
+        const prevIframe = document.getElementById('tp-print-pdf-iframe');
+        if (prevIframe && prevIframe.parentNode) {
+          prevIframe.parentNode.removeChild(prevIframe);
+        }
+
+        const printIframe = document.createElement('iframe');
+        printIframe.id = 'tp-print-pdf-iframe';
+        printIframe.title = cleanTitle;
+        printIframe.style.position = 'fixed';
+        printIframe.style.right = '0';
+        printIframe.style.bottom = '0';
+        printIframe.style.width = '0';
+        printIframe.style.height = '0';
+        printIframe.style.border = '0';
+        printIframe.style.opacity = '0';
+        printIframe.style.pointerEvents = 'none';
+        document.body.appendChild(printIframe);
+
+        const iframeWin = printIframe.contentWindow;
+        const iframeDoc = printIframe.contentDocument || (iframeWin && iframeWin.document);
+        if (!iframeDoc || !iframeWin) {
+          triggerDirectDomPrintFallback();
+          return;
+        }
+
+        const prevTitle = document.title;
+        document.title = docTitle || 'Reporte Ejecutivo - Test Pulse';
+
+        iframeDoc.open();
+        iframeDoc.write(fullPrintDocument);
+        iframeDoc.close();
+
+        let printed = false;
+        const executeIframePrint = () => {
+          if (printed) return;
+          printed = true;
+          try {
+            iframeWin.focus();
+            iframeWin.print();
+            addNotification({
+              type: 'info',
+              title: '🖨️ Diálogo de PDF listo',
+              description: 'Selecciona "Guardar como PDF" en el destino de impresión para descargar tu reporte.'
+            });
+          } catch (printErr) {
+            console.warn('[Test Pulse] Fallback a impresión directa DOM:', printErr);
+            triggerDirectDomPrintFallback();
+          } finally {
+            setTimeout(() => {
+              document.title = prevTitle;
+            }, 2500);
+          }
+        };
+
+        printIframe.onload = () => {
+          setTimeout(executeIframePrint, 250);
+        };
+        // Fallback timer if onload already fired synchronously on document.close()
+        setTimeout(executeIframePrint, 450);
+      } catch (err) {
+        console.warn('[Test Pulse] Error en iframe print, usando fallback DOM:', err);
+        triggerDirectDomPrintFallback();
+      }
     };
 
     const copyReportHtmlToClipboard = async (htmlTemplate, plainText) => {
@@ -13660,13 +13730,14 @@ const renderPlanningTab = () => {
                     await copyReportHtmlToClipboard(htmlToExport, previewRep.plainText);
                     handlePrintPdf(htmlToExport, previewRep.emailSubject);
                     const subjectEnc = encodeURIComponent(previewRep.emailSubject);
-                    router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subjectEnc}`);
+                    setTimeout(() => {
+                      router.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${subjectEnc}`);
+                    }, 600);
                     addNotification({
                       type: 'success',
                       title: '🚀 Reporte listo para enviar',
-                      description: 'Ventana de PDF lista para guardar y reporte copiado al portapapeles. Pégalo en Gmail (Ctrl+V) y adjunta tu archivo PDF.'
+                      description: 'Diálogo de PDF iniciado y reporte copiado al portapapeles. Pégalo en Gmail (Ctrl+V) y adjunta tu archivo PDF.'
                     });
-                    setExecutiveReportModalOpen(false);
                   }}
                   style={{
                     display: 'inline-flex',
@@ -15061,9 +15132,10 @@ const renderPlanningTab = () => {
                     <tbody>
                       {filteredBugsList.map((bug) => {
                         const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
-                        const age = formatBugAge(bug.created, bug.resolutiondate, false);
-                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
-                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+                        // Pass full bug metadata so reopened bugs reset counter ("Re abierto hace...") and ON HOLD bugs pause clock
+                        const age = formatBugAge(bug.created, bug.resolutiondate, false, bug);
+                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
+                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
                         return (
                           <tr key={bug.key} onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }}>
@@ -15132,7 +15204,7 @@ const renderPlanningTab = () => {
                                     }}
                                     title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles transcurridas`}
                                   >
-                                    <span>⏱️</span> <span>{age.label}</span>
+                                    <span>{age.tone === 'onhold' ? '⏸️' : '⏱️'}</span> <span>{age.label}</span>
                                   </div>
                                 )}
                               </div>
@@ -15477,9 +15549,10 @@ const renderPlanningTab = () => {
                     <tbody>
                       {filteredPlanGeneralBugsList.map((bug) => {
                         const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
-                        const age = formatBugAge(bug.created, bug.resolutiondate, bug.isDone);
-                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
-                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+                        // Pass full bug metadata so reopened bugs reset counter ("Re abierto hace...") and ON HOLD bugs pause clock
+                        const age = formatBugAge(bug.created, bug.resolutiondate, bug.isDone, bug);
+                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
+                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
                         return (
                           <tr key={bug.key} onClick={() => setSelectedBug(bug)} style={{ opacity: bug.isDone ? 0.85 : 1, cursor: 'pointer' }}>
@@ -15548,7 +15621,7 @@ const renderPlanningTab = () => {
                                     }}
                                     title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles ${bug.isDone ? 'invertidas hasta resolución' : 'transcurridas'}`}
                                   >
-                                    <span>⏱️</span> <span>{age.label}</span>
+                                    <span>{age.tone === 'onhold' ? '⏸️' : '⏱️'}</span> <span>{age.label}</span>
                                   </div>
                                 )}
                               </div>
@@ -16653,9 +16726,10 @@ const renderPlanningTab = () => {
                       <tbody>
                         {projectUnlinkedBugs.map((bug, idx) => {
                           const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
-                          const age = formatBugAge(bug.created, bug.resolutiondate, isBugDone(bug));
-                          const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : '#F1F2F4';
-                          const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : '#44546F';
+                          // Pass full bug metadata so reopened bugs reset counter ("Re abierto hace...") and ON HOLD bugs pause clock
+                          const age = formatBugAge(bug.created, bug.resolutiondate, isBugDone(bug), bug);
+                          const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
+                          const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
                           return (
                             <tr key={bug.key || idx} onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }}>
@@ -16705,7 +16779,7 @@ const renderPlanningTab = () => {
                                       }}
                                       title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles`}
                                     >
-                                      <span>⏱️</span> <span>{age.label}</span>
+                                      <span>{age.tone === 'onhold' ? '⏸️' : '⏱️'}</span> <span>{age.label}</span>
                                     </div>
                                   )}
                                 </div>
