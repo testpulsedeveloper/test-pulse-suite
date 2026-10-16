@@ -12057,8 +12057,8 @@ const renderPlanningTab = () => {
       let tableRows = '';
       if (cycleBugsArray.length === 0) {
         tableRows = `
-          <tr>
-            <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
+          <tr class="tp-er-tr-even">
+            <td colspan="6" class="tp-er-empty-td" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
               🟢 No se registraron defectos vinculados en las ejecuciones del ciclo actual.
             </td>
           </tr>
@@ -12067,23 +12067,29 @@ const renderPlanningTab = () => {
         cycleBugsArray.forEach((bug, idx) => {
           const isEven = idx % 2 === 0;
           const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+          const trClass = isEven ? 'tp-er-tr-even' : 'tp-er-tr-odd';
           
           // Severity styling (Liverpool & Jira harmonious tones)
           let sevBg = '#F4F5F7';
           let sevColor = '#172B4D';
+          let sevClass = 'tp-er-sev-default';
           const sLow = (bug.severity || '').toLowerCase();
           if (sLow.includes('bloq') || sLow.includes('high') || sLow.includes('alt')) {
             sevBg = '#FFEBE6';
             sevColor = '#BF2600';
+            sevClass = 'tp-er-sev-high';
           } else if (sLow.includes('crit')) {
             sevBg = '#FDF0F6';
             sevColor = '#C20062';
+            sevClass = 'tp-er-sev-crit';
           } else if (sLow.includes('med') || sLow.includes('may')) {
             sevBg = '#FFF0B3';
             sevColor = '#172B4D';
+            sevClass = 'tp-er-sev-med';
           } else if (sLow.includes('min') || sLow.includes('low') || sLow.includes('baj')) {
             sevBg = '#EAE6FF';
             sevColor = '#403294';
+            sevClass = 'tp-er-sev-low';
           }
 
           // Dates, Aging & TTR (pass `bug` metadata for reopened counter reset & On Hold pause)
@@ -12098,69 +12104,74 @@ const renderPlanningTab = () => {
           const isBugOnHold = bugAge.tone === 'onhold';
           const statusBg = bug.isDone ? '#E3FCEF' : (isBugOnHold ? '#E9F2FF' : '#FFEBE6');
           const statusColor = bug.isDone ? '#006644' : (isBugOnHold ? '#0C66E4' : '#BF2600');
+          const statusClass = bug.isDone ? 'tp-er-status-done' : (isBugOnHold ? 'tp-er-status-onhold' : 'tp-er-status-open');
 
           let agePillBg = '#E3FCEF';
           let agePillColor = '#006644';
           let agePillBorder = '#ABF5D1';
+          let agePillClass = 'tp-er-age-green';
           if (!bug.isDone) {
             if (bugAge.tone === 'onhold') {
               agePillBg = '#E9F2FF';
               agePillColor = '#0C66E4';
               agePillBorder = '#CCE0FF';
+              agePillClass = 'tp-er-age-onhold';
             } else if (bugAge.tone === 'orange') {
               agePillBg = '#FFF0B3';
               agePillColor = '#172B4D';
               agePillBorder = '#FFE380';
+              agePillClass = 'tp-er-age-orange';
             } else if (bugAge.tone === 'red') {
               agePillBg = '#FFEBE6';
               agePillColor = '#BF2600';
               agePillBorder = '#FFBDAD';
+              agePillClass = 'tp-er-age-red';
             }
           }
 
           const verVal = bug.version || (Array.isArray(bug.versions) && bug.versions.length > 0 ? bug.versions.join(', ') : (Array.isArray(bug.fixVersions) && bug.fixVersions.length > 0 ? bug.fixVersions.join(', ') : ''));
 
           tableRows += `
-            <tr style="background-color: ${bgRow};">
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; font-weight: 700; width: 15%; vertical-align: top;">
-                <a href="${baseUrl}/browse/${bug.key}" style="color: #E1007A; text-decoration: underline; font-size: 13px;" target="_blank">
+            <tr class="${trClass}" style="background-color: ${bgRow};">
+              <td class="tp-er-td tp-er-fw-700 tp-er-w-15" style="border: 1px solid #DFE1E6; padding: 8px 8px; font-weight: 700; width: 15%; vertical-align: top;">
+                <a href="${baseUrl}/browse/${bug.key}" class="tp-er-issue-link-pink" style="color: #E1007A; text-decoration: underline; font-size: 13px;" target="_blank">
                   ${bug.key}
                 </a>
                 ${verVal && verVal !== 'Sin versión' ? `
-                  <div style="margin-top: 4px;">
-                    <span style="font-size: 10px; font-weight: 700; color: #0C66E4; background-color: #E9F2FF; border: 1px solid #CCE0FF; padding: 1px 5px; border-radius: 4px; display: inline-block;">
+                  <div class="tp-er-mt-4" style="margin-top: 4px;">
+                    <span class="tp-er-version-tag" style="font-size: 10px; font-weight: 700; color: #0C66E4; background-color: #E9F2FF; border: 1px solid #CCE0FF; padding: 1px 5px; border-radius: 4px; display: inline-block;">
                       🏷️ ${verVal}
                     </span>
                   </div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 31%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
+              <td class="tp-er-td tp-er-fs-12 tp-er-w-31" style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 31%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
                 ${bug.summary || 'Sin resumen'}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
+              <td class="tp-er-td tp-er-td-center tp-er-w-11" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
+                <span class="tp-er-badge ${sevClass}" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; white-space: nowrap;">
                   ${bug.severity || 'Media'}
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
+              <td class="tp-er-td tp-er-td-center tp-er-w-11" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
+                <span class="tp-er-badge ${statusClass}" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
                   ${isBugOnHold ? `⏸️ ${bug.status || 'ON HOLD'}` : (bug.status || (bug.isDone ? 'Cerrado' : 'Abierto'))}
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
-                <div style="color: #626F86; margin-bottom: 3px;">
+              <td class="tp-er-td tp-er-fs-11 tp-er-w-20" style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
+                <div class="tp-er-c-muted tp-er-mb-3" style="color: #626F86; margin-bottom: 3px;">
                   📅 <strong>Creado:</strong> ${bugCreated.dateStr}${bugCreated.timeStr ? ` ${bugCreated.timeStr}` : ''}
                 </div>
-                <div style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
+                <div class="tp-er-age-pill ${agePillClass}" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
                   ${bug.isDone ? `✅ ${bugAge.label}` : (isBugOnHold ? `⏸️ ${bugAge.label}` : `⏱️ ${bugAge.label}`)}
                 </div>
                 ${bug.isDone && resFormatted?.dateStr ? `
-                  <div style="color: #006644; font-size: 10px; margin-top: 3px;">
+                  <div class="tp-er-c-green tp-er-fs-10 tp-er-mt-3" style="color: #006644; font-size: 10px; margin-top: 3px;">
                     🏁 Resuelto: ${resFormatted.dateStr}${resFormatted.timeStr ? ` ${resFormatted.timeStr}` : ''}
                   </div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
-                <div style="font-weight: 600; color: #172B4D;">${bug.assignee || 'Sin asignar'}</div>
-                <div style="color: #626F86; font-size: 10px; margin-top: 2px;">${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}</div>
+              <td class="tp-er-td tp-er-fs-11 tp-er-c-body-sub tp-er-w-12" style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #44546F; font-size: 11px; width: 12%; word-break: break-word; vertical-align: top;">
+                <div class="tp-er-fw-600 tp-er-c-dark" style="font-weight: 600; color: #172B4D;">${bug.assignee || 'Sin asignar'}</div>
+                <div class="tp-er-c-muted tp-er-fs-10 tp-er-mt-2" style="color: #626F86; font-size: 10px; margin-top: 2px;">${bug.resolution || (bug.isDone ? 'Resuelto' : 'Sin resolver')}</div>
               </td>
             </tr>
           `;
@@ -12171,8 +12182,8 @@ const renderPlanningTab = () => {
       let generalBlockerTableRows = '';
       if (generalBlockerBugs.length === 0) {
         generalBlockerTableRows = `
-          <tr>
-            <td colspan="6" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
+          <tr class="tp-er-tr-even">
+            <td colspan="6" class="tp-er-empty-td" style="border: 1px solid #DFE1E6; padding: 14px; text-align: center; color: #006644; background-color: #E3FCEF; font-weight: 600;">
               🟢 No se registran defectos bloqueantes abiertos en la relación general del plan de pruebas.
             </td>
           </tr>
@@ -12181,6 +12192,7 @@ const renderPlanningTab = () => {
         generalBlockerBugs.forEach((bug, idx) => {
           const isEven = idx % 2 === 0;
           const bgRow = isEven ? '#FFFFFF' : '#FAFBFC';
+          const trClass = isEven ? 'tp-er-tr-even' : 'tp-er-tr-odd';
           
           // Severity styling (Bloqueante Red Badge)
           const sevBg = '#FFEBE6';
@@ -12198,23 +12210,28 @@ const renderPlanningTab = () => {
           const isBugOnHold = bugAge.tone === 'onhold';
           const statusBg = bug.isDone ? '#E3FCEF' : (isBugOnHold ? '#E9F2FF' : '#FFEBE6');
           const statusColor = bug.isDone ? '#006644' : (isBugOnHold ? '#0C66E4' : '#BF2600');
+          const statusClass = bug.isDone ? 'tp-er-status-done' : (isBugOnHold ? 'tp-er-status-onhold' : 'tp-er-status-open');
 
           let agePillBg = '#E3FCEF';
           let agePillColor = '#006644';
           let agePillBorder = '#ABF5D1';
+          let agePillClass = 'tp-er-age-green';
           if (!bug.isDone) {
             if (bugAge.tone === 'onhold') {
               agePillBg = '#E9F2FF';
               agePillColor = '#0C66E4';
               agePillBorder = '#CCE0FF';
+              agePillClass = 'tp-er-age-onhold';
             } else if (bugAge.tone === 'orange') {
               agePillBg = '#FFF0B3';
               agePillColor = '#172B4D';
               agePillBorder = '#FFE380';
+              agePillClass = 'tp-er-age-orange';
             } else if (bugAge.tone === 'red') {
               agePillBg = '#FFEBE6';
               agePillColor = '#BF2600';
               agePillBorder = '#FFBDAD';
+              agePillClass = 'tp-er-age-red';
             }
           }
 
@@ -12222,47 +12239,47 @@ const renderPlanningTab = () => {
           const cycleDisplay = bug.cycleList && bug.cycleList !== 'Sin vincular' ? bug.cycleList : 'General del Plan';
 
           generalBlockerTableRows += `
-            <tr style="background-color: ${bgRow};">
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; font-weight: 700; width: 14%; vertical-align: top;">
-                <a href="${baseUrl}/browse/${bug.key}" style="color: #DE350B; text-decoration: underline; font-size: 13px; font-weight: 800;" target="_blank">
+            <tr class="${trClass}" style="background-color: ${bgRow};">
+              <td class="tp-er-td tp-er-fw-700 tp-er-w-14" style="border: 1px solid #DFE1E6; padding: 8px 8px; font-weight: 700; width: 14%; vertical-align: top;">
+                <a href="${baseUrl}/browse/${bug.key}" class="tp-er-issue-link-red" style="color: #DE350B; text-decoration: underline; font-size: 13px; font-weight: 800;" target="_blank">
                   ${bug.key}
                 </a>
                 ${verVal && verVal !== 'Sin versión' ? `
-                  <div style="margin-top: 4px;">
-                    <span style="font-size: 10px; font-weight: 700; color: #0C66E4; background-color: #E9F2FF; border: 1px solid #CCE0FF; padding: 1px 5px; border-radius: 4px; display: inline-block;">
+                  <div class="tp-er-mt-4" style="margin-top: 4px;">
+                    <span class="tp-er-version-tag" style="font-size: 10px; font-weight: 700; color: #0C66E4; background-color: #E9F2FF; border: 1px solid #CCE0FF; padding: 1px 5px; border-radius: 4px; display: inline-block;">
                       🏷️ ${verVal}
                     </span>
                   </div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 28%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
+              <td class="tp-er-td tp-er-fs-12 tp-er-w-28" style="border: 1px solid #DFE1E6; padding: 8px 8px; color: #172B4D; font-size: 12px; line-height: 1.35; width: 28%; word-break: break-word; overflow-wrap: break-word; vertical-align: top;">
                 ${bug.summary || 'Sin resumen'}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 12%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; border: 1px solid #FFBDAD; white-space: nowrap;">
+              <td class="tp-er-td tp-er-td-center tp-er-w-12" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 12%; vertical-align: top;">
+                <span class="tp-er-badge tp-er-sev-blocker" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${sevBg}; color: ${sevColor}; border: 1px solid #FFBDAD; white-space: nowrap;">
                   ✱ Bloqueante
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
-                <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
+              <td class="tp-er-td tp-er-td-center tp-er-w-11" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; width: 11%; vertical-align: top;">
+                <span class="tp-er-badge ${statusClass}" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
                   ${isBugOnHold ? `⏸️ ${bug.status || 'ON HOLD'}` : (bug.status || (bug.isDone ? 'Cerrado' : 'Abierto'))}
                 </span>
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 6px; width: 15%; vertical-align: top; font-size: 11px; color: #44546F; word-break: break-word;">
-                <div style="font-weight: 600; color: #172B4D;">🔄 ${cycleDisplay}</div>
-                ${bug.affectedCount > 0 ? `<div style="font-size: 10px; color: #626F86; margin-top: 2px;">${bug.affectedCount} caso(s) afectado(s)</div>` : ''}
+              <td class="tp-er-td tp-er-fs-11 tp-er-c-body-sub tp-er-w-15" style="border: 1px solid #DFE1E6; padding: 8px 6px; width: 15%; vertical-align: top; font-size: 11px; color: #44546F; word-break: break-word;">
+                <div class="tp-er-fw-600 tp-er-c-dark" style="font-weight: 600; color: #172B4D;">🔄 ${cycleDisplay}</div>
+                ${bug.affectedCount > 0 ? `<div class="tp-er-c-muted tp-er-fs-10 tp-er-mt-2" style="font-size: 10px; color: #626F86; margin-top: 2px;">${bug.affectedCount} caso(s) afectado(s)</div>` : ''}
               </td>
-              <td style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
-                <div style="color: #626F86; margin-bottom: 3px;">
+              <td class="tp-er-td tp-er-fs-11 tp-er-w-20" style="border: 1px solid #DFE1E6; padding: 8px 8px; width: 20%; vertical-align: top; font-size: 11px;">
+                <div class="tp-er-c-muted tp-er-mb-3" style="color: #626F86; margin-bottom: 3px;">
                   📅 <strong>Creado:</strong> ${bugCreated.dateStr}${bugCreated.timeStr ? ` ${bugCreated.timeStr}` : ''}
                 </div>
-                <div style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
+                <div class="tp-er-age-pill ${agePillClass}" style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background-color: ${agePillBg}; color: ${agePillColor}; border: 1px solid ${agePillBorder};">
                   ${bug.isDone ? `✅ ${bugAge.label}` : (isBugOnHold ? `⏸️ ${bugAge.label}` : `⏱️ ${bugAge.label}`)}
                 </div>
                 ${bug.isDone && resFormatted?.dateStr ? `
-                  <div style="color: #006644; font-size: 10px; margin-top: 2px;">
+                  <div class="tp-er-c-green tp-er-fs-10 tp-er-mt-2" style="color: #006644; font-size: 10px; margin-top: 2px;">
                     🏁 Resuelto: ${resFormatted.dateStr}${resFormatted.timeStr ? ` ${resFormatted.timeStr}` : ''}
                   </div>` : ''}
-                <div style="color: #44546F; font-size: 10px; margin-top: 4px;">
+                <div class="tp-er-c-body-sub tp-er-fs-10 tp-er-mt-4" style="color: #44546F; font-size: 10px; margin-top: 4px;">
                   👤 <strong>Resp:</strong> ${bug.assignee || 'Sin asignar'}
                 </div>
               </td>
@@ -12280,32 +12297,34 @@ const renderPlanningTab = () => {
           const mod = featureStats[fk];
           const mRate = mod.total > 0 ? ((mod.passed / mod.total) * 100).toFixed(0) : '0';
           const isEven = idx % 2 === 0;
+          const trClass = isEven ? 'tp-er-tr-even' : 'tp-er-tr-odd';
+          const rateColorClass = Number(mRate) >= 80 ? 'tp-er-c-green' : 'tp-er-c-danger';
           modRows += `
-            <tr style="background-color: ${isEven ? '#FFFFFF' : '#FAFBFC'};">
-              <td style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D;">${fk}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700;">${mod.total}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #006644; font-weight: 700;">${mod.passed}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #DE350B; font-weight: 700;">${mod.failed}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #FF8B00; font-weight: 700;">${mod.blocked}</td>
-              <td style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700; color: ${Number(mRate) >= 80 ? '#006644' : '#DE350B'};">${mRate}%</td>
+            <tr class="${trClass}" style="background-color: ${isEven ? '#FFFFFF' : '#FAFBFC'};">
+              <td class="tp-er-td tp-er-fw-600 tp-er-c-dark" style="border: 1px solid #DFE1E6; padding: 6px 8px; font-weight: 600; color: #172B4D;">${fk}</td>
+              <td class="tp-er-td tp-er-td-center tp-er-fw-700" style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700;">${mod.total}</td>
+              <td class="tp-er-td tp-er-td-center tp-er-fw-700 tp-er-c-green" style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #006644; font-weight: 700;">${mod.passed}</td>
+              <td class="tp-er-td tp-er-td-center tp-er-fw-700 tp-er-c-danger" style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #DE350B; font-weight: 700;">${mod.failed}</td>
+              <td class="tp-er-td tp-er-td-center tp-er-fw-700 tp-er-c-orange" style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; color: #FF8B00; font-weight: 700;">${mod.blocked}</td>
+              <td class="tp-er-td tp-er-td-center tp-er-fw-700 ${rateColorClass}" style="border: 1px solid #DFE1E6; padding: 6px 6px; text-align: center; font-weight: 700; color: ${Number(mRate) >= 80 ? '#006644' : '#DE350B'};">${mRate}%</td>
             </tr>
           `;
         });
 
         moduleSectionHtml = `
-          <div style="margin-bottom: 22px;">
-            <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+          <div class="tp-er-section-block" style="margin-bottom: 22px;">
+            <div class="tp-er-section-title-navy" style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
               📁 Cobertura Funcional por Módulo / Funcionalidad
             </div>
-            <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
-              <thead>
+            <table width="100%" cellpadding="6" cellspacing="0" border="0" class="tp-er-data-table" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden;">
+              <thead class="tp-er-thead-gray">
                 <tr style="background-color: #F4F5F7; color: #172B4D;">
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Módulo / Carpeta</th>
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">Total</th>
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #006644;">Pasados</th>
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #DE350B;">Fallidos</th>
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #FF8B00;">Bloqueados</th>
-                  <th style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">% Éxito</th>
+                  <th class="tp-er-th-left" style="border: 1px solid #DFE1E6; padding: 8px 10px; text-align: left; font-weight: 700;">Módulo / Carpeta</th>
+                  <th class="tp-er-th-center" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">Total</th>
+                  <th class="tp-er-th-center tp-er-c-green" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #006644;">Pasados</th>
+                  <th class="tp-er-th-center tp-er-c-danger" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #DE350B;">Fallidos</th>
+                  <th class="tp-er-th-center tp-er-c-orange" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700; color: #FF8B00;">Bloqueados</th>
+                  <th class="tp-er-th-center" style="border: 1px solid #DFE1E6; padding: 8px 6px; text-align: center; font-weight: 700;">% Éxito</th>
                 </tr>
               </thead>
               <tbody>
@@ -12330,125 +12349,104 @@ const renderPlanningTab = () => {
       }
 
       const htmlTemplate = `
-        <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
-          <style>
-            @keyframes liverpoolGlowPulse {
-              0% {
-                transform: scale(1);
-                filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.7)) brightness(1);
-              }
-              50% {
-                transform: scale(1.05);
-                filter: drop-shadow(0 0 10px #FFFFFF) drop-shadow(0 0 22px #FFE0F0) brightness(1.25);
-              }
-              100% {
-                transform: scale(1);
-                filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.7)) brightness(1);
-              }
-            }
-            .liverpool-animated-logo {
-              animation: liverpoolGlowPulse 2.4s ease-in-out infinite alternate !important;
-              display: inline-block !important;
-              transition: all 0.3s ease-in-out !important;
-            }
-            .liverpool-animated-logo:hover {
-              transform: scale(1.08) !important;
-              filter: drop-shadow(0 0 14px #FFFFFF) drop-shadow(0 0 26px #FFE0F0) brightness(1.3) !important;
-            }
-          </style>
+        <div class="tp-er-root" style="max-width: 780px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #172B4D; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 45, 98, 0.08);">
           
           <!-- Header Banner (Liverpool Gradient & Logo) -->
-          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
-            <tr>
-              <td style="vertical-align: middle;">
-                <div style="font-size: 13px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 8px;">
-                  ⚡ TEST PULSE SUITE • REPORTE DE ESTATUS
-                </div>
-                <div style="margin-top: 4px;">
-                  <img src="${LIVERPOOL_LOGO_WHITE_ANIMATED_B64 || LIVERPOOL_LOGO_WHITE_B64}" alt="Liverpool" class="liverpool-animated-logo" style="height: 30px; width: auto; max-width: 150px; display: block; border: 0;" />
-                </div>
-              </td>
-              <td style="vertical-align: middle; text-align: right;">
-                <span style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
-                  📅 ${dateFormatted}
-                </span>
-              </td>
-            </tr>
-          </table>
-
-          <div style="padding: 24px 26px;">
-            
-            <!-- Project & Scope Meta Box -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
+          <div class="tp-er-header-banner" style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); background-color: #E1007A; color: #ffffff; padding: 22px 26px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-header-table" style="width: 100%; border-collapse: collapse;">
               <tr>
-                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
-                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
-                  <span style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
+                <td class="tp-er-header-left" style="vertical-align: middle;">
+                  <div class="tp-er-header-subtitle" style="font-size: 13px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #FFE0F0; margin-bottom: 8px;">
+                    ⚡ TEST PULSE SUITE • REPORTE DE ESTATUS
+                  </div>
+                  <div class="tp-er-header-logo-wrap" style="margin-top: 4px;">
+                    <img src="${LIVERPOOL_LOGO_WHITE_B64 || LIVERPOOL_LOGO_WHITE_ANIMATED_B64}" alt="Liverpool" class="liverpool-animated-logo tp-er-header-logo" style="height: 30px; width: auto; max-width: 150px; display: block; border: 0;" />
+                  </div>
                 </td>
-                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
-                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
-                  <span style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
-                </td>
-                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
-                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
-                  <span style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
-                </td>
-                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
-                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
-                  <span style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
-                </td>
-                <td style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
-                  <strong style="color: #626F86; font-size: 11px; text-transform: uppercase;">Versión / Build:</strong><br/>
-                  <span style="font-weight: 700; color: ${scopeVersionsText ? '#0C66E4' : '#626F86'}; font-size: 13px;">${scopeVersionsText || '(No especificado)'}</span>
+                <td class="tp-er-header-right" style="vertical-align: middle; text-align: right;">
+                  <span class="tp-er-header-date" style="display: inline-block; padding: 6px 14px; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 20px; font-size: 12px; font-weight: 600; color: #ffffff;">
+                    📅 ${dateFormatted}
+                  </span>
                 </td>
               </tr>
             </table>
+          </div>
+
+          <div class="tp-er-body" style="padding: 24px 26px;">
+            
+            <!-- Project & Scope Meta Box -->
+            <div class="tp-er-meta-box" style="background-color: #FDF8FA; border: 1px solid #F3D3E2; border-radius: 8px; margin-bottom: 22px; padding: 12px 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-meta-table" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td class="tp-er-meta-td" style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                    <strong class="tp-er-meta-label" style="color: #626F86; font-size: 11px; text-transform: uppercase;">Proyecto:</strong><br/>
+                    <span class="tp-er-meta-val-pink" style="font-weight: 700; color: #E1007A; font-size: 14px;">${projectDisplay}</span>
+                  </td>
+                  <td class="tp-er-meta-td" style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                    <strong class="tp-er-meta-label" style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ambiente:</strong><br/>
+                    <span class="tp-er-meta-val-navy" style="font-weight: 700; color: #002D62; font-size: 14px;">🟢 QA</span>
+                  </td>
+                  <td class="tp-er-meta-td" style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                    <strong class="tp-er-meta-label" style="color: #626F86; font-size: 11px; text-transform: uppercase;">Plan(es):</strong><br/>
+                    <span class="tp-er-meta-val-dark" style="font-weight: 600; color: #172B4D;">${scopePlansText}</span>
+                  </td>
+                  <td class="tp-er-meta-td" style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                    <strong class="tp-er-meta-label" style="color: #626F86; font-size: 11px; text-transform: uppercase;">Ciclo(s):</strong><br/>
+                    <span class="tp-er-meta-val-dark" style="font-weight: 600; color: #172B4D;">${scopeCyclesText}</span>
+                  </td>
+                  <td class="tp-er-meta-td" style="padding: 4px 8px; font-size: 13px; vertical-align: top;">
+                    <strong class="tp-er-meta-label" style="color: #626F86; font-size: 11px; text-transform: uppercase;">Versión / Build:</strong><br/>
+                    <span class="${scopeVersionsText ? 'tp-er-meta-val-blue' : 'tp-er-meta-val-muted'}" style="font-weight: 700; color: ${scopeVersionsText ? '#0C66E4' : '#626F86'}; font-size: 13px;">${scopeVersionsText || '(No especificado)'}</span>
+                  </td>
+                </tr>
+              </table>
+            </div>
 
             <!-- Executive KPI Grid (Cards) -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 22px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-kpi-table" style="margin-bottom: 22px;">
               <tr>
                 <!-- Card 1: Total Casos -->
-                <td width="20%" style="padding: 0 4px 0 0;">
-                  <div style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
-                    <div style="font-size: 11px; color: #626F86; margin-top: 4px;">${evaluados} evaluados</div>
+                <td width="20%" class="tp-er-kpi-td-first" style="padding: 0 4px 0 0;">
+                  <div class="tp-er-kpi-card tp-er-kpi-total" style="background: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div class="tp-er-kpi-title tp-er-c-muted" style="font-size: 11px; font-weight: 700; color: #626F86; text-transform: uppercase; margin-bottom: 4px;">Total Casos</div>
+                    <div class="tp-er-kpi-num tp-er-c-navy" style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${allTotal}</div>
+                    <div class="tp-er-kpi-sub tp-er-c-muted" style="font-size: 11px; color: #626F86; margin-top: 4px;">${evaluados} evaluados</div>
                   </div>
                 </td>
 
                 <!-- Card 2: Tasa de Éxito -->
-                <td width="20%" style="padding: 0 4px;">
-                  <div style="background: #E8F8F0; border: 1px solid #B7EBCE; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #0E8A4C; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #0E8A4C; line-height: 1.1;">${successRate}%</div>
-                    <div style="font-size: 11px; color: #0E8A4C; margin-top: 4px;">${passed} Pasados</div>
+                <td width="20%" class="tp-er-kpi-td" style="padding: 0 4px;">
+                  <div class="tp-er-kpi-card tp-er-kpi-success" style="background: #E8F8F0; border: 1px solid #B7EBCE; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div class="tp-er-kpi-title tp-er-c-success" style="font-size: 11px; font-weight: 700; color: #0E8A4C; text-transform: uppercase; margin-bottom: 4px;">Tasa Éxito</div>
+                    <div class="tp-er-kpi-num tp-er-c-success" style="font-size: 22px; font-weight: 800; color: #0E8A4C; line-height: 1.1;">${successRate}%</div>
+                    <div class="tp-er-kpi-sub tp-er-c-success" style="font-size: 11px; color: #0E8A4C; margin-top: 4px;">${passed} Pasados</div>
                   </div>
                 </td>
 
                 <!-- Card 3: Cobertura -->
-                <td width="20%" style="padding: 0 4px;">
-                  <div style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
-                    <div style="font-size: 11px; color: #C20062; margin-top: 4px;">${evaluados} ejecutados</div>
+                <td width="20%" class="tp-er-kpi-td" style="padding: 0 4px;">
+                  <div class="tp-er-kpi-card tp-er-kpi-coverage" style="background: #FDF2F7; border: 1px solid #F5B8D8; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div class="tp-er-kpi-title tp-er-c-cov-sub" style="font-size: 11px; font-weight: 700; color: #C20062; text-transform: uppercase; margin-bottom: 4px;">Cobertura</div>
+                    <div class="tp-er-kpi-num tp-er-c-pink" style="font-size: 22px; font-weight: 800; color: #E1007A; line-height: 1.1;">${coverageRate}%</div>
+                    <div class="tp-er-kpi-sub tp-er-c-cov-sub" style="font-size: 11px; color: #C20062; margin-top: 4px;">${evaluados} ejecutados</div>
                   </div>
                 </td>
 
                 <!-- Card 4: Defectos del Ciclo -->
-                <td width="20%" style="padding: 0 4px;">
-                  <div style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos Ciclo</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalCycleBugs}</div>
-                    <div style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${openCycleBugs}</strong> abiertos (${closedCycleBugs} cerrados)</div>
+                <td width="20%" class="tp-er-kpi-td" style="padding: 0 4px;">
+                  <div class="tp-er-kpi-card tp-er-kpi-defects" style="background: #FFF1F0; border: 1px solid #FFCCC7; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div class="tp-er-kpi-title tp-er-c-crimson" style="font-size: 11px; font-weight: 700; color: #BF2600; text-transform: uppercase; margin-bottom: 4px;">Defectos Ciclo</div>
+                    <div class="tp-er-kpi-num tp-er-c-red-val" style="font-size: 22px; font-weight: 800; color: #CF1322; line-height: 1.1;">${totalCycleBugs}</div>
+                    <div class="tp-er-kpi-sub tp-er-c-crimson" style="font-size: 11px; color: #BF2600; margin-top: 4px;"><strong>${openCycleBugs}</strong> abiertos (${closedCycleBugs} cerrados)</div>
                   </div>
                 </td>
 
                 <!-- Card 5: MTTR -->
-                <td width="20%" style="padding: 0 0 0 4px;">
-                  <div style="background: #EEF2FB; border: 1px solid #CCD7F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
-                    <div style="font-size: 11px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${avgResolutionHours}h</div>
-                    <div style="font-size: 11px; color: #002D62; margin-top: 4px;">Resolución</div>
+                <td width="20%" class="tp-er-kpi-td-last" style="padding: 0 0 0 4px;">
+                  <div class="tp-er-kpi-card tp-er-kpi-mttr" style="background: #EEF2FB; border: 1px solid #CCD7F2; border-radius: 8px; padding: 12px 8px; text-align: center;">
+                    <div class="tp-er-kpi-title tp-er-c-navy" style="font-size: 11px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 4px;">MTTR Prom.</div>
+                    <div class="tp-er-kpi-num tp-er-c-navy" style="font-size: 22px; font-weight: 800; color: #002D62; line-height: 1.1;">${avgResolutionHours}h</div>
+                    <div class="tp-er-kpi-sub tp-er-c-navy" style="font-size: 11px; color: #002D62; margin-top: 4px;">Resolución</div>
                   </div>
                 </td>
               </tr>
@@ -12456,44 +12454,44 @@ const renderPlanningTab = () => {
 
             ${(customNotes && typeof customNotes === 'string' && customNotes.trim().length > 0) ? `
             <!-- Observaciones y Notas Ejecutivas -->
-            <div style="background-color: #F0F7FF; border: 1px solid #B9D5FF; border-left: 5px solid #002D62; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
-              <div style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+            <div class="tp-er-notes-box" style="background-color: #F0F7FF; border: 1px solid #B9D5FF; border-left: 5px solid #002D62; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
+              <div class="tp-er-notes-title" style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
                 📝 Observaciones y Notas Ejecutivas
               </div>
-              <div style="font-size: 13px; color: #172B4D; line-height: 1.6; white-space: pre-wrap;">${customNotes.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+              <div class="tp-er-notes-body" style="font-size: 13px; color: #172B4D; line-height: 1.6; white-space: pre-wrap;">${customNotes.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
             </div>
             ` : ''}
 
             <!-- Resumen de Cambios & Actividad del Ciclo -->
-            <div style="background-color: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
-              <div style="margin-bottom: 10px;">
-                <span style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px;">
+            <div class="tp-er-activity-box" style="background-color: #F8F9FA; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 18px; margin-bottom: 22px;">
+              <div class="tp-er-activity-header" style="margin-bottom: 10px;">
+                <span class="tp-er-section-title-navy" style="font-size: 13px; font-weight: 800; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px;">
                   📋 Resumen de Cambios & Actividad
                 </span>
-                <span style="font-size: 11px; font-weight: 600; color: #626F86; background: #EBECF0; padding: 2px 8px; border-radius: 12px; margin-left: 8px;">
+                <span class="tp-er-pill-gray tp-er-ml-8" style="font-size: 11px; font-weight: 600; color: #626F86; background: #EBECF0; padding: 2px 8px; border-radius: 12px; margin-left: 8px;">
                   Corte: ${dateFormatted}
                 </span>
               </div>
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px; line-height: 1.6; color: #172B4D;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-activity-table" style="font-size: 12px; line-height: 1.6; color: #172B4D;">
                 <tr>
-                  <td width="33%" style="vertical-align: top; padding-right: 12px;">
-                    <div style="font-weight: 700; color: #0E8A4C; margin-bottom: 4px;">✅ Avance de Ejecución</div>
-                    <div style="color: #44546F; font-size: 11.5px;">
+                  <td width="33%" class="tp-er-activity-col" style="vertical-align: top; padding-right: 12px;">
+                    <div class="tp-er-activity-col-title tp-er-c-success" style="font-weight: 700; color: #0E8A4C; margin-bottom: 4px;">✅ Avance de Ejecución</div>
+                    <div class="tp-er-activity-col-text" style="color: #44546F; font-size: 11.5px;">
                       • <strong>${evaluados}</strong> de ${allTotal} casos evaluados (<strong>${coverageRate}%</strong> cobertura).<br/>
                       • <strong>${passed}</strong> aprobados (${successRate}% éxito).
                     </div>
                   </td>
-                  <td width="33%" style="vertical-align: top; padding-right: 12px; border-left: 1px solid #E2E8F0; padding-left: 12px;">
-                    <div style="font-weight: 700; color: #DE350B; margin-bottom: 4px;">🐞 Estatus de Defectos</div>
-                    <div style="color: #44546F; font-size: 11.5px;">
+                  <td width="33%" class="tp-er-activity-col-sep" style="vertical-align: top; padding-right: 12px; border-left: 1px solid #E2E8F0; padding-left: 12px;">
+                    <div class="tp-er-activity-col-title tp-er-c-danger" style="font-weight: 700; color: #DE350B; margin-bottom: 4px;">🐞 Estatus de Defectos</div>
+                    <div class="tp-er-activity-col-text" style="color: #44546F; font-size: 11.5px;">
                       • <strong>${openCycleBugs}</strong> defecto(s) abiertos en el ciclo actual.<br/>
                       • <strong>${openGeneralBlockersCount}</strong> defecto(s) bloqueante(s) abiertos en el plan general.<br/>
                       • MTTR de resolución: <strong>${avgResolutionHours}h</strong> hábiles.
                     </div>
                   </td>
-                  <td width="34%" style="vertical-align: top; border-left: 1px solid #E2E8F0; padding-left: 12px;">
-                    <div style="font-weight: 700; color: #0C66E4; margin-bottom: 4px;">🎯 Estabilidad & Cierre</div>
-                    <div style="color: #44546F; font-size: 11.5px;">
+                  <td width="34%" class="tp-er-activity-col-last" style="vertical-align: top; border-left: 1px solid #E2E8F0; padding-left: 12px;">
+                    <div class="tp-er-activity-col-title tp-er-c-blue" style="font-weight: 700; color: #0C66E4; margin-bottom: 4px;">🎯 Estabilidad & Cierre</div>
+                    <div class="tp-er-activity-col-text" style="color: #44546F; font-size: 11.5px;">
                       ${notRun > 0 ? `• Restan <strong>${notRun}</strong> caso(s) por ejecutar.<br/>` : `• <strong>100% de los casos</strong> evaluados en el ciclo.<br/>`}
                       ${openGeneralBlockersCount > 0 ? `• ⛔ <strong>${openGeneralBlockersCount} Bloqueante(s) Abierto(s) en Plan</strong> impiden liberación.` : (openCycleBugs === 0 ? `• 🟢 Sin defectos bloqueantes ni abiertos que impidan liberación.` : `• ⚠️ Requiere seguimiento de defectos antes de liberar.`)}
                     </div>
@@ -12503,38 +12501,40 @@ const renderPlanningTab = () => {
             </div>
 
             <!-- Desglose de Ejecución (Visual Bar) -->
-            <div style="margin-bottom: 22px;">
-              <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+            <div class="tp-er-section-block" style="margin-bottom: 22px;">
+              <div class="tp-er-section-title-navy" style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
                 📊 Distribución de Ejecución
               </div>
               
               <!-- Progress Multi-Segment Bar -->
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
-                <tr>
-                  ${pPct > 0 ? `<td width="${pPct}%" style="background-color: #28A745;" title="Passed: ${passed}"></td>` : ''}
-                  ${fPct > 0 ? `<td width="${fPct}%" style="background-color: #E1007A;" title="Failed: ${failed}"></td>` : ''}
-                  ${bPct > 0 ? `<td width="${bPct}%" style="background-color: #FF9800;" title="Blocked: ${blocked}"></td>` : ''}
-                  ${nPct > 0 ? `<td width="${nPct}%" style="background-color: #CBD5E1;" title="Not Run: ${notRun}"></td>` : ''}
-                </tr>
-              </table>
+              <div class="tp-er-progress-wrap" style="height: 14px; border-radius: 6px; overflow: hidden; background-color: #EBECF0; margin-bottom: 8px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-progress-table" style="width: 100%; height: 14px; background-color: #EBECF0;">
+                  <tr>
+                    ${pPct > 0 ? `<td width="${pPct}%" class="tp-er-bar-seg tp-er-bar-pass" style="width: ${pPct}%; background-color: #28A745;"></td>` : ''}
+                    ${fPct > 0 ? `<td width="${fPct}%" class="tp-er-bar-seg tp-er-bar-fail" style="width: ${fPct}%; background-color: #E1007A;"></td>` : ''}
+                    ${bPct > 0 ? `<td width="${bPct}%" class="tp-er-bar-seg tp-er-bar-block" style="width: ${bPct}%; background-color: #FF9800;"></td>` : ''}
+                    ${nPct > 0 ? `<td width="${nPct}%" class="tp-er-bar-seg tp-er-bar-notrun" style="width: ${nPct}%; background-color: #CBD5E1;"></td>` : ''}
+                  </tr>
+                </table>
+              </div>
 
               <!-- Status Legend Grid -->
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size: 12px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-legend-table" style="font-size: 12px;">
                 <tr>
-                  <td width="25%" style="color: #172B4D;">
-                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #28A745; margin-right: 6px;"></span>
+                  <td width="25%" class="tp-er-legend-td" style="color: #172B4D;">
+                    <span class="tp-er-dot tp-er-bar-pass" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #28A745; margin-right: 6px;"></span>
                     <strong>Pasados:</strong> ${passed} (${pPct.toFixed(1)}%)
                   </td>
-                  <td width="25%" style="color: #172B4D;">
-                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #E1007A; margin-right: 6px;"></span>
+                  <td width="25%" class="tp-er-legend-td" style="color: #172B4D;">
+                    <span class="tp-er-dot tp-er-bar-fail" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #E1007A; margin-right: 6px;"></span>
                     <strong>Fallidos:</strong> ${failed} (${fPct.toFixed(1)}%)
                   </td>
-                  <td width="25%" style="color: #172B4D;">
-                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF9800; margin-right: 6px;"></span>
+                  <td width="25%" class="tp-er-legend-td" style="color: #172B4D;">
+                    <span class="tp-er-dot tp-er-bar-block" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #FF9800; margin-right: 6px;"></span>
                     <strong>Bloqueados:</strong> ${blocked} (${bPct.toFixed(1)}%)
                   </td>
-                  <td width="25%" style="color: #626F86;">
-                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #CBD5E1; margin-right: 6px;"></span>
+                  <td width="25%" class="tp-er-legend-td-muted" style="color: #626F86;">
+                    <span class="tp-er-dot tp-er-bar-notrun" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #CBD5E1; margin-right: 6px;"></span>
                     <strong>Sin Ejecutar:</strong> ${notRun} (${nPct.toFixed(1)}%)
                   </td>
                 </tr>
@@ -12542,24 +12542,24 @@ const renderPlanningTab = () => {
             </div>
 
             <!-- Defect Matrix Table (Scoped Strictly to Active Cycle) -->
-            <div style="margin-bottom: 22px;">
-              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                <div style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px;">
+            <div class="tp-er-section-block" style="margin-bottom: 22px;">
+              <div class="tp-er-section-header" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                <div class="tp-er-section-title-navy" style="font-size: 13px; font-weight: 700; color: #002D62; text-transform: uppercase; letter-spacing: 0.5px;">
                   🐞 DEFECTOS DEL CICLO ACTUAL (${cycleBugsArray.length})
                 </div>
-                <span style="font-size: 11px; font-weight: 600; color: #626F86; background: #EBECF0; padding: 2px 8px; border-radius: 12px;">
+                <span class="tp-er-pill-gray" style="font-size: 11px; font-weight: 600; color: #626F86; background: #EBECF0; padding: 2px 8px; border-radius: 12px;">
                   Todos los defectos vinculados al ciclo
                 </span>
               </div>
-              <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
-                <thead>
+              <table width="100%" cellpadding="6" cellspacing="0" border="0" class="tp-er-data-table" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
+                <thead class="tp-er-thead-navy">
                   <tr style="background-color: #002D62; color: #ffffff;">
-                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 15%;">Incidencia</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 31%;">Resumen</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Severidad</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Estado</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 20%;">Línea de Tiempo / TTR</th>
-                    <th style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 12%;">Responsable</th>
+                    <th class="tp-er-th-left tp-er-w-15" style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 15%;">Incidencia</th>
+                    <th class="tp-er-th-left tp-er-w-31" style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 31%;">Resumen</th>
+                    <th class="tp-er-th-center tp-er-w-11" style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Severidad</th>
+                    <th class="tp-er-th-center tp-er-w-11" style="border: 1px solid #002D62; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Estado</th>
+                    <th class="tp-er-th-left tp-er-w-20" style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 20%;">Línea de Tiempo / TTR</th>
+                    <th class="tp-er-th-left tp-er-w-12" style="border: 1px solid #002D62; padding: 8px 8px; text-align: left; font-weight: 700; width: 12%;">Responsable</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -12569,24 +12569,24 @@ const renderPlanningTab = () => {
             </div>
 
             <!-- General Plan Blocker Defects Table (Only Bloqueantes Abiertos) -->
-            <div style="margin-bottom: 22px;">
-              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                <div style="font-size: 13px; font-weight: 700; color: #BF2600; text-transform: uppercase; letter-spacing: 0.5px;">
+            <div class="tp-er-section-block" style="margin-bottom: 22px;">
+              <div class="tp-er-section-header" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                <div class="tp-er-section-title-crimson" style="font-size: 13px; font-weight: 700; color: #BF2600; text-transform: uppercase; letter-spacing: 0.5px;">
                   ⛔ DEFECTOS BLOQUEANTES DE LA RELACIÓN GENERAL DEL PLAN (${generalBlockerBugs.length})
                 </div>
-                <span style="font-size: 11px; font-weight: 600; color: #BF2600; background: #FFEBE6; border: 1px solid #FFBDAD; padding: 2px 8px; border-radius: 12px;">
+                <span class="tp-er-pill-crimson" style="font-size: 11px; font-weight: 600; color: #BF2600; background: #FFEBE6; border: 1px solid #FFBDAD; padding: 2px 8px; border-radius: 12px;">
                   Filtrado estricto: Solo Bloqueantes Abiertos
                 </span>
               </div>
-              <table width="100%" cellpadding="6" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
-                <thead>
+              <table width="100%" cellpadding="6" cellspacing="0" border="0" class="tp-er-data-table" style="width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #DFE1E6; border-radius: 6px; overflow: hidden; table-layout: fixed;">
+                <thead class="tp-er-thead-crimson">
                   <tr style="background-color: #BF2600; color: #ffffff;">
-                    <th style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 14%;">Incidencia</th>
-                    <th style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 28%;">Resumen</th>
-                    <th style="border: 1px solid #BF2600; padding: 8px 6px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
-                    <th style="border: 1px solid #BF2600; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Estado</th>
-                    <th style="border: 1px solid #BF2600; padding: 8px 6px; text-align: left; font-weight: 700; width: 15%;">Ciclos / Origen</th>
-                    <th style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 20%;">Línea de Tiempo / TTR</th>
+                    <th class="tp-er-th-left tp-er-w-14" style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 14%;">Incidencia</th>
+                    <th class="tp-er-th-left tp-er-w-28" style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 28%;">Resumen</th>
+                    <th class="tp-er-th-center tp-er-w-12" style="border: 1px solid #BF2600; padding: 8px 6px; text-align: center; font-weight: 700; width: 12%;">Severidad</th>
+                    <th class="tp-er-th-center tp-er-w-11" style="border: 1px solid #BF2600; padding: 8px 6px; text-align: center; font-weight: 700; width: 11%;">Estado</th>
+                    <th class="tp-er-th-left tp-er-w-15" style="border: 1px solid #BF2600; padding: 8px 6px; text-align: left; font-weight: 700; width: 15%;">Ciclos / Origen</th>
+                    <th class="tp-er-th-left tp-er-w-20" style="border: 1px solid #BF2600; padding: 8px 8px; text-align: left; font-weight: 700; width: 20%;">Línea de Tiempo / TTR</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -12599,14 +12599,14 @@ const renderPlanningTab = () => {
             ${moduleSectionHtml}
 
             <!-- QA Assessment & Next Steps Box -->
-            <div style="background-color: #FDF8FA; border-left: 4px solid #E1007A; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
-              <div style="font-size: 13px; font-weight: 700; color: #E1007A; text-transform: uppercase; margin-bottom: 6px;">
+            <div class="tp-er-verdict-box" style="background-color: #FDF8FA; border-left: 4px solid #E1007A; border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 20px;">
+              <div class="tp-er-verdict-title" style="font-size: 13px; font-weight: 700; color: #E1007A; text-transform: uppercase; margin-bottom: 6px;">
                 📌 Evaluación de Calidad & Próximos Pasos
               </div>
-              <p style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
+              <p class="tp-er-verdict-p" style="margin: 0 0 10px 0; font-size: 13px; color: #172B4D; line-height: 1.5;">
                 ${verdictText}
               </p>
-              <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
+              <ul class="tp-er-verdict-ul" style="margin: 0; padding-left: 18px; font-size: 12px; color: #44546F; line-height: 1.6;">
                 ${openGeneralBlockersCount > 0 ? `<li>⛔ <strong>Prioridad Crítica:</strong> Resolver de inmediato los <strong>${openGeneralBlockersCount}</strong> defecto(s) bloqueante(s) abiertos en el plan general.</li>` : ''}
                 <li>Priorizar la atención y resolución de los <strong>${openCycleBugs}</strong> defectos abiertos en el ciclo con el equipo de desarrollo.</li>
                 <li>Realizar re-test de casos fallidos tras el despliegue del siguiente build o corrección.</li>
@@ -12617,12 +12617,12 @@ const renderPlanningTab = () => {
           </div>
 
           <!-- Footer -->
-          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" class="tp-er-footer-table" style="background-color: #FAFBFC; border-top: 1px solid #EBECF0; padding: 14px 26px;">
             <tr>
-              <td style="font-size: 11px; color: #626F86;">
+              <td class="tp-er-footer-td-left" style="font-size: 11px; color: #626F86;">
                 Test Pulse Suite ${APP_VERSION} • Jira Cloud Quality Management • El Puerto de Liverpool
               </td>
-              <td style="font-size: 11px; color: #626F86; text-align: right;">
+              <td class="tp-er-footer-td-right" style="font-size: 11px; color: #626F86; text-align: right;">
                 Generado automáticamente
               </td>
             </tr>
@@ -12685,120 +12685,113 @@ const renderPlanningTab = () => {
     };
 
     /**
-     * Generates and triggers a native PDF / Print dialog directly inside the
-     * Atlassian Forge Custom UI iframe without relying on `window.open('about:blank', '_blank')`,
-     * which is blocked by the Forge sandboxed iframe policy even when browser popups are allowed.
+     * Programmatically applies each element's `style="..."` attribute declarations via the
+     * JavaScript CSSOM (`el.style.setProperty(prop, val, priority)`).
      *
-     * Strategy 1 (Primary): Injects a hidden `<iframe>` into the Custom UI DOM, writes the
-     * print-ready HTML document, and invokes `iframe.contentWindow.print()`.
-     * Strategy 2 (Fallback): Injects a dedicated `@media print` container into `document.body`
-     * that isolates the executive report during `window.print()` and cleans up afterward.
+     * Why this is needed:
+     * Under strict Atlassian Forge Content Security Policy (`style-src 'self'`), HTML strings
+     * injected via `innerHTML` or `iframeDoc.write()` may have their raw `style="..."` attributes
+     * ignored by the HTML parser, whereas JavaScript CSSOM property assignments (`el.style.setProperty`)
+     * and external `'self'` stylesheets (`index.css`) are fully permitted.
+     */
+    const applyCssomInlineStyles = (rootEl) => {
+      if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
+      const elements = [rootEl, ...Array.from(rootEl.querySelectorAll('[style]'))];
+      elements.forEach((el) => {
+        if (!el || !el.getAttribute) return;
+        const rawStyle = el.getAttribute('style');
+        if (!rawStyle) return;
+        rawStyle.split(';').forEach((decl) => {
+          const colonIdx = decl.indexOf(':');
+          if (colonIdx === -1) return;
+          const prop = decl.slice(0, colonIdx).trim();
+          let val = decl.slice(colonIdx + 1).trim();
+          if (!prop || !val) return;
+          let priority = '';
+          if (/!important$/i.test(val)) {
+            val = val.replace(/!important$/i, '').trim();
+            priority = 'important';
+          }
+          try {
+            el.style.setProperty(prop, val, priority);
+          } catch (_) {
+            // Ignore malformed individual CSS properties
+          }
+        });
+      });
+    };
+
+    /**
+     * Generates and triggers a native PDF / Print dialog directly inside the
+     * Atlassian Forge Custom UI iframe so the printed PDF looks 100% identical to the
+     * HTML email report (`buildExecutiveReportData`).
+     *
+     * Key architectural details for Forge CSP (`style-src 'self'`):
+     * 1. Clones all `<link rel="stylesheet">` tags from `window.document.head` into the print
+     *    iframe's `<head>`, so the Vite-bundled `index.css` (`.tp-er-*` classes and `@media print`
+     *    rules) is loaded from `'self'` inside the print iframe.
+     * 2. Runs `applyCssomInlineStyles` on the print DOM so any dynamic inline styles (e.g.,
+     *    progress bar percentage widths) are also applied via JavaScript CSSOM.
+     * 3. Blurs the active button before opening the print preview so no native browser tooltip
+     *    floats over the captured PDF preview.
      */
     const handlePrintPdf = (reportHtml, docTitle) => {
+      // Blur any focused button immediately to prevent native browser tooltips from appearing over the print dialog
+      try {
+        if (document.activeElement && typeof document.activeElement.blur === 'function') {
+          document.activeElement.blur();
+        }
+      } catch (_) {}
+
       const cleanTitle = (docTitle || 'Reporte Ejecutivo - Test Pulse').replace(/"/g, '&quot;');
+
+      // Collect all external 'self' stylesheets compiled by Vite in the parent document
+      const stylesheetLinksHtml = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+        .map((link) => (link.href ? `<link rel="stylesheet" href="${link.href}" />` : ''))
+        .filter(Boolean)
+        .join('\n');
+
       const fullPrintDocument = `
         <!DOCTYPE html>
         <html lang="es">
           <head>
             <meta charset="utf-8" />
             <title>${cleanTitle}</title>
-            <style>
-              @page {
-                size: letter portrait;
-                margin: 10mm 12mm;
-              }
-              @media print {
-                html, body {
-                  -webkit-print-color-adjust: exact !important;
-                  print-color-adjust: exact !important;
-                  color-adjust: exact !important;
-                  background-color: #ffffff !important;
-                  margin: 0 !important;
-                  padding: 0 !important;
-                }
-                .no-print {
-                  display: none !important;
-                }
-              }
-              body {
-                margin: 0;
-                padding: 0;
-                background-color: #ffffff;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-              }
-              .report-container {
-                width: 100%;
-                max-width: 800px;
-                background: #ffffff;
-                box-sizing: border-box;
-              }
-            </style>
+            ${stylesheetLinksHtml}
           </head>
-          <body>
-            <div class="report-container">
+          <body class="tp-print-iframe-body">
+            <div class="tp-print-report-wrapper">
               ${reportHtml}
             </div>
           </body>
         </html>
       `;
 
-      // Helper for Fallback Strategy: Direct @media print DOM container on current window
+      // Helper for Fallback Strategy: Direct @media print DOM container on current window (styled by index.css)
       const triggerDirectDomPrintFallback = () => {
         try {
           const prevTitle = document.title;
           document.title = docTitle || 'Reporte Ejecutivo - Test Pulse';
 
-          const existingStyle = document.getElementById('tp-print-direct-style');
-          if (existingStyle) existingStyle.remove();
           const existingContainer = document.getElementById('tp-print-direct-container');
           if (existingContainer) existingContainer.remove();
 
-          const printStyle = document.createElement('style');
-          printStyle.id = 'tp-print-direct-style';
-          printStyle.innerHTML = `
-            @media screen {
-              #tp-print-direct-container {
-                display: none !important;
-              }
-            }
-            @media print {
-              @page {
-                size: letter portrait;
-                margin: 10mm 12mm;
-              }
-              html, body {
-                -webkit-print-color-adjust: exact !important;
-                print-color-adjust: exact !important;
-                background: #ffffff !important;
-                margin: 0 !important;
-                padding: 0 !important;
-              }
-              body > *:not(#tp-print-direct-container) {
-                display: none !important;
-              }
-              #tp-print-direct-container {
-                display: block !important;
-                width: 100% !important;
-                max-width: 800px !important;
-                margin: 0 auto !important;
-                background: #ffffff !important;
-              }
-            }
-          `;
-
           const printContainer = document.createElement('div');
           printContainer.id = 'tp-print-direct-container';
+          printContainer.className = 'tp-print-report-wrapper';
           printContainer.innerHTML = reportHtml;
 
-          document.head.appendChild(printStyle);
+          document.documentElement.classList.add('tp-printing-exec-report');
+          document.body.classList.add('tp-printing-exec-report');
           document.body.appendChild(printContainer);
+
+          // Apply CSSOM styles in case CSP blocked raw style="" attributes on innerHTML
+          applyCssomInlineStyles(printContainer);
 
           const cleanupDirectPrint = () => {
             document.title = prevTitle;
-            if (printStyle.parentNode) printStyle.parentNode.removeChild(printStyle);
+            document.documentElement.classList.remove('tp-printing-exec-report');
+            document.body.classList.remove('tp-printing-exec-report');
             if (printContainer.parentNode) printContainer.parentNode.removeChild(printContainer);
             window.removeEventListener('afterprint', cleanupDirectPrint);
           };
@@ -12827,14 +12820,15 @@ const renderPlanningTab = () => {
         const printIframe = document.createElement('iframe');
         printIframe.id = 'tp-print-pdf-iframe';
         printIframe.title = cleanTitle;
-        printIframe.style.position = 'fixed';
-        printIframe.style.right = '0';
-        printIframe.style.bottom = '0';
-        printIframe.style.width = '0';
-        printIframe.style.height = '0';
-        printIframe.style.border = '0';
-        printIframe.style.opacity = '0';
-        printIframe.style.pointerEvents = 'none';
+        printIframe.style.setProperty('position', 'fixed');
+        printIframe.style.setProperty('right', '0');
+        printIframe.style.setProperty('bottom', '0');
+        printIframe.style.setProperty('width', '820px');
+        printIframe.style.setProperty('height', '1100px');
+        printIframe.style.setProperty('border', '0');
+        printIframe.style.setProperty('opacity', '0');
+        printIframe.style.setProperty('pointer-events', 'none');
+        printIframe.style.setProperty('z-index', '-9999');
         document.body.appendChild(printIframe);
 
         const iframeWin = printIframe.contentWindow;
@@ -12851,11 +12845,19 @@ const renderPlanningTab = () => {
         iframeDoc.write(fullPrintDocument);
         iframeDoc.close();
 
+        // Apply CSSOM inline styles onto all elements inside the print iframe
+        if (iframeDoc.body) {
+          applyCssomInlineStyles(iframeDoc.body);
+        }
+
         let printed = false;
         const executeIframePrint = () => {
           if (printed) return;
           printed = true;
           try {
+            if (iframeDoc.body) {
+              applyCssomInlineStyles(iframeDoc.body);
+            }
             iframeWin.focus();
             iframeWin.print();
             addNotification({
@@ -12873,11 +12875,31 @@ const renderPlanningTab = () => {
           }
         };
 
-        printIframe.onload = () => {
-          setTimeout(executeIframePrint, 250);
+        // Wait for cloned external stylesheet links and images inside the iframe before invoking print()
+        const waitAndPrint = () => {
+          const links = Array.from(iframeDoc.querySelectorAll('link[rel="stylesheet"]'));
+          const pendingLinks = links.filter((l) => !l.sheet);
+          if (pendingLinks.length === 0) {
+            setTimeout(executeIframePrint, 180);
+            return;
+          }
+          let remaining = pendingLinks.length;
+          const onSettled = () => {
+            remaining -= 1;
+            if (remaining <= 0) {
+              setTimeout(executeIframePrint, 180);
+            }
+          };
+          pendingLinks.forEach((l) => {
+            l.addEventListener('load', onSettled, { once: true });
+            l.addEventListener('error', onSettled, { once: true });
+          });
         };
-        // Fallback timer if onload already fired synchronously on document.close()
-        setTimeout(executeIframePrint, 450);
+
+        printIframe.onload = waitAndPrint;
+        waitAndPrint();
+        // Safety fallback timer if stylesheet load events already fired
+        setTimeout(executeIframePrint, 650);
       } catch (err) {
         console.warn('[Test Pulse] Error en iframe print, usando fallback DOM:', err);
         triggerDirectDomPrintFallback();
@@ -13639,7 +13661,10 @@ const renderPlanningTab = () => {
                   boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
                 }}>
                   <div
-                    ref={executiveReportContainerRef}
+                    ref={(el) => {
+                      executiveReportContainerRef.current = el;
+                      if (el) applyCssomInlineStyles(el);
+                    }}
                     contentEditable={true}
                     suppressContentEditableWarning={true}
                     style={{ outline: 'none', cursor: 'text' }}
@@ -13682,7 +13707,6 @@ const renderPlanningTab = () => {
                     background: '#F4F5F7',
                     border: '1px solid #DFE1E6'
                   }}
-                  title="Abrir vista de impresión y guardar como PDF con todas tus ediciones"
                 >
                   🖨️ Guardar PDF
                 </button>
@@ -13709,7 +13733,6 @@ const renderPlanningTab = () => {
                     background: '#F4F5F7',
                     border: '1px solid #DFE1E6'
                   }}
-                  title="Copiar HTML editado al portapapeles"
                 >
                   📋 Solo Copiar
                 </button>
@@ -13742,7 +13765,6 @@ const renderPlanningTab = () => {
                     background: 'linear-gradient(135deg, #E1007A 0%, #002D62 100%)',
                     boxShadow: '0 2px 6px rgba(225, 0, 122, 0.3)'
                   }}
-                  title="Abre la ventana de PDF, copia el reporte editado al portapapeles y abre Gmail para redactar"
                 >
                   🚀 Guardar PDF, Copiar y Abrir Gmail
                 </button>
