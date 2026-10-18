@@ -18921,27 +18921,21 @@ Then el sistema valida la identidad.
                           }} />
                           {planEvalCount === planTotalCases && planTotalCases > 0 ? 'COMPLETADO' : 'EN EJECUCIÓN'}
                         </span>
-                        <span style={{ color: '#CBD5E1' }}>•</span>
-                        <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 500 }}>
-                          Ambiente: <strong style={{ color: '#334155' }}>
-                            {(() => {
-                              const envSet = new Set(
-                                (Array.isArray(planCycles) ? planCycles : [])
-                                  .map(c => c.schedule?.environment || c.environment)
-                                  .filter(Boolean)
-                              );
-                              return envSet.size > 0 ? Array.from(envSet).join(', ') : (availableEnvironments[0]?.name || 'QA');
-                            })()}
-                          </strong>
-                          {(startIso || endIso) && (
-                            <> ({startIso ? formatShortDateEs(startIso) : '—'} – {endIso ? formatShortDateEs(endIso) : '—'})</>
-                          )}
-                          {hasCycleOverrun && (
-                            <span style={{ color: '#BE123C', fontWeight: 700, marginLeft: '4px' }}>
-                              · Ext. {formatShortDateEs(cycleMaxEndIso)}{extraCyclesAfterPlanEnd > 0 ? ` (+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo' : 'ciclos'})` : ''}
+                        {(startIso || endIso || hasCycleOverrun) && (
+                          <>
+                            <span style={{ color: '#CBD5E1' }}>•</span>
+                            <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 500 }}>
+                              {(startIso || endIso) && (
+                                <>({startIso ? formatShortDateEs(startIso) : '—'} – {endIso ? formatShortDateEs(endIso) : '—'})</>
+                              )}
+                              {hasCycleOverrun && (
+                                <span style={{ color: '#BE123C', fontWeight: 700, marginLeft: (startIso || endIso) ? '4px' : 0 }}>
+                                  {(startIso || endIso) ? '· ' : ''}Ext. {formatShortDateEs(cycleMaxEndIso)}{extraCyclesAfterPlanEnd > 0 ? ` (+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo' : 'ciclos'})` : ''}
+                                </span>
+                              )}
                             </span>
-                          )}
-                        </span>
+                          </>
+                        )}
                       </div>
 
                       {/* Interactive Plan Selector Button */}
