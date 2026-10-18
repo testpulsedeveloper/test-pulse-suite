@@ -18561,8 +18561,11 @@ Then el sistema valida la identidad.
                     <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
                     <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
                       {(() => {
+                        const cyclesSource = Array.isArray(filteredCycles) && filteredCycles.length > 0
+                          ? filteredCycles
+                          : (Array.isArray(testCycles) ? testCycles : []);
                         const envSet = new Set(
-                          filteredCycles
+                          cyclesSource
                             .map(c => c.schedule?.environment || c.environment)
                             .filter(Boolean)
                         );
@@ -18923,7 +18926,7 @@ Then el sistema valida la identidad.
                           Ambiente: <strong style={{ color: '#334155' }}>
                             {(() => {
                               const envSet = new Set(
-                                activeCyclesForOverview
+                                (Array.isArray(planCycles) ? planCycles : [])
                                   .map(c => c.schedule?.environment || c.environment)
                                   .filter(Boolean)
                               );
