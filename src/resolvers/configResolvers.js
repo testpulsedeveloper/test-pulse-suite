@@ -1,0 +1,416 @@
+import api, { route } from '@forge/api';
+import { kvs as storage } from '@forge/kvs';
+
+const REMOVED_DASHBOARD_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles_progress'];
+const GLOBAL_WIDGETS_KVS_KEY = 'testpulse_global_dashboard_widgets_v2';
+const GLOBAL_ENVIRONMENTS_KVS_KEY = 'testpulse_global_environments_v1';
+
+export const DEFAULT_EXECUTION_ENVIRONMENTS = [
+  { id: 'env-qa', name: 'QA', description: 'Ambiente de Aseguramiento de Calidad (Pruebas Funcionales)' },
+  { id: 'env-uat', name: 'UAT', description: 'Ambiente de Pruebas de Aceptación de Usuario (UAT)' },
+  { id: 'env-staging', name: 'Staging / Pre-Prod', description: 'Ambiente Pre-Productivo / Homologación' },
+  { id: 'env-int', name: 'Integración (SIT)', description: 'Ambiente de Pruebas de Integración de Sistemas' },
+  { id: 'env-prod', name: 'Producción', description: 'Ambiente Productivo (Smoke / Sanity Post-Release)' }
+];
+
+const sanitizeDashboardWidgetsList = (widgets) => {
+  if (!Array.isArray(widgets)) return null;
+  const cleaned = widgets.filter(w => w && w.type && !REMOVED_DASHBOARD_WIDGET_TYPES.includes(w.type));
+  return cleaned.length > 0 ? cleaned : null;
+};
+
+const sanitizeEnvironmentsList = (envs) => {
+  if (!Array.isArray(envs)) return null;
+  const cleaned = envs
+    .filter(e => e && (typeof e === 'string' || (typeof e === 'object' && e.name)))
+    .map((e, idx) => {
+      if (typeof e === 'string') {
+        const trimmed = e.trim();
+        return { id: `env-${idx}-${trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, name: trimmed, description: '' };
+      }
+      return {
+        id: String(e.id || `env-${idx}-${String(e.name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+        name: String(e.name || '').trim(),
+        description: String(e.description || '').trim()
+      };
+    })
+    .filter(e => e.name.length > 0);
+  return cleaned.length > 0 ? cleaned : null;
+};
+
+/**
+ * Registers project configuration, permissions, allowlist, bulk mapping, and attachment resolvers.
+ * @param {import('@forge/resolver').default} resolver
+ */
+export function registerConfigResolvers(resolver) {
+  resolver.define('probeAPI', async () => {
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jql: "project IS NOT EMPTY", maxResults: 1 })
+      });
+      const data = await response.json();
+      return {
+        keys: Object.keys(data),
+        hasIssues: !!data.issues,
+        hasValues: !!data.values,
+        issueKeys: data.issues ? Object.keys(data.issues[0] || {}) : null,
+        valueKeys: data.values ? Object.keys(data.values[0] || {}) : null
+      };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  // === Project Management & Configuration ===
+  resolver.define('getProjects', async () => {
+    try {
+      let response = await api.asUser().requestJira(route`/rest/api/3/project`);
+      let data = null;
+      if (response.ok) {
+        data = await response.json();
+      } else {
+        // Fallback to asApp() in case of user permission scheme quirks
+        response = await api.asApp().requestJira(route`/rest/api/3/project`);
+        if (response.ok) {
+          data = await response.json();
+        }
+      }
+
+      if (!data) return [];
+      let projects = Array.isArray(data) ? data : (data.values || []);
+      if (projects.length === 0) return [];
+
+      return projects.map(p => ({ id: p.id, key: p.key, name: p.name }));
+    } catch (err) {
+      return { error: `Exception: ${err ? err.message || String(err) : "Unknown error"}` };
+    }
+  });
+
+  resolver.define('getProjectIssueTypes', async ({ payload }) => {
+    try {
+      const { projectId } = payload;
+      const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
+      if (!response.ok) return [];
+      const data = await response.json();
+      if (!data.issueTypes) return [];
+      return data.issueTypes.map(type => ({
+        id: type.id,
+        name: type.name,
+        iconUrl: type.iconUrl
+      }));
+    } catch (e) {
+      return [];
+    }
+  });
+
+  resolver.define('getIssueLinkTypes', async () => {
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/issueLinkType`);
+      if (!response.ok) return [];
+      const data = await response.json();
+      return data.issueLinkTypes || [];
+    } catch (e) {
+      console.error("Error getIssueLinkTypes:", e);
+      return [];
+    }
+  });
+
+  resolver.define('getConfig', async ({ payload }) => {
+    const { projectId } = payload;
+    let globalWidgets = null;
+    let globalEnvironments = null;
+    try {
+      const [rawGlobal, rawGlobalEnvs] = await Promise.all([
+        storage.get(GLOBAL_WIDGETS_KVS_KEY).catch(() => null),
+        storage.get(GLOBAL_ENVIRONMENTS_KVS_KEY).catch(() => null)
+      ]);
+      globalWidgets = sanitizeDashboardWidgetsList(rawGlobal);
+      globalEnvironments = sanitizeEnvironmentsList(rawGlobalEnvs);
+    } catch (e) {}
+
+    const defaultConf = {
+      testCaseType: 'Test Case',
+      testCycleType: 'Test Cycle',
+      planIssueType: 'Test Set',
+      testRunType: 'Test Run',
+      requirementIssueTypes: [],
+      requirementLinkType: 'ANY',
+      environments: globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS,
+      ...(globalWidgets ? { dashboardWidgets: globalWidgets } : {})
+    };
+
+    if (!projectId) {
+      return defaultConf;
+    }
+
+    let retries = 3;
+    while (retries >= 0) {
+      try {
+        const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+        if (response.status === 429) {
+          retries--;
+          if (retries < 0) break;
+          await new Promise(r => setTimeout(r, 1000 + Math.random() * 600));
+          continue;
+        }
+        if (response.status === 404) {
+          return defaultConf;
+        }
+        if (!response.ok) {
+          retries--;
+          if (retries < 0) break;
+          await new Promise(r => setTimeout(r, 600));
+          continue;
+        }
+        const data = await response.json();
+        const config = data?.value || {};
+        const projectWidgets = sanitizeDashboardWidgetsList(config.dashboardWidgets);
+        const effectiveWidgets = globalWidgets || projectWidgets;
+
+        const projectEnvs = sanitizeEnvironmentsList(config.environments);
+        const effectiveEnvironments = globalEnvironments || projectEnvs || DEFAULT_EXECUTION_ENVIRONMENTS;
+
+        if (!globalWidgets && projectWidgets) {
+          try {
+            await storage.set(GLOBAL_WIDGETS_KVS_KEY, projectWidgets);
+          } catch (e) {}
+        }
+        if (!globalEnvironments && projectEnvs) {
+          try {
+            await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, projectEnvs);
+          } catch (e) {}
+        }
+
+        const merged = {
+          testCaseType: config.testCaseType || 'Test Case',
+          testCycleType: config.testCycleType || 'Test Cycle',
+          planIssueType: config.planIssueType || 'Test Set',
+          testRunType: config.testRunType || 'Test Run',
+          requirementIssueTypes: Array.isArray(config.requirementIssueTypes) ? config.requirementIssueTypes : [],
+          requirementLinkType: config.requirementLinkType || 'ANY',
+          ...config,
+          environments: effectiveEnvironments
+        };
+
+        if (effectiveWidgets) {
+          merged.dashboardWidgets = effectiveWidgets;
+        } else {
+          delete merged.dashboardWidgets;
+        }
+
+        return merged;
+      } catch (e) {
+        retries--;
+        if (retries < 0) break;
+        await new Promise(r => setTimeout(r, 600));
+      }
+    }
+    return defaultConf;
+  });
+
+  resolver.define('setConfig', async ({ payload }) => {
+    const { projectId, config } = payload;
+    const nextConfig = { ...(config || {}) };
+    if (Array.isArray(nextConfig.dashboardWidgets)) {
+      const sanitized = sanitizeDashboardWidgetsList(nextConfig.dashboardWidgets) || [];
+      nextConfig.dashboardWidgets = sanitized;
+      try {
+        await storage.set(GLOBAL_WIDGETS_KVS_KEY, sanitized);
+      } catch (e) {}
+    }
+    if (Array.isArray(nextConfig.environments)) {
+      const sanitizedEnvs = sanitizeEnvironmentsList(nextConfig.environments) || DEFAULT_EXECUTION_ENVIRONMENTS;
+      nextConfig.environments = sanitizedEnvs;
+      try {
+        await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, sanitizedEnvs);
+      } catch (e) {}
+    }
+    const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(nextConfig)
+    });
+    return { success: response.status >= 200 && response.status < 300 };
+  });
+
+  // === Permissions ===
+  resolver.define('checkAdminPermission', async ({ payload }) => {
+    try {
+      const { projectId } = payload;
+      const response = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
+      if (!response.ok) return false;
+      const data = await response.json();
+      return data?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+    } catch (e) {
+      console.error("checkAdminPermission error:", e);
+      return false;
+    }
+  });
+
+  // === Bulk Upload: Field Mapping Config ===
+  resolver.define('getBulkMapping', async () => {
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/user/properties/testops-bulk-mapping`);
+      if (response.status === 404) return { mapping: {}, folderId: '' };
+      if (!response.ok) {
+        console.warn('getBulkMapping response not ok:', response.status);
+        return { mapping: {}, folderId: '' };
+      }
+      const data = await response.json();
+      return data.value || { mapping: {}, folderId: '' };
+    } catch (e) {
+      console.error('getBulkMapping error:', e);
+      return { mapping: {}, folderId: '' };
+    }
+  });
+
+  resolver.define('saveBulkMapping', async ({ payload }) => {
+    const { mapping, folderId } = payload;
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/user/properties/testops-bulk-mapping`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mapping: mapping || {}, folderId: folderId || '' })
+      });
+      if (!response.ok) {
+        console.error('saveBulkMapping failed:', await response.text());
+        return { success: false, message: 'Fallo al guardar en Jira' };
+      }
+      return { success: true };
+    } catch (e) {
+      console.error('saveBulkMapping error:', e);
+      return { success: false, message: String(e) };
+    }
+  });
+
+  // === Bulk Upload: Link issues to folder in batch ===
+  resolver.define('bulkLinkToFolder', async ({ payload }) => {
+    const { issueIds, folderId } = payload;
+    if (!folderId || !issueIds || issueIds.length === 0) return { success: true, count: 0 };
+
+    const results = await Promise.allSettled(
+      issueIds.map(id =>
+        api.asUser().requestJira(route`/rest/api/3/issue/${id}/properties/testops-folder-link`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folderId })
+        })
+      )
+    );
+    const succeeded = results.filter(r => r.status === 'fulfilled').length;
+    return { success: true, count: succeeded };
+  });
+
+  // === Project Allowlist ===
+  resolver.define('getAllowedProjects', async () => {
+    try {
+      let response = await api.asUser().requestJira(route`/rest/api/3/project`);
+      let data = await response.json();
+      let projects = Array.isArray(data) ? data : (data.values || []);
+
+      if (projects.length === 0) {
+        response = await api.asApp().requestJira(route`/rest/api/3/project`);
+        data = await response.json();
+        projects = Array.isArray(data) ? data : (data.values || []);
+      }
+
+      return projects.map(p => ({ id: p.id, key: p.key, name: p.name }));
+    } catch (err) {
+      console.error("getAllowedProjects exception:", err);
+      return [];
+    }
+  });
+
+  resolver.define('setAllowedProjects', async ({ payload }) => {
+    const { projectId, enabled } = payload;
+    await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-enabled`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(enabled)
+    });
+    return { success: true };
+  });
+
+  resolver.define('isProjectAllowed', async ({ payload, context }) => {
+    try {
+      const projectId = payload?.projectId || context?.extension?.project?.id;
+      if (!projectId) return { allowed: true };
+      const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-enabled`);
+      if (response.status === 404) return { allowed: true };
+      if (!response.ok) return { allowed: true };
+      const data = await response.json();
+      return { allowed: data.value?.enabled !== false };
+    } catch (err) {
+      return { allowed: true };
+    }
+  });
+
+  // === Attachment Upload / Download / Delete ===
+  resolver.define('uploadAttachment', async ({ payload }) => {
+    const { issueId, filename, base64Data, mimeType } = payload;
+    if (!issueId || !base64Data) {
+      throw new Error("Missing issueId or base64Data");
+    }
+
+    try {
+      const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+      const buffer = Buffer.from(cleanBase64, 'base64');
+      const blob = new Blob([buffer], { type: mimeType || 'application/octet-stream' });
+
+      const formData = new FormData();
+      formData.append('file', blob, filename || `attachment_${Date.now()}.png`);
+
+      const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}/attachments`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'X-Atlassian-Token': 'no-check'
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[uploadAttachment] Failed for issue ${issueId}: ${response.status} ${errText}`);
+        throw new Error(`Jira upload error ${response.status}: ${errText}`);
+      }
+
+      const attachments = await response.json();
+      return attachments;
+    } catch (err) {
+      console.error(`[uploadAttachment] Exception:`, err.message);
+      throw err;
+    }
+  });
+
+  resolver.define('deleteAttachment', async ({ payload }) => {
+    const { attachmentId } = payload;
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/attachment/${attachmentId}`, {
+        method: 'DELETE'
+      });
+      return { success: response.status === 204 || response.status === 200 };
+    } catch (e) {
+      console.error('deleteAttachment error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  resolver.define('getAttachmentContent', async ({ payload }) => {
+    const { attachmentId } = payload;
+    try {
+      const response = await api.asUser().requestJira(route`/rest/api/3/attachment/content/${attachmentId}`);
+      if (response.status !== 200) {
+        throw new Error(`Failed to fetch attachment content, status: ${response.status}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      return { base64: buffer.toString('base64'), mimeType: response.headers.get('content-type') };
+    } catch (e) {
+      console.error('getAttachmentContent error:', e);
+      return { error: e.message };
+    }
+  });
+}
