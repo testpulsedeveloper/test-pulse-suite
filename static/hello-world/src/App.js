@@ -2312,7 +2312,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Dashboard</span>
+              <span>Reports</span>
               {activeTab === 'reports' && <div className="tab-indicator" />}
             </button>
 
@@ -14977,7 +14977,7 @@ Then el sistema valida la identidad.
       return (
         <TestPulseLoader
           size={110}
-          text="Cargando métricas y tableros del Dashboard..."
+          text="Cargando métricas y tableros de Reports..."
         />
       );
     }
@@ -17853,7 +17853,7 @@ Then el sistema valida la identidad.
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>📊</span>
                   <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                    DASHBOARD
+                    REPORTS
                   </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -17910,7 +17910,7 @@ Then el sistema valida la identidad.
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>📊</span>
-                  <span>Reports</span>
+                  <span>Runs</span>
                 </div>
                 <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', fontWeight: 700 }}>
                   {totalCases}
@@ -18027,7 +18027,7 @@ Then el sistema valida la identidad.
                   <button
                     onClick={toggleFolderSidebar}
                     className="btn-secondary"
-                    title="Mostrar panel lateral del Dashboard"
+                    title="Mostrar panel lateral de Reports"
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -18042,7 +18042,7 @@ Then el sistema valida la identidad.
                       <line x1="9" y1="3" x2="9" y2="21" />
                       <path d="M13 9l3 3-3 3" />
                     </svg>
-                    <span>Dashboard</span>
+                    <span>Reports</span>
                   </button>
                 )}
                 {!isFolderSidebarVisible && (
@@ -18061,7 +18061,7 @@ Then el sistema valida la identidad.
                         boxShadow: dashboardSubView === 'runs' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                       }}
                     >
-                      📊 Reports
+                      📊 Runs
                     </button>
                     <button
                       onClick={() => setDashboardSubView('bugs')}
@@ -18225,8 +18225,8 @@ Then el sistema valida la identidad.
             ) : (
               <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                 <h1 className="dashboard-title">
-                  {dashboardSubView === 'bugs' && 'Dashboard: Tablero de Defectos y Fallos Críticos (Bugs)'}
-                  {dashboardSubView === 'traceability' && 'Dashboard: Matriz de Trazabilidad (Traceability)'}
+                  {dashboardSubView === 'bugs' && 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)'}
+                  {dashboardSubView === 'traceability' && 'Reports: Matriz de Trazabilidad (Traceability)'}
                 </h1>
                 {circuitBreakerActive && (
                   <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
