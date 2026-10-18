@@ -5,12 +5,14 @@ modules:
       resolver:
         function: resolver
       title: Test Pulse
+      layout: blank
   jira:globalPage:
     - key: test-management-global-page
       resource: main
       resolver:
         function: resolver
       title: Test Pulse (Global)
+      layout: blank
   scheduledTrigger:
     - key: automated-report-trigger
       function: scheduledReportHandler
