@@ -41,7 +41,7 @@ import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.1.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.2.0'}`;
 
 function App() {
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
@@ -298,6 +298,7 @@ function App() {
   const [resolutionStage, setResolutionStage] = useState('Nuevo a Abierto');
   const [dashboardSubView, setDashboardSubView] = useState('runs'); // 'runs', 'bugs', 'traceability'
   const [dashboardBugSearch, setDashboardBugSearch] = useState('');
+  const [dashboardCycleBugFilter, setDashboardCycleBugFilter] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED', 'BLOCKER'
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
   const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
@@ -15251,6 +15252,44 @@ Then el sistema valida la identidad.
       return ['closed', 'cerrado', 'cerrada'].includes(statusStr);
     };
 
+    // Validates whether the bug's current status actually corresponds to a resolved/validation/closed state.
+    // Prevents inventing or displaying stale Jira resolutions (e.g. "Listo" when status is "Análisis" or "Abierto").
+    const isBugStatusResolved = (statusStr, isDoneFlag) => {
+      const low = String(statusStr || '').toLowerCase().trim();
+      return (
+        Boolean(isDoneFlag) ||
+        low.includes('resuelta') ||
+        low.includes('resuelto') ||
+        low.includes('resolved') ||
+        low.includes('validaci') ||
+        low.includes('validation') ||
+        low.includes('cerrada') ||
+        low.includes('cerrado') ||
+        low.includes('closed') ||
+        low.includes('done') ||
+        low.includes('listo') ||
+        low.includes('finalizad') ||
+        low.includes('completad') ||
+        low.includes('solucionad')
+      );
+    };
+
+    const resolveValidBugResolution = (bugObj, isDoneFlag) => {
+      const statusStr = bugObj?.status || bugObj?.fields?.status?.name || bugObj?.rawFields?.status?.name || '';
+      if (!isBugStatusResolved(statusStr, isDoneFlag)) {
+        return 'Sin resolver';
+      }
+      let rawRes = 'Sin resolver';
+      if (bugObj?.resolution && typeof bugObj.resolution === 'string' && bugObj.resolution !== 'Unresolved' && bugObj.resolution !== 'Sin resolver') {
+        rawRes = bugObj.resolution;
+      } else if (bugObj?.rawFields?.resolution?.name && bugObj.rawFields.resolution.name !== 'Unresolved') {
+        rawRes = bugObj.rawFields.resolution.name;
+      } else if (typeof bugObj?.resolution === 'object' && bugObj.resolution?.name && bugObj.resolution.name !== 'Unresolved') {
+        rawRes = bugObj.resolution.name;
+      }
+      return rawRes || 'Sin resolver';
+    };
+
     const renderBugStatusLozenge = (statusStr, isDone) => {
       const st = (statusStr || '').trim();
       const low = st.toLowerCase();
@@ -15407,15 +15446,7 @@ Then el sistema valida la identidad.
 
               const isDone = isBugDone(bug);
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
-
-              let resName = 'Sin resolver';
-              if (bug.resolution && typeof bug.resolution === 'string' && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver') {
-                resName = bug.resolution;
-              } else if (bug.rawFields?.resolution?.name) {
-                resName = bug.rawFields.resolution.name;
-              } else if (typeof bug.resolution === 'object' && bug.resolution?.name) {
-                resName = bug.resolution.name;
-              }
+              const resName = resolveValidBugResolution(bug, isDone);
 
               const rawAff = bug.versions || bug.rawFields?.versions || [];
               const rawFix = bug.fixVersions || bug.rawFields?.fixVersions || [];
@@ -15611,15 +15642,7 @@ Then el sistema valida la identidad.
 
               const isDone = isBugDone(bug);
               const finalSeverity = normalizeSeverity(bug.severity, bug.rawFields);
-
-              let resName = 'Sin resolver';
-              if (bug.resolution && typeof bug.resolution === 'string' && bug.resolution !== 'Unresolved' && bug.resolution !== 'Sin resolver') {
-                resName = bug.resolution;
-              } else if (bug.rawFields?.resolution?.name) {
-                resName = bug.rawFields.resolution.name;
-              } else if (typeof bug.resolution === 'object' && bug.resolution?.name) {
-                resName = bug.resolution.name;
-              }
+              const resName = resolveValidBugResolution(bug, isDone);
 
               const rawAff = bug.versions || bug.rawFields?.versions || [];
               const rawFix = bug.fixVersions || bug.rawFields?.fixVersions || [];
@@ -15827,13 +15850,14 @@ Then el sistema valida la identidad.
         // Bug is in the project but wasn't part of planAllBugsMap
         // ONLY include if it matched at least one target cycle in scope
         if (foundCycles.size > 0) {
+          const ubResName = resolveValidBugResolution(ub, isDone);
           allBugsMap.set(ub.key, {
             key: ub.key,
             summary: ub.summary || (isLinkedToAnyTest ? 'Defecto vinculado a prueba' : 'Defecto sin vincular'),
             severity: finalSeverity,
             assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
             status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
-            resolution: ub.resolution || (isDone ? 'Resuelto' : 'Sin resolver'),
+            resolution: ubResName,
             isDone: isDone,
             isUnlinked: !isLinkedToAnyTest && foundCycles.size === 0,
             version: versionDisplay,
@@ -15910,11 +15934,17 @@ Then el sistema valida la identidad.
     // Cycle-specific Bug Totals (Used in Runs subview and Cycle bugs)
     let criticalCycleBugs = Array.from(cycleOpenBugsMap.values()).map(item => ({
       ...item,
+      cycleList: item.cycles && item.cycles.size > 0 ? Array.from(item.cycles).join(', ') : 'Sin vincular',
       affectedCount: item.affectedCases ? item.affectedCases.size : 0,
       affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
     })).sort(sortBugsByCreatedDesc);
 
-    let cycleAllBugsList = Array.from(cycleAllBugsMap.values()).sort(sortBugsByCreatedDesc);
+    let cycleAllBugsList = Array.from(cycleAllBugsMap.values()).map(item => ({
+      ...item,
+      cycleList: item.cycles && item.cycles.size > 0 ? Array.from(item.cycles).join(', ') : 'Sin vincular',
+      affectedCount: item.affectedCases ? item.affectedCases.size : 0,
+      affectedCasesList: item.affectedCases ? Array.from(item.affectedCases.values()) : []
+    })).sort(sortBugsByCreatedDesc);
 
     const activeCyclesForVersions = (reportSelectedCycles && reportSelectedCycles.length > 0)
       ? filteredCycles
@@ -17436,7 +17466,12 @@ Then el sistema valida la identidad.
       emitStoryRows(null, storyObj, true);
     });
 
-    const filteredBugsList = criticalCycleBugs.filter(bug => {
+    const filteredBugsList = cycleAllBugsList.filter(bug => {
+      if (dashboardCycleBugFilter === 'OPEN' && bug.isDone) return false;
+      if (dashboardCycleBugFilter === 'CLOSED' && !bug.isDone) return false;
+      if (dashboardCycleBugFilter === 'BLOCKER' && getSevRank(bug.severity) > 2) return false;
+      if (dashboardCycleBugFilter === 'MEDIUM' && getSevRank(bug.severity) <= 2) return false;
+
       if (!dashboardBugSearch) return true;
       const q = dashboardBugSearch.toLowerCase().trim();
       return (
@@ -17446,7 +17481,8 @@ Then el sistema valida la identidad.
         String(bug.severity).toLowerCase().includes(q) ||
         String(bug.status).toLowerCase().includes(q) ||
         String(bug.resolution).toLowerCase().includes(q) ||
-        (bug.version && String(bug.version).toLowerCase().includes(q))
+        (bug.version && String(bug.version).toLowerCase().includes(q)) ||
+        (bug.cycleList && String(bug.cycleList).toLowerCase().includes(q))
       );
     }).sort(sortBugsByCreatedDesc);
 
@@ -17894,19 +17930,19 @@ Then el sistema valida la identidad.
                 borderLeft: dashboardSubView === 'bugs' ? '3px solid #DE350B' : '3px solid transparent',
                 transition: 'all 0.15s ease'
               }}
-              title="Gestión de defectos abiertos vinculados a pruebas"
+              title="Gestión de defectos vinculados a pruebas"
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>🐞</span>
                   <span>Bugs</span>
                 </div>
-                <span className={`ads-lozenge ${criticalCycleBugs.length > 0 ? 'ads-lozenge-danger' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px', fontWeight: 700 }}>
-                  {criticalCycleBugs.length}
+                <span className={`ads-lozenge ${openCycleBugs > 0 ? 'ads-lozenge-danger' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px', fontWeight: 700 }}>
+                  {totalCycleBugs}
                 </span>
               </div>
               <div style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)', paddingLeft: '23px', fontWeight: 500 }}>
-                {totalOpenPlanBugs} {totalOpenPlanBugs === 1 ? 'abierto' : 'abiertos'} · {totalClosedPlanBugs} cerrados
+                {openCycleBugs} {openCycleBugs === 1 ? 'activo' : 'activos'} · {closedCycleBugs} {closedCycleBugs === 1 ? 'cerrado' : 'cerrados'}
               </div>
             </div>
 
@@ -18211,8 +18247,8 @@ Then el sistema valida la identidad.
               </div>
             )}
 
-            {/* Filter Toolbar (Only shown for non-runs subviews; Runs uses the new Master Test Plan Hero) */}
-            {dashboardSubView !== 'runs' && (
+            {/* Filter Toolbar (Only shown for Traceability; Runs and Bugs automatically synchronize with the Runs Plan/Cycle selector) */}
+            {dashboardSubView !== 'runs' && dashboardSubView !== 'bugs' && (
               <div className="dashboard-filter-toolbar">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                   {/* 1. Plan de Pruebas */}
@@ -19824,310 +19860,471 @@ Then el sistema valida la identidad.
           {/* ═══════════════════════════════════════════════════════ */}
           {dashboardSubView === 'bugs' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {/* Bugs KPI Scorecard */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+              {/* ─── STITCH 5-COLUMN KPI SCORECARD ─── */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '1rem' }}>
                 {/* Card 1: Total Defectos */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ color: 'var(--jira-dark, #172B4D)', fontWeight: 700 }}>🐞 TOTAL DEFECTOS</span>
-                    <span className="dashboard-kpi-pill blue">{totalAllBugs} totales</span>
+                <div style={{ background: '#FFFFFF', borderRadius: '12px', padding: '18px 20px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#414754' }}>TOTAL DEFECTOS</span>
+                      <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '999px', background: '#E9F2FF', color: '#0055CC' }}>En el Plan</span>
+                    </div>
+                    <div style={{ fontSize: '34px', fontWeight: 800, color: '#181C20', lineHeight: 1, marginBottom: '14px', letterSpacing: '-0.02em' }}>
+                      {totalAllBugs}
+                    </div>
+                    <div style={{ width: '100%', height: '6px', background: '#ECEEF3', borderRadius: '999px', overflow: 'hidden', display: 'flex', marginBottom: '12px' }}>
+                      <div style={{ width: `${totalAllBugs > 0 ? Math.round((totalClosedBugs / totalAllBugs) * 100) : 0}%`, height: '100%', background: '#006C47', transition: 'width 0.3s ease' }} />
+                      <div style={{ width: `${totalAllBugs > 0 ? Math.max(0, 100 - Math.round((totalClosedBugs / totalAllBugs) * 100)) : 0}%`, height: '100%', background: '#CA3521', transition: 'width 0.3s ease' }} />
+                    </div>
                   </div>
-                  <div className="dashboard-kpi-value" style={{ color: 'var(--jira-dark, #172B4D)' }}>
-                    {totalAllBugs}
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span style={{ color: '#006644', fontWeight: 600 }}>{totalClosedBugs} Cerrados</span>
-                    <span style={{ color: totalOpenBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', fontWeight: 600 }}>
+                    <span style={{ color: '#006C47', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#006C47', display: 'inline-block' }} />
+                      {totalClosedBugs} Cerrados
+                    </span>
+                    <span style={{ color: totalOpenBugs > 0 ? '#CA3521' : '#727785', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: totalOpenBugs > 0 ? '#CA3521' : '#727785', display: 'inline-block' }} />
                       {totalOpenBugs} Abiertos
                     </span>
                   </div>
                 </div>
 
-                {/* Card 2: Defectos Abiertos en Ciclo */}
-                <div className="dashboard-kpi-card">
-                  <div className="dashboard-kpi-header">
-                    <span style={{ color: '#DE350B', fontWeight: 700 }}>🐞 DEFECTOS ABIERTOS (CICLO)</span>
-                    <span className="dashboard-kpi-pill red">{criticalCycleBugs.length} Activos</span>
+                {/* Card 2: Defectos de Ciclo (Idéntico al KPI de Defectos en Runs) */}
+                <div style={{ background: '#FFFFFF', borderRadius: '12px', padding: '18px 20px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '3px', background: '#CA3521' }} />
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#BA1A1A' }}>EN CICLO ACTIVO</span>
+                      <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '4px', background: '#FFDAD6', color: '#93000A', textTransform: 'uppercase' }}>{openCycleBugs} ACTIVOS</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '34px', fontWeight: 800, color: '#BA1A1A', lineHeight: 1, letterSpacing: '-0.02em' }}>
+                        {totalCycleBugs}
+                      </span>
+                      <span style={{ fontSize: '12px', fontWeight: 600, color: '#626F86' }}>bugs vinculados</span>
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#727785', fontWeight: 500, marginBottom: '12px' }}>
+                      {blocked} {blocked === 1 ? 'caso bloqueado en ciclo' : 'casos bloqueados en ciclo'}
+                    </div>
                   </div>
-                  <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
-                    {criticalCycleBugs.length}
-                  </div>
-                  <div className="dashboard-kpi-footer">
-                    <span>En ciclo(s) seleccionados</span>
-                    <span style={{ color: '#0C66E4', fontWeight: 600 }}>{totalOpenPlanBugs} en Plan</span>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '8px', borderTop: '1px solid #F2F4F8', fontSize: '11px', fontWeight: 700 }}>
+                    <span style={{ color: '#006C47' }}>{closedCycleBugs} Cerrados</span>
+                    <span style={{ color: openCycleBugs > 0 ? '#BA1A1A' : '#626F86' }}>{openCycleBugs} En Curso</span>
                   </div>
                 </div>
 
                 {/* Card 3: Bloqueantes & Críticos (Configurable) */}
-                {(conf.showSevBloqueante !== false || conf.showSevCritico !== false) && (
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#DE350B', fontWeight: 700 }}>
-                        {conf.showSevBloqueante !== false && conf.showSevCritico !== false
-                          ? '✱ BLOQUEANTES & CRÍTICOS'
-                          : conf.showSevBloqueante !== false
-                            ? '✱ BLOQUEANTES'
-                            : '▲ CRÍTICOS'}
-                      </span>
-                      <span className="dashboard-kpi-pill red">Alta prioridad</span>
+                {(conf.showSevBloqueante !== false || conf.showSevCritico !== false) && (() => {
+                  const highSevCount = planGeneralBugsList.filter(b => !b.isDone && (
+                    (conf.showSevBloqueante !== false && getSevRank(b.severity) === 1) ||
+                    (conf.showSevCritico !== false && getSevRank(b.severity) === 2)
+                  )).length;
+                  return (
+                    <div style={{ background: '#FFFFFF', borderRadius: '12px', padding: '18px 20px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                          <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#414754' }}>
+                            {conf.showSevBloqueante !== false && conf.showSevCritico !== false
+                              ? 'BLOQUEANTES & CRÍTICOS'
+                              : conf.showSevBloqueante !== false
+                                ? 'BLOQUEANTES'
+                                : 'CRÍTICOS'}
+                          </span>
+                          <span style={{ color: '#BA1A1A', fontSize: '14px', lineHeight: 1 }}>⚠️</span>
+                        </div>
+                        <div style={{ fontSize: '34px', fontWeight: 800, color: '#181C20', lineHeight: 1, marginBottom: '12px', letterSpacing: '-0.02em' }}>
+                          {highSevCount}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '4px', background: highSevCount > 0 ? 'rgba(255, 218, 214, 0.6)' : '#E3FCEF', color: highSevCount > 0 ? '#BA1A1A' : '#006644' }}>
+                          {highSevCount > 0 ? 'Prioridad Máxima' : 'Sin bloqueos críticos'}
+                        </span>
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
-                      {planGeneralBugsList.filter(b => !b.isDone && (
-                        (conf.showSevBloqueante !== false && getSevRank(b.severity) === 1) ||
-                        (conf.showSevCritico !== false && getSevRank(b.severity) === 2)
-                      )).length}
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>Abiertos en el Plan</span>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Card 4: Mayores, Medios & Menores (Configurable) */}
-                {(conf.showSevMayor !== false || conf.showSevMedio !== false || conf.showSevMenor !== false) && (
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#FF8B00', fontWeight: 700 }}>
-                        {(() => {
-                          const activeLabels = [];
-                          if (conf.showSevMayor !== false) activeLabels.push('MAYORES');
-                          if (conf.showSevMedio !== false) activeLabels.push('MEDIOS');
-                          if (conf.showSevMenor !== false) activeLabels.push('MENORES');
-                          if (activeLabels.length >= 2) {
-                            return `● ${activeLabels[0]} & ${activeLabels[activeLabels.length - 1]}`;
-                          }
-                          return `● ${activeLabels[0] || 'MEDIA / BAJA'}`;
-                        })()}
-                      </span>
-                      <span className="dashboard-kpi-pill orange">Media/Baja</span>
+                {(conf.showSevMayor !== false || conf.showSevMedio !== false || conf.showSevMenor !== false) && (() => {
+                  const medLowCount = planGeneralBugsList.filter(b => !b.isDone && (
+                    (conf.showSevMayor !== false && getSevRank(b.severity) === 3) ||
+                    (conf.showSevMedio !== false && getSevRank(b.severity) === 4) ||
+                    (conf.showSevMenor !== false && getSevRank(b.severity) === 5)
+                  )).length;
+                  const activeLabels = [];
+                  if (conf.showSevMayor !== false) activeLabels.push('MAYORES');
+                  if (conf.showSevMedio !== false) activeLabels.push('MEDIOS');
+                  if (conf.showSevMenor !== false) activeLabels.push('MENORES');
+                  const cardTitle = activeLabels.length >= 2
+                    ? `${activeLabels[0]} & ${activeLabels[activeLabels.length - 1]}`
+                    : (activeLabels[0] || 'MEDIOS & MENORES');
+                  return (
+                    <div style={{ background: '#FFFFFF', borderRadius: '12px', padding: '18px 20px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                          <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#414754' }}>
+                            {cardTitle}
+                          </span>
+                          <span style={{ color: '#A54800', fontSize: '13px', fontWeight: 800, lineHeight: 1 }}>●</span>
+                        </div>
+                        <div style={{ fontSize: '34px', fontWeight: 800, color: '#A54800', lineHeight: 1, marginBottom: '12px', letterSpacing: '-0.02em' }}>
+                          {medLowCount}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#414754', fontWeight: 500 }}>
+                        Abiertos no bloqueantes
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value" style={{ color: '#FF8B00' }}>
-                      {planGeneralBugsList.filter(b => !b.isDone && (
-                        (conf.showSevMayor !== false && getSevRank(b.severity) === 3) ||
-                        (conf.showSevMedio !== false && getSevRank(b.severity) === 4) ||
-                        (conf.showSevMenor !== false && getSevRank(b.severity) === 5)
-                      )).length}
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>Abiertos no bloqueantes</span>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Card 5: Resolución (MTTR) */}
                 {conf.showBugTimes !== false && (
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#0C66E4', fontWeight: 700 }}>⏱ RESOLUCIÓN (MTTR)</span>
-                      <span className="dashboard-kpi-pill blue">SLA 24h</span>
+                  <div style={{ background: '#FFFFFF', borderRadius: '12px', padding: '18px 20px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                        <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#414754' }}>RESOLUCIÓN MTTR</span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '999px', background: '#A0F3C1', color: '#005235' }}>SLA 24H</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', marginBottom: '12px' }}>
+                        <span style={{ fontSize: '34px', fontWeight: 800, color: '#0055CC', lineHeight: 1, letterSpacing: '-0.02em' }}>
+                          {avgResolutionHours}
+                        </span>
+                        <span style={{ fontSize: '14px', fontWeight: 600, color: '#727785' }}>hrs</span>
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value">
-                      {avgResolutionHours} <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--jira-subtle)' }}>hrs</span>
-                    </div>
-                    <div className="dashboard-kpi-footer">
+                    <div style={{ fontSize: '11px', color: '#006C47', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span>✓</span>
                       <span>Tiempo promedio cierre</span>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* ─── TABLA 1: DEFECTOS ABIERTOS EN CICLO(S) SELECCIONADOS ─── */}
-              <div className="dashboard-card" style={{ overflowX: 'auto' }}>
-                <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
-                  <div>
-                    <div className="dashboard-card-title">
-                      <span style={{ color: '#DE350B' }}>🐞</span>
-                      <span>Defectos Abiertos en Ciclo(s) Seleccionados</span>
-                      <span className="ads-lozenge ads-lozenge-danger" style={{ fontSize: '11px', fontWeight: 700, marginLeft: '8px' }}>
-                        {criticalCycleBugs.length} activos
-                      </span>
+              {/* ─── SECCIÓN 1: DEFECTOS EN CICLO(S) SELECCIONADOS (REDISEÑO STITCH) ─── */}
+              <div style={{ background: '#FFFFFF', borderRadius: '12px', border: '1px solid #EAEEF4', boxShadow: '0 4px 20px -2px rgba(24, 28, 32, 0.04)', overflow: 'hidden' }}>
+                {/* Table Header / Action Bar */}
+                <div style={{ padding: '18px 24px', borderBottom: '1px solid #EAEEF4', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: '#FFDAD6', color: '#93000A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', flexShrink: 0 }}>
+                      🐞
                     </div>
-                    <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
-                      Defectos no resueltos vinculados a casos de prueba en los ciclos actualmente seleccionados en la barra superior.
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '15px', fontWeight: 800, color: '#181C20', letterSpacing: '-0.01em' }}>
+                          Defectos en Ciclo(s) Seleccionados
+                        </span>
+                        <span style={{ fontSize: '10px', fontWeight: 800, padding: '2px 8px', borderRadius: '999px', background: '#E9F2FF', color: '#0055CC' }}>
+                          {totalCycleBugs} EN CICLO
+                        </span>
+                        <span style={{ fontSize: '10px', fontWeight: 800, padding: '2px 8px', borderRadius: '999px', background: '#FFDAD6', color: '#93000A' }}>
+                          {openCycleBugs} ACTIVOS
+                        </span>
+                        <span style={{ fontSize: '10px', fontWeight: 800, padding: '2px 8px', borderRadius: '999px', background: '#E3FCEF', color: '#006644' }}>
+                          {closedCycleBugs} CERRADOS
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#414754', marginTop: '2px' }}>
+                        Listado completo de defectos (abiertos y cerrados) vinculados a casos de prueba en los ciclos seleccionados.
+                      </div>
                     </div>
                   </div>
 
-                  {/* Search filter input */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input
-                      type="text"
-                      placeholder="Buscar bug en ciclo..."
-                      value={dashboardBugSearch}
-                      onChange={(e) => setDashboardBugSearch(e.target.value)}
-                      style={{
-                        padding: '6px 12px',
-                        fontSize: '12px',
-                        border: '1px solid var(--jira-border, #DCDFE4)',
-                        borderRadius: '6px',
-                        width: '260px'
-                      }}
-                    />
-                    {dashboardBugSearch && (
-                      <button
-                        onClick={() => setDashboardBugSearch('')}
-                        style={{ padding: '4px 8px', fontSize: '11px', background: '#F1F2F4', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                      >
-                        Limpiar
-                      </button>
-                    )}
+                  {/* Filter Pills & Search Input */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    {/* Quick Filter Tabs */}
+                    <div style={{ display: 'flex', background: '#F2F4F8', padding: '3px', borderRadius: '8px', gap: '2px' }}>
+                      {[
+                        { id: 'ALL', label: `Todos (${totalCycleBugs})` },
+                        { id: 'OPEN', label: `Abiertos (${openCycleBugs})` },
+                        { id: 'CLOSED', label: `Cerrados (${closedCycleBugs})` },
+                        { id: 'BLOCKER', label: 'Bloqueantes' },
+                        { id: 'MEDIUM', label: 'Medios' }
+                      ].map(tab => {
+                        const isActive = dashboardCycleBugFilter === tab.id;
+                        return (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setDashboardCycleBugFilter(tab.id)}
+                            style={{
+                              padding: '5px 10px',
+                              fontSize: '11px',
+                              fontWeight: isActive ? 700 : 600,
+                              background: isActive ? '#FFFFFF' : 'transparent',
+                              color: isActive ? '#0055CC' : '#414754',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              boxShadow: isActive ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
+                              transition: 'all 0.15s ease'
+                            }}
+                          >
+                            {tab.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Search Input */}
+                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                      <span style={{ position: 'absolute', left: '10px', fontSize: '12px', color: '#727785', pointerEvents: 'none' }}>🔍</span>
+                      <input
+                        type="text"
+                        placeholder="Buscar por ID, resumen o versión..."
+                        value={dashboardBugSearch}
+                        onChange={(e) => setDashboardBugSearch(e.target.value)}
+                        style={{
+                          padding: '6px 12px 6px 30px',
+                          fontSize: '12px',
+                          background: '#F2F4F8',
+                          border: '1px solid transparent',
+                          borderRadius: '8px',
+                          width: '240px',
+                          color: '#181C20',
+                          outline: 'none'
+                        }}
+                      />
+                      {dashboardBugSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setDashboardBugSearch('')}
+                          style={{ marginLeft: '6px', padding: '4px 8px', fontSize: '11px', background: '#ECEEF3', border: 'none', borderRadius: '6px', cursor: 'pointer', color: '#414754', fontWeight: 600 }}
+                        >
+                          Limpiar
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
+                {/* High-Density Defect Table */}
                 {filteredBugsList.length > 0 ? (
-                  <table className="dashboard-defects-table">
-                    <thead>
-                      <tr>
-                        <th>ID</th>
-                        <th>Resumen del bug</th>
-                        <th>Versión Afectada</th>
-                        <th>Fecha Registro / Antigüedad</th>
-                        <th>Fecha Estimada Solución</th>
-                        <th>Severidad</th>
-                        <th>Estado</th>
-                        <th>Responsable</th>
-                        <th>Resolución</th>
-                        <th style={{ textAlign: 'center' }}>Casos afectados</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredBugsList.map((bug) => {
-                        const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
-                        // Pass full bug metadata so reopened bugs reset counter ("Re abierto hace...") and ON HOLD bugs pause clock
-                        const age = formatBugAge(bug.created, bug.resolutiondate, false, bug);
-                        const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
-                        const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="dashboard-defects-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ background: '#F8F9FE', borderBottom: '1px solid #EAEEF4' }}>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Incidencia / ID</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left' }}>Resumen y Contexto</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Versión Afectada</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Registro / Tiempo</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Fecha Est. Solución</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Severidad</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Estado</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Asignado</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'left', whiteSpace: 'nowrap' }}>Resolución</th>
+                          <th style={{ padding: '12px 16px', fontSize: '10px', fontWeight: 800, color: '#414754', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'center', whiteSpace: 'nowrap' }}>Casos</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredBugsList.map((bug) => {
+                          const { dateStr, timeStr } = formatBugCreatedDate(bug.created);
+                          const age = formatBugAge(bug.created, bug.resolutiondate, bug.isDone, bug);
+                          const badgeColor = age.tone === 'red' ? '#FFDAD6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#ECEEF3';
+                          const textColor = age.tone === 'red' ? '#93000A' : age.tone === 'orange' ? '#A54800' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#414754';
+                          const showValidResolution = isBugStatusResolved(bug.status, bug.isDone) && bug.resolution && bug.resolution !== 'Sin resolver' && bug.resolution !== 'Unresolved';
 
-                        return (
-                          <tr key={bug.key} onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }}>
-                            {/* 1. ID */}
-                            <td style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <span className="dashboard-bug-icon">B</span>
-                                <span
-                                  onClick={(e) => { e.stopPropagation(); setSelectedBug(bug); }}
-                                  style={{ color: '#0C66E4', fontWeight: 700, cursor: 'pointer' }}
-                                  className="hover:underline"
-                                  title="Ver detalle del bug en Test Pulse"
-                                >
-                                  {bug.key}
-                                </span>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); router.open('/browse/' + bug.key); }}
-                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px', color: '#626F86', display: 'inline-flex', alignItems: 'center' }}
-                                  title="Abrir directamente en Jira"
-                                >
-                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-                                </button>
-                              </div>
-                            </td>
-
-                            {/* 2. Resumen del bug */}
-                            <td style={{ maxWidth: '380px' }}>
-                              <div 
-                                style={{ fontWeight: 600, color: 'var(--jira-dark, #172B4D)', fontSize: '13px' }} 
-                                title={bug.summary}
-                              >
-                                {bug.summary}
-                              </div>
-                            </td>
-
-                            {/* 3. Versión */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              <span
-                                className="ads-lozenge ads-lozenge-subtle"
-                                style={{ fontSize: '11px', fontWeight: 600, maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' }}
-                                title={bug.version || 'Sin versión'}
-                              >
-                                🏷️ {bug.version || 'Sin versión'}
-                              </span>
-                            </td>
-
-                            {/* 4. Fecha Registro / Antigüedad (Aging laboral) */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                                <div style={{ fontSize: '11px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                  <span>📅</span> <span>{dateStr}</span> {timeStr && <span style={{ color: 'var(--jira-subtle, #626F86)', fontWeight: 400, fontSize: '10px' }}>({timeStr})</span>}
-                                </div>
-                                {bug.created && (
-                                  <div
+                          return (
+                            <tr
+                              key={bug.key}
+                              onClick={() => setSelectedBug(bug)}
+                              style={{
+                                cursor: 'pointer',
+                                borderBottom: '1px solid #F2F4F8',
+                                opacity: bug.isDone ? 0.88 : 1,
+                                transition: 'background-color 0.15s ease'
+                              }}
+                            >
+                              {/* 1. Incidencia / ID */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <span
                                     style={{
-                                      fontSize: '10px',
-                                      fontWeight: 700,
-                                      background: badgeColor,
-                                      color: textColor,
-                                      padding: '2px 6px',
+                                      width: '20px',
+                                      height: '20px',
                                       borderRadius: '4px',
+                                      background: bug.isDone ? '#006C47' : '#CA3521',
+                                      color: '#FFFFFF',
+                                      fontSize: '10px',
+                                      fontWeight: 800,
                                       display: 'inline-flex',
                                       alignItems: 'center',
-                                      gap: '3px',
-                                      width: 'fit-content'
+                                      justifyContent: 'center',
+                                      flexShrink: 0
                                     }}
-                                    title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles transcurridas`}
                                   >
-                                    <span>{age.tone === 'onhold' ? '⏸️' : '⏱️'}</span> <span>{age.label}</span>
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* 4.1. Fecha Estimada Solución */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              {renderBugDueDate(bug.estimatedResolutionDate || bug.duedate, false)}
-                            </td>
-
-                            {/* 5. Severidad */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
-                                {getSeverityLabel(bug.severity)}
-                              </span>
-                            </td>
-
-                            {/* 6. Estado */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              {renderBugStatusLozenge(bug.status, false)}
-                            </td>
-
-                            {/* 7. Responsable */}
-                            <td>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
-                                  {getInitials(bug.assignee)}
+                                    B
+                                  </span>
+                                  <span
+                                    onClick={(e) => { e.stopPropagation(); setSelectedBug(bug); }}
+                                    style={{ color: '#0055CC', fontWeight: 700, fontSize: '12px', cursor: 'pointer' }}
+                                    className="hover:underline"
+                                    title="Ver detalle del bug en Test Pulse"
+                                  >
+                                    {bug.key}
+                                  </span>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); router.open('/browse/' + bug.key); }}
+                                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px', color: '#727785', display: 'inline-flex', alignItems: 'center' }}
+                                    title="Abrir directamente en Jira"
+                                  >
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                  </button>
                                 </div>
-                                <span style={{ fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 500 }}>
-                                  {bug.assignee}
-                                </span>
-                              </div>
-                            </td>
+                              </td>
 
-                            {/* 8. Resolución */}
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              {(!bug.resolution || bug.resolution === 'Sin resolver' || bug.resolution === 'Unresolved') ? (
-                                <span style={{ color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', fontSize: '12px' }}>
-                                  Sin resolver
-                                </span>
-                              ) : (
-                                <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
-                                  {bug.resolution}
-                                </span>
-                              )}
-                            </td>
+                              {/* 2. Resumen del bug */}
+                              <td style={{ padding: '14px 16px', maxWidth: '340px' }}>
+                                <div
+                                  style={{ fontWeight: 600, color: bug.isDone ? '#626F86' : '#181C20', fontSize: '13px', lineHeight: 1.35 }}
+                                  title={bug.summary}
+                                >
+                                  {bug.summary}
+                                </div>
+                              </td>
 
-                            {/* 9. Casos afectados */}
-                            <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-                              <span className="dashboard-affected-badge" title={`${bug.affectedCount} ${bug.affectedCount === 1 ? 'caso afectado' : 'casos afectados'}`}>
-                                {bug.affectedCount}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              {/* 3. Versión Afectada (sin icono de etiqueta) */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                <span
+                                  style={{
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    padding: '3px 8px',
+                                    borderRadius: '4px',
+                                    background: '#ECEEF3',
+                                    color: '#414754',
+                                    maxWidth: '160px',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    display: 'inline-block'
+                                  }}
+                                  title={bug.version || 'Sin versión'}
+                                >
+                                  {bug.version || 'Sin versión'}
+                                </span>
+                              </td>
+
+                              {/* 4. Fecha Registro / Tiempo */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                  <div style={{ fontSize: '11px', color: '#181C20', fontWeight: 600 }}>
+                                    {dateStr} {timeStr && <span style={{ color: '#727785', fontWeight: 400, fontSize: '10px' }}>({timeStr})</span>}
+                                  </div>
+                                  {bug.created && (
+                                    <div
+                                      style={{
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        background: badgeColor,
+                                        color: textColor,
+                                        padding: '2px 6px',
+                                        borderRadius: '4px',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        width: 'fit-content'
+                                      }}
+                                      title={`Jornada laboral México (L-J 7-18h, V 7-13h): ${age.bHoursFormatted} hrs hábiles ${bug.isDone ? 'invertidas hasta resolución' : 'transcurridas'}`}
+                                    >
+                                      <span>{age.tone === 'onhold' ? '⏸️' : '⏱️'}</span>
+                                      <span>{age.label}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+
+                              {/* 5. Fecha Estimada Solución */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                {renderBugDueDate(bug.estimatedResolutionDate || bug.duedate, bug.isDone)}
+                              </td>
+
+                              {/* 6. Severidad */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                <span className={`dashboard-sev-badge ${getSeverityClass(bug.severity)}`}>
+                                  {getSeverityLabel(bug.severity)}
+                                </span>
+                              </td>
+
+                              {/* 7. Estado */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                {renderBugStatusLozenge(bug.status, bug.isDone)}
+                              </td>
+
+                              {/* 8. Asignado */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <div className="dashboard-avatar-circle" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
+                                    {getInitials(bug.assignee)}
+                                  </div>
+                                  <span style={{ fontSize: '12px', color: '#181C20', fontWeight: 500 }}>
+                                    {bug.assignee}
+                                  </span>
+                                </div>
+                              </td>
+
+                              {/* 9. Resolución (estrictamente sin inventar si el estado no es resuelto/cerrado) */}
+                              <td style={{ padding: '14px 16px', whiteSpace: 'nowrap' }}>
+                                {!showValidResolution ? (
+                                  <span style={{ color: '#727785', fontStyle: 'italic', fontSize: '11px' }}>
+                                    Sin resolver
+                                  </span>
+                                ) : (
+                                  <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px', fontWeight: 700 }}>
+                                    {bug.resolution}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* 10. Casos afectados */}
+                              <td style={{ padding: '14px 16px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                                <span
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    width: '28px',
+                                    height: '28px',
+                                    borderRadius: '8px',
+                                    background: (bug.affectedCount || 0) > 0 ? '#E9F2FF' : '#F2F4F8',
+                                    color: (bug.affectedCount || 0) > 0 ? '#0055CC' : '#727785',
+                                    fontSize: '12px',
+                                    fontWeight: 800
+                                  }}
+                                  title={`${bug.affectedCount || 0} ${(bug.affectedCount || 0) === 1 ? 'caso afectado' : 'casos afectados'}`}
+                                >
+                                  {bug.affectedCount || 0}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 ) : (
-                  <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
-                    {dashboardBugSearch ? '🔍 No se encontraron bugs con ese criterio de búsqueda.' : '✅ No hay bugs abiertos en el ciclo seleccionado.'}
+                  <div style={{ textAlign: 'center', color: '#626F86', padding: '3rem', fontSize: '13px' }}>
+                    {(dashboardBugSearch || dashboardCycleBugFilter !== 'ALL')
+                      ? '🔍 No se encontraron defectos en el ciclo con ese criterio de filtrado.'
+                      : '✅ No hay defectos vinculados a los ciclos seleccionados.'}
                   </div>
                 )}
+
+                {/* Smart Footer Bar */}
+                <div style={{ padding: '12px 24px', background: '#F2F4F8', borderTop: '1px solid #EAEEF4', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ fontSize: '11px', color: '#414754', fontWeight: 500 }}>
+                    Mostrando <strong style={{ color: '#181C20' }}>{filteredBugsList.length}</strong> de <strong style={{ color: '#181C20' }}>{totalCycleBugs}</strong> defectos en el ciclo actual ({totalAllBugs} en el plan total)
+                  </div>
+                  {(dashboardBugSearch || dashboardCycleBugFilter !== 'ALL') && (
+                    <button
+                      type="button"
+                      onClick={() => { setDashboardBugSearch(''); setDashboardCycleBugFilter('ALL'); }}
+                      style={{ background: 'transparent', border: 'none', color: '#0055CC', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}
+                    >
+                      Restablecer filtros de ciclo
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* ─── WIDGET DONUT INTERACTIVO DE SEVERIDADES (DEBAJO DE TABLA 1) ─── */}
@@ -20455,7 +20652,7 @@ Then el sistema valida la identidad.
                                 style={{ fontSize: '11px', fontWeight: 600, maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' }}
                                 title={bug.version || 'Sin versión'}
                               >
-                                🏷️ {bug.version || 'Sin versión'}
+                                {bug.version || 'Sin versión'}
                               </span>
                             </td>
 
