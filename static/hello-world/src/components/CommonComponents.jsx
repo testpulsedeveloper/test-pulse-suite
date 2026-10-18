@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { requestJira } from '@forge/bridge';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
+import 'pdfjs-dist/build/pdf.worker.entry';
 import { formatAttachmentSize } from '../utils/constants';
+import { fetchAttachmentBlobData, getCachedAttachmentBlobUrl } from '../utils/adfUtils';
 
 export const RichTextEditor = ({ value, onChange, disabled }) => {
   const editorRef = React.useRef(null);
@@ -95,37 +97,34 @@ export const SearchableSelect = ({ value, onChange, options, placeholder }) => {
 };
 
 export function BugAttachmentImageCard({ att, onPreview }) {
-  const [blobUrl, setBlobUrl] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [blobUrl, setBlobUrl] = useState(() => getCachedAttachmentBlobUrl(att.id));
+  const [loading, setLoading] = useState(() => !getCachedAttachmentBlobUrl(att.id));
 
   useEffect(() => {
     let active = true;
-    let createdUrl = null;
-
-    async function loadThumb() {
-      try {
-        const res = await requestJira(`/rest/api/3/attachment/content/${att.id}`);
-        if (res.ok && active) {
-          const blob = await res.blob();
-          createdUrl = URL.createObjectURL(blob);
-          setBlobUrl(createdUrl);
-        }
-      } catch (e) {
-        // Fallback gracefully without breaking UI
-      } finally {
-        if (active) setLoading(false);
-      }
+    const existing = getCachedAttachmentBlobUrl(att.id);
+    if (existing) {
+      setBlobUrl(existing);
+      setLoading(false);
+      return;
     }
 
-    loadThumb();
+    setLoading(true);
+    fetchAttachmentBlobData(att.id, att.mimeType || 'image/png')
+      .then((res) => {
+        if (active && res && res.blobUrl) {
+          setBlobUrl(res.blobUrl);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoading(false);
+      });
 
     return () => {
       active = false;
-      if (createdUrl) {
-        try { URL.revokeObjectURL(createdUrl); } catch (e) {}
-      }
     };
-  }, [att.id]);
+  }, [att.id, att.mimeType]);
 
   return (
     <div
@@ -170,6 +169,259 @@ export function BugAttachmentImageCard({ att, onPreview }) {
         <div style={{ color: '#626F86', fontSize: '10px', marginTop: '2px' }}>
           {formatAttachmentSize(att.size)}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Renders a single PDF page onto a high-DPI HTML5 canvas.
+ */
+function PdfPageCanvas({ pdfDoc, pageNumber, scale }) {
+  const canvasRef = useRef(null);
+  const [pageError, setPageError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    let renderTask = null;
+
+    async function renderPage() {
+      if (!pdfDoc || !canvasRef.current) return;
+      try {
+        const page = await pdfDoc.getPage(pageNumber);
+        if (!active || !canvasRef.current) return;
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const viewport = page.getViewport({ scale });
+        const outputViewport = page.getViewport({ scale: scale * dpr });
+
+        const canvas = canvasRef.current;
+        const context = canvas.getContext('2d');
+        canvas.width = Math.floor(outputViewport.width);
+        canvas.height = Math.floor(outputViewport.height);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+        renderTask = page.render({
+          canvasContext: context,
+          viewport: outputViewport
+        });
+        await renderTask.promise;
+      } catch (err) {
+        if (active && err?.name !== 'RenderingCancelledException') {
+          setPageError(err?.message || 'Error al renderizar página');
+        }
+      }
+    }
+
+    renderPage();
+
+    return () => {
+      active = false;
+      if (renderTask && typeof renderTask.cancel === 'function') {
+        try { renderTask.cancel(); } catch (e) {}
+      }
+    };
+  }, [pdfDoc, pageNumber, scale]);
+
+  return (
+    <div style={{
+      background: '#FFFFFF',
+      boxShadow: '0 4px 16px rgba(0, 0, 0, 0.35)',
+      borderRadius: '4px',
+      overflow: 'hidden',
+      marginBottom: '16px',
+      position: 'relative',
+      display: 'inline-block'
+    }}>
+      <canvas ref={canvasRef} style={{ display: 'block' }} />
+      {pageError && (
+        <div style={{ padding: '16px', color: '#DE350B', fontSize: '12px' }}>
+          No se pudo renderizar la página {pageNumber}: {pageError}
+        </div>
+      )}
+      <div style={{
+        position: 'absolute',
+        bottom: '8px',
+        right: '10px',
+        background: 'rgba(9, 30, 66, 0.65)',
+        color: '#FFFFFF',
+        fontSize: '10px',
+        fontWeight: 600,
+        padding: '2px 7px',
+        borderRadius: '10px',
+        pointerEvents: 'none'
+      }}>
+        Pág. {pageNumber}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * In-app PDF Document Viewer using Mozilla PDF.js on HTML5 Canvas.
+ * Avoids browser iframe/embed download behavior inside Atlassian Forge sandboxed iframes.
+ */
+export function PdfDocumentPreview({ byteArray, blobUrl, filename }) {
+  const [pdfDoc, setPdfDoc] = useState(null);
+  const [numPages, setNumPages] = useState(0);
+  const [scale, setScale] = useState(1.25);
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    let loadedDoc = null;
+
+    async function loadPdf() {
+      setLoading(true);
+      setErrorMsg(null);
+      try {
+        let dataBytes = null;
+        if (byteArray && byteArray.length > 0) {
+          // Clone the Uint8Array so PDF.js does not detach the cached buffer
+          dataBytes = new Uint8Array(byteArray);
+        } else if (blobUrl) {
+          const resp = await fetch(blobUrl);
+          const ab = await resp.arrayBuffer();
+          dataBytes = new Uint8Array(ab);
+        }
+
+        if (!dataBytes || dataBytes.length === 0) {
+          throw new Error('El archivo PDF está vacío o no se pudo leer.');
+        }
+
+        const loadingTask = pdfjsLib.getDocument({
+          data: dataBytes,
+          isEvalSupported: false
+        });
+        const doc = await loadingTask.promise;
+        if (!active) {
+          doc.destroy();
+          return;
+        }
+        loadedDoc = doc;
+        setPdfDoc(doc);
+        setNumPages(doc.numPages || 0);
+      } catch (err) {
+        if (active) {
+          setErrorMsg(err?.message || 'No fue posible previsualizar el documento PDF.');
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadPdf();
+
+    return () => {
+      active = false;
+      if (loadedDoc && typeof loadedDoc.destroy === 'function') {
+        try { loadedDoc.destroy(); } catch (e) {}
+      }
+    };
+  }, [byteArray, blobUrl]);
+
+  return (
+    <div style={{
+      width: '100%',
+      height: '78vh',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#2C333A',
+      borderRadius: '8px',
+      overflow: 'hidden',
+      border: '1px solid rgba(255, 255, 255, 0.14)'
+    }}>
+      {/* PDF Viewer Toolbar */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '8px 16px',
+        background: '#1D2125',
+        borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+        color: '#FFFFFF',
+        fontSize: '12px',
+        flexShrink: 0
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontWeight: 700, color: '#B3D4FF' }}>
+            📄 {loading ? 'Cargando PDF...' : `${numPages} ${numPages === 1 ? 'página' : 'páginas'}`}
+          </span>
+          {filename && (
+            <span style={{ color: '#9FADBC', maxWidth: '340px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              • {filename}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <button
+            type="button"
+            onClick={() => setScale(s => Math.max(0.6, +(s - 0.2).toFixed(2)))}
+            style={{ background: 'rgba(255,255,255,0.1)', color: '#FFF', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontWeight: 700, fontSize: '12px' }}
+            title="Alejar"
+          >
+            ➖
+          </button>
+          <button
+            type="button"
+            onClick={() => setScale(1.25)}
+            style={{ background: 'rgba(255,255,255,0.08)', color: '#FFF', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontWeight: 600, fontSize: '11px', minWidth: '58px' }}
+            title="Restablecer zoom"
+          >
+            {Math.round(scale * 100)}%
+          </button>
+          <button
+            type="button"
+            onClick={() => setScale(s => Math.min(2.6, +(s + 0.2).toFixed(2)))}
+            style={{ background: 'rgba(255,255,255,0.1)', color: '#FFF', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontWeight: 700, fontSize: '12px' }}
+            title="Acercar"
+          >
+            ➕
+          </button>
+        </div>
+      </div>
+
+      {/* Scrollable Pages Area */}
+      <div style={{
+        flex: 1,
+        overflow: 'auto',
+        padding: '20px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center'
+      }}>
+        {loading && (
+          <div style={{ margin: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', color: '#FFFFFF' }}>
+            <div style={{ width: '32px', height: '32px', border: '3px solid rgba(255,255,255,0.2)', borderTop: '3px solid #388BFF', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+            <span style={{ fontSize: '13px', fontWeight: 500 }}>Renderizando páginas del PDF...</span>
+          </div>
+        )}
+        {!loading && errorMsg && (
+          <div style={{ margin: 'auto', background: '#FFFFFF', color: '#172B4D', padding: '24px', borderRadius: '8px', maxWidth: '420px', textAlign: 'center' }}>
+            <div style={{ fontSize: '28px', marginBottom: '8px' }}>⚠️</div>
+            <div style={{ fontWeight: 700, fontSize: '14px', marginBottom: '6px' }}>No se pudo mostrar la vista previa del PDF</div>
+            <div style={{ fontSize: '12px', color: '#626F86', marginBottom: '16px' }}>{errorMsg}</div>
+            {blobUrl && (
+              <a
+                href={blobUrl}
+                download={filename || 'documento.pdf'}
+                style={{ display: 'inline-block', background: '#0C66E4', color: '#FFFFFF', textDecoration: 'none', padding: '8px 16px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}
+              >
+                ⬇️ Descargar PDF
+              </a>
+            )}
+          </div>
+        )}
+        {!loading && !errorMsg && pdfDoc && Array.from({ length: numPages }, (_, idx) => (
+          <PdfPageCanvas
+            key={idx + 1}
+            pdfDoc={pdfDoc}
+            pageNumber={idx + 1}
+            scale={scale}
+          />
+        ))}
       </div>
     </div>
   );
@@ -229,3 +481,4 @@ export const useNotification = () => {
   if (!ctx) return { addNotification: ({ title, description }) => console.warn('Notification:', title, description) };
   return ctx;
 };
+

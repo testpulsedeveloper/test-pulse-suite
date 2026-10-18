@@ -21,11 +21,12 @@ import {
   formatBugCreatedDate,
   formatBugAge
 } from './utils/constants';
-import { textToAdf, sanitizeRenderedHtml, adfToHtml } from './utils/adfUtils';
+import { textToAdf, sanitizeRenderedHtml, adfToHtml, fetchAttachmentBlobData } from './utils/adfUtils';
 import {
   RichTextEditor,
   SearchableSelect,
   BugAttachmentImageCard,
+  PdfDocumentPreview,
   NotificationProvider,
   useNotification
 } from './components/CommonComponents';
@@ -563,6 +564,7 @@ function App() {
   const [qrModalLoading, setQrModalLoading] = useState(false);
   const [qrModalCopied, setQrModalCopied] = useState(false);
   const [qrModalReceived, setQrModalReceived] = useState(false);
+  const [qrModalReceivedCount, setQrModalReceivedCount] = useState(0);
   
   // Reports State
   const [reportData, setReportData] = useState({ cycles: [] });
@@ -593,6 +595,7 @@ function App() {
     });
   };
   const [reportSelectedPlans, setReportSelectedPlans] = useState([]);
+  const [runsPlanDropdownOpen, setRunsPlanDropdownOpen] = useState(false);
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycles, setReportSelectedCycles] = useState([]);
   const [reportSelectedVersions, setReportSelectedVersions] = useState([]);
@@ -643,17 +646,39 @@ function App() {
   const [testCaseHistoryLoading, setTestCaseHistoryLoading] = useState(false);
   const [modalDetailTab, setModalDetailTab] = useState('details');
 
-  // Bug Details Modal / Drawer State (Lazy Loading)
+  // Bug Details Modal / Drawer State (Lazy Loading & In-App Editing)
   const [selectedBug, setSelectedBug] = useState(null);
   const [selectedBugDetails, setSelectedBugDetails] = useState(null);
   const [selectedBugLoading, setSelectedBugLoading] = useState(false);
   const [selectedMediaModal, setSelectedMediaModal] = useState(null);
 
+  // In-app Bug Editing States
+  const [bugSavingField, setBugSavingField] = useState(null);
+  const [bugAssigneeOpen, setBugAssigneeOpen] = useState(false);
+  const [bugAssigneeQuery, setBugAssigneeQuery] = useState('');
+  const [bugAssigneeResults, setBugAssigneeResults] = useState([]);
+  const [bugAssigneeSearching, setBugAssigneeSearching] = useState(false);
+  const [bugEditingEnv, setBugEditingEnv] = useState(false);
+  const [bugEnvDraft, setBugEnvDraft] = useState('');
+  const [bugCommentText, setBugCommentText] = useState('');
+  const [bugCommentFiles, setBugCommentFiles] = useState([]);
+  const [bugSubmittingComment, setBugSubmittingComment] = useState(false);
+  const [bugUploadingStandalone, setBugUploadingStandalone] = useState(false);
+  const [bugCustomVersionInput, setBugCustomVersionInput] = useState('');
+  const [bugAddingVersion, setBugAddingVersion] = useState(false);
+
   useEffect(() => {
-    if (selectedBug) {
+    const bugKeyOrId = selectedBug ? (selectedBug.key || selectedBug.id) : null;
+    if (bugKeyOrId) {
       setSelectedBugLoading(true);
       setSelectedBugDetails(null);
-      const bugKeyOrId = selectedBug.key || selectedBug.id;
+      setBugAssigneeOpen(false);
+      setBugAssigneeQuery('');
+      setBugEditingEnv(false);
+      setBugCommentText('');
+      setBugCommentFiles([]);
+      setBugCustomVersionInput('');
+      setBugAddingVersion(false);
       invoke('getBugFullDetails', { issueIdOrKey: bugKeyOrId })
         .then(details => {
           setSelectedBugDetails(details);
@@ -667,7 +692,8 @@ function App() {
       setSelectedBugDetails(null);
       setSelectedBugLoading(false);
     }
-  }, [selectedBug]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBug?.key, selectedBug?.id]);
 
   // Traceability Item (Epic / Story) Details Modal State (Lazy Loading)
   const [selectedTraceabilityItem, setSelectedTraceabilityItem] = useState(null);
@@ -701,6 +727,65 @@ function App() {
       ...extra
     });
   }, []);
+
+  // Preload blob URLs for inline images in Bug Details and Traceability modals
+  // so that <img src="blob:..."> renders inside description & comments without CSP blocks.
+  const [inlineAttachmentUrls, setInlineAttachmentUrls] = useState({});
+
+  useEffect(() => {
+    let isMounted = true;
+    const candidateMap = new Map();
+
+    const collectFromDetails = (detailsObj) => {
+      if (!detailsObj) return;
+      const atts = Array.isArray(detailsObj.attachments) ? detailsObj.attachments : [];
+      atts.forEach((att) => {
+        if (!att || !att.id) return;
+        const isImg = att.isImage || (att.mimeType && att.mimeType.startsWith('image/')) || /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(att.filename || '');
+        if (isImg) {
+          candidateMap.set(String(att.id), att.mimeType || 'image/png');
+        }
+      });
+
+      // Also scan rendered HTML strings for any embedded attachment IDs
+      const htmlSources = [
+        detailsObj.descriptionRendered,
+        ...(Array.isArray(detailsObj.comments) ? detailsObj.comments.map(c => c?.bodyRendered) : [])
+      ].filter(Boolean);
+
+      const attRegex = /\/(?:rest\/api\/[23]\/attachment\/(?:content|thumbnail)\/|secure\/attachment\/)(\d+)/gi;
+      htmlSources.forEach((htmlStr) => {
+        let match;
+        while ((match = attRegex.exec(htmlStr)) !== null) {
+          const foundId = String(match[1]);
+          if (!candidateMap.has(foundId)) {
+            candidateMap.set(foundId, 'image/png');
+          }
+        }
+      });
+    };
+
+    collectFromDetails(selectedBug);
+    collectFromDetails(selectedBugDetails);
+    collectFromDetails(selectedTraceabilityDetails);
+
+    candidateMap.forEach((mimeType, attId) => {
+      fetchAttachmentBlobData(attId, mimeType)
+        .then((res) => {
+          if (isMounted && res && res.blobUrl) {
+            setInlineAttachmentUrls((prev) => {
+              if (prev[attId] === res.blobUrl) return prev;
+              return { ...prev, [attId]: res.blobUrl };
+            });
+          }
+        })
+        .catch(() => {});
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedBug, selectedBugDetails, selectedTraceabilityDetails]);
   
   // Search & Refresh State
   const [searchQuery, setSearchQuery] = useState('');
@@ -1520,6 +1605,53 @@ function App() {
     return () => clearInterval(id);
   }, [activeTab, selectedCycle?.id]);
 
+  // Preload execution summaries for ALL cycles of the active Plan atomically so Plan-level health & slack remain constant across cycle clicks
+  const [planCyclesSummary, setPlanCyclesSummary] = useState({});
+  useEffect(() => {
+    if (activeTab !== 'execution' || !testCycles || testCycles.length === 0) return;
+    let cancelled = false;
+    const targetCycles = selectedPlanId
+      ? testCycles.filter(c => {
+          const pid = String(selectedPlanId);
+          return String(c.planId || '') === pid ||
+            String(c.testPlanId || '') === pid ||
+            String(c.parentPlanId || '') === pid ||
+            (Array.isArray(c.planIds) && c.planIds.map(String).includes(pid));
+        })
+      : testCycles;
+    if (targetCycles.length === 0) return;
+
+    (async () => {
+      const nextMap = {};
+      await Promise.all(
+        targetCycles.map(async (c) => {
+          const cid = String(c.id);
+          const cached = perCycleCacheRef.current[cid] || perCycleCacheRef.current[c.id];
+          if (Array.isArray(cached) && cached.length > 0) {
+            nextMap[cid] = cached;
+            return;
+          }
+          try {
+            const summary = await invoke('getCycleExecutionSummary', { cycleId: c.id });
+            if (Array.isArray(summary)) {
+              perCycleCacheRef.current[cid] = summary;
+              nextMap[cid] = summary;
+            } else {
+              nextMap[cid] = c.tests || c.execution || [];
+            }
+          } catch (_) {
+            nextMap[cid] = c.tests || c.execution || [];
+          }
+        })
+      );
+      if (!cancelled) {
+        setPlanCyclesSummary(prev => ({ ...prev, ...nextMap }));
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [activeTab, selectedPlanId, testCycles.length]);
+
   // Reports: load on entering tab only if not loaded yet, and poll quietly in the background
   useEffect(() => {
     if (activeTab !== 'reports') return;
@@ -2274,7 +2406,13 @@ Then el sistema valida la identidad.
                       invoke('getTestCycles', { projectId: selectedProjectId, config }),
                       invoke('getTestPlans', { projectId: selectedProjectId, config })
                     ]);
-                    if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
+                    if (fetchedCycles && !fetchedCycles._isError) {
+                      setTestCycles(fetchedCycles);
+                      if (selectedCycle) {
+                        const refreshedSel = fetchedCycles.find(c => String(c.id) === String(selectedCycle.id));
+                        if (refreshedSel) setSelectedCycle(refreshedSel);
+                      }
+                    }
                     if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
                     if (selectedCycle) {
                       const rawExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
@@ -2511,161 +2649,291 @@ Then el sistema valida la identidad.
           </div>
         </div>
 
-        <ul className="folder-list" style={{ padding: '0.5rem 0', margin: 0, listStyle: 'none', overflowY: 'auto', flex: 1 }}>
-          <li 
-            data-folder-id="__ROOT__"
-            className={`folder-item ${activeFolder === null ? 'active' : ''} ${dragOverFolderId === '__ROOT__' ? 'drag-over' : ''}`} 
-            onClick={() => setActiveFolder(null)} 
-            onDragEnter={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.dataTransfer.dropEffect = 'move';
-              if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
-            }}
-            onDragLeave={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (e.currentTarget.contains(e.relatedTarget)) return;
-              if (dragOverFolderId === '__ROOT__') setDragOverFolderId(null);
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setDragOverFolderId(null);
-              let idsToMove = draggedDesignTestIds;
-              try {
-                const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
-                if (dataStr) {
-                  const parsed = JSON.parse(dataStr);
-                  if (parsed?.testIds?.length) idsToMove = parsed.testIds;
-                }
-              } catch (err) {}
-              if (idsToMove && idsToMove.length > 0) {
-                handleBatchLinkTestsToFolder(idsToMove, null, 'Sin Carpeta (Raíz)');
-                setSelectedDesignTestIds(new Set());
-                setDraggedDesignTestIds(null);
-              }
-            }}
-            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.75rem', cursor: 'pointer', borderRadius: '4px', margin: '0 0.5rem 2px 0.5rem' }}
-          >
-            <div style={{ width: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); setIsAllTestsExpanded(prev => !prev); }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--jira-subtle, #626F86)' }}>
-                {isAllTestsExpanded ? <polyline points="6 9 12 15 18 9"></polyline> : <polyline points="9 18 15 12 9 6"></polyline>}
-              </svg>
-            </div>
-            <span style={{ fontSize: '15px', flexShrink: 0, lineHeight: 1 }}>📁</span>
-            <span style={{ fontWeight: 600, fontSize: '0.82rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {dragOverFolderId === '__ROOT__' ? '⚡ Soltar aquí (Sin Carpeta)' : 'Sin Carpeta'}
-            </span>
-            <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>
-              {isFetchingTests && testCases.length === 0 ? '...' : testCases.filter(t => !t.folderId || !existingFolderIdSet.has(t.folderId)).length}
-            </span>
-          </li>
-          {isAllTestsExpanded && (() => {
-            const renderTree = (parentId = null, depth = 0) => {
-              return folders
-                .filter(f => (f.parentId || null) === parentId)
-                .filter(f => !folderSearchQuery || f.name.toLowerCase().includes(folderSearchQuery.toLowerCase()))
-                .map(folder => {
-                  const hasChildren = folders.some(f => f.parentId === folder.id);
-                  const isExpanded = expandedFolders[folder.id] !== false;
-                  const isDragTarget = dragOverFolderId === folder.id;
-                  
-                  return (
-                    <React.Fragment key={folder.id}>
-                      <li 
-                        data-folder-id={folder.id}
-                        className={`folder-item ${activeFolder === folder.id ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`} 
-                        onClick={() => setActiveFolder(folder.id)} 
-                        onDragEnter={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
-                        }}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          e.dataTransfer.dropEffect = 'move';
-                          if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
-                        }}
-                        onDragLeave={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (e.currentTarget.contains(e.relatedTarget)) return;
-                          if (dragOverFolderId === folder.id) setDragOverFolderId(null);
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDragOverFolderId(null);
-                          let idsToMove = draggedDesignTestIds;
-                          try {
-                            const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
-                            if (dataStr) {
-                              const parsed = JSON.parse(dataStr);
-                              if (parsed?.testIds?.length) idsToMove = parsed.testIds;
-                            }
-                          } catch (err) {}
-                          if (idsToMove && idsToMove.length > 0) {
-                            handleBatchLinkTestsToFolder(idsToMove, folder.id, `"${folder.name}"`);
-                            setSelectedDesignTestIds(new Set());
-                            setDraggedDesignTestIds(null);
-                          }
-                        }}
-                        style={{
-                          display: 'flex', 
-                          justifyContent: 'space-between', 
-                          alignItems: 'center', 
-                          padding: '0.35rem 0.75rem 0.35rem ' + (0.75 + depth * 1.1) + 'rem',
-                          cursor: 'pointer',
-                          borderRadius: '4px',
-                          margin: '0 0.5rem 2px 0.5rem',
-                          borderLeft: depth > 0 ? '2px solid var(--jira-border, #DCDFE4)' : 'none'
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flex: 1, minWidth: 0 }}>
-                          <div style={{ width: '14px', display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); setExpandedFolders(prev => ({...prev, [folder.id]: !isExpanded})); }}>
-                            {hasChildren ? (
-                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--jira-subtle, #626F86)' }}>
-                                {isExpanded ? <polyline points="6 9 12 15 18 9"></polyline> : <polyline points="9 18 15 12 9 6"></polyline>}
-                              </svg>
-                            ) : null}
-                          </div>
-                          <span style={{ fontSize: '15px', flexShrink: 0, lineHeight: 1 }}>📁</span>
-                          <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isDragTarget ? 700 : (activeFolder === folder.id ? 600 : 400) }} title={folder.name}>
-                            {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
-                          </span>
-                          <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', marginLeft: 'auto', marginRight: '4px' }}>
-                            {isFetchingTests && testCases.length === 0 ? '...' : getFolderTotalCount(folder.id)}
-                          </span>
-                        </div>
-                        <div className="folder-actions" style={{ display: 'flex', gap: '0.2rem', flexShrink: 0 }}>
-                          <button onClick={(e) => { e.stopPropagation(); handleCreateFolder(folder.id); setExpandedFolders(prev => ({...prev, [folder.id]: true})); }} title="Nueva Subcarpeta" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--jira-subtle, #626F86)' }}>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                          </button>
-                          <button onClick={(e) => { e.stopPropagation(); handleUpdateFolder(folder.id, folder.name); }} title="Editar" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--jira-subtle, #626F86)' }}>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                          </button>
-                          {isAdmin && (
-                            <button onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }} title="Eliminar" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--danger-color)' }}>
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                            </button>
-                          )}
-                        </div>
-                      </li>
-                      {isExpanded && renderTree(folder.id, depth + 1)}
-                    </React.Fragment>
-                  );
-                });
-            };
-            return renderTree(null, 0);
+        <div id="folderTreeList" style={{ padding: '0.5rem', margin: 0, overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '12px' }}>
+          {(() => {
+            const rootCount = isFetchingTests && testCases.length === 0
+              ? '...'
+              : testCases.filter(t => !t.folderId || !existingFolderIdSet.has(t.folderId)).length;
+            const isRootActive = activeFolder === null;
+            const isRootDragOver = dragOverFolderId === '__ROOT__';
+            return (
+              <div
+                data-folder-id="__ROOT__"
+                className={`folder-tree-row ${isRootActive ? 'active' : ''} ${isRootDragOver ? 'drag-over' : ''}`}
+                onClick={() => setActiveFolder(null)}
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (dragOverFolderId !== '__ROOT__') setDragOverFolderId('__ROOT__');
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (e.currentTarget.contains(e.relatedTarget)) return;
+                  if (dragOverFolderId === '__ROOT__') setDragOverFolderId(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragOverFolderId(null);
+                  let idsToMove = draggedDesignTestIds;
+                  try {
+                    const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+                    if (dataStr) {
+                      const parsed = JSON.parse(dataStr);
+                      if (parsed?.testIds?.length) idsToMove = parsed.testIds;
+                    }
+                  } catch (err) {}
+                  if (idsToMove && idsToMove.length > 0) {
+                    handleBatchLinkTestsToFolder(idsToMove, null, 'Sin Carpeta (Raíz)');
+                    setSelectedDesignTestIds(new Set());
+                    setDraggedDesignTestIds(null);
+                  }
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setIsAllTestsExpanded(prev => !prev); }}
+                    style={{
+                      padding: '2px',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: isRootActive ? '#0C66E4' : '#626F86',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d={isAllTestsExpanded ? "M19 9l-7 7-7-7" : "M9 5l7 7-7 7"} />
+                    </svg>
+                  </button>
+                  <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style={{ color: isRootActive ? '#0C66E4' : '#F59E0B', flexShrink: 0 }}>
+                    <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                  </svg>
+                  <span style={{ fontWeight: 600, color: isRootDragOver ? '#E1007A' : (isRootActive ? '#0C66E4' : '#172B4D'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {isRootDragOver ? '⚡ Soltar aquí (Sin Carpeta)' : 'Sin Carpeta'}
+                  </span>
+                </div>
+                {isRootActive ? (
+                  <span style={{ backgroundColor: '#0C66E4', color: '#FFFFFF', fontSize: '10px', fontWeight: 700, borderRadius: '9999px', padding: '1px 7px', lineHeight: '16px', flexShrink: 0 }}>
+                    {rootCount}
+                  </span>
+                ) : rootCount === 0 ? (
+                  <span style={{ fontSize: '10px', color: '#8590A2', fontWeight: 500, padding: '0 4px', flexShrink: 0 }}>
+                    0
+                  </span>
+                ) : (
+                  <span style={{ backgroundColor: '#F1F2F4', color: '#44546F', fontSize: '10px', fontWeight: 700, borderRadius: '9999px', padding: '2px 8px', lineHeight: '14px', flexShrink: 0 }}>
+                    {rootCount}
+                  </span>
+                )}
+              </div>
+            );
           })()}
-        </ul>
+
+          {isAllTestsExpanded && (() => {
+            const q = (folderSearchQuery || '').trim().toLowerCase();
+            const folderMatchesSearch = (fId) => {
+              if (!q) return true;
+              const desc = getFolderDescendantIds(fId);
+              return folders.some(f => desc.has(f.id) && (f.name || '').toLowerCase().includes(q));
+            };
+
+            const renderTree = (parentId = null) => {
+              const children = folders
+                .filter(f => (f.parentId || null) === parentId)
+                .filter(f => folderMatchesSearch(f.id));
+              if (children.length === 0) return null;
+
+              const hasDirectActiveChild = children.some(f => f.id === activeFolder);
+
+              return (
+                <div
+                  style={{
+                    position: 'relative',
+                    marginLeft: '12px',
+                    paddingLeft: '10px',
+                    borderLeft: hasDirectActiveChild ? '1px solid rgba(12, 102, 228, 0.3)' : '1px solid #DCDFE4',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '2px',
+                    marginTop: '2px'
+                  }}
+                >
+                  {children.map(folder => {
+                    const hasChildren = folders.some(f => f.parentId === folder.id && folderMatchesSearch(f.id));
+                    const isExpanded = q ? true : (expandedFolders[folder.id] !== false);
+                    const isActive = activeFolder === folder.id;
+                    const isDragTarget = dragOverFolderId === folder.id;
+                    const folderCount = isFetchingTests && testCases.length === 0 ? '...' : getFolderTotalCount(folder.id);
+
+                    return (
+                      <div key={folder.id} style={{ display: 'flex', flexDirection: 'column' }}>
+                        <div
+                          data-folder-id={folder.id}
+                          className={`folder-tree-row ${isActive ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`}
+                          onClick={() => setActiveFolder(folder.id)}
+                          onDragEnter={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
+                          }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.dataTransfer.dropEffect = 'move';
+                            if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id);
+                          }}
+                          onDragLeave={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (e.currentTarget.contains(e.relatedTarget)) return;
+                            if (dragOverFolderId === folder.id) setDragOverFolderId(null);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverFolderId(null);
+                            let idsToMove = draggedDesignTestIds;
+                            try {
+                              const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+                              if (dataStr) {
+                                const parsed = JSON.parse(dataStr);
+                                if (parsed?.testIds?.length) idsToMove = parsed.testIds;
+                              }
+                            } catch (err) {}
+                            if (idsToMove && idsToMove.length > 0) {
+                              handleBatchLinkTestsToFolder(idsToMove, folder.id, `"${folder.name}"`);
+                              setSelectedDesignTestIds(new Set());
+                              setDraggedDesignTestIds(null);
+                            }
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+                            {hasChildren && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedFolders(prev => ({ ...prev, [folder.id]: !isExpanded }));
+                                }}
+                                style={{
+                                  padding: '2px',
+                                  background: 'none',
+                                  border: 'none',
+                                  cursor: 'pointer',
+                                  color: isActive ? '#0C66E4' : '#626F86',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  flexShrink: 0
+                                }}
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d={isExpanded ? "M19 9l-7 7-7-7" : "M9 5l7 7-7 7"} />
+                                </svg>
+                              </button>
+                            )}
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 20 20"
+                              fill="currentColor"
+                              style={{ color: isActive ? '#0C66E4' : '#F59E0B', flexShrink: 0 }}
+                            >
+                              <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                            </svg>
+                            <span
+                              style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                fontWeight: isDragTarget ? 700 : (isActive ? 600 : (hasChildren ? 500 : 400)),
+                                color: isDragTarget ? '#E1007A' : (isActive ? '#0C66E4' : '#172B4D')
+                              }}
+                              title={folder.name}
+                            >
+                              {isDragTarget ? `⚡ Soltar en "${folder.name}"` : folder.name}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                            <div className="folder-tree-actions">
+                              <button
+                                type="button"
+                                className="folder-tree-action-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCreateFolder(folder.id);
+                                  setExpandedFolders(prev => ({ ...prev, [folder.id]: true }));
+                                }}
+                                title="Añadir subcarpeta"
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="folder-tree-action-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleUpdateFolder(folder.id, folder.name);
+                                }}
+                                title="Editar carpeta"
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                              </button>
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  className="folder-tree-action-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteFolder(folder.id, folder.name);
+                                  }}
+                                  title="Eliminar carpeta"
+                                  style={{ color: '#CA3521' }}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                </button>
+                              )}
+                            </div>
+
+                            {isActive ? (
+                              <span style={{ backgroundColor: '#0C66E4', color: '#FFFFFF', fontSize: '10px', fontWeight: 700, borderRadius: '9999px', padding: '1px 7px', lineHeight: '16px' }}>
+                                {folderCount}
+                              </span>
+                            ) : folderCount === 0 ? (
+                              <span style={{ fontSize: '10px', color: '#8590A2', fontWeight: 500, padding: '0 4px' }}>
+                                0
+                              </span>
+                            ) : (
+                              <span style={{ backgroundColor: '#F1F2F4', color: '#44546F', fontSize: '10px', fontWeight: 600, borderRadius: '9999px', padding: '2px 7px', lineHeight: '14px' }}>
+                                {folderCount}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {hasChildren && isExpanded && renderTree(folder.id)}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            };
+            return renderTree(null);
+          })()}
+        </div>
         <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', marginTop: 'auto' }}>
           <button className="btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.82rem', padding: '0.45rem' }} onClick={handleCreateFolder}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -4068,6 +4336,7 @@ Then el sistema valida la identidad.
           if (e.target === e.currentTarget) {
             setQrModalSession(null);
             setQrModalReceived(false);
+            setQrModalReceivedCount(0);
           }
         }}
       >
@@ -4102,12 +4371,12 @@ Then el sistema valida la identidad.
                   Captura Móvil de Evidencia (QR)
                 </div>
                 <div style={{ fontSize: '11.5px', opacity: 0.9, fontWeight: 500 }}>
-                  Apunta con la cámara de tu celular para subir fotos
+                  Apunta con la cámara de tu celular para subir una o más fotos
                 </div>
               </div>
             </div>
             <button
-              onClick={() => { setQrModalSession(null); setQrModalReceived(false); }}
+              onClick={() => { setQrModalSession(null); setQrModalReceived(false); setQrModalReceivedCount(0); }}
               style={{
                 background: 'rgba(255, 255, 255, 0.2)',
                 border: 'none',
@@ -4251,8 +4520,14 @@ Then el sistema valida la identidad.
               >
                 <span style={{ fontSize: '20px' }}>✅</span>
                 <div>
-                  <div>¡Evidencia Recibida con Éxito!</div>
-                  <div style={{ fontSize: '11px', fontWeight: 500, color: '#216E4E' }}>La imagen ya fue adjuntada a la ejecución.</div>
+                  <div>
+                    {qrModalReceivedCount > 1
+                      ? `¡${qrModalReceivedCount} Evidencias Recibidas con Éxito!`
+                      : '¡Evidencia Recibida con Éxito!'}
+                  </div>
+                  <div style={{ fontSize: '11px', fontWeight: 500, color: '#216E4E' }}>
+                    Las capturas se acumulan sin sobrescribirse. Puedes seguir enviando más fotos desde el celular o cerrar esta ventana.
+                  </div>
                 </div>
               </div>
             ) : (
@@ -4273,7 +4548,7 @@ Then el sistema valida la identidad.
                 }}
               >
                 <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#0C66E4' }} />
-                <span>Esperando captura desde el celular...</span>
+                <span>Esperando capturas desde el celular...</span>
               </div>
             )}
 
@@ -4282,7 +4557,7 @@ Then el sistema valida la identidad.
               <div style={{ fontWeight: 700, color: '#172B4D', marginBottom: '4px' }}>📌 Pasos rápidos:</div>
               <div>1. Abre la app de <strong>Cámara</strong> en tu iPhone o Android.</div>
               <div>2. Apunta al código QR y toca el enlace que aparece.</div>
-              <div>3. Toma la foto y presiona <strong>"Enviar a la Pantalla"</strong>.</div>
+              <div>3. Toma una o varias fotos y presiona <strong>"Enviar a la Pantalla"</strong> (puedes repetir todas las veces que necesites).</div>
             </div>
 
             {/* Action Buttons */}
@@ -4315,7 +4590,7 @@ Then el sistema valida la identidad.
               </button>
 
               <button
-                onClick={() => { setQrModalSession(null); setQrModalReceived(false); }}
+                onClick={() => { setQrModalSession(null); setQrModalReceived(false); setQrModalReceivedCount(0); }}
                 style={{
                   padding: '8px 20px',
                   borderRadius: '8px',
@@ -4424,8 +4699,256 @@ Then el sistema valida la identidad.
     const summary = b.summary || selectedBug.summary || 'Sin título';
     const rawStatus = b.status || selectedBug.status || 'Abierto';
     const isDone = ['closed', 'cerrada', 'cerrado'].includes(String(rawStatus).toLowerCase().trim());
+    const statusNormLower = String(rawStatus || '').toLowerCase().trim();
+    const isResolvedState =
+      isDone ||
+      b.statusCategory === 'done' ||
+      statusNormLower.includes('resuelta') ||
+      statusNormLower.includes('resuelto') ||
+      statusNormLower.includes('resolved') ||
+      statusNormLower.includes('validaci') ||
+      statusNormLower.includes('validation') ||
+      statusNormLower.includes('cerrada') ||
+      statusNormLower.includes('cerrado') ||
+      statusNormLower.includes('closed') ||
+      statusNormLower.includes('done') ||
+      statusNormLower.includes('listo') ||
+      statusNormLower.includes('finalizad') ||
+      statusNormLower.includes('completad') ||
+      statusNormLower.includes('solucionad');
 
-    // Severities
+    // Helper to keep local state (modal + tables) in sync after any in-app bug edit
+    const syncUpdatedBugToState = (fresh) => {
+      if (!fresh) return;
+      setSelectedBugDetails(fresh);
+      const fixVerArr = (Array.isArray(fresh.fixVersions) && fresh.fixVersions.length > 0)
+        ? fresh.fixVersions
+        : (Array.isArray(fresh.versions) ? fresh.versions : []);
+      const versionStr = fixVerArr.length > 0 ? fixVerArr.join(', ') : 'Sin versión';
+      const estDateVal = fresh.estimatedResolutionDate || null;
+      const assigneeName = fresh.assignee?.displayName || 'Sin asignar';
+
+      setSelectedBug(prev => prev ? {
+        ...prev,
+        status: fresh.status || prev.status,
+        severity: fresh.severity || prev.severity,
+        rawSeverity: fresh.rawSeverity || fresh.severity || prev.rawSeverity,
+        assignee: assigneeName,
+        resolution: fresh.resolution ?? prev.resolution,
+        resolutiondate: fresh.resolutiondate ?? prev.resolutiondate,
+        fixVersions: fixVerArr,
+        versions: fixVerArr,
+        version: versionStr,
+        estimatedResolutionDate: estDateVal,
+        duedate: estDateVal
+      } : null);
+
+      if (typeof setReportData === 'function') {
+        setReportData(prev => {
+          if (!prev || !prev.bugMap || !prev.bugMap[bugKey]) return prev;
+          const updatedBugEntry = {
+            ...prev.bugMap[bugKey],
+            status: fresh.status || prev.bugMap[bugKey].status,
+            severity: fresh.severity || prev.bugMap[bugKey].severity,
+            assignee: assigneeName,
+            resolution: fresh.resolution ?? prev.bugMap[bugKey].resolution,
+            resolutiondate: fresh.resolutiondate ?? prev.bugMap[bugKey].resolutiondate,
+            fixVersions: fixVerArr,
+            version: versionStr,
+            estimatedResolutionDate: estDateVal,
+            duedate: estDateVal
+          };
+          return {
+            ...prev,
+            bugMap: {
+              ...prev.bugMap,
+              [bugKey]: updatedBugEntry
+            }
+          };
+        });
+      }
+
+      if (typeof setUnlinkedBugs === 'function') {
+        setUnlinkedBugs(prev => Array.isArray(prev) ? prev.map(item => {
+          if (item.key !== bugKey) return item;
+          return {
+            ...item,
+            status: fresh.status || item.status,
+            severity: fresh.severity || item.severity,
+            assignee: assigneeName,
+            resolution: fresh.resolution ?? item.resolution,
+            resolutiondate: fresh.resolutiondate ?? item.resolutiondate,
+            fixVersions: fixVerArr,
+            version: versionStr,
+            estimatedResolutionDate: estDateVal,
+            duedate: estDateVal
+          };
+        }) : prev);
+      }
+    };
+
+    const handleUpdateBugField = async (field, value, extraPayload = {}, label = field) => {
+      if (!bugKey) return;
+      setBugSavingField(field);
+      try {
+        const res = await invoke('updateBugIssue', {
+          issueIdOrKey: bugKey,
+          field,
+          value,
+          ...extraPayload
+        });
+        if (res && res.error) {
+          addNotification('Error al actualizar bug', `No se pudo actualizar ${label}: ${res.error}`, 'error');
+        } else {
+          const fresh = await invoke('getBugFullDetails', { issueIdOrKey: bugKey });
+          if (fresh && !fresh.error) {
+            syncUpdatedBugToState(fresh);
+          }
+          addNotification('Bug actualizado', `Se actualizó ${label} en ${bugKey}.`, 'success');
+        }
+      } catch (err) {
+        console.error(`Error updating bug field ${field}:`, err);
+        addNotification('Error al actualizar bug', err.message || String(err), 'error');
+      } finally {
+        setBugSavingField(null);
+      }
+    };
+
+    const handleSearchBugAssignee = async (queryText) => {
+      setBugAssigneeQuery(queryText);
+      setBugAssigneeSearching(true);
+      try {
+        const pKey = b.projectKey || (bugKey.includes('-') ? bugKey.split('-')[0] : selectedProjectId);
+        const users = await invoke('searchAssignableUsers', { projectKey: pKey, query: queryText || '' });
+        setBugAssigneeResults(Array.isArray(users) ? users : []);
+      } catch (err) {
+        console.error('Error searching assignable users for bug:', err);
+        setBugAssigneeResults([]);
+      } finally {
+        setBugAssigneeSearching(false);
+      }
+    };
+
+    const fileToBase64Obj = (file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const resultStr = String(reader.result || '');
+        const commaIdx = resultStr.indexOf(',');
+        const base64Data = commaIdx >= 0 ? resultStr.slice(commaIdx + 1) : resultStr;
+        resolve({
+          filename: file.name || `captura_${Date.now()}.png`,
+          mimeType: file.type || 'application/octet-stream',
+          size: file.size || 0,
+          base64Data,
+          previewUrl: (file.type || '').startsWith('image/') ? resultStr : null
+        });
+      };
+      reader.onerror = (e) => reject(e);
+      reader.readAsDataURL(file);
+    });
+
+    const handleBugCommentFilesSelect = async (fileList) => {
+      if (!fileList || fileList.length === 0) return;
+      try {
+        const converted = await Promise.all(Array.from(fileList).map(f => fileToBase64Obj(f)));
+        setBugCommentFiles(prev => [...prev, ...converted]);
+      } catch (err) {
+        console.error('Error reading selected files:', err);
+        addNotification('Error al leer archivo', 'No se pudo procesar el archivo seleccionado.', 'error');
+      }
+    };
+
+    const handleBugCommentPaste = async (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      const imageFiles = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const blob = item.getAsFile();
+          if (blob) {
+            const ext = (blob.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
+            const namedFile = new File([blob], `captura_${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`, { type: blob.type });
+            imageFiles.push(namedFile);
+          }
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        await handleBugCommentFilesSelect(imageFiles);
+        addNotification('Captura adjuntada', 'La captura del portapapeles se agregó al comentario.', 'info');
+      }
+    };
+
+    const handleAddBugComment = async () => {
+      const hasText = bugCommentText && bugCommentText.trim().length > 0;
+      const hasFiles = bugCommentFiles && bugCommentFiles.length > 0;
+      if (!hasText && !hasFiles) return;
+
+      setBugSubmittingComment(true);
+      try {
+        const res = await invoke('addBugComment', {
+          issueIdOrKey: bugKey,
+          commentText: bugCommentText,
+          files: bugCommentFiles.map(f => ({
+            filename: f.filename,
+            mimeType: f.mimeType,
+            base64Data: f.base64Data
+          }))
+        });
+        if (res && res.error) {
+          addNotification('Error al publicar comentario', res.error, 'error');
+        } else {
+          setBugCommentText('');
+          setBugCommentFiles([]);
+          const fresh = await invoke('getBugFullDetails', { issueIdOrKey: bugKey });
+          if (fresh && !fresh.error) {
+            syncUpdatedBugToState(fresh);
+          }
+          addNotification('Comentario publicado', `Se registró el comentario${hasFiles ? ' y la evidencia adjunta' : ''} en ${bugKey}.`, 'success');
+        }
+      } catch (err) {
+        console.error('Error submitting bug comment:', err);
+        addNotification('Error al comentar', err.message || String(err), 'error');
+      } finally {
+        setBugSubmittingComment(false);
+      }
+    };
+
+    const handleStandaloneBugAttachmentUpload = async (e) => {
+      const fileList = e.target.files;
+      if (!fileList || fileList.length === 0) return;
+      setBugUploadingStandalone(true);
+      try {
+        const converted = await Promise.all(Array.from(fileList).map(f => fileToBase64Obj(f)));
+        const res = await invoke('addBugComment', {
+          issueIdOrKey: bugKey,
+          commentText: '',
+          files: converted.map(f => ({
+            filename: f.filename,
+            mimeType: f.mimeType,
+            base64Data: f.base64Data
+          }))
+        });
+        if (res && res.error) {
+          addNotification('Error al subir archivo', res.error, 'error');
+        } else {
+          const fresh = await invoke('getBugFullDetails', { issueIdOrKey: bugKey });
+          if (fresh && !fresh.error) {
+            syncUpdatedBugToState(fresh);
+          }
+          addNotification('Archivo adjuntado', `Se subió ${converted.length === 1 ? converted[0].filename : `${converted.length} archivos`} a ${bugKey}.`, 'success');
+        }
+      } catch (err) {
+        console.error('Error uploading standalone attachment:', err);
+        addNotification('Error al subir archivo', err.message || String(err), 'error');
+      } finally {
+        setBugUploadingStandalone(false);
+        e.target.value = '';
+      }
+    };
+
+    // Severities (*Severity custom field)
     const rawSev = b.rawSeverity || b.severity || selectedBug.severity || 'Sin definir';
     const sevNormalized = typeof rawSev === 'string' ? rawSev : (rawSev.value || rawSev.name || 'Sin definir');
     const sevLow = sevNormalized.toLowerCase();
@@ -4452,6 +4975,10 @@ Then el sistema valida la identidad.
       sevBorder = '#ABF5D1';
     }
 
+    const severityOptionsList = (Array.isArray(b.severityOptions) && b.severityOptions.length > 0)
+      ? b.severityOptions
+      : ['Bloqueante', 'Crítico', 'Mayor', 'Medio', 'Menor'].map(v => ({ id: v, value: v }));
+
     // Dates & Aging
     const createdDate = b.created || selectedBug.created;
     const resDate = b.resolutiondate || selectedBug.resolutiondate;
@@ -4461,31 +4988,46 @@ Then el sistema valida la identidad.
     const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
     const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
-    // Due Date
-    const dueDateStr = b.duedate || selectedBug.duedate || null;
-    let formattedDueDate = null;
-    let isDueDateFlagged = false;
+    // Fecha Estimada de Solución (strictly customfield_10763 / estimatedResolutionDate, NOT duedate)
+    const estDateRaw = b.estimatedResolutionDate || selectedBug.estimatedResolutionDate || null;
+    const estDateInputVal = estDateRaw ? String(estDateRaw).slice(0, 10) : '';
+    let formattedEstDate = null;
+    let isEstDateFlagged = false;
 
-    if (dueDateStr) {
+    if (estDateInputVal) {
       try {
-        const d = new Date(dueDateStr);
+        const d = new Date(`${estDateInputVal}T12:00:00`);
         if (!isNaN(d.getTime())) {
-          formattedDueDate = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+          formattedEstDate = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
           const statusLower = String(rawStatus).toLowerCase();
           const isInProgress = statusLower.includes('curso') || statusLower.includes('progress') || statusLower.includes('progreso') || statusLower.includes('desarrollo') || statusLower.includes('testing') || statusLower.includes('atención');
           const isOverdue = d.getTime() < Date.now() && !isDone;
           if (isInProgress || isOverdue) {
-            isDueDateFlagged = true;
+            isEstDateFlagged = true;
           }
         }
       } catch (e) {}
     }
 
-    // Versions
-    let versionsList = [];
-    if (Array.isArray(b.versions) && b.versions.length > 0) versionsList = b.versions;
-    else if (b.version) versionsList = [b.version];
-    else if (Array.isArray(b.fixVersions) && b.fixVersions.length > 0) versionsList = b.fixVersions;
+    // Versiones afectadas -> check non-empty fixVersions, versions, and selectedBug.version from table list
+    let fixVersionsList = [];
+    if (Array.isArray(b.fixVersions) && b.fixVersions.length > 0) {
+      fixVersionsList = b.fixVersions;
+    } else if (Array.isArray(b.versions) && b.versions.length > 0) {
+      fixVersionsList = b.versions;
+    } else if (Array.isArray(selectedBug.fixVersions) && selectedBug.fixVersions.length > 0) {
+      fixVersionsList = selectedBug.fixVersions;
+    } else if (Array.isArray(selectedBug.versions) && selectedBug.versions.length > 0) {
+      fixVersionsList = selectedBug.versions;
+    } else if (selectedBug.version && selectedBug.version !== 'Sin versión') {
+      fixVersionsList = String(selectedBug.version).split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    const availableVersionsList = Array.isArray(b.availableVersions) ? b.availableVersions : [];
+    const transitionsList = Array.isArray(b.transitions) ? b.transitions : [];
+    const resolutionOptionsList = (Array.isArray(b.resolutionOptions) && b.resolutionOptions.length > 0)
+      ? b.resolutionOptions
+      : ['Done', 'Fixed', 'Listo', 'Won\'t Fix', 'Duplicate', 'Cannot Reproduce'].map(name => ({ id: name, name }));
 
     // Attachments
     const attachments = b.attachments || [];
@@ -4496,14 +5038,14 @@ Then el sistema valida la identidad.
     // Comments
     const comments = b.comments || [];
 
-    // Description HTML (clean and mapped with attachments)
+    // Description HTML (clean and mapped with attachments + preloaded blob URLs)
     let descHtml = '';
     if (b.descriptionRaw) {
-      descHtml = sanitizeRenderedHtml(adfToHtml(b.descriptionRaw, attachments));
+      descHtml = sanitizeRenderedHtml(adfToHtml(b.descriptionRaw, attachments, inlineAttachmentUrls), attachments, inlineAttachmentUrls);
     } else if (b.descriptionRendered) {
-      descHtml = sanitizeRenderedHtml(b.descriptionRendered);
+      descHtml = sanitizeRenderedHtml(b.descriptionRendered, attachments, inlineAttachmentUrls);
     } else if (selectedBug.description) {
-      descHtml = sanitizeRenderedHtml(adfToHtml(selectedBug.description, attachments));
+      descHtml = sanitizeRenderedHtml(adfToHtml(selectedBug.description, attachments, inlineAttachmentUrls), attachments, inlineAttachmentUrls);
     }
 
     return (
@@ -4524,7 +5066,18 @@ Then el sistema valida la identidad.
       >
         <div 
           className="jira-modal-content"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const previewEl = e.target.closest && e.target.closest('[data-preview-attachment-id]');
+            if (previewEl) {
+              e.preventDefault();
+              const attId = previewEl.getAttribute('data-preview-attachment-id');
+              const attName = previewEl.getAttribute('data-preview-attachment-name') || `evidence_${attId}.png`;
+              if (attId) {
+                handlePreviewEvidence({ id: attId, filename: attName });
+              }
+            }
+          }}
           style={{
             maxWidth: '1380px',
             width: '95%',
@@ -4549,7 +5102,7 @@ Then el sistema valida la identidad.
             justifyContent: 'space-between',
             flexShrink: 0
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               <span style={{ 
                 backgroundColor: '#FFEBE6', 
                 color: '#DE350B', 
@@ -4567,13 +5120,17 @@ Then el sistema valida la identidad.
               <span style={{ fontSize: '15px', fontWeight: 700, color: '#0C66E4' }}>
                 {bugKey}
               </span>
-              <span className={`ads-lozenge ${isDone ? 'ads-lozenge-success' : 'ads-lozenge-current'}`} style={{ fontSize: '11px', fontWeight: 600 }}>
+              {/* Read-only Status Badge in Header (Status selector lives in the right-hand panel) */}
+              <span
+                className={`ads-lozenge ${isResolvedState ? 'ads-lozenge-success' : 'ads-lozenge-current'}`}
+                style={{ fontSize: '11px', fontWeight: 700 }}
+              >
                 {rawStatus}
               </span>
-              {selectedBugLoading && (
-                <span style={{ fontSize: '11px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {(selectedBugLoading || bugSavingField) && (
+                <span style={{ fontSize: '11px', color: '#0C66E4', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
                   <span className="spinner-border spinner-border-sm" style={{ width: '12px', height: '12px', border: '2px solid #0C66E4', borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} />
-                  Cargando detalles...
+                  {bugSavingField ? 'Guardando cambios en Jira...' : 'Cargando detalles...'}
                 </span>
               )}
             </div>
@@ -4641,10 +5198,35 @@ Then el sistema valida la identidad.
 
               {/* Imágenes, Videos & Evidencias Adjuntas */}
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px', gap: '8px', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     🖼️ Evidencias &amp; Archivos Adjuntos ({attachments.length})
                   </span>
+                  <label
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '4px 10px',
+                      borderRadius: '5px',
+                      backgroundColor: '#E9F2FF',
+                      color: '#0C66E4',
+                      border: '1px solid #85B8FF',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: bugUploadingStandalone ? 'wait' : 'pointer'
+                    }}
+                    title="Adjuntar archivos o capturas directamente a este bug"
+                  >
+                    <span>{bugUploadingStandalone ? '⏳ Subiendo...' : '📎 Adjuntar archivo / captura'}</span>
+                    <input
+                      type="file"
+                      multiple
+                      disabled={bugUploadingStandalone}
+                      onChange={handleStandaloneBugAttachmentUpload}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
                 </div>
 
                 {attachments.length > 0 ? (
@@ -4748,27 +5330,147 @@ Then el sistema valida la identidad.
                   </div>
                 ) : (
                   <div style={{ padding: '0.85rem 1rem', background: '#F8FAFD', border: '1px dashed #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
-                    Sin evidencias ni archivos adjuntos registrados.
+                    Sin evidencias ni archivos adjuntos registrados. Puedes usar el botón "Adjuntar archivo / captura" arriba o pegar imágenes en un comentario.
                   </div>
                 )}
               </div>
 
-              {/* Historial de Comentarios (Último Primero) */}
+              {/* Historial de Comentarios + Composer (Último Primero) */}
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid #F1F2F4', paddingBottom: '6px' }}>
                   <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-dark, #172B4D)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    💬 Historial de Comentarios ({comments.length})
+                    💬 Comentarios &amp; Actividad ({comments.length})
                   </span>
                   <span style={{ fontSize: '11px', color: '#626F86' }}>
                     Ordenado por el más reciente
                   </span>
                 </div>
 
+                {/* Nuevo Comentario + Adjuntar Archivos / Pegar Capturas */}
+                <div style={{
+                  border: '1px solid #DCDFE4',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  backgroundColor: '#FAFBFC',
+                  marginBottom: '12px'
+                }}>
+                  <textarea
+                    rows={3}
+                    value={bugCommentText}
+                    onChange={(e) => setBugCommentText(e.target.value)}
+                    onPaste={handleBugCommentPaste}
+                    disabled={bugSubmittingComment}
+                    placeholder="Escribe un comentario para este bug... (También puedes pegar una captura de pantalla directamente con Ctrl+V / Cmd+V)"
+                    style={{
+                      width: '100%',
+                      border: '1px solid #DCDFE4',
+                      borderRadius: '6px',
+                      padding: '8px 10px',
+                      fontSize: '12.5px',
+                      fontFamily: 'inherit',
+                      color: '#172B4D',
+                      backgroundColor: '#FFFFFF',
+                      resize: 'vertical',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+
+                  {/* Archivos / Capturas en cola para el comentario */}
+                  {bugCommentFiles.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' }}>
+                      {bugCommentFiles.map((fileObj, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '4px 8px',
+                            borderRadius: '6px',
+                            backgroundColor: '#FFFFFF',
+                            border: '1px solid #85B8FF',
+                            fontSize: '11px',
+                            color: '#172B4D'
+                          }}
+                        >
+                          {fileObj.previewUrl ? (
+                            <img src={fileObj.previewUrl} alt={fileObj.filename} style={{ width: '28px', height: '28px', objectFit: 'cover', borderRadius: '4px', border: '1px solid #EBECF0' }} />
+                          ) : (
+                            <span>📎</span>
+                          )}
+                          <span style={{ maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                            {fileObj.filename}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setBugCommentFiles(prev => prev.filter((_, i) => i !== idx))}
+                            style={{ border: 'none', background: 'transparent', color: '#DE350B', cursor: 'pointer', fontWeight: 700, padding: '0 2px', fontSize: '12px' }}
+                            title="Quitar archivo adjunto"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '8px', gap: '8px', flexWrap: 'wrap' }}>
+                    <label
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '5px',
+                        padding: '5px 10px',
+                        borderRadius: '5px',
+                        backgroundColor: '#FFFFFF',
+                        color: '#44546F',
+                        border: '1px solid #DCDFE4',
+                        fontSize: '11.5px',
+                        fontWeight: 600,
+                        cursor: bugSubmittingComment ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      <span>📎 Adjuntar archivo / captura</span>
+                      <input
+                        type="file"
+                        multiple
+                        disabled={bugSubmittingComment}
+                        onChange={(e) => {
+                          handleBugCommentFilesSelect(e.target.files);
+                          e.target.value = '';
+                        }}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
+
+                    <button
+                      type="button"
+                      disabled={bugSubmittingComment || (!bugCommentText.trim() && bugCommentFiles.length === 0)}
+                      onClick={handleAddBugComment}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: '5px',
+                        border: 'none',
+                        backgroundColor: (bugSubmittingComment || (!bugCommentText.trim() && bugCommentFiles.length === 0)) ? '#DCDFE4' : '#0C66E4',
+                        color: (bugSubmittingComment || (!bugCommentText.trim() && bugCommentFiles.length === 0)) ? '#626F86' : '#FFFFFF',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        cursor: (bugSubmittingComment || (!bugCommentText.trim() && bugCommentFiles.length === 0)) ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      {bugSubmittingComment ? '⏳ Publicando...' : '💬 Publicar comentario'}
+                    </button>
+                  </div>
+                </div>
+
                 {comments.length > 0 ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     {comments.map((comm) => {
                       const commDate = formatBugCreatedDate(comm.created);
-                      const commBodyHtml = sanitizeRenderedHtml(comm.bodyRendered || adfToHtml(comm.bodyRaw, attachments));
+                      const commBodyHtml = comm.bodyRaw
+                        ? sanitizeRenderedHtml(adfToHtml(comm.bodyRaw, attachments, inlineAttachmentUrls), attachments, inlineAttachmentUrls)
+                        : sanitizeRenderedHtml(comm.bodyRendered || '', attachments, inlineAttachmentUrls);
 
                       return (
                         <div
@@ -4821,17 +5523,84 @@ Then el sistema valida la identidad.
               </div>
             </div>
 
-            {/* Columna Derecha / Panel Lateral de Metadatos (35%) */}
-            <div style={{ width: '320px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
-              <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px' }}>
-                Detalles &amp; Metadatos
+            {/* Columna Derecha / Panel Lateral de Metadatos Editables (35%) */}
+            <div style={{ width: '340px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+              <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>Detalles &amp; Edición Rápida</span>
+                <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 700 }}>En vivo</span>
               </div>
 
-              {/* 1. Persona Asignada */}
+              {/* 0. Estado (Status Workflow Transition) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  👤 PERSONA ASIGNADA
+                  ESTADO
                 </div>
+                <select
+                  value=""
+                  disabled={bugSavingField === 'status' || transitionsList.length === 0}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    if (!nextVal) return;
+                    const chosen = transitionsList.find(t => String(t.id) === String(nextVal));
+                    handleUpdateBugField(
+                      'status',
+                      chosen ? chosen.toStatus : nextVal,
+                      { transitionId: nextVal },
+                      'Estado'
+                    );
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '7px 10px',
+                    borderRadius: '6px',
+                    border: '1px solid #DCDFE4',
+                    backgroundColor: '#FFFFFF',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    color: '#172B4D',
+                    cursor: (bugSavingField === 'status' || transitionsList.length === 0) ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  <option value="">
+                    {bugSavingField === 'status' ? `Actualizando (${rawStatus})...` : rawStatus}
+                  </option>
+                  {transitionsList.map(t => (
+                    <option key={t.id} value={t.id}>
+                      {t.toStatus || t.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 1. Persona Asignada (Assignee) */}
+              <div style={{ position: 'relative' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86' }}>
+                    PERSONA ASIGNADA
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextOpen = !bugAssigneeOpen;
+                      setBugAssigneeOpen(nextOpen);
+                      if (nextOpen && bugAssigneeResults.length === 0) {
+                        handleSearchBugAssignee('');
+                      }
+                    }}
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: '#0C66E4',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      padding: 0
+                    }}
+                  >
+                    {bugAssigneeOpen ? 'Cerrar' : 'Cambiar'}
+                  </button>
+                </div>
+
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
                   {b.assignee?.avatarUrl ? (
                     <img src={b.assignee.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
@@ -4840,9 +5609,9 @@ Then el sistema valida la identidad.
                       {(b.assignee?.displayName || '?').charAt(0).toUpperCase()}
                     </div>
                   )}
-                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
                     <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {b.assignee?.displayName || 'Sin asignar'}
+                      {bugSavingField === 'assignee' ? 'Guardando...' : (b.assignee?.displayName || 'Sin asignar')}
                     </span>
                     {b.assignee?.email && (
                       <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -4851,12 +5620,110 @@ Then el sistema valida la identidad.
                     )}
                   </div>
                 </div>
+
+                {bugAssigneeOpen && (
+                  <div style={{
+                    marginTop: '6px',
+                    background: '#FFFFFF',
+                    border: '1px solid #85B8FF',
+                    borderRadius: '6px',
+                    padding: '8px',
+                    boxShadow: '0 8px 16px rgba(9, 30, 66, 0.15)'
+                  }}>
+                    <input
+                      type="text"
+                      value={bugAssigneeQuery}
+                      onChange={(e) => handleSearchBugAssignee(e.target.value)}
+                      placeholder="Buscar usuario en Jira..."
+                      style={{
+                        width: '100%',
+                        padding: '6px 8px',
+                        fontSize: '12px',
+                        borderRadius: '4px',
+                        border: '1px solid #DCDFE4',
+                        marginBottom: '6px',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                    <div style={{ maxHeight: '165px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBugAssigneeOpen(false);
+                          handleUpdateBugField('assignee', null, {}, 'Persona asignada');
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '5px 8px',
+                          border: 'none',
+                          background: '#F4F5F7',
+                          borderRadius: '4px',
+                          fontSize: '11.5px',
+                          color: '#44546F',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          textAlign: 'left'
+                        }}
+                      >
+                        Dejar sin asignar
+                      </button>
+                      {bugAssigneeSearching ? (
+                        <div style={{ fontSize: '11px', color: '#626F86', padding: '6px', textAlign: 'center' }}>
+                          Buscando usuarios...
+                        </div>
+                      ) : bugAssigneeResults.length > 0 ? (
+                        bugAssigneeResults.map(u => (
+                          <button
+                            key={u.accountId}
+                            type="button"
+                            onClick={() => {
+                              setBugAssigneeOpen(false);
+                              handleUpdateBugField('assignee', u.accountId, {}, 'Persona asignada');
+                            }}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              padding: '5px 8px',
+                              border: 'none',
+                              background: 'transparent',
+                              borderRadius: '4px',
+                              fontSize: '11.5px',
+                              color: '#172B4D',
+                              cursor: 'pointer',
+                              textAlign: 'left'
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#E9F2FF'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                          >
+                            {u.avatarUrl ? (
+                              <img src={u.avatarUrl} alt="" style={{ width: '20px', height: '20px', borderRadius: '50%' }} />
+                            ) : (
+                              <span style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#0C66E4', color: '#FFF', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 700 }}>
+                                {(u.displayName || 'U').charAt(0).toUpperCase()}
+                              </span>
+                            )}
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                              {u.displayName}
+                            </span>
+                          </button>
+                        ))
+                      ) : (
+                        <div style={{ fontSize: '11px', color: '#626F86', padding: '6px', textAlign: 'center' }}>
+                          No se encontraron usuarios.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 2. Informador (Reporter) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  📣 INFORMADOR / REPORTER
+                  INFORMADOR
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
                   {b.reporter?.avatarUrl ? (
@@ -4872,46 +5739,81 @@ Then el sistema valida la identidad.
                 </div>
               </div>
 
-              {/* 3. Severidad (en colores) */}
+              {/* 3. Severidad (*Severity custom field, NOT priority) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  🚨 SEVERIDAD
+                  SEVERIDAD
                 </div>
-                <div>
-                  <span
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '5px',
-                      background: sevBg,
-                      color: sevColor,
-                      border: `1px solid ${sevBorder}`,
-                      padding: '4px 10px',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      fontWeight: 700,
-                      textTransform: 'uppercase'
-                    }}
-                  >
-                    <span>●</span> {sevNormalized}
-                  </span>
-                </div>
+                <select
+                  value={sevNormalized === 'Sin definir' ? '' : sevNormalized}
+                  disabled={bugSavingField === 'severity'}
+                  onChange={(e) => {
+                    const newSev = e.target.value;
+                    if (!newSev) return;
+                    const optObj = severityOptionsList.find(o => o.value === newSev);
+                    handleUpdateBugField(
+                      'severity',
+                      newSev,
+                      {
+                        customFieldId: b.severityFieldId || 'customfield_10238',
+                        optionId: optObj?.id || null
+                      },
+                      'Severidad'
+                    );
+                  }}
+                  style={{
+                    width: '100%',
+                    background: sevBg,
+                    color: sevColor,
+                    border: `1px solid ${sevBorder}`,
+                    padding: '6px 10px',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    cursor: bugSavingField === 'severity' ? 'wait' : 'pointer'
+                  }}
+                >
+                  {sevNormalized === 'Sin definir' && (
+                    <option value="">-- Sin definir --</option>
+                  )}
+                  {!severityOptionsList.some(o => o.value === sevNormalized) && sevNormalized !== 'Sin definir' && (
+                    <option value={sevNormalized}>{sevNormalized}</option>
+                  )}
+                  {severityOptionsList.map(opt => (
+                    <option key={opt.id || opt.value} value={opt.value}>
+                      {opt.value}
+                    </option>
+                  ))}
+                </select>
               </div>
 
-              {/* 4. Versiones Afectadas */}
+              {/* 4. Versiones Afectadas (fixVersions) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  🏷️ VERSIONES AFECTADAS
+                  VERSIONES AFECTADAS
                 </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
-                  {versionsList.length > 0 ? (
-                    versionsList.map((ver, idx) => (
+                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '5px' }}>
+                  {fixVersionsList.length > 0 ? (
+                    fixVersionsList.map((ver, idx) => (
                       <span
                         key={idx}
                         className="ads-lozenge ads-lozenge-subtle"
-                        style={{ fontSize: '11px', fontWeight: 600 }}
+                        style={{ fontSize: '11px', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '2px 7px' }}
                       >
-                        🏷️ {ver}
+                        <span>{ver}</span>
+                        <button
+                          type="button"
+                          disabled={bugSavingField === 'fixVersions'}
+                          onClick={() => {
+                            const updated = fixVersionsList.filter(v => v !== ver);
+                            handleUpdateBugField('fixVersions', updated, {}, 'Versiones afectadas');
+                          }}
+                          style={{ border: 'none', background: 'transparent', color: '#DE350B', cursor: 'pointer', fontWeight: 700, padding: 0, fontSize: '11px', lineHeight: 1 }}
+                          title={`Quitar versión ${ver}`}
+                        >
+                          ✕
+                        </button>
                       </span>
                     ))
                   ) : (
@@ -4919,13 +5821,130 @@ Then el sistema valida la identidad.
                       Sin versión asignada
                     </span>
                   )}
+
+                  {!bugAddingVersion && (
+                    <button
+                      type="button"
+                      disabled={bugSavingField === 'fixVersions'}
+                      onClick={() => setBugAddingVersion(true)}
+                      style={{
+                        padding: '3px 8px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        borderRadius: '5px',
+                        border: '1px solid #0C66E4',
+                        backgroundColor: '#E9F2FF',
+                        color: '#0C66E4',
+                        cursor: bugSavingField === 'fixVersions' ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      + Añadir
+                    </button>
+                  )}
                 </div>
+
+                {bugAddingVersion && (
+                  <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '5px', background: '#FFFFFF', border: '1px solid #85B8FF', borderRadius: '6px', padding: '7px' }}>
+                    {availableVersionsList.length > 0 && (
+                      <select
+                        value=""
+                        disabled={bugSavingField === 'fixVersions'}
+                        onChange={(e) => {
+                          const chosenVer = e.target.value;
+                          if (!chosenVer) return;
+                          setBugAddingVersion(false);
+                          if (!fixVersionsList.includes(chosenVer)) {
+                            handleUpdateBugField('fixVersions', [...fixVersionsList, chosenVer], {}, 'Versiones afectadas');
+                          }
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '5px 8px',
+                          borderRadius: '5px',
+                          border: '1px solid #DCDFE4',
+                          backgroundColor: '#FFFFFF',
+                          fontSize: '11.5px',
+                          color: '#172B4D'
+                        }}
+                      >
+                        <option value="">Seleccionar versión del proyecto...</option>
+                        {availableVersionsList
+                          .filter(v => !fixVersionsList.includes(v.name))
+                          .map(v => (
+                            <option key={v.id || v.name} value={v.name}>
+                              {v.name} {v.released ? '(Liberada)' : ''}
+                            </option>
+                          ))}
+                      </select>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <input
+                        type="text"
+                        value={bugCustomVersionInput}
+                        onChange={(e) => setBugCustomVersionInput(e.target.value)}
+                        placeholder="Escribir versión..."
+                        style={{
+                          flex: 1,
+                          padding: '4px 8px',
+                          fontSize: '11.5px',
+                          borderRadius: '5px',
+                          border: '1px solid #DCDFE4',
+                          backgroundColor: '#FFFFFF'
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={bugSavingField === 'fixVersions' || !bugCustomVersionInput.trim()}
+                        onClick={() => {
+                          const val = bugCustomVersionInput.trim();
+                          if (!val) return;
+                          setBugCustomVersionInput('');
+                          setBugAddingVersion(false);
+                          if (!fixVersionsList.includes(val)) {
+                            handleUpdateBugField('fixVersions', [...fixVersionsList, val], {}, 'Versiones afectadas');
+                          }
+                        }}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          borderRadius: '5px',
+                          border: '1px solid #0C66E4',
+                          backgroundColor: '#0C66E4',
+                          color: '#FFFFFF',
+                          cursor: (!bugCustomVersionInput.trim() || bugSavingField === 'fixVersions') ? 'not-allowed' : 'pointer'
+                        }}
+                      >
+                        Guardar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBugAddingVersion(false);
+                          setBugCustomVersionInput('');
+                        }}
+                        style={{
+                          padding: '4px 7px',
+                          fontSize: '11px',
+                          borderRadius: '5px',
+                          border: '1px solid #DCDFE4',
+                          backgroundColor: '#FFFFFF',
+                          color: '#44546F',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* 5. Tiempo Abierto / Transcurrido (Aging laboral con semáforo) */}
+              {/* 5. Tiempo Abierto / Transcurrido */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  ⏱️ TIEMPO TRANSCURRIDO (AGING LABORAL)
+                  TIEMPO TRANSCURRIDO
                 </div>
                 <div
                   style={{
@@ -4941,84 +5960,258 @@ Then el sistema valida la identidad.
                     border: `1px solid ${textColor}30`
                   }}
                 >
-                  <span>⏱️</span>
                   <span>{age.label}</span>
                 </div>
               </div>
 
-              {/* 6. Fecha de Solución Estimada (DueDate) */}
+              {/* 6. Fecha Estimada de Solución (Custom Field customfield_10763, NOT duedate) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  📅 FECHA ESTIMADA DE SOLUCIÓN
+                  FECHA ESTIMADA DE SOLUCIÓN
                 </div>
-                {formattedDueDate ? (
-                  isDueDateFlagged ? (
-                    <div
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: formattedEstDate && isEstDateFlagged ? '6px' : 0 }}>
+                  <input
+                    type="date"
+                    value={estDateInputVal}
+                    disabled={bugSavingField === 'estimatedDate'}
+                    onChange={(e) => {
+                      const nextDate = e.target.value || null;
+                      handleUpdateBugField(
+                        'estimatedDate',
+                        nextDate,
+                        {
+                          customFieldId: b.estDateFieldId || 'customfield_10763',
+                          candidateFieldIds: Array.isArray(b.estDateCandidateIds) ? b.estDateCandidateIds : []
+                        },
+                        'Fecha Estimada de Solución'
+                      );
+                    }}
+                    style={{
+                      flex: 1,
+                      padding: '5px 8px',
+                      borderRadius: '6px',
+                      border: '1px solid #DCDFE4',
+                      backgroundColor: '#FFFFFF',
+                      fontSize: '12px',
+                      color: '#172B4D',
+                      fontWeight: 600
+                    }}
+                  />
+                  {estDateInputVal && (
+                    <button
+                      type="button"
+                      disabled={bugSavingField === 'estimatedDate'}
+                      onClick={() => handleUpdateBugField(
+                        'estimatedDate',
+                        null,
+                        {
+                          customFieldId: b.estDateFieldId || 'customfield_10763',
+                          candidateFieldIds: Array.isArray(b.estDateCandidateIds) ? b.estDateCandidateIds : []
+                        },
+                        'Fecha Estimada de Solución'
+                      )}
                       style={{
+                        border: '1px solid #FFBDAD',
                         background: '#FFEBE6',
-                        border: '1px solid #FF8F73',
-                        color: '#BF2600',
-                        padding: '6px 10px',
-                        borderRadius: '6px',
+                        color: '#DE350B',
+                        borderRadius: '5px',
+                        padding: '5px 8px',
                         fontSize: '11px',
                         fontWeight: 700,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px'
+                        cursor: 'pointer'
                       }}
+                      title="Limpiar Fecha Estimada"
                     >
-                      <span style={{ fontSize: '14px' }}>🚩</span>
-                      <div>
-                        <div>{formattedDueDate}</div>
-                        <div style={{ fontSize: '9.5px', textTransform: 'uppercase', opacity: 0.9 }}>
-                          {rawStatus.toUpperCase()} • EN ATENCIÓN
-                        </div>
+                      ✕
+                    </button>
+                  )}
+                </div>
+                {formattedEstDate && isEstDateFlagged && (
+                  <div
+                    style={{
+                      background: '#FFEBE6',
+                      border: '1px solid #FF8F73',
+                      color: '#BF2600',
+                      padding: '5px 8px',
+                      borderRadius: '6px',
+                      fontSize: '10.5px',
+                      fontWeight: 700,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <div>
+                      <div>{formattedEstDate}</div>
+                      <div style={{ fontSize: '9px', textTransform: 'uppercase', opacity: 0.9 }}>
+                        {rawStatus.toUpperCase()} • EN ATENCIÓN
                       </div>
                     </div>
-                  ) : (
-                    <div style={{ fontSize: '12px', color: '#172B4D', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '5px' }}>
-                      <span>📅</span> <span>{formattedDueDate}</span>
-                    </div>
-                  )
-                ) : (
-                  <div style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
-                    No definida en Jira
                   </div>
                 )}
               </div>
 
-              {/* 7. Ambiente (Environment) */}
+              {/* 7. Ambiente / Entorno (Environment) */}
               <div>
-                <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
-                  🌐 AMBIENTE / ENTORNO
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  {b.environment ? (
-                    <span
-                      style={{
-                        background: '#E9F2FF',
-                        color: '#0C66E4',
-                        border: '1px solid #85B8FF',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '11px',
-                        fontWeight: 700
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86' }}>
+                    AMBIENTE / ENTORNO
+                  </span>
+                  {!bugEditingEnv && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const initialEnv = b.environmentPlainText !== undefined
+                          ? b.environmentPlainText
+                          : (typeof b.environment === 'string' ? b.environment.replace(/<[^>]+>/g, '').trim() : '');
+                        setBugEnvDraft(initialEnv);
+                        setBugEditingEnv(true);
                       }}
-                      dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : adfToHtml(b.environment) }}
-                    />
-                  ) : (
-                    <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
-                      No especificado
-                    </span>
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        color: '#0C66E4',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        padding: 0
+                      }}
+                    >
+                      Editar
+                    </button>
                   )}
                 </div>
+
+                {bugEditingEnv ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <textarea
+                      rows={2}
+                      value={bugEnvDraft}
+                      onChange={(e) => setBugEnvDraft(e.target.value)}
+                      placeholder="Ej. QA / Staging / iOS 17.4 / Chrome 124..."
+                      style={{
+                        width: '100%',
+                        padding: '6px 8px',
+                        fontSize: '12px',
+                        borderRadius: '5px',
+                        border: '1px solid #85B8FF',
+                        fontFamily: 'inherit',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        onClick={() => setBugEditingEnv(false)}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: '11px',
+                          borderRadius: '4px',
+                          border: '1px solid #DCDFE4',
+                          background: '#FFFFFF',
+                          color: '#44546F',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        disabled={bugSavingField === 'environment'}
+                        onClick={async () => {
+                          await handleUpdateBugField('environment', bugEnvDraft, {}, 'Ambiente / Entorno');
+                          setBugEditingEnv(false);
+                        }}
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          borderRadius: '4px',
+                          border: 'none',
+                          background: '#0C66E4',
+                          color: '#FFFFFF',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Guardar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {b.environment ? (
+                      <span
+                        style={{
+                          background: '#E9F2FF',
+                          color: '#0C66E4',
+                          border: '1px solid #85B8FF',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: 700
+                        }}
+                        dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : adfToHtml(b.environment) }}
+                      />
+                    ) : (
+                      <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
+                        No especificado
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* 8. Fecha de Creación & Resolución */}
+              {/* 8. Resolución (Resolution) - En blanco si no hay resolución o si el estado no es Resuelta / En validación / Cerrada */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86' }}>
+                    RESOLUCIÓN
+                  </span>
+                </div>
+                <select
+                  value={(isResolvedState && b.resolution && b.resolution !== 'Sin resolver' && b.resolution !== 'Unresolved') ? b.resolution : ''}
+                  disabled={!isResolvedState || bugSavingField === 'resolution'}
+                  onChange={(e) => {
+                    const nextRes = e.target.value || null;
+                    const chosenRes = resolutionOptionsList.find(r => r.name === nextRes);
+                    handleUpdateBugField(
+                      'resolution',
+                      nextRes,
+                      {
+                        resolutionId: chosenRes?.id || null,
+                        currentStatus: rawStatus
+                      },
+                      'Resolución'
+                    );
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '6px 10px',
+                    borderRadius: '6px',
+                    border: isResolvedState ? '1px solid #85B8FF' : '1px solid #DCDFE4',
+                    backgroundColor: isResolvedState ? '#FFFFFF' : '#F4F5F7',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    color: isResolvedState ? '#172B4D' : '#8993A4',
+                    cursor: !isResolvedState ? 'not-allowed' : (bugSavingField === 'resolution' ? 'wait' : 'pointer')
+                  }}
+                >
+                  <option value=""></option>
+                  {isResolvedState && b.resolution && b.resolution !== 'Sin resolver' && b.resolution !== 'Unresolved' && !resolutionOptionsList.some(r => r.name === b.resolution) && (
+                    <option value={b.resolution}>{b.resolution}</option>
+                  )}
+                  {resolutionOptionsList.map(r => (
+                    <option key={r.id || r.name} value={r.name}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 9. Fecha de Creación & Resolución */}
               <div style={{ borderTop: '1px solid #EBECF0', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px', color: '#626F86' }}>
                 <div><strong>Registrado:</strong> {dateStr} {timeStr}</div>
-                {resDate && <div><strong>Resuelto:</strong> {formatBugCreatedDate(resDate).dateStr}</div>}
-                {b.resolution && <div><strong>Resolución:</strong> {b.resolution}</div>}
+                {isResolvedState && resDate && <div><strong>Resuelto:</strong> {formatBugCreatedDate(resDate).dateStr}</div>}
               </div>
             </div>
           </div>
@@ -5385,9 +6578,9 @@ Then el sistema valida la identidad.
     // Description HTML
     let descHtml = '';
     if (d.descriptionRaw) {
-      descHtml = sanitizeRenderedHtml(adfToHtml(d.descriptionRaw, attachments));
+      descHtml = sanitizeRenderedHtml(adfToHtml(d.descriptionRaw, attachments, inlineAttachmentUrls), attachments, inlineAttachmentUrls);
     } else if (d.descriptionRendered) {
-      descHtml = sanitizeRenderedHtml(d.descriptionRendered);
+      descHtml = sanitizeRenderedHtml(d.descriptionRendered, attachments, inlineAttachmentUrls);
     }
 
     // Dates
@@ -5420,7 +6613,18 @@ Then el sistema valida la identidad.
       >
         <div
           className="jira-modal-content"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const previewEl = e.target.closest && e.target.closest('[data-preview-attachment-id]');
+            if (previewEl) {
+              e.preventDefault();
+              const attId = previewEl.getAttribute('data-preview-attachment-id');
+              const attName = previewEl.getAttribute('data-preview-attachment-name') || `evidence_${attId}.png`;
+              if (attId) {
+                handlePreviewEvidence({ id: attId, filename: attName });
+              }
+            }
+          }}
           style={{
             maxWidth: '1380px',
             width: '95%',
@@ -5971,7 +7175,9 @@ Then el sistema valida la identidad.
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     {comments.map((comm) => {
                       const commDate = formatBugCreatedDate(comm.created);
-                      const commBodyHtml = sanitizeRenderedHtml(comm.bodyRendered || adfToHtml(comm.bodyRaw, attachments));
+                      const commBodyHtml = comm.bodyRaw
+                        ? sanitizeRenderedHtml(adfToHtml(comm.bodyRaw, attachments, inlineAttachmentUrls), attachments, inlineAttachmentUrls)
+                        : sanitizeRenderedHtml(comm.bodyRendered || '', attachments, inlineAttachmentUrls);
                       return (
                         <div
                           key={comm.id}
@@ -6922,8 +8128,9 @@ Then el sistema valida la identidad.
         const uploaded = attachments[0];
         const newEvidence = {
           id: uploaded.id,
-          filename: uploaded.filename,
-          url: uploaded.content
+          filename: uploaded.filename || actualFile.name,
+          url: uploaded.content,
+          mimeType: uploaded.mimeType || actualFile.type || ''
         };
 
         const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
@@ -7043,6 +8250,17 @@ Then el sistema valida la identidad.
     const currentTest = cycleTests.find(t => String(t.id) === String(testId));
     if (!currentTest) return;
     const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
+
+    // Helper: preserve original file extension (e.g. .pdf, .png) if the user omitted it when renaming
+    const ensureExtensionPreserved = (oldFilename, requestedName) => {
+      const trimmed = String(requestedName || '').trim();
+      if (!trimmed || !oldFilename) return trimmed;
+      const oldExtMatch = String(oldFilename).match(/(\.[a-zA-Z0-9]{1,8})$/);
+      if (oldExtMatch && !/\.[a-zA-Z0-9]{1,8}$/.test(trimmed)) {
+        return `${trimmed}${oldExtMatch[1]}`;
+      }
+      return trimmed;
+    };
     
     if (iterId) {
        const iters = [...(currentTest.iterations || [])];
@@ -7050,7 +8268,8 @@ Then el sistema valida la identidad.
        if (iterIdx > -1) {
           const evs = iters[iterIdx].evidences ? [...iters[iterIdx].evidences] : [];
           if (typeof evs[index] === 'object') {
-             evs[index] = { ...evs[index], filename: newName };
+             const finalName = ensureExtensionPreserved(evs[index].filename, newName);
+             evs[index] = { ...evs[index], filename: finalName };
           }
           iters[iterIdx] = { ...iters[iterIdx], evidences: evs };
           setCycleTests(prev => {
@@ -7076,7 +8295,8 @@ Then el sistema valida la identidad.
     }
     
     if (typeof currentEvidences[index] === 'object') {
-      currentEvidences[index] = { ...currentEvidences[index], filename: newName };
+      const finalName = ensureExtensionPreserved(currentEvidences[index].filename, newName);
+      currentEvidences[index] = { ...currentEvidences[index], filename: finalName };
     }
     
     setCycleTests(prev => {
@@ -7139,6 +8359,7 @@ Then el sistema valida la identidad.
     try {
       setQrModalLoading(true);
       setQrModalReceived(false);
+      setQrModalReceivedCount(0);
       setQrModalCopied(false);
 
       const testItem = typeof test === 'object' ? test : cycleTests.find(t => String(t.id) === String(test));
@@ -7193,51 +8414,106 @@ Then el sistema valida la identidad.
     }
   };
 
-  // Polling for QR Mobile Evidence Upload
+  /**
+   * Continuous Polling for QR Mobile Evidence Uploads.
+   * Keeps polling as long as the QR modal is open (even after the first photo arrives)
+   * and appends every newly uploaded photo/video to the target iteration or test case
+   * without overwriting previously captured evidences.
+   */
   useEffect(() => {
-    if (!qrModalSession || !qrModalSession.sessionId || qrModalReceived) return;
+    if (!qrModalSession || !qrModalSession.sessionId) return;
 
+    let isPolling = false;
     const interval = setInterval(async () => {
+      if (isPolling) return;
+      isPolling = true;
       try {
         const res = await invoke('checkMobileUploadStatus', { sessionId: qrModalSession.sessionId });
-        if (res && res.uploaded && res.evidence) {
+        const rawList = Array.isArray(res?.evidences) && res.evidences.length > 0
+          ? res.evidences
+          : (res?.evidence ? [res.evidence] : []);
+
+        if (res && res.uploaded && rawList.length > 0) {
+          const incomingEvidences = rawList.map(ev => ({
+            id: ev.id,
+            filename: ev.filename,
+            url: ev.url,
+            note: ev.note,
+            mimeType: ev.mimeType || undefined
+          }));
+
           setQrModalReceived(true);
-          const newEvidence = {
-            id: res.evidence.id,
-            filename: res.evidence.filename,
-            url: res.evidence.url,
-            note: res.evidence.note
-          };
+          setQrModalReceivedCount(prev => prev + incomingEvidences.length);
 
           const testId = qrModalSession.testId;
           const iterId = qrModalSession.iterId;
-          const testItem = cycleTests.find(t => String(t.id) === String(testId));
           const cycleIdStr = selectedCycle ? String(selectedCycle.id) : null;
+
+          // Read the freshest test state from perCycleCacheRef (if available) or cycleTests
+          // so consecutive batches never overwrite previous uploads.
+          const latestList = (cycleIdStr && Array.isArray(perCycleCacheRef.current[cycleIdStr]))
+            ? perCycleCacheRef.current[cycleIdStr]
+            : cycleTests;
+          const testItem = latestList.find(t => String(t.id) === String(testId));
 
           if (iterId) {
             const iters = [...(testItem?.iterations || [])];
             const iterIdx = iters.findIndex(i => i.id === iterId);
             if (iterIdx > -1) {
+              const existingIterEvs = Array.isArray(iters[iterIdx].evidences) ? [...iters[iterIdx].evidences] : [];
+              const existingIds = new Set(existingIterEvs.map(e => String(typeof e === 'object' ? (e.id || '') : e)));
+              for (const ne of incomingEvidences) {
+                if (!existingIds.has(String(ne.id))) {
+                  existingIterEvs.push(ne);
+                  existingIds.add(String(ne.id));
+                }
+              }
               iters[iterIdx] = {
                 ...iters[iterIdx],
-                evidences: iters[iterIdx].evidences ? [...iters[iterIdx].evidences, newEvidence] : [newEvidence]
+                evidences: existingIterEvs
               };
+
+              const incomingIdSet = new Set(incomingEvidences.map(e => String(e.id)));
+              const incomingNameSet = new Set(incomingEvidences.map(e => String(e.filename || '')).filter(Boolean));
               const cleanEvidences = (testItem?.evidences || []).filter(e => {
                 const id = typeof e === 'object' ? String(e.id || '') : String(e || '');
                 const name = typeof e === 'object' ? String(e.filename || '') : '';
-                return id !== String(newEvidence.id) && (!name || name !== String(newEvidence.filename));
+                return !incomingIdSet.has(id) && (!name || !incomingNameSet.has(name));
               });
+
               setCycleTests(prev => {
-                const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: cleanEvidences, iterations: iters, _detailLoaded: true } : t);
-                if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+                const updated = prev.map(t => {
+                  if (String(t.id) !== String(testId)) return t;
+                  const tIters = Array.isArray(t.iterations) ? [...t.iterations] : iters;
+                  const tIdx = tIters.findIndex(i => i.id === iterId);
+                  if (tIdx > -1) {
+                    const prevEvs = Array.isArray(tIters[tIdx].evidences) ? [...tIters[tIdx].evidences] : [];
+                    const prevIdSet = new Set(prevEvs.map(e => String(typeof e === 'object' ? (e.id || '') : e)));
+                    for (const ne of incomingEvidences) {
+                      if (!prevIdSet.has(String(ne.id))) {
+                        prevEvs.push(ne);
+                        prevIdSet.add(String(ne.id));
+                      }
+                    }
+                    tIters[tIdx] = { ...tIters[tIdx], evidences: prevEvs };
+                  }
+                  const tCleanEvs = (t.evidences || []).filter(e => {
+                    const id = typeof e === 'object' ? String(e.id || '') : String(e || '');
+                    const name = typeof e === 'object' ? String(e.filename || '') : '';
+                    return !incomingIdSet.has(id) && (!name || !incomingNameSet.has(name));
+                  });
+                  return { ...t, evidences: tCleanEvs, iterations: tIters, _detailLoaded: true };
+                });
+                if (cycleIdStr) {
                   perCycleCacheRef.current[cycleIdStr] = updated;
                 }
                 return updated;
               });
+
               await invoke('updateTestStatus', {
                 cycleId: selectedCycle?.id,
                 testId,
-                testRunId: testItem?.testRunId || testItem?.testRunKey,
+                testRunId: testItem?.testRunId || testItem?.testRunKey || qrModalSession.testRunId || qrModalSession.testRunKey,
                 iterations: iters,
                 evidences: cleanEvidences
               });
@@ -7247,11 +8523,31 @@ Then el sistema valida la identidad.
             if (testItem?.evidence && currentEvidences.length === 0) {
               currentEvidences.push(testItem.evidence);
             }
-            currentEvidences.push(newEvidence);
+            const existingIds = new Set(currentEvidences.map(e => String(typeof e === 'object' ? (e.id || '') : e)));
+            for (const ne of incomingEvidences) {
+              if (!existingIds.has(String(ne.id))) {
+                currentEvidences.push(ne);
+                existingIds.add(String(ne.id));
+              }
+            }
 
             setCycleTests(prev => {
-              const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, evidences: currentEvidences, _detailLoaded: true } : t);
-              if (cycleIdStr && perCycleCacheRef.current[cycleIdStr]) {
+              const updated = prev.map(t => {
+                if (String(t.id) !== String(testId)) return t;
+                const prevEvs = Array.isArray(t.evidences) ? [...t.evidences] : [];
+                if (t.evidence && prevEvs.length === 0) {
+                  prevEvs.push(t.evidence);
+                }
+                const prevIdSet = new Set(prevEvs.map(e => String(typeof e === 'object' ? (e.id || '') : e)));
+                for (const ne of incomingEvidences) {
+                  if (!prevIdSet.has(String(ne.id))) {
+                    prevEvs.push(ne);
+                    prevIdSet.add(String(ne.id));
+                  }
+                }
+                return { ...t, evidences: prevEvs, _detailLoaded: true };
+              });
+              if (cycleIdStr) {
                 perCycleCacheRef.current[cycleIdStr] = updated;
               }
               return updated;
@@ -7260,24 +8556,28 @@ Then el sistema valida la identidad.
             await invoke('updateTestStatus', {
               cycleId: selectedCycle?.id,
               testId,
-              testRunId: testItem?.testRunId || testItem?.testRunKey,
+              testRunId: testItem?.testRunId || testItem?.testRunKey || qrModalSession.testRunId || qrModalSession.testRunKey,
               evidences: currentEvidences
             });
           }
 
           addNotification({
             type: 'success',
-            title: '📸 ¡Evidencia Móvil Recibida!',
-            description: `Captura adjuntada a ${qrModalSession.testRunKey || qrModalSession.testRunId || qrModalSession.testKey}.`
+            title: incomingEvidences.length > 1
+              ? `📸 ¡${incomingEvidences.length} Evidencias Móviles Recibidas!`
+              : '📸 ¡Evidencia Móvil Recibida!',
+            description: `${incomingEvidences.length > 1 ? `${incomingEvidences.length} capturas adjuntadas` : 'Captura adjuntada'} a ${qrModalSession.testRunKey || qrModalSession.testRunId || qrModalSession.testKey}${qrModalSession.iterName ? ` (${qrModalSession.iterName})` : ''}.`
           });
         }
       } catch (e) {
         console.warn('[QR Poll] Error checking mobile upload status:', e);
+      } finally {
+        isPolling = false;
       }
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [qrModalSession, qrModalReceived, cycleTests, selectedCycle, addNotification]);
+  }, [qrModalSession, cycleTests, selectedCycle, addNotification]);
 
   const handleRunTest = async (testId, testKey, test) => {
     try {
@@ -7291,112 +8591,68 @@ Then el sistema valida la identidad.
     }
   };
 
-  const handlePreviewEvidence = async (ev) => {
+  /**
+   * Opens an in-app preview modal for images, videos, and PDF documents attached to
+   * Test Runs, Bug Details, or Traceability items.
+   * Uses `fetchAttachmentBlobData` which automatically falls back to the Forge backend
+   * resolver (`getAttachmentContent`) when browser `requestJira` is blocked by Jira's
+   * 303 redirect to `api.media.atlassian.com`.
+   */
+  const handlePreviewEvidence = async (ev, explicitFilename) => {
     if (!ev) return;
-    const id = typeof ev === 'string' ? ev : (ev.id || ev.attachmentId);
-    let filename = typeof ev === 'string' ? `evidence_${id}.jpg` : (ev.filename || `evidence_${id}.jpg`);
+    const id = typeof ev === 'object' ? (ev.id || ev.attachmentId) : ev;
+    if (!id) return;
+
+    let filename = explicitFilename || (typeof ev === 'object' ? ev.filename : null) || `evidence_${id}`;
     const note = (typeof ev === 'object' && ev.note) ? ev.note : null;
-    
-    // Si no tiene extensión, determinamos según el tipo
-    const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(filename);
-    const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(filename);
-    const isPdf = /\.(pdf)$/i.test(filename);
-    const hasExtension = /\.[a-zA-Z0-9]+$/.test(filename);
+    const rawMime = (typeof ev === 'object' && ev.mimeType) ? String(ev.mimeType).toLowerCase() : '';
 
-    if (isPdf) {
-      const newWin = window.open('about:blank', '_blank');
-      if (newWin) {
-        newWin.document.write('<p style="font-family:sans-serif;padding:20px;color:#172B4D;">Cargando documento PDF...</p>');
-      }
-      try {
-        let blobUrl = null;
-        const res = await requestJira(`/rest/api/3/attachment/content/${id}`);
-        if (res.ok) {
-          const blob = await res.blob();
-          const pdfBlob = new Blob([blob], { type: 'application/pdf' });
-          blobUrl = URL.createObjectURL(pdfBlob);
-        } else {
-          const data = await invoke('getAttachmentContent', { attachmentId: id });
-          if (data && !data.error && data.base64) {
-            const byteCharacters = atob(data.base64);
-            const byteNumbers = new Array(byteCharacters.length);
-            for (let i = 0; i < byteCharacters.length; i++) {
-              byteNumbers[i] = byteCharacters.charCodeAt(i);
-            }
-            const byteArray = new Uint8Array(byteNumbers);
-            const pdfBlob = new Blob([byteArray], { type: 'application/pdf' });
-            blobUrl = URL.createObjectURL(pdfBlob);
-          }
-        }
-        if (blobUrl) {
-          if (newWin) newWin.location.href = blobUrl;
-          else {
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.target = '_blank';
-            a.click();
-          }
-          return;
-        }
-      } catch (e) {
-        console.error('PDF preview error:', e);
-      }
-      if (newWin) newWin.close();
-      router.open(`/secure/attachment/${id}/${encodeURIComponent(filename)}`);
-      return;
-    }
+    const isVideoExt = /\.(mp4|mov|webm|avi|mkv)$/i.test(filename) || rawMime.startsWith('video/');
+    const isImageExt = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(filename) || rawMime.startsWith('image/');
+    const isPdfExt = /\.(pdf)$/i.test(filename) || rawMime === 'application/pdf';
+    const hasExtension = /\.[a-zA-Z0-9]{1,8}$/.test(filename);
 
-    if (isVideo || isImage || !hasExtension) {
-      if (!hasExtension && !isVideo) filename += '.png';
+    if (isPdfExt || isVideoExt || isImageExt || !hasExtension) {
+      const fallbackMime = isPdfExt
+        ? 'application/pdf'
+        : isVideoExt
+        ? 'video/mp4'
+        : 'image/png';
 
-      // Limpiar URL Blob anterior si existía
-      if (previewModalData && previewModalData.blobUrl) {
-        try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
-      }
-
-      setPreviewModalData({ id, filename, note, loading: true });
+      setPreviewModalData({
+        id,
+        filename,
+        note,
+        loading: true,
+        isPdf: isPdfExt,
+        isVideo: isVideoExt
+      });
 
       try {
-        let blobUrl = null;
-        let mimeType = isVideo ? 'video/mp4' : 'image/png';
+        const data = await fetchAttachmentBlobData(id, fallbackMime);
 
-        // 1. Fetch directo en navegador vía requestJira (soporta streaming, archivos grandes y aceleración por HW)
-        try {
-          const res = await requestJira(`/rest/api/3/attachment/content/${id}`);
-          if (res.ok) {
-            const blob = await res.blob();
-            mimeType = res.headers?.get?.('content-type') || blob.type || (isVideo ? 'video/mp4' : 'image/png');
-            blobUrl = URL.createObjectURL(blob);
+        if (data && data.blobUrl) {
+          const detectedMime = String(data.mimeType || fallbackMime).toLowerCase();
+          const finalIsPdf = isPdfExt || detectedMime === 'application/pdf';
+          const finalIsVideo = !finalIsPdf && (isVideoExt || detectedMime.startsWith('video/'));
+
+          let finalFilename = filename;
+          if (!hasExtension) {
+            if (finalIsPdf) finalFilename += '.pdf';
+            else if (finalIsVideo) finalFilename += '.mp4';
+            else finalFilename += '.png';
           }
-        } catch (fetchErr) {
-          console.warn('requestJira attachment content failed, falling back to backend resolver:', fetchErr);
-        }
 
-        // 2. Fallback a resolver backend si requestJira no respondió
-        if (!blobUrl) {
-          const data = await invoke('getAttachmentContent', { attachmentId: id });
-          if (data && !data.error && data.base64) {
-            const byteCharacters = atob(data.base64);
-            const byteNumbers = new Array(byteCharacters.length);
-            for (let i = 0; i < byteCharacters.length; i++) {
-              byteNumbers[i] = byteCharacters.charCodeAt(i);
-            }
-            const byteArray = new Uint8Array(byteNumbers);
-            const blob = new Blob([byteArray], { type: data.mimeType || (isVideo ? 'video/mp4' : 'image/png') });
-            blobUrl = URL.createObjectURL(blob);
-            mimeType = data.mimeType || (isVideo ? 'video/mp4' : 'image/png');
-          }
-        }
-
-        if (blobUrl) {
           setPreviewModalData({
             id,
-            filename,
+            filename: finalFilename,
             note,
             loading: false,
-            blobUrl,
-            mimeType,
-            isVideo: isVideo || mimeType.startsWith('video/')
+            blobUrl: data.blobUrl,
+            byteArray: data.byteArray || null,
+            mimeType: data.mimeType || fallbackMime,
+            isPdf: finalIsPdf,
+            isVideo: finalIsVideo
           });
         } else {
           setPreviewModalData({
@@ -7618,11 +8874,13 @@ Then el sistema valida la identidad.
             const existing = prevMap.get(String(s.id));
             const loadedCycle = initialCycles.find(ic => String(ic.id) === String(s.id));
             return {
+              ...(existing || {}),
               id: s.id,
               key: s.key,
               summary: s.summary,
               status: existing?.status || 'To Do',
               planId: s.planId || existing?.planId || null,
+              schedule: s.schedule || existing?.schedule || null,
               testCount: loadedCycle ? (loadedCycle.execution?.length || 0) : (existing?.testCount || 0)
             };
           });
@@ -8345,7 +9603,199 @@ Then el sistema valida la identidad.
     );
   };
 
-const renderPlanningTab = () => {
+  // ─── Planning Schedule & Filter States (Stitch Redesign) ───
+  const [planningPlanSearch, setPlanningPlanSearch] = useState('');
+  const [planningShowAllCycles, setPlanningShowAllCycles] = useState(false);
+  const [planningCycleSearch, setPlanningCycleSearch] = useState('');
+  const [planningCycleStatusFilter, setPlanningCycleStatusFilter] = useState('');
+  const [isPlanCalendarOpen, setIsPlanCalendarOpen] = useState(false);
+  const [planScheduleForm, setPlanScheduleForm] = useState({
+    startDate: '',
+    endDate: '',
+    excludeWeekends: true,
+    holidays: [],
+    statusBadge: 'ACTIVO'
+  });
+  const [newHolidayDate, setNewHolidayDate] = useState('');
+  const [newHolidayDesc, setNewHolidayDesc] = useState('');
+  const [isSavingPlanSchedule, setIsSavingPlanSchedule] = useState(false);
+
+  const [isCycleScheduleOpen, setIsCycleScheduleOpen] = useState(false);
+  const [cycleScheduleForm, setCycleScheduleForm] = useState({
+    startDate: '',
+    endDate: '',
+    sprint: '',
+    planningStatus: 'EN CURSO',
+    excludeWeekends: true,
+    holidays: []
+  });
+  const [isSavingCycleSchedule, setIsSavingCycleSchedule] = useState(false);
+
+  // Sync active Test Plan schedule into form when selectedPlanId or testPlans changes
+  useEffect(() => {
+    const plan = testPlans.find(p => String(p.id) === String(selectedPlanId));
+    const sched = plan?.schedule || {};
+    setPlanScheduleForm({
+      startDate: sched.startDate || '',
+      endDate: sched.endDate || '',
+      excludeWeekends: sched.excludeWeekends !== false,
+      holidays: Array.isArray(sched.holidays) ? sched.holidays : [],
+      statusBadge: sched.statusBadge || 'ACTIVO'
+    });
+    if (plan) {
+      const hasSavedDates = Boolean(sched.startDate && sched.endDate);
+      setIsPlanCalendarOpen(!hasSavedDates);
+    } else {
+      setIsPlanCalendarOpen(false);
+    }
+  }, [selectedPlanId, testPlans]);
+
+  // Sync active Test Cycle schedule into form when selectedCycle or testCycles changes
+  useEffect(() => {
+    if (!selectedCycle) return;
+    const cycleInList = testCycles.find(c => String(c.id) === String(selectedCycle.id)) || selectedCycle;
+    const sched = cycleInList?.schedule || selectedCycle?.schedule || {};
+    const parentPlan = testPlans.find(p => String(p.id) === String(cycleInList?.planId || selectedPlanId));
+    const parentHolidays = Array.isArray(parentPlan?.schedule?.holidays) ? parentPlan.schedule.holidays : [];
+    setCycleScheduleForm({
+      startDate: sched.startDate || '',
+      endDate: sched.endDate || '',
+      sprint: sched.sprint || '',
+      planningStatus: sched.planningStatus || 'EN CURSO',
+      excludeWeekends: sched.excludeWeekends !== undefined ? sched.excludeWeekends !== false : (parentPlan?.schedule?.excludeWeekends !== false),
+      holidays: Array.isArray(sched.holidays) && sched.holidays.length > 0 ? sched.holidays : parentHolidays
+    });
+  }, [selectedCycle?.id, testCycles, selectedPlanId, testPlans]);
+
+  // Helper: Calculate natural and business days between two YYYY-MM-DD dates
+  const calcScheduleDays = (startStr, endStr, excludeWeekends = true, holidays = []) => {
+    if (!startStr || !endStr) return { naturalDays: 0, businessDays: 0 };
+    const [sy, sm, sd] = String(startStr).split('-').map(Number);
+    const [ey, em, ed] = String(endStr).split('-').map(Number);
+    if (!sy || !sm || !sd || !ey || !em || !ed) return { naturalDays: 0, businessDays: 0 };
+    const start = new Date(sy, sm - 1, sd);
+    const end = new Date(ey, em - 1, ed);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) {
+      return { naturalDays: 0, businessDays: 0 };
+    }
+    const holidaySet = new Set(
+      (Array.isArray(holidays) ? holidays : [])
+        .map(h => (typeof h === 'object' && h !== null ? String(h.date || '') : String(h || '')))
+        .filter(Boolean)
+    );
+    let naturalDays = 0;
+    let businessDays = 0;
+    const cur = new Date(start);
+    while (cur <= end && naturalDays < 3660) {
+      naturalDays++;
+      const dow = cur.getDay();
+      const iso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
+      const isWeekend = dow === 0 || dow === 6;
+      const isHoliday = holidaySet.has(iso);
+      if ((!excludeWeekends || !isWeekend) && !isHoliday) {
+        businessDays++;
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return { naturalDays, businessDays };
+  };
+
+  // Helper: Format YYYY-MM-DD into short Spanish date (e.g. "06 Abr" or "06 Abr 2026")
+  const formatShortDateEs = (dateStr, withYear = false) => {
+    if (!dateStr) return '';
+    const parts = String(dateStr).split('-');
+    if (parts.length !== 3) return dateStr;
+    const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const mIdx = parseInt(parts[1], 10) - 1;
+    const monthName = months[mIdx] || parts[1];
+    return withYear ? `${parts[2]} ${monthName} ${parts[0]}` : `${parts[2]} ${monthName}`;
+  };
+
+  // Persist Test Plan calendar in Jira Issue Entity Property ('testpulse-schedule')
+  const handleSavePlanSchedule = async () => {
+    if (!selectedPlanId) return;
+    setIsSavingPlanSchedule(true);
+    try {
+      const { naturalDays, businessDays } = calcScheduleDays(
+        planScheduleForm.startDate,
+        planScheduleForm.endDate,
+        planScheduleForm.excludeWeekends,
+        planScheduleForm.holidays
+      );
+      const schedulePayload = {
+        ...planScheduleForm,
+        naturalDays,
+        businessDays
+      };
+      const res = await invoke('savePlanSchedule', {
+        planId: selectedPlanId,
+        schedule: schedulePayload
+      });
+      clearPersistentCache();
+      queryClient.invalidateQueries();
+      const savedSchedule = res?.schedule || schedulePayload;
+      setTestPlans(prev => prev.map(p => String(p.id) === String(selectedPlanId) ? { ...p, schedule: savedSchedule } : p));
+      setIsPlanCalendarOpen(false);
+      addNotification({
+        type: 'success',
+        title: 'Calendario del Plan guardado',
+        description: savedSchedule.startDate && savedSchedule.endDate
+          ? `Vigencia: ${formatShortDateEs(savedSchedule.startDate)} – ${formatShortDateEs(savedSchedule.endDate)} (${savedSchedule.businessDays}d hábiles)`
+          : 'Configuración de calendario actualizada en Jira.'
+      });
+    } catch (e) {
+      console.error('Error saving plan schedule:', e);
+      addNotification({ type: 'error', title: 'Error al guardar calendario del plan', description: e.message || String(e) });
+    } finally {
+      setIsSavingPlanSchedule(false);
+    }
+  };
+
+  // Persist Test Cycle schedule in Jira Issue Entity Property ('testops-plan-link' & 'testpulse-schedule')
+  const handleSaveCycleSchedule = async (overrideFields = null) => {
+    if (!selectedCycle) return;
+    setIsSavingCycleSchedule(true);
+    try {
+      const mergedForm = overrideFields ? { ...cycleScheduleForm, ...overrideFields } : cycleScheduleForm;
+      const { naturalDays, businessDays } = calcScheduleDays(
+        mergedForm.startDate,
+        mergedForm.endDate,
+        mergedForm.excludeWeekends,
+        mergedForm.holidays
+      );
+      const schedulePayload = {
+        ...mergedForm,
+        naturalDays,
+        businessDays
+      };
+      const targetPlanId = selectedCycle.planId || selectedPlanId || null;
+      const res = await invoke('saveCycleSchedule', {
+        cycleId: selectedCycle.id,
+        planId: targetPlanId,
+        schedule: schedulePayload
+      });
+      clearPersistentCache();
+      queryClient.invalidateQueries();
+      const savedSchedule = res?.schedule || schedulePayload;
+      const savedPlanId = res?.planId !== undefined ? res.planId : targetPlanId;
+      setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, schedule: savedSchedule, planId: savedPlanId || c.planId } : c));
+      setSelectedCycle(prev => prev ? { ...prev, schedule: savedSchedule, planId: savedPlanId || prev.planId } : prev);
+      addNotification({
+        type: 'success',
+        title: 'Fechas del Ciclo guardadas',
+        description: savedSchedule.startDate && savedSchedule.endDate
+          ? `${formatShortDateEs(savedSchedule.startDate)} → ${formatShortDateEs(savedSchedule.endDate)} (${savedSchedule.businessDays}d hábiles)`
+          : 'Metadatos del ciclo actualizados en Jira.'
+      });
+    } catch (e) {
+      console.error('Error saving cycle schedule:', e);
+      addNotification({ type: 'error', title: 'Error al guardar fechas del ciclo', description: e.message || String(e) });
+    } finally {
+      setIsSavingCycleSchedule(false);
+    }
+  };
+
+  const renderPlanningTab = () => {
     // Deduplicate cycleTests strictly by test case key and ID
     const uniqueCycleTestsMap = new Map();
     for (const test of cycleTests) {
@@ -8365,24 +9815,25 @@ const renderPlanningTab = () => {
     }
     const deduplicatedCycleTests = Array.from(uniqueCycleTestsMap.values());
 
-    const totalInProject = testCases.length;
     const inCycleCount = selectedCycle ? deduplicatedCycleTests.length : 0;
-    const notInCycleCount = totalInProject > inCycleCount ? totalInProject - inCycleCount : 0;
-    const missingPct = totalInProject > 0 ? Math.round((notInCycleCount / totalInProject) * 100) : 0;
-    const cycleProgressPct = totalInProject > 0 ? ((inCycleCount / totalInProject) * 100).toFixed(1) : '0.0';
     const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
 
-    const filteredCycleTests = deduplicatedCycleTests.filter(test => 
-      !deferredSearchQuery || 
-      test.key?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || 
-      test.summary?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || 
-      (findTc(test.id)?.summary || '').toLowerCase().includes(deferredSearchQuery.toLowerCase())
-    );
+    // Filter cycle tests by global search or local cycle search
+    const effectiveCycleQuery = (planningCycleSearch || deferredSearchQuery || '').trim().toLowerCase();
+    const filteredCycleTests = deduplicatedCycleTests.filter(test => {
+      const matchesSearch = !effectiveCycleQuery ||
+        test.key?.toLowerCase().includes(effectiveCycleQuery) ||
+        test.testRunKey?.toLowerCase().includes(effectiveCycleQuery) ||
+        test.testCaseKey?.toLowerCase().includes(effectiveCycleQuery) ||
+        test.summary?.toLowerCase().includes(effectiveCycleQuery) ||
+        (findTc(test.id)?.summary || '').toLowerCase().includes(effectiveCycleQuery);
+      return matchesSearch;
+    });
 
     const cycleTestIds = new Set(deduplicatedCycleTests.map(ct => String(ct.id)));
     const cycleTestKeys = new Set(deduplicatedCycleTests.map(ct => ct.testCaseKey || ct.key).filter(Boolean));
 
-    const availableFilteredTestCases = testCases.filter(tc => 
+    const availableFilteredTestCases = testCases.filter(tc =>
       (planningFolder === '' || tc.folderId === planningFolder) &&
       (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
       (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) &&
@@ -8391,518 +9842,1627 @@ const renderPlanningTab = () => {
       (!deferredSearchQuery || tc.key?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || tc.summary?.toLowerCase().includes(deferredSearchQuery.toLowerCase()))
     );
 
+    // Filtered plans for Plan Selector dropdown
+    const visiblePlans = testPlans.filter(p => {
+      if (!planningPlanSearch.trim()) return true;
+      const q = planningPlanSearch.trim().toLowerCase();
+      return (p.key || '').toLowerCase().includes(q) || (p.summary || '').toLowerCase().includes(q);
+    });
+
+    // Live day calculations for active Plan calendar form
+    const planDaysCalc = calcScheduleDays(
+      planScheduleForm.startDate,
+      planScheduleForm.endDate,
+      planScheduleForm.excludeWeekends,
+      planScheduleForm.holidays
+    );
+
+    // Active cycle schedule & live day calculation from cycleScheduleForm
+    const activeCycleObj = selectedCycle
+      ? (testCycles.find(c => String(c.id) === String(selectedCycle.id)) || selectedCycle)
+      : null;
+    const cycleDaysCalc = calcScheduleDays(
+      cycleScheduleForm.startDate,
+      cycleScheduleForm.endDate,
+      cycleScheduleForm.excludeWeekends !== false,
+      cycleScheduleForm.holidays || planScheduleForm.holidays || []
+    );
+
+    const hasCycleDates = Boolean(cycleScheduleForm.startDate && cycleScheduleForm.endDate);
+
+    // Format YYYY-MM-DD as "Miércoles, 14 de Octubre"
+    const formatLongDayMonthEs = (dateStr) => {
+      if (!dateStr) return 'Sin fecha definida';
+      const [y, m, d] = String(dateStr).split('-').map(Number);
+      if (!y || !m || !d) return dateStr;
+      const dt = new Date(y, m - 1, d);
+      if (isNaN(dt.getTime())) return dateStr;
+      const days = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+      const months = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+      return `${days[dt.getDay()]}, ${String(d).padStart(2, '0')} de ${months[m - 1] || ''}`;
+    };
+
+    // Format YYYY-MM-DD as "14 Octubre 2026"
+    const formatFullDateEs = (dateStr) => {
+      if (!dateStr) return 'Sin definir';
+      const [y, m, d] = String(dateStr).split('-').map(Number);
+      if (!y || !m || !d) return dateStr;
+      const months = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+      return `${String(d).padStart(2, '0')} ${months[m - 1] || ''} ${y}`;
+    };
+
+    // Stitch status pill for sidebar cycles
+    const renderStitchCycleBadge = (statusLabel) => {
+      const label = (statusLabel || 'EN CURSO').toUpperCase();
+      let bg = '#DBEAFE', color = '#1D4ED8';
+      if (label === 'PLANIFICADO' || label === 'PLANNED') {
+        bg = '#F3E8FF'; color = '#7E22CE';
+      } else if (label === 'CERRADO' || label === 'COMPLETADO' || label === 'DONE' || label === 'BORRADOR' || label === 'TO DO') {
+        bg = '#F1F5F9'; color = '#475569';
+      }
+      return (
+        <span style={{
+          padding: '2px 6px',
+          borderRadius: '4px',
+          fontSize: '9px',
+          fontWeight: 700,
+          backgroundColor: bg,
+          color,
+          textTransform: 'uppercase',
+          letterSpacing: '0.03em',
+          flexShrink: 0
+        }}>
+          {label}
+        </span>
+      );
+    };
+
+    const cyclesInCurrentPlan = selectedPlanId
+      ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId))
+      : filteredTestCycles;
+    const availableUnlinkedCycles = selectedPlanId
+      ? filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId))
+      : [];
+    const displayedSidebarCycles = (!selectedPlanId || planningShowAllCycles) ? filteredTestCycles : cyclesInCurrentPlan;
+
+    // Export current cycle plan to CSV
+    const handleExportCyclePlanCsv = () => {
+      if (!selectedCycle) return;
+      const headers = ['Cycle Key', 'Cycle Summary', 'Start Date', 'End Date', 'Business Days', 'Test Key', 'Test Summary', 'Execution Type'];
+      const rows = deduplicatedCycleTests.map(t => [
+        selectedCycle.key || '',
+        `"${(selectedCycle.summary || '').replace(/"/g, '""')}"`,
+        cycleScheduleForm.startDate || '',
+        cycleScheduleForm.endDate || '',
+        cycleDaysCalc.businessDays || 0,
+        t.testCaseKey || t.key || '',
+        `"${(t.summary || findTc(t.id)?.summary || '').replace(/"/g, '""')}"`,
+        getExecVal(t).includes('auto') ? 'AUTOMATIZADO' : 'MANUAL'
+      ]);
+      const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement('a');
+      link.setAttribute('href', encodedUri);
+      link.setAttribute('download', `Plan_${selectedCycle.key || 'Ciclo'}_${cycleScheduleForm.startDate || 'cronograma'}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
     return (
-      <div className="tab-layout" style={{ height: '100%', overflow: 'hidden' }}>
-        {/* Left Planning Sidebar (Test Plans & Cycles) */}
+      <div className="tab-layout" style={{ height: '100%', overflow: 'hidden', background: '#FBFBFC', display: 'flex' }}>
+        {/* Left Sidebar: Plans & Cycles Navigation (Stitch w-72 white sidebar) */}
         {isFolderSidebarVisible && (
           <>
-            <aside className="planning-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
-              <div className="planning-sidebar-header">
-                <div className="planning-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span>TEST PLANS</span>
-                    <button 
+            <aside
+              className="planning-sidebar"
+              style={{
+                width: Math.max(sidebarWidth, 288),
+                flexShrink: 0,
+                background: '#FFFFFF',
+                borderRight: '1px solid #E2E8F0',
+                display: 'flex',
+                flexDirection: 'column',
+                height: '100%',
+                overflow: 'hidden',
+                userSelect: 'none'
+              }}
+            >
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                {/* BLOCK 1: TEST PLAN ACTIVO (data-purpose="test-plan-selector-block") */}
+                <div style={{ padding: '12px', borderBottom: '1px solid #F1F5F9' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                      Test Plan Activo
+                    </span>
+                    <button
+                      type="button"
                       onClick={handleCreateIssue}
-                      style={{ background: 'none', border: 'none', color: 'var(--jira-blue, #0C66E4)', fontSize: '11px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: '#0C66E4',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '2px',
+                        padding: 0
+                      }}
                     >
-                      + Nuevo
+                      <span>+ Nuevo</span>
                     </button>
                   </div>
-                  <button
-                    onClick={toggleFolderSidebar}
-                    title="Ocultar panel lateral (Sidebar)"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      padding: '3px',
-                      borderRadius: '4px',
-                      color: 'var(--jira-subtle, #626F86)',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
-                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                      <line x1="9" y1="3" x2="9" y2="21" />
-                      <path d="M15 15l-3-3 3-3" />
-                    </svg>
-                  </button>
-                </div>
-                <select 
-                  value={selectedPlanId || ''} 
-                  onChange={e => { 
-                    setSelectedPlanId(e.target.value); 
-                    setSelectedCycle(null); 
-                    setSelectedTestsForCycle([]); 
-                  }}
-                  className="planning-plan-dropdown"
-                  style={{ outline: 'none' }}
-                >
-                  <option value="">Seleccionar un Test Plan...</option>
-                  {testPlans.map(plan => (
-                    <option key={plan.id} value={plan.id}>{plan.summary}</option>
-                  ))}
-                </select>
-              </div>
 
-          {/* Sidebar scrollable cycles */}
-          <div className="planning-sidebar-content">
-            {selectedPlanId ? (
-              <>
-                {/* Cycles in this Plan */}
-                <div>
-                  <div className="planning-section-title">
-                    <span>CYCLES IN THIS PLAN</span>
-                    <span style={{ fontSize: '10px', fontWeight: 700, background: 'var(--jira-bg-subtle, #F1F2F4)', color: 'var(--jira-subtle, #626F86)', padding: '1px 6px', borderRadius: '10px' }}>
-                      {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length}
-                    </span>
-                  </div>
-                  <div>
-                    {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).map(cycle => {
-                      const isActive = selectedCycle?.id === cycle.id;
-                      return (
-                        <div 
-                          key={cycle.id} 
-                          className={`planning-cycle-card ${isActive ? 'active' : ''}`}
-                          onClick={() => handleCycleSelect(cycle)}
-                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                            </svg>
-                            <span style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isActive ? 600 : 500 }}>
-                              {cycle.summary}
-                            </span>
+                  {/* Active Plan Card */}
+                  <div style={{
+                    border: '1px solid #E2E8F0',
+                    borderRadius: '6px',
+                    padding: '10px',
+                    background: '#FFFFFF',
+                    boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px', marginBottom: (planningShowAllCycles || (isPlanCalendarOpen && currentPlan)) ? '8px' : 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                        <div style={{
+                          width: '24px',
+                          height: '24px',
+                          borderRadius: '4px',
+                          background: '#F3E8FF',
+                          color: '#7E22CE',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0
+                        }}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                            <line x1="16" y1="2" x2="16" y2="6" />
+                            <line x1="8" y1="2" x2="8" y2="6" />
+                            <line x1="3" y1="10" x2="21" y2="10" />
+                          </svg>
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              color: '#1E293B',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              cursor: currentPlan ? 'pointer' : 'default'
+                            }}
+                            title={currentPlan ? currentPlan.summary : 'Selecciona un Test Plan'}
+                            onClick={() => currentPlan && router.open('/browse/' + currentPlan.key)}
+                          >
+                            {currentPlan ? currentPlan.summary : 'Sin Test Plan seleccionado'}
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); handleUnlinkCycleFromPlan(cycle.id); }} 
-                              style={{ 
-                                background: 'none', 
-                                border: 'none', 
-                                color: '#AE2A19', 
-                                fontSize: '11px', 
-                                fontWeight: 600, 
-                                cursor: 'pointer', 
-                                padding: '2px 4px', 
-                                borderRadius: '4px'
-                              }}
-                              title="Remover ciclo del plan"
-                            >
-                              - Remove
-                            </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '2px' }}>
+                            <span style={{ fontSize: '10px', color: '#64748B', fontFamily: 'monospace' }}>
+                              {planScheduleForm.startDate && planScheduleForm.endDate
+                                ? `${formatShortDateEs(planScheduleForm.startDate)} - ${formatShortDateEs(planScheduleForm.endDate, true)}`
+                                : 'Sin vigencia configurada'}
+                            </span>
+                            {planScheduleForm.startDate && planScheduleForm.endDate && (
+                              <span style={{
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                color: '#1D4ED8',
+                                background: '#EFF6FF',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                border: '1px solid #BFDBFE',
+                                fontFamily: 'monospace'
+                              }}>
+                                {planDaysCalc.businessDays} días hábiles
+                              </span>
+                            )}
+                            {currentPlan && (
+                              <button
+                                type="button"
+                                onClick={() => setIsPlanCalendarOpen(prev => !prev)}
+                                title={isPlanCalendarOpen ? 'Ocultar calendario del plan' : 'Editar fechas del plan'}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  width: '18px',
+                                  height: '18px',
+                                  padding: 0,
+                                  borderRadius: '4px',
+                                  border: isPlanCalendarOpen ? '1px solid #BFDBFE' : '1px solid transparent',
+                                  background: isPlanCalendarOpen ? '#EFF6FF' : 'transparent',
+                                  color: isPlanCalendarOpen ? '#0C66E4' : '#64748B',
+                                  cursor: 'pointer',
+                                  flexShrink: 0
+                                }}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Switch Test Plan Dropdown Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setPlanningShowAllCycles(prev => !prev)}
+                        title="Cambiar Test Plan activo"
+                        style={{
+                          color: '#94A3B8',
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          display: 'flex',
+                          alignItems: 'center'
+                        }}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M7 15l5 5 5-5M7 9l5-5 5 5" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* Inline Test Plan Switcher when unfolded */}
+                    {planningShowAllCycles && (
+                      <div style={{
+                        marginBottom: (isPlanCalendarOpen && currentPlan) ? '8px' : 0,
+                        padding: '6px',
+                        background: '#F8FAFC',
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '4px'
+                      }}>
+                        <input
+                          type="text"
+                          value={planningPlanSearch}
+                          onChange={e => setPlanningPlanSearch(e.target.value)}
+                          placeholder="Buscar Test Plan..."
+                          style={{
+                            width: '100%',
+                            fontSize: '11px',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid #CBD5E1',
+                            marginBottom: '6px',
+                            boxSizing: 'border-box'
+                          }}
+                        />
+                        <div style={{ maxHeight: '130px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                          {visiblePlans.map(plan => {
+                            const isSel = String(plan.id) === String(selectedPlanId);
+                            return (
+                              <div
+                                key={plan.id}
+                                onClick={() => {
+                                  setSelectedPlanId(plan.id);
+                                  setPlanningShowAllCycles(false);
+                                  const planCycles = filteredTestCycles.filter(c => isCycleInPlan(c, plan.id));
+                                  if (planCycles.length > 0 && (!selectedCycle || !isCycleInPlan(selectedCycle, plan.id))) {
+                                    handleCycleSelect(planCycles[0]);
+                                  }
+                                }}
+                                style={{
+                                  padding: '5px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '11px',
+                                  fontWeight: isSel ? 700 : 500,
+                                  color: isSel ? '#0C66E4' : '#334155',
+                                  background: isSel ? '#EFF6FF' : 'transparent',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: '6px'
+                                }}
+                              >
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {plan.summary}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Collapsible Plan Calendar Editor */}
+                    {isPlanCalendarOpen && currentPlan && (
+                      <div style={{
+                        marginTop: '8px',
+                        paddingTop: '8px',
+                        borderTop: '1px dashed #E2E8F0',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px'
+                      }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '9px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: '2px' }}>
+                              Inicio Plan
+                            </label>
+                            <input
+                              type="date"
+                              value={planScheduleForm.startDate}
+                              onChange={e => setPlanScheduleForm(prev => ({ ...prev, startDate: e.target.value }))}
+                              style={{ width: '100%', fontSize: '11px', padding: '4px', borderRadius: '4px', border: '1px solid #CBD5E1', boxSizing: 'border-box' }}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '9px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: '2px' }}>
+                              Fin Plan
+                            </label>
+                            <input
+                              type="date"
+                              value={planScheduleForm.endDate}
+                              onChange={e => setPlanScheduleForm(prev => ({ ...prev, endDate: e.target.value }))}
+                              style={{ width: '100%', fontSize: '11px', padding: '4px', borderRadius: '4px', border: '1px solid #CBD5E1', boxSizing: 'border-box' }}
+                            />
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: '#475569', cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={planScheduleForm.excludeWeekends}
+                              onChange={e => setPlanScheduleForm(prev => ({ ...prev, excludeWeekends: e.target.checked }))}
+                            />
+                            <span>Excluir Sáb/Dom</span>
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleSavePlanSchedule}
+                            disabled={isSavingPlanSchedule}
+                            style={{
+                              fontSize: '10px',
+                              fontWeight: 600,
+                              background: '#0C66E4',
+                              color: '#FFFFFF',
+                              border: 'none',
+                              padding: '4px 10px',
+                              borderRadius: '4px',
+                              cursor: isSavingPlanSchedule ? 'wait' : 'pointer'
+                            }}
+                          >
+                            {isSavingPlanSchedule ? 'Guardando...' : 'Guardar Plan'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* BLOCK 2: CICLOS PLANIFICADOS (data-purpose="cycles-in-plan-list") — NO PROGRESS BARS / NO SEMÁFOROS */}
+                <div style={{ padding: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                        Ciclos Planificados
+                      </span>
+                      <span style={{
+                        background: '#E2E8F0',
+                        color: '#334155',
+                        padding: '1px 6px',
+                        borderRadius: '9999px',
+                        fontSize: '10px',
+                        fontWeight: 700
+                      }}>
+                        {displayedSidebarCycles.length}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#94A3B8' }}>Fechas / Duración</span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {displayedSidebarCycles.map(cycle => {
+                      const isActive = selectedCycle?.id === cycle.id;
+                      const cSched = (isActive && cycleScheduleForm) ? cycleScheduleForm : (cycle.schedule || {});
+                      const cDays = calcScheduleDays(
+                        cSched.startDate,
+                        cSched.endDate,
+                        cSched.excludeWeekends !== false,
+                        cSched.holidays || []
+                      );
+                      const isLinkedToCurrentPlan = selectedPlanId && isCycleInPlan(cycle, selectedPlanId);
+
+                      return (
+                        <div
+                          key={cycle.id}
+                          onClick={() => handleCycleSelect(cycle)}
+                          style={{
+                            padding: '8px 10px',
+                            borderRadius: '6px',
+                            background: isActive ? 'rgba(239, 246, 255, 0.8)' : 'transparent',
+                            border: isActive ? '1px solid #BFDBFE' : '1px solid transparent',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px', marginBottom: '4px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={isActive ? '#0C66E4' : '#94A3B8'} strokeWidth="2" style={{ flexShrink: 0 }}>
+                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                                <line x1="16" y1="2" x2="16" y2="6" />
+                                <line x1="8" y1="2" x2="8" y2="6" />
+                                <line x1="3" y1="10" x2="21" y2="10" />
+                              </svg>
+                              <span
+                                style={{
+                                  fontSize: '12px',
+                                  fontWeight: isActive ? 700 : 500,
+                                  color: isActive ? '#0C66E4' : '#334155',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                title={cycle.summary}
+                              >
+                                {cycle.summary}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                              {isLinkedToCurrentPlan && (
+                                <button
+                                  type="button"
+                                  onClick={e => { e.stopPropagation(); handleUnlinkCycleFromPlan(cycle.id); }}
+                                  title="Desvincular ciclo de este plan"
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: '#94A3B8',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    padding: '0 2px',
+                                    lineHeight: 1
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            paddingLeft: '19px',
+                            fontSize: '10px',
+                            color: isActive ? '#475569' : '#64748B'
+                          }}>
+                            <span style={{ fontFamily: 'monospace' }}>
+                              {cSched.startDate && cSched.endDate
+                                ? `${formatShortDateEs(cSched.startDate)} - ${formatShortDateEs(cSched.endDate)}`
+                                : 'Sin fechas definidas'}
+                            </span>
+                            <span style={{
+                              fontFamily: 'monospace',
+                              fontWeight: isActive ? 600 : 400,
+                              color: isActive ? '#0C66E4' : '#64748B'
+                            }}>
+                              {cDays.naturalDays > 0 ? `${cDays.naturalDays} días` : '—'}
+                            </span>
                           </div>
                         </div>
                       );
                     })}
-                    {filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length === 0 && (
-                      <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', padding: '6px 0' }}>
-                        No hay ciclos vinculados a este plan.
+
+                    {displayedSidebarCycles.length === 0 && (
+                      <div style={{ padding: '12px 8px', textAlign: 'center', fontSize: '11px', color: '#94A3B8', fontStyle: 'italic' }}>
+                        No hay ciclos planificados en este plan.
                       </div>
                     )}
                   </div>
                 </div>
 
-                <div style={{ borderTop: '1px solid var(--jira-border, #DCDFE4)' }} />
+                <div style={{ margin: '4px 12px', borderTop: '1px solid #E2E8F0' }} />
 
-                {/* Available Cycles */}
-                <div>
-                  <div className="planning-section-title">
-                    <span>AVAILABLE CYCLES</span>
-                    <span style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)' }}>
-                      {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).length} listos
+                {/* BLOCK 3: AVAILABLE CYCLES (data-purpose="available-cycles-list") */}
+                <div style={{ padding: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                      Available Cycles
+                    </span>
+                    <span style={{ fontSize: '10px', color: '#94A3B8' }}>
+                      {availableUnlinkedCycles.length} listos
                     </span>
                   </div>
-                  <div>
-                    {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).map(cycle => (
-                      <div key={cycle.id} className="planning-cycle-available-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#626F86" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <circle cx="12" cy="12" r="9"></circle>
-                            <polyline points="12 6 12 12 16 14"></polyline>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {availableUnlinkedCycles.map(cycle => (
+                      <div
+                        key={cycle.id}
+                        onClick={() => handleCycleSelect(cycle)}
+                        style={{
+                          padding: '6px 10px',
+                          borderRadius: '6px',
+                          border: '1px solid #E2E8F0',
+                          background: '#FFFFFF',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '8px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2" style={{ flexShrink: 0 }}>
+                            <circle cx="12" cy="12" r="10" />
+                            <polyline points="12 6 12 12 16 14" />
                           </svg>
-                          <span style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#172B4D', fontWeight: 500 }}>
+                          <span style={{
+                            fontSize: '12px',
+                            color: '#475569',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }} title={cycle.summary}>
                             {cycle.summary}
                           </span>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                          <button 
-                            onClick={() => handleLinkCycleToPlan(cycle.id, selectedPlanId)} 
-                            style={{ 
-                              background: 'none', 
-                              border: '1px solid #85B8FF', 
-                              color: '#0C66E4', 
-                              fontSize: '11px', 
-                              fontWeight: 600, 
-                              borderRadius: '4px', 
-                              padding: '2px 6px', 
-                              cursor: 'pointer'
+                        {selectedPlanId && (
+                          <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); handleLinkCycleToPlan(cycle.id, selectedPlanId); }}
+                            style={{
+                              fontSize: '11px',
+                              fontWeight: 500,
+                              color: '#0C66E4',
+                              background: 'transparent',
+                              border: '1px solid #BFDBFE',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              flexShrink: 0
                             }}
                           >
                             + Add
                           </button>
-                        </div>
+                        )}
                       </div>
                     ))}
-                    {filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId)).length === 0 && (
-                      <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', fontStyle: 'italic', padding: '4px 0' }}>
-                        Todos los ciclos están vinculados.
+                    {availableUnlinkedCycles.length === 0 && (
+                      <div style={{ fontSize: '11px', color: '#94A3B8', fontStyle: 'italic', padding: '4px 2px' }}>
+                        Todos los ciclos están vinculados al plan.
                       </div>
                     )}
                   </div>
                 </div>
-              </>
-            ) : (
-              <div>
-                <div className="planning-section-title">
-                  <span>ALL CYCLES</span>
-                  <span style={{ fontSize: '10px', fontWeight: 700, background: 'var(--jira-bg-subtle, #F1F2F4)', color: 'var(--jira-subtle, #626F86)', padding: '1px 6px', borderRadius: '10px' }}>
-                    {filteredTestCycles.length}
-                  </span>
-                </div>
-                <div>
-                  {filteredTestCycles.map(cycle => {
-                    const isActive = selectedCycle?.id === cycle.id;
-                    return (
-                      <div 
-                        key={cycle.id} 
-                        className={`planning-cycle-card ${isActive ? 'active' : ''}`}
-                        onClick={() => handleCycleSelect(cycle)}
-                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                          </svg>
-                          <span style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isActive ? 600 : 500 }}>
-                            {cycle.summary}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
               </div>
-            )}
-          </div>
 
-          {/* Sidebar Footer Button */}
-          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC' }}>
-            <button 
-              onClick={handleCreateIssue}
-              className="btn-secondary"
-              style={{ width: '100%', justifyContent: 'center', fontSize: '12px', height: '32px' }}
-            >
-              + Nuevo Ciclo de Prueba
-            </button>
-          </div>
-        </aside>
+              {/* Sidebar Footer: + New Cycle/Plan */}
+              <div style={{ padding: '12px', borderTop: '1px solid #E2E8F0', background: '#F8FAFC' }}>
+                <button
+                  type="button"
+                  onClick={handleCreateIssue}
+                  style={{
+                    width: '100%',
+                    height: '36px',
+                    background: '#0C66E4',
+                    color: '#FFFFFF',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    border: 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    boxShadow: '0 1px 2px rgba(0, 0, 0, 0.05)'
+                  }}
+                >
+                  <span style={{ fontSize: '15px', lineHeight: 1 }}>+</span>
+                  <span>New Cycle/Plan</span>
+                </button>
+              </div>
+            </aside>
 
-        {/* Resizer */}
-        <div 
-          onMouseDown={() => setIsResizing(true)}
-          style={{
-            width: '5px',
-            cursor: 'col-resize',
-            backgroundColor: isResizing ? 'var(--ds-border-focused, #0C66E4)' : 'transparent',
-            zIndex: 10,
-            borderRight: '1px solid var(--jira-border, #DCDFE4)',
-            marginLeft: '-1px'
-          }}
-        />
-        </>
+            {/* Resizer */}
+            <div
+              onMouseDown={() => setIsResizing(true)}
+              style={{
+                width: '4px',
+                cursor: 'col-resize',
+                backgroundColor: isResizing ? '#0C66E4' : 'transparent',
+                zIndex: 10
+              }}
+            />
+          </>
         )}
 
-        {/* Main Workspace */}
-        <main className="planning-workspace">
-          <div className="planning-scroll-container">
+        {/* Right Column: Main Planning Workspace */}
+        <main className="planning-workspace" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#FBFBFC' }}>
+          <div className="planning-scroll-container" style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
             {selectedCycle ? (
-              <div className="planning-canvas">
-                {/* Workspace Header & Action */}
-                <div className="planning-workspace-header">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                {/* WORKSPACE HEADER (Stitch Header without health bars/semáforos) */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: '16px',
+                  paddingBottom: '16px',
+                  borderBottom: '1px solid #E2E8F0',
+                  flexWrap: 'wrap'
+                }}>
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       {!isFolderSidebarVisible && (
                         <button
+                          type="button"
                           onClick={toggleFolderSidebar}
-                          className="btn-secondary"
-                          title="Mostrar panel de planes y ciclos"
                           style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '5px',
-                            fontSize: '0.78rem',
-                            padding: '0.35rem 0.65rem',
-                            borderRadius: '6px'
+                            fontSize: '11px',
+                            fontWeight: 600,
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid #CBD5E1',
+                            background: '#FFFFFF',
+                            color: '#334155',
+                            cursor: 'pointer'
                           }}
                         >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                            <line x1="9" y1="3" x2="9" y2="21" />
-                            <path d="M13 9l3 3-3 3" />
-                          </svg>
-                          <span>Planes &amp; Ciclos</span>
+                          ☰ Planes y Ciclos
                         </button>
                       )}
-                      <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', letterSpacing: '-0.01em' }}>
-                        Planning: <span style={{ color: '#0C66E4' }}>{selectedCycle.summary}</span>
+                      <h1 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#0F172A' }}>
+                        Planeación de Ciclo:{' '}
+                        <span
+                          onClick={() => router.open('/browse/' + selectedCycle.key)}
+                          style={{ color: '#0C66E4', cursor: 'pointer' }}
+                          title="Abrir ciclo en Jira"
+                        >
+                          {selectedCycle.summary}
+                        </span>
                       </h1>
-                      <span style={{ fontSize: '11px', fontWeight: 600, background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                        {isLoadingCycleTests ? (
-                          <>
-                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
-                            <span>Sincronizando...</span>
-                          </>
-                        ) : (
-                          `${deduplicatedCycleTests.length} casos en ciclo`
-                        )}
+                      <span style={{
+                        padding: '2px 10px',
+                        borderRadius: '9999px',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        background: '#F1F5F9',
+                        color: '#334155',
+                        border: '1px solid #E2E8F0'
+                      }}>
+                        {inCycleCount} casos asignados
+                      </span>
+                      <span style={{
+                        padding: '2px 10px',
+                        borderRadius: '9999px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        background: '#EFF6FF',
+                        color: '#0C66E4',
+                        border: '1px solid #BFDBFE',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                          <line x1="16" y1="2" x2="16" y2="6" />
+                          <line x1="8" y1="2" x2="8" y2="6" />
+                          <line x1="3" y1="10" x2="21" y2="10" />
+                        </svg>
+                        <span>
+                          Período: {hasCycleDates ? `${formatShortDateEs(cycleScheduleForm.startDate)} - ${formatShortDateEs(cycleScheduleForm.endDate, true)}` : 'Sin definir'}
+                        </span>
                       </span>
                     </div>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#626F86' }}>
-                      Asigna, filtra y gestiona los casos que integran este ciclo de prueba para la versión actual.
+                    <p style={{ margin: '6px 0 0 0', fontSize: '12px', color: '#64748B', lineHeight: 1.5 }}>
+                      Ventana programada:{' '}
+                      <strong style={{ color: '#334155', fontWeight: 500 }}>
+                        {hasCycleDates
+                          ? `${formatFullDateEs(cycleScheduleForm.startDate)} a ${formatFullDateEs(cycleScheduleForm.endDate)} (${cycleDaysCalc.naturalDays} días naturales, ${cycleDaysCalc.businessDays} días hábiles)`
+                          : 'Configura las fechas de inicio y término abajo'}
+                      </strong>.
+                      <br />
+                      Define el cronograma del ciclo y asigna los casos de prueba previstos antes de pasar a la fase de Ejecución.
                     </p>
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <button 
-                      className="btn-primary"
-                      style={{ background: '#10B981', borderColor: '#059669', height: '32px', fontSize: '12px', fontWeight: 600, padding: '0 12px' }}
-                      onClick={() => {
-                        setActiveTab('execution');
+                  {/* Header Right Action Buttons */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (planScheduleForm.startDate && planScheduleForm.endDate && (!cycleScheduleForm.startDate || !cycleScheduleForm.endDate)) {
+                          const syncedStart = cycleScheduleForm.startDate || planScheduleForm.startDate;
+                          const syncedEnd = cycleScheduleForm.endDate || planScheduleForm.endDate;
+                          setCycleScheduleForm(prev => ({
+                            ...prev,
+                            startDate: syncedStart,
+                            endDate: syncedEnd
+                          }));
+                          await handleSaveCycleSchedule({ startDate: syncedStart, endDate: syncedEnd });
+                        } else {
+                          clearPersistentCache();
+                          queryClient.invalidateQueries();
+                          if (selectedProjectId) {
+                            const [freshPlans, freshCycles] = await Promise.all([
+                              invoke('getTestPlans', { projectId: selectedProjectId, issueTypeId: projectConfig?.testPlanIssueTypeId }).catch(() => null),
+                              invoke('getTestCycles', { projectId: selectedProjectId, issueTypeId: projectConfig?.testCycleIssueTypeId }).catch(() => null)
+                            ]);
+                            if (Array.isArray(freshPlans)) setPlans(freshPlans);
+                            if (Array.isArray(freshCycles)) {
+                              setCycles(freshCycles);
+                              if (selectedCycle?.id) {
+                                const updated = freshCycles.find(c => String(c.id) === String(selectedCycle.id) || c.key === selectedCycle.key);
+                                if (updated) setSelectedCycle(updated);
+                              }
+                            }
+                          }
+                          addNotification({
+                            type: 'success',
+                            title: 'Sincronizado con Release',
+                            description: 'Planes y ciclos actualizados con la información más reciente de Jira.'
+                          });
+                        }
                       }}
-                      title="Ir a ejecutar este ciclo en la pestaña Execution"
+                      style={{
+                        height: '32px',
+                        padding: '0 12px',
+                        background: '#FFFFFF',
+                        border: '1px solid #CBD5E1',
+                        color: '#334155',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)'
+                      }}
                     >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                      <span>Ejecutar Ciclo</span>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M23 4v6h-6M1 20v-6h6" />
+                        <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                      </svg>
+                      <span>Sincronizar con Release</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleExportCyclePlanCsv}
+                      style={{
+                        height: '32px',
+                        padding: '0 12px',
+                        background: '#FFFFFF',
+                        border: '1px solid #CBD5E1',
+                        color: '#334155',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)'
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      <span>Exportar Plan</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSaveCycleSchedule()}
+                      disabled={isSavingCycleSchedule}
+                      style={{
+                        height: '32px',
+                        padding: '0 14px',
+                        background: '#0C66E4',
+                        border: 'none',
+                        color: '#FFFFFF',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        cursor: isSavingCycleSchedule ? 'wait' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        boxShadow: '0 1px 2px rgba(0, 0, 0, 0.06)'
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
+                        <polyline points="17 21 17 13 7 13 7 21" />
+                        <polyline points="7 3 7 8 15 8" />
+                      </svg>
+                      <span>{isSavingCycleSchedule ? 'Guardando...' : 'Guardar Cronograma'}</span>
                     </button>
                   </div>
                 </div>
 
-                {/* SECTION 1: Tests in this Cycle */}
-                <div className="planning-card-panel">
-                  <div className="planning-panel-header">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      {renderSectionChevron('planning-cycle')}
-                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span>Tests in this Cycle</span>
-                        {isLoadingCycleTests ? (
-                          <span style={{ fontSize: '11px', fontWeight: 500, color: '#626F86' }}>(Sincronizando...)</span>
-                        ) : (
-                          <span style={{ fontSize: '12px', fontWeight: 600, color: '#626F86' }}>({deduplicatedCycleTests.length})</span>
-                        )}
-                      </h2>
-                    </div>
+                {/* CARD 1: CONFIGURACIÓN DE CALENDARIO Y FECHAS DEL CICLO (data-purpose="cycle-calendar-config-card") */}
+                <div style={{
+                  background: '#FFFFFF',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingBottom: '12px',
+                    marginBottom: '16px',
+                    borderBottom: '1px solid #F1F5F9',
+                    flexWrap: 'wrap',
+                    gap: '10px'
+                  }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      {!isSectionCollapsed('planning-cycle') && deduplicatedCycleTests.length > 0 && renderGroupToolbar(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests.slice(0, planningCycleVisible))}
+                      <div style={{
+                        width: '28px',
+                        height: '28px',
+                        borderRadius: '6px',
+                        background: '#EFF6FF',
+                        color: '#0C66E4',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0
+                      }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                          <line x1="16" y1="2" x2="16" y2="6" />
+                          <line x1="8" y1="2" x2="8" y2="6" />
+                          <line x1="3" y1="10" x2="21" y2="10" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1E293B' }}>
+                          Configuración de Calendario y Fechas del Ciclo
+                        </h2>
+                        <p style={{ margin: '2px 0 0 0', fontSize: '11px', color: '#64748B' }}>
+                          Define el intervalo de fechas de prueba, días inhábiles y plazos de asignación
+                        </p>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <label style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '11px',
+                        color: '#475569',
+                        cursor: 'pointer',
+                        background: '#F8FAFC',
+                        padding: '5px 10px',
+                        borderRadius: '4px',
+                        border: '1px solid #E2E8F0',
+                        userSelect: 'none'
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={cycleScheduleForm.excludeWeekends !== false}
+                          onChange={e => setCycleScheduleForm(prev => ({ ...prev, excludeWeekends: e.target.checked }))}
+                          style={{ borderRadius: '3px', cursor: 'pointer', margin: 0 }}
+                        />
+                        <span>Excluir fines de semana</span>
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsCycleScheduleOpen(prev => !prev)}
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: 500,
+                          color: isCycleScheduleOpen ? '#0C66E4' : '#475569',
+                          background: isCycleScheduleOpen ? '#EFF6FF' : '#FFFFFF',
+                          border: isCycleScheduleOpen ? '1px solid #BFDBFE' : '1px solid #CBD5E1',
+                          padding: '5px 10px',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px'
+                        }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                          <line x1="16" y1="2" x2="16" y2="6" />
+                          <line x1="8" y1="2" x2="8" y2="6" />
+                          <line x1="3" y1="10" x2="21" y2="10" />
+                        </svg>
+                        <span>
+                          Días festivos {(cycleScheduleForm.holidays || []).length > 0 ? `(${(cycleScheduleForm.holidays || []).length})` : ''}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 3-Column Date & Duration Grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '16px' }}>
+                    {/* Column 1: Fecha de Inicio */}
+                    <div style={{
+                      background: 'rgba(248, 250, 252, 0.7)',
+                      border: '1px solid #E2E8F0',
+                      borderRadius: '6px',
+                      padding: '12px'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                        <label style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                          Fecha de Inicio
+                        </label>
+                        <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 600 }}>Requerido</span>
+                      </div>
+                      <input
+                        type="date"
+                        value={cycleScheduleForm.startDate}
+                        onChange={e => setCycleScheduleForm(prev => ({ ...prev, startDate: e.target.value }))}
+                        style={{
+                          width: '100%',
+                          height: '34px',
+                          padding: '0 10px',
+                          fontSize: '12px',
+                          fontFamily: 'monospace',
+                          fontWeight: 500,
+                          color: '#1E293B',
+                          background: '#FFFFFF',
+                          border: '1px solid #CBD5E1',
+                          borderRadius: '4px',
+                          boxSizing: 'border-box',
+                          outline: 'none'
+                        }}
+                      />
+                      <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', color: '#64748B' }}>
+                        <span>{formatLongDayMonthEs(cycleScheduleForm.startDate)}</span>
+                        <span style={{ fontFamily: 'monospace', color: '#475569' }}>09:00 hrs</span>
+                      </div>
+                    </div>
+
+                    {/* Column 2: Fecha de Término / Cierre */}
+                    <div style={{
+                      background: 'rgba(248, 250, 252, 0.7)',
+                      border: '1px solid #E2E8F0',
+                      borderRadius: '6px',
+                      padding: '12px'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                        <label style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                          Fecha de Término / Cierre
+                        </label>
+                        <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 600 }}>Requerido</span>
+                      </div>
+                      <input
+                        type="date"
+                        value={cycleScheduleForm.endDate}
+                        onChange={e => setCycleScheduleForm(prev => ({ ...prev, endDate: e.target.value }))}
+                        style={{
+                          width: '100%',
+                          height: '34px',
+                          padding: '0 10px',
+                          fontSize: '12px',
+                          fontFamily: 'monospace',
+                          fontWeight: 500,
+                          color: '#1E293B',
+                          background: '#FFFFFF',
+                          border: '1px solid #CBD5E1',
+                          borderRadius: '4px',
+                          boxSizing: 'border-box',
+                          outline: 'none'
+                        }}
+                      />
+                      <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', color: '#64748B' }}>
+                        <span>{formatLongDayMonthEs(cycleScheduleForm.endDate)}</span>
+                        <span style={{ fontFamily: 'monospace', color: '#475569' }}>18:00 hrs</span>
+                      </div>
+                    </div>
+
+                    {/* Column 3: Cálculo de Duración */}
+                    <div style={{
+                      background: 'rgba(248, 250, 252, 0.7)',
+                      border: '1px solid #E2E8F0',
+                      borderRadius: '6px',
+                      padding: '12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
+                          Cálculo de Duración
+                        </span>
+                        <span style={{
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                          fontSize: '10px',
+                          fontWeight: 600,
+                          background: '#ECFDF5',
+                          color: '#047857',
+                          border: '1px solid #A7F3D0'
+                        }}>
+                          Automático
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
+                        <div style={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '4px', padding: '8px 10px' }}>
+                          <div style={{ fontSize: '10px', color: '#64748B' }}>Días Naturales</div>
+                          <div style={{ fontSize: '14px', fontWeight: 700, color: '#1E293B', fontFamily: 'monospace', marginTop: '2px' }}>
+                            {cycleDaysCalc.naturalDays} días
+                          </div>
+                        </div>
+                        <div style={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '4px', padding: '8px 10px' }}>
+                          <div style={{ fontSize: '10px', color: '#64748B' }}>Días Hábiles</div>
+                          <div style={{ fontSize: '14px', fontWeight: 700, color: '#0C66E4', fontFamily: 'monospace', marginTop: '2px' }}>
+                            {cycleDaysCalc.businessDays} hábiles
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Collapsible Drawer ONLY for Días Festivos (Fecha + Descripción + Tablita) */}
+                  {isCycleScheduleOpen && (
+                    <div style={{
+                      marginTop: '12px',
+                      padding: '14px',
+                      background: '#F8FAFC',
+                      border: '1px solid #CBD5E1',
+                      borderRadius: '6px'
+                    }}>
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'flex-end',
+                        gap: '10px',
+                        flexWrap: 'wrap'
+                      }}>
+                        <div style={{ width: '170px', flexShrink: 0 }}>
+                          <label style={{ display: 'block', fontSize: '10px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', marginBottom: '4px' }}>
+                            Día Festivo
+                          </label>
+                          <input
+                            type="date"
+                            value={newHolidayDate}
+                            onChange={e => setNewHolidayDate(e.target.value)}
+                            style={{
+                              width: '100%',
+                              height: '32px',
+                              padding: '0 8px',
+                              fontSize: '12px',
+                              fontFamily: 'monospace',
+                              borderRadius: '4px',
+                              border: '1px solid #CBD5E1',
+                              background: '#FFFFFF',
+                              boxSizing: 'border-box'
+                            }}
+                          />
+                        </div>
+
+                        <div style={{ flex: 1, minWidth: '200px' }}>
+                          <label style={{ display: 'block', fontSize: '10px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', marginBottom: '4px' }}>
+                            Descripción
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Ej. Día de la Independencia / Mantenimiento programado"
+                            value={newHolidayDesc}
+                            onChange={e => setNewHolidayDesc(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' && newHolidayDate) {
+                                e.preventDefault();
+                                const normalizedList = (cycleScheduleForm.holidays || []).map(item =>
+                                  typeof item === 'string' ? { date: item, description: 'Día festivo' } : item
+                                );
+                                const filtered = normalizedList.filter(item => item.date !== newHolidayDate);
+                                const nextHolidays = [
+                                  ...filtered,
+                                  { date: newHolidayDate, description: (newHolidayDesc || '').trim() || 'Día festivo' }
+                                ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+                                setCycleScheduleForm(prev => ({ ...prev, holidays: nextHolidays }));
+                                setNewHolidayDate('');
+                                setNewHolidayDesc('');
+                                handleSaveCycleSchedule({ holidays: nextHolidays });
+                              }
+                            }}
+                            style={{
+                              width: '100%',
+                              height: '32px',
+                              padding: '0 10px',
+                              fontSize: '12px',
+                              borderRadius: '4px',
+                              border: '1px solid #CBD5E1',
+                              background: '#FFFFFF',
+                              boxSizing: 'border-box'
+                            }}
+                          />
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!newHolidayDate) return;
+                            const normalizedList = (cycleScheduleForm.holidays || []).map(item =>
+                              typeof item === 'string' ? { date: item, description: 'Día festivo' } : item
+                            );
+                            const filtered = normalizedList.filter(item => item.date !== newHolidayDate);
+                            const nextHolidays = [
+                              ...filtered,
+                              { date: newHolidayDate, description: (newHolidayDesc || '').trim() || 'Día festivo' }
+                            ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+                            setCycleScheduleForm(prev => ({ ...prev, holidays: nextHolidays }));
+                            setNewHolidayDate('');
+                            setNewHolidayDesc('');
+                            handleSaveCycleSchedule({ holidays: nextHolidays });
+                          }}
+                          style={{
+                            height: '32px',
+                            padding: '0 12px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#FFFFFF',
+                            background: '#0C66E4',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            flexShrink: 0
+                          }}
+                        >
+                          + Agregar día festivo
+                        </button>
+                      </div>
+
+                      {/* Tablita de Días Festivos y su Descripción */}
+                      <div style={{
+                        marginTop: '12px',
+                        background: '#FFFFFF',
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '6px',
+                        overflow: 'hidden'
+                      }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                          <thead>
+                            <tr style={{ background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
+                              <th style={{ textAlign: 'left', padding: '7px 12px', fontSize: '10px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', width: '180px' }}>
+                                Día Festivo
+                              </th>
+                              <th style={{ textAlign: 'left', padding: '7px 12px', fontSize: '10px', fontWeight: 700, color: '#475569', textTransform: 'uppercase' }}>
+                                Descripción
+                              </th>
+                              <th style={{ textAlign: 'right', padding: '7px 12px', fontSize: '10px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', width: '80px' }}>
+                                Acción
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(cycleScheduleForm.holidays || []).length === 0 ? (
+                              <tr>
+                                <td colSpan={3} style={{ padding: '12px', textAlign: 'center', fontSize: '11px', color: '#94A3B8' }}>
+                                  No hay días festivos registrados para este ciclo.
+                                </td>
+                              </tr>
+                            ) : (
+                              (cycleScheduleForm.holidays || []).map((h, idx) => {
+                                const hDate = typeof h === 'string' ? h : h?.date;
+                                const hDesc = typeof h === 'string' ? 'Día festivo' : (h?.description || 'Día festivo');
+                                return (
+                                  <tr key={hDate || idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                                    <td style={{ padding: '8px 12px', fontFamily: 'monospace', fontWeight: 600, color: '#1E293B', fontSize: '11px' }}>
+                                      {formatShortDateEs(hDate)} <span style={{ color: '#94A3B8', fontWeight: 400 }}>({hDate})</span>
+                                    </td>
+                                    <td style={{ padding: '8px 12px', color: '#334155', fontSize: '12px' }}>
+                                      {hDesc}
+                                    </td>
+                                    <td style={{ padding: '8px 12px', textAlign: 'right' }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const nextHolidays = (cycleScheduleForm.holidays || []).filter(item => {
+                                            const d = typeof item === 'string' ? item : item?.date;
+                                            return d !== hDate;
+                                          });
+                                          setCycleScheduleForm(prev => ({
+                                            ...prev,
+                                            holidays: nextHolidays
+                                          }));
+                                          handleSaveCycleSchedule({ holidays: nextHolidays });
+                                        }}
+                                        style={{
+                                          background: 'none',
+                                          border: 'none',
+                                          color: '#DC2626',
+                                          cursor: 'pointer',
+                                          fontSize: '11px',
+                                          fontWeight: 600,
+                                          padding: '2px 6px',
+                                          borderRadius: '4px'
+                                        }}
+                                      >
+                                        Eliminar
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Blue Info Note Banner (Stitch Nota de Planeación) */}
+                  <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #F1F5F9' }}>
+                    <div style={{
+                      background: 'rgba(239, 246, 255, 0.7)',
+                      border: '1px solid rgba(191, 219, 254, 0.7)',
+                      borderRadius: '6px',
+                      padding: '10px 12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '12px',
+                      flexWrap: 'wrap'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#334155' }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" style={{ flexShrink: 0 }}>
+                          <circle cx="12" cy="12" r="10" />
+                          <line x1="12" y1="16" x2="12" y2="12" />
+                          <line x1="12" y1="8" x2="12.01" y2="8" />
+                        </svg>
+                        <span>
+                          <strong style={{ fontWeight: 600, color: '#0F172A' }}>Nota de Planeación:</strong> Los semáforos, ritmos de ejecución diaria y métricas de retraso se activarán en el módulo{' '}
+                          <span
+                            onClick={() => setActiveTab('execution')}
+                            style={{ fontWeight: 600, color: '#0C66E4', cursor: 'pointer' }}
+                          >
+                            Execution
+                          </span>{' '}
+                          una vez que inicie la ventana del ciclo.
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                        <span style={{ fontSize: '11px', color: '#64748B' }}>Fase actual:</span>
+                        <span style={{
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          background: '#DBEAFE',
+                          color: '#1E40AF',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.04em'
+                        }}>
+                          Definición de Cronograma
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* CARD 2: TESTS IN THIS CYCLE (Keeping Folder Grouping & Expand/Collapse) */}
+                <div style={{
+                  background: '#FFFFFF',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '8px',
+                  boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    padding: '12px 16px',
+                    borderBottom: '1px solid #F1F5F9',
+                    background: 'rgba(248, 250, 252, 0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '10px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      {renderSectionChevron('planning-cycle')}
+                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1E293B' }}>
+                        Tests in this Cycle ({inCycleCount})
+                      </h2>
+                      {!isSectionCollapsed('planning-cycle') && deduplicatedCycleTests.length > 0 && renderGroupToolbar(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests)}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       {planningChecked.size > 0 && (
-                        <button 
-                          className="btn-secondary" 
-                          style={{ color: '#CA3521', height: '28px', fontSize: '11px', fontWeight: 600, padding: '0 8px' }}
+                        <button
+                          type="button"
                           onClick={() => {
                             const selectedIds = [...planningChecked];
-                            const executedCount = selectedIds.filter(id => {
-                              const t = deduplicatedCycleTests.find(ct => String(ct.id) === String(id));
-                              return t && t.status && normalizeUiStatus(t.status) !== 'Not Run';
-                            }).length;
-                            const msg = executedCount > 0
-                              ? `¿Remover ${selectedIds.length} caso${selectedIds.length !== 1 ? 's' : ''} del ciclo? (${executedCount} de ellos ya cuentan con ejecución registrada y sus datos quedarán preservados en Jira).`
-                              : `¿Eliminar ${selectedIds.length} caso${selectedIds.length !== 1 ? 's' : ''} del ciclo?`;
                             showConfirm(
                               'Remover casos seleccionados',
-                              msg,
+                              `¿Eliminar ${selectedIds.length} caso${selectedIds.length !== 1 ? 's' : ''} del ciclo?`,
                               () => handleRemoveManyFromCycle(selectedIds),
                               { danger: true, confirmLabel: 'Remover' }
                             );
                           }}
+                          style={{
+                            height: '28px',
+                            padding: '0 10px',
+                            background: '#FFFFFF',
+                            border: '1px solid #FECACA',
+                            color: '#DC2626',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: 500,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}
                         >
-                          🗑 Eliminar seleccionados ({planningChecked.size})
+                          <span>Eliminar seleccionados ({planningChecked.size})</span>
                         </button>
                       )}
+
                       {deduplicatedCycleTests.length > 0 && (
-                        <button 
-                          className="btn-secondary" 
-                          style={{ color: '#CA3521', height: '28px', fontSize: '11px', fontWeight: 600, padding: '0 8px' }}
+                        <button
+                          type="button"
                           onClick={() => {
                             const allIds = deduplicatedCycleTests.map(t => t.id);
-                            const executedCount = deduplicatedCycleTests.filter(t => t.status && normalizeUiStatus(t.status) !== 'Not Run').length;
-                            const msg = executedCount > 0
-                              ? `¿Remover TODOS los ${deduplicatedCycleTests.length} casos del ciclo? (${executedCount} caso${executedCount !== 1 ? 's' : ''} cuentan con ejecuciones que quedarán preservadas de forma segura en Jira).`
-                              : `¿Eliminar TODOS los ${deduplicatedCycleTests.length} casos del ciclo?`;
                             showConfirm(
                               'Remover todos los casos',
-                              msg,
+                              `¿Eliminar TODOS los ${deduplicatedCycleTests.length} casos del ciclo?`,
                               () => handleRemoveManyFromCycle(allIds),
-                              { danger: true, confirmLabel: 'Remover todos' }
+                              { danger: true, confirmLabel: 'Eliminar todos' }
                             );
                           }}
+                          style={{
+                            height: '28px',
+                            padding: '0 10px',
+                            background: '#FFFFFF',
+                            border: '1px solid #E2E8F0',
+                            color: '#DC2626',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: 500,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            boxShadow: '0 1px 2px rgba(0, 0, 0, 0.02)'
+                          }}
                         >
-                          🗑 Eliminar todos
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                          </svg>
+                          <span>Eliminar todos</span>
                         </button>
                       )}
                     </div>
                   </div>
 
-                  {!isSectionCollapsed('planning-cycle') && (<>
-                  {/* Select All Sub-bar */}
-                  {deduplicatedCycleTests.length > 0 && (
-                    <div className="planning-panel-subbar">
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', userSelect: 'none' }}>
-                        <input
-                          type="checkbox"
-                          checked={planningChecked.size > 0 && planningChecked.size === deduplicatedCycleTests.length}
-                          ref={el => { if (el) el.indeterminate = planningChecked.size > 0 && planningChecked.size < deduplicatedCycleTests.length; }}
-                          onChange={e => {
-                            if (e.target.checked) setPlanningChecked(new Set(deduplicatedCycleTests.map(t => String(t.id))));
-                            else setPlanningChecked(new Set());
-                          }}
-                          style={{ borderRadius: '3px', cursor: 'pointer' }}
-                        />
-                        <span style={{ fontWeight: 600, color: '#44546F' }}>
-                          {planningChecked.size > 0 ? `${planningChecked.size} seleccionado${planningChecked.size !== 1 ? 's' : ''}` : 'Seleccionar todos'}
-                        </span>
-                      </label>
-                    </div>
-                  )}
+                  {!isSectionCollapsed('planning-cycle') && (
+                    <>
+                      {/* Sub-header Select All */}
+                      {deduplicatedCycleTests.length > 0 && (
+                        <div style={{
+                          padding: '8px 16px',
+                          background: 'rgba(248, 250, 252, 0.3)',
+                          borderBottom: '1px solid #F1F5F9',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '12px'
+                        }}>
+                          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: 500, color: '#64748B', userSelect: 'none' }}>
+                            <input
+                              type="checkbox"
+                              checked={planningChecked.size > 0 && planningChecked.size === deduplicatedCycleTests.length}
+                              ref={el => { if (el) el.indeterminate = planningChecked.size > 0 && planningChecked.size < deduplicatedCycleTests.length; }}
+                              onChange={e => {
+                                if (e.target.checked) setPlanningChecked(new Set(deduplicatedCycleTests.map(t => String(t.id))));
+                                else setPlanningChecked(new Set());
+                              }}
+                              style={{ borderRadius: '3px', cursor: 'pointer', margin: 0 }}
+                            />
+                            <span>
+                              {planningChecked.size > 0 ? `${planningChecked.size} seleccionado${planningChecked.size !== 1 ? 's' : ''}` : 'Seleccionar todos'}
+                            </span>
+                          </label>
+                        </div>
+                      )}
 
-                  {/* Cycle Tests List */}
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {isLoadingCycleTests ? (
-                      <div style={{ padding: '3rem 2rem', textAlign: 'center', color: '#626F86', fontSize: '13px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
-                        <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #DCDFE4', borderTopColor: '#0C66E4', animation: 'spin 0.8s linear infinite' }}></div>
-                        <span style={{ fontWeight: 500, color: '#172B4D' }}>Cargando casos del ciclo...</span>
-                        <span style={{ fontSize: '12px', color: '#626F86' }}>Sincronizando casos desde Jira</span>
-                      </div>
-                    ) : (
-                      <>
-                        {renderGroupedList(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests.slice(0, planningCycleVisible), test => {
-                          const isAuto = getExecVal(test).includes('auto');
-                          return (
-                            <div key={test.id} className="planning-row">
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1, paddingRight: '1rem' }}>
-                                <input 
-                                  type="checkbox"
-                                  checked={planningChecked.has(String(test.id))}
-                                  onChange={e => setPlanningChecked(prev => {
-                                    const s = new Set(prev);
-                                    if (e.target.checked) s.add(String(test.id)); else s.delete(String(test.id));
-                                    return s;
-                                  })}
-                                  style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
-                                />
-                                <span 
-                                  onClick={() => router.open('/browse/' + (test.testRunKey || test.key))}
-                                  style={{ fontWeight: 700, fontSize: '13px', color: '#0C66E4', cursor: 'pointer', flexShrink: 0 }}
-                                  title="Abrir en Jira"
-                                >
-                                  {test.testRunKey || test.key}
-                                </span>
-                                {test.testCaseKey && test.testRunKey && test.testCaseKey !== test.testRunKey && (
-                                  <span style={{ fontSize: '11px', color: '#626F86', flexShrink: 0 }}>
-                                    (TC: <span onClick={() => router.open('/browse/' + test.testCaseKey)} style={{ cursor: 'pointer', textDecoration: 'underline' }}>{test.testCaseKey}</span>)
-                                  </span>
-                                )}
-                                <span className={isAuto ? "planning-badge-auto" : "planning-badge-manual"}>
-                                  {isAuto ? "⚡ Auto" : "Manual"}
-                                </span>
-                                <span 
-                                  style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                                  title={test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
-                                >
-                                  {test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
-                                </span>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
-                                <AtlaskitStatusLozenge status={test.status} />
-                                <button 
-                                  className="btn-secondary"
-                                  style={{ 
-                                    color: '#CA3521', 
-                                    borderColor: '#FFD2CC',
-                                    backgroundColor: '#FFF5F5',
-                                    padding: '0 8px', 
-                                    height: '28px',
-                                    borderRadius: '4px',
+                      {/* Cycle Items List (with Folder Grouping) */}
+                      <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        {isLoadingCycleTests ? (
+                          <div style={{ padding: '32px', textAlign: 'center', color: '#64748B', fontSize: '12px' }}>
+                            Sincronizando casos asignados al ciclo...
+                          </div>
+                        ) : (
+                          <>
+                            {renderGroupedList(`plan-cycle-${selectedCycle?.id || ''}`, groupByFolder ? filteredCycleTests : filteredCycleTests.slice(0, planningCycleVisible), test => {
+                              const isAuto = getExecVal(test).includes('auto');
+                              return (
+                                <div
+                                  key={test.id}
+                                  style={{
+                                    padding: '10px 16px',
+                                    borderBottom: '1px solid #F1F5F9',
                                     display: 'flex',
                                     alignItems: 'center',
-                                    justifyContent: 'center',
-                                    cursor: 'pointer',
-                                    transition: 'all 0.15s ease'
+                                    justifyContent: 'space-between',
+                                    gap: '12px'
                                   }}
-                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#FFEBE6'; e.currentTarget.style.borderColor = '#FFBDAD'; }}
-                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#FFF5F5'; e.currentTarget.style.borderColor = '#FFD2CC'; }}
-                                  onClick={() => {
-                                    const isExecuted = test.status && normalizeUiStatus(test.status) !== 'Not Run';
-                                    if (isExecuted) {
-                                      showConfirm(
-                                        'Remover caso ejecutado',
-                                        `Este caso ya tiene resultados registrados (${test.status}). Al removerlo se desvinculará del ciclo, pero sus datos y evidencias se conservarán de forma segura en Jira. Si lo vuelves a agregar más adelante, se restaurará automáticamente.`,
-                                        () => handleRemoveTestFromCycle(test.id),
-                                        { danger: true, confirmLabel: 'Desvincular del ciclo' }
-                                      );
-                                    } else {
-                                      handleRemoveTestFromCycle(test.id);
-                                    }
-                                  }}
-                                  title="Quitar del ciclo"
                                 >
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                                </button>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1 }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={planningChecked.has(String(test.id))}
+                                      onChange={e => setPlanningChecked(prev => {
+                                        const s = new Set(prev);
+                                        if (e.target.checked) s.add(String(test.id)); else s.delete(String(test.id));
+                                        return s;
+                                      })}
+                                      style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0, margin: 0 }}
+                                    />
+                                    <span
+                                      onClick={() => router.open('/browse/' + (test.testCaseKey || test.key))}
+                                      style={{
+                                        fontFamily: 'monospace',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        color: '#0C66E4',
+                                        cursor: 'pointer',
+                                        flexShrink: 0
+                                      }}
+                                    >
+                                      {test.testCaseKey || test.key}
+                                    </span>
+                                    {isAuto ? (
+                                      <span style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        padding: '2px 8px',
+                                        borderRadius: '4px',
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        background: '#F3E8FF',
+                                        color: '#7E22CE',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.04em',
+                                        flexShrink: 0
+                                      }}>
+                                        <span>⚡</span> Automatizado
+                                      </span>
+                                    ) : (
+                                      <span style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        padding: '2px 8px',
+                                        borderRadius: '4px',
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        background: '#F1F5F9',
+                                        color: '#475569',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.04em',
+                                        flexShrink: 0
+                                      }}>
+                                        Manual
+                                      </span>
+                                    )}
+                                    <span
+                                      style={{
+                                        fontSize: '12px',
+                                        color: '#334155',
+                                        fontWeight: 500,
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap'
+                                      }}
+                                      title={test.summary || (findTc(test.id)?.summary) || 'Caso de prueba'}
+                                    >
+                                      {test.summary || (findTc(test.id)?.summary) || 'Caso de prueba'}
+                                    </span>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveTestFromCycle(test.id)}
+                                    title="Remover del ciclo"
+                                    style={{
+                                      width: '28px',
+                                      height: '28px',
+                                      borderRadius: '4px',
+                                      border: '1px solid #FECACA',
+                                      background: '#FEF2F2',
+                                      color: '#EF4444',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      cursor: 'pointer',
+                                      flexShrink: 0
+                                    }}
+                                  >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                      <polyline points="3 6 5 6 21 6" />
+                                      <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              );
+                            }, items => `${items.length} caso${items.length !== 1 ? 's' : ''}`)}
+                            {!groupByFolder && filteredCycleTests.length > planningCycleVisible && (
+                              <LoadMoreSentinel key={`cyc-${planningCycleVisible}`} remaining={filteredCycleTests.length - planningCycleVisible} onVisible={() => setPlanningCycleVisible(v => v + LIST_BATCH_SIZE)} />
+                            )}
+                            {deduplicatedCycleTests.length === 0 && (
+                              <div style={{ padding: '28px', textAlign: 'center', color: '#64748B', fontSize: '12px' }}>
+                                No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
                               </div>
-                            </div>
-                          );
-                        }, items => `${items.filter(t => normalizeUiStatus(t.status) !== 'Not Run').length}/${items.length} ejecutados`)}
-                        {filteredCycleTests.length > planningCycleVisible && (
-                          <LoadMoreSentinel key={`cyc-${planningCycleVisible}`} remaining={filteredCycleTests.length - planningCycleVisible} onVisible={() => setPlanningCycleVisible(v => v + LIST_BATCH_SIZE)} />
+                            )}
+                          </>
                         )}
-                        {deduplicatedCycleTests.length === 0 && (
-                          <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
-                            No hay casos asignados a este ciclo todavía. Usa la sección inferior para añadir casos de prueba.
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  </>)}
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                {/* LOADING INDICATOR (Cycle Sync) */}
-                {isLoadingCycleTests && (
-                  <div style={{ padding: '10px 14px', background: '#FAFBFC', border: '1px solid #DCDFE4', borderRadius: '6px', fontSize: '12px', color: '#626F86', display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 1rem 0' }}>
-                    <div style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                    <span>Sincronizando casos de prueba del ciclo...</span>
-                  </div>
-                )}
-
-                {/* SECTION 2: Available Test Cases (Filtered Backlog) */}
-                <div className="planning-card-panel">
-                  <div className="planning-panel-header">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {/* CARD 3: AVAILABLE TEST CASES (Keeping Folder Grouping & Expand/Collapse) */}
+                <div style={{
+                  background: '#FFFFFF',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '8px',
+                  boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    padding: '12px 16px',
+                    borderBottom: '1px solid #E2E8F0',
+                    background: 'rgba(248, 250, 252, 0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '12px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       {renderSectionChevron('planning-available')}
-                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#172B4D' }}>
+                      <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1E293B' }}>
                         Available Test Cases
                       </h2>
-                      <span style={{ fontSize: '11px', fontWeight: 700, background: '#F1F2F4', color: '#626F86', padding: '1px 8px', borderRadius: '10px' }}>
+                      <span style={{
+                        padding: '2px 8px',
+                        borderRadius: '9999px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        background: '#E2E8F0',
+                        color: '#334155'
+                      }}>
                         {availableFilteredTestCases.length}
                       </span>
-                      {!isSectionCollapsed('planning-available') && availableFilteredTestCases.length > 0 && renderGroupToolbar(`plan-avail-${selectedCycle?.id || ''}`, availableFilteredTestCases.slice(0, planningAvailVisible))}
+                      {!isSectionCollapsed('planning-available') && availableFilteredTestCases.length > 0 && renderGroupToolbar(`plan-avail-${selectedCycle?.id || ''}`, availableFilteredTestCases)}
                     </div>
 
-                    {/* Filters & Bulk Add Button */}
+                    {/* Filter Controls & + Añadir todos */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                      {/* Folder Filter */}
-                      <select 
-                        value={planningFolder} 
+                      <select
+                        value={planningFolder}
                         onChange={e => {
                           setPlanningFolder(e.target.value);
                           setSelectedTestsForCycle([]);
                         }}
-                        className="status-badge"
-                        style={{ height: '32px', padding: '0 8px', fontSize: '12px', fontWeight: 600, background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '6px', color: '#172B4D', outline: 'none' }}
+                        style={{
+                          height: '32px',
+                          padding: '0 10px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: '#334155',
+                          background: '#FFFFFF',
+                          border: '1px solid #CBD5E1',
+                          borderRadius: '6px',
+                          outline: 'none'
+                        }}
                       >
                         <option value="">TODAS LAS CARPETAS</option>
                         {folderPaths.map(f => (
@@ -8910,15 +11470,23 @@ const renderPlanningTab = () => {
                         ))}
                       </select>
 
-                      {/* Priority Filter */}
-                      <select 
-                        value={planningPriority} 
-                        onChange={e => { 
-                          setPlanningPriority(e.target.value); 
-                          setSelectedTestsForCycle([]); 
-                        }} 
-                        className="status-badge" 
-                        style={{ height: '32px', padding: '0 8px', fontSize: '12px', fontWeight: 600, background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '6px', color: '#172B4D', outline: 'none' }}
+                      <select
+                        value={planningPriority}
+                        onChange={e => {
+                          setPlanningPriority(e.target.value);
+                          setSelectedTestsForCycle([]);
+                        }}
+                        style={{
+                          height: '32px',
+                          padding: '0 10px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: '#334155',
+                          background: '#FFFFFF',
+                          border: '1px solid #CBD5E1',
+                          borderRadius: '6px',
+                          outline: 'none'
+                        }}
                       >
                         <option value="">TODAS LAS PRIORIDADES</option>
                         <option value="Highest">Highest</option>
@@ -8928,30 +11496,42 @@ const renderPlanningTab = () => {
                         <option value="Lowest">Lowest</option>
                       </select>
 
-                      {/* Execution Type Filter */}
-                      <select 
-                        value={planningExecutionType} 
-                        onChange={e => { 
-                          setPlanningExecutionType(e.target.value); 
-                          setSelectedTestsForCycle([]); 
-                        }} 
-                        className="status-badge" 
-                        style={{ height: '32px', padding: '0 8px', fontSize: '12px', fontWeight: 600, background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '6px', color: '#172B4D', outline: 'none' }}
+                      <select
+                        value={planningExecutionType}
+                        onChange={e => {
+                          setPlanningExecutionType(e.target.value);
+                          setSelectedTestsForCycle([]);
+                        }}
+                        style={{
+                          height: '32px',
+                          padding: '0 10px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: '#334155',
+                          background: '#FFFFFF',
+                          border: '1px solid #CBD5E1',
+                          borderRadius: '6px',
+                          outline: 'none'
+                        }}
                       >
                         <option value="">TODOS LOS TIPOS</option>
-                        <option value="Automatizado">⚡ Auto</option>
-                        <option value="Manual">Manual</option>
+                        <option value="Automatizado">AUTOMATIZADO</option>
+                        <option value="Manual">MANUAL</option>
                       </select>
 
-                      {/* Primary Action: Bulk Add */}
-                      <button 
-                        className="btn-primary" 
+                      <button
+                        type="button"
                         onClick={async () => {
-                          const allAvailable = testCases.filter(tc => (planningFolder === '' || tc.folderId === planningFolder) && (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) && (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) && !cycleTests.some(ct => ct.id === tc.id));
-                          const testsToAdd = selectedTestsForCycle.length > 0 
+                          const allAvailable = testCases.filter(tc =>
+                            (planningFolder === '' || tc.folderId === planningFolder) &&
+                            (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
+                            (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) &&
+                            !cycleTests.some(ct => ct.id === tc.id)
+                          );
+                          const testsToAdd = selectedTestsForCycle.length > 0
                             ? testCases.filter(tc => selectedTestsForCycle.includes(tc.id))
                             : allAvailable;
-                            
+
                           setIsAddingAll(true);
                           setAddingProgress({ current: 0, total: testsToAdd.length });
                           try {
@@ -8967,36 +11547,35 @@ const renderPlanningTab = () => {
                             const CHUNK_SIZE = 25;
                             let allAddedTests = [];
                             for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
-                                const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
-                                let retries = 2;
-                                let bRes = null;
-                                while (retries >= 0) {
-                                  try {
-                                    bRes = await invoke('addBulkTestsToCycle', { 
-                                      cycleId: selectedCycle.id,
-                                      cycleKey: selectedCycle.key || selectedCycle.id,
-                                      projectId: selectedProjectId,
-                                      config: projectConfig,
-                                      testCases: chunk,
-                                      skipIndexWrite: true
-                                    });
-                                    break;
-                                  } catch (errChunk) {
-                                    retries--;
-                                    if (retries < 0) {
-                                      console.warn('[addBulkTestsToCycle] Chunk error:', errChunk);
-                                    } else {
-                                      await new Promise(r => setTimeout(r, 600));
-                                    }
+                              const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
+                              let retries = 2;
+                              let bRes = null;
+                              while (retries >= 0) {
+                                try {
+                                  bRes = await invoke('addBulkTestsToCycle', {
+                                    cycleId: selectedCycle.id,
+                                    cycleKey: selectedCycle.key || selectedCycle.id,
+                                    projectId: selectedProjectId,
+                                    config: projectConfig,
+                                    testCases: chunk,
+                                    skipIndexWrite: true
+                                  });
+                                  break;
+                                } catch (errChunk) {
+                                  retries--;
+                                  if (retries < 0) {
+                                    console.warn('[addBulkTestsToCycle] Chunk error:', errChunk);
+                                  } else {
+                                    await new Promise(r => setTimeout(r, 600));
                                   }
                                 }
-                                if (bRes && bRes.addedTests) {
-                                    allAddedTests = allAddedTests.concat(bRes.addedTests);
-                                }
-                                setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
+                              }
+                              if (bRes && bRes.addedTests) {
+                                allAddedTests = allAddedTests.concat(bRes.addedTests);
+                              }
+                              setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
                             }
 
-                            // Write unified cycle index once at the end
                             if (allAddedTests.length > 0) {
                               try {
                                 await invoke('syncCycleIndexWithRuns', {
@@ -9007,31 +11586,29 @@ const renderPlanningTab = () => {
                                 console.warn('[syncCycleIndexWithRuns] Index sync warning:', errSync);
                               }
                             }
-                            
-                            // Optimistic UI update
+
                             const locallyAdded = testsToAdd.map(tc => ({
-                               id: tc.id,
-                               key: tc.key,
-                               summary: tc.summary,
-                               executionType: tc.executionType || 'Manual',
-                               status: 'Not Run'
+                              id: tc.id,
+                              key: tc.key,
+                              summary: tc.summary,
+                              executionType: tc.executionType || 'Manual',
+                              status: 'Not Run'
                             }));
-                            
+
                             const cycleIdStr = String(cycleId);
                             const existingBase = perCycleCacheRef.current[cycleIdStr] || [];
                             const newArr = [...existingBase];
                             locallyAdded.forEach(lt => {
-                                let finalItem = lt;
-                                if (allAddedTests && allAddedTests.length > 0) {
-                                    const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
-                                    if (matched) {
-                                        finalItem = { ...lt, ...matched };
-                                    }
+                              let finalItem = lt;
+                              if (allAddedTests && allAddedTests.length > 0) {
+                                const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
+                                if (matched) {
+                                  finalItem = { ...lt, ...matched };
                                 }
-                                
-                                if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
-                                    newArr.push(finalItem);
-                                }
+                              }
+                              if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
+                                newArr.push(finalItem);
+                              }
                             });
                             perCycleCacheRef.current[cycleIdStr] = newArr;
                             setTestCycles(cycles => cycles.map(c => String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
@@ -9039,158 +11616,249 @@ const renderPlanningTab = () => {
                               setCycleTests(newArr);
                               setSelectedCycle(c => (c && String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
                             }
-                            
-                            const recoveredCount = (allAddedTests || []).filter(t => t.isRecovered).length;
-                            if (recoveredCount > 0) {
-                              addNotification({
-                                type: 'success',
-                                title: 'Casos restaurados',
-                                description: `${recoveredCount} caso${recoveredCount !== 1 ? 's' : ''} restauraron automáticamente su ejecución histórica y evidencias previas.`
-                              });
-                            }
 
                             setSelectedTestsForCycle([]);
-                            
+
                             setTimeout(async () => {
-                                const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-                                if (finalExecution) {
-                                    safeSetCycleTests(finalExecution, cycleId);
-                                }
+                              const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
+                              if (finalExecution) {
+                                safeSetCycleTests(finalExecution, cycleId);
+                              }
                             }, 2500);
-                            
-                          } catch(err) {
+                          } catch (err) {
                             console.error(err);
-                            alert("Error al añadir casos: " + err.message);
+                            alert('Error al añadir casos: ' + err.message);
                           }
                           setIsAddingAll(false);
                           setAddingProgress({ current: 0, total: 0 });
                         }}
                         disabled={loading || isAddingAll || availableFilteredTestCases.length === 0}
-                        style={{ height: '32px', fontSize: '12px', fontWeight: 600 }}
+                        style={{
+                          height: '32px',
+                          padding: '0 12px',
+                          background: '#0C66E4',
+                          color: '#FFFFFF',
+                          border: 'none',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          cursor: (loading || isAddingAll || availableFilteredTestCases.length === 0) ? 'not-allowed' : 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          boxShadow: '0 1px 2px rgba(0, 0, 0, 0.05)'
+                        }}
                       >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 4v16m8-8H4"></path></svg>
-                        <span>{isAddingAll ? (addingProgress.total > 0 ? `Añadiendo (${addingProgress.current}/${addingProgress.total})...` : 'Añadiendo casos...') : (selectedTestsForCycle.length > 0 ? `+ Añadir (${selectedTestsForCycle.length})` : '+ Añadir todos')}</span>
+                        <span>+</span>
+                        <span>
+                          {isAddingAll
+                            ? (addingProgress.total > 0 ? `Añadiendo (${addingProgress.current}/${addingProgress.total})...` : 'Añadiendo...')
+                            : (selectedTestsForCycle.length > 0 ? `Añadir seleccionados (${selectedTestsForCycle.length})` : 'Añadir todos')}
+                        </span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Available Tests List */}
+                  {/* Available Test Cases Rows (with Folder Grouping) */}
                   {!isSectionCollapsed('planning-available') && (
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {renderGroupedList(`plan-avail-${selectedCycle?.id || ''}`, availableFilteredTestCases.slice(0, planningAvailVisible), test => {
-                      const isSelected = selectedTestsForCycle.includes(test.id);
-                      const isAuto = getExecVal(test).includes('auto');
-                      return (
-                        <div 
-                          key={test.id} 
-                          className="planning-row"
-                          style={{
-                            backgroundColor: isSelected ? '#E9F2FF' : undefined,
-                            cursor: 'pointer'
-                          }}
-                          onClick={() => {
-                            setSelectedTestsForCycle(prev => 
-                              prev.includes(test.id) ? prev.filter(id => id !== test.id) : [...prev, test.id]
-                            );
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1, paddingRight: '1rem' }}>
-                            <input 
-                              type="checkbox" 
-                              checked={isSelected} 
-                              readOnly
-                              style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
-                            />
-                            <span 
-                              onClick={(e) => { e.stopPropagation(); router.open('/browse/' + test.key); }}
-                              style={{ fontWeight: 700, fontSize: '13px', color: '#0C66E4', cursor: 'pointer', flexShrink: 0 }}
-                              title="Abrir en Jira"
-                            >
-                              {test.key}
-                            </span>
-                            <span className={isAuto ? "planning-badge-auto" : "planning-badge-manual"}>
-                              {isAuto ? "⚡ Auto" : "Manual"}
-                            </span>
-                            <span 
-                              style={{ fontSize: '13px', fontWeight: 500, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                              title={test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
-                            >
-                              {test.summary || (findTc(test.id)?.summary) || "Caso de prueba"}
-                            </span>
-                          </div>
-                          <button 
-                            className="btn-secondary" 
-                            style={{ height: '28px', fontSize: '12px', fontWeight: 600, padding: '0 10px', flexShrink: 0 }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleAddTestToCycle(test);
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {renderGroupedList(`plan-avail-${selectedCycle?.id || ''}`, groupByFolder ? availableFilteredTestCases : availableFilteredTestCases.slice(0, planningAvailVisible), test => {
+                        const isSelected = selectedTestsForCycle.includes(test.id);
+                        const isAuto = getExecVal(test).includes('auto');
+                        return (
+                          <div
+                            key={test.id}
+                            onClick={() => {
+                              setSelectedTestsForCycle(prev =>
+                                prev.includes(test.id) ? prev.filter(id => id !== test.id) : [...prev, test.id]
+                              );
+                            }}
+                            style={{
+                              padding: '10px 16px',
+                              borderBottom: '1px solid #F1F5F9',
+                              background: isSelected ? '#EFF6FF' : '#FFFFFF',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: '12px',
+                              cursor: 'pointer'
                             }}
                           >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 4v16m8-8H4"></path></svg>
-                            <span>Add</span>
-                          </button>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: 1 }}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                readOnly
+                                style={{ borderRadius: '3px', cursor: 'pointer', flexShrink: 0, margin: 0 }}
+                              />
+                              <span
+                                onClick={e => { e.stopPropagation(); router.open('/browse/' + test.key); }}
+                                style={{
+                                  fontFamily: 'monospace',
+                                  fontSize: '12px',
+                                  fontWeight: 600,
+                                  color: '#0C66E4',
+                                  width: '64px',
+                                  flexShrink: 0,
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                {test.key}
+                              </span>
+                              {isAuto ? (
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '10px',
+                                  fontWeight: 700,
+                                  background: '#F3E8FF',
+                                  color: '#7E22CE',
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.04em',
+                                  width: '108px',
+                                  justifyContent: 'center',
+                                  flexShrink: 0
+                                }}>
+                                  <span>⚡</span> Automatizado
+                                </span>
+                              ) : (
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  padding: '2px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '10px',
+                                  fontWeight: 700,
+                                  background: '#F1F5F9',
+                                  color: '#475569',
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.04em',
+                                  width: '108px',
+                                  justifyContent: 'center',
+                                  flexShrink: 0
+                                }}>
+                                  Manual
+                                </span>
+                              )}
+                              <span
+                                style={{
+                                  fontSize: '12px',
+                                  color: '#334155',
+                                  fontWeight: 500,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                title={test.summary || (findTc(test.id)?.summary) || 'Caso de prueba'}
+                              >
+                                {test.summary || (findTc(test.id)?.summary) || 'Caso de prueba'}
+                              </span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                handleAddTestToCycle(test);
+                              }}
+                              style={{
+                                height: '28px',
+                                padding: '0 10px',
+                                borderRadius: '4px',
+                                border: '1px solid #E2E8F0',
+                                background: '#FFFFFF',
+                                color: '#334155',
+                                fontSize: '11px',
+                                fontWeight: 500,
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                flexShrink: 0
+                              }}
+                            >
+                              <span>+</span>
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {!groupByFolder && availableFilteredTestCases.length > planningAvailVisible && (
+                        <LoadMoreSentinel key={`avl-${planningAvailVisible}`} remaining={availableFilteredTestCases.length - planningAvailVisible} onVisible={() => setPlanningAvailVisible(v => v + LIST_BATCH_SIZE)} />
+                      )}
+                      {availableFilteredTestCases.length === 0 && (
+                        <div style={{ padding: '28px', textAlign: 'center', color: '#64748B', fontSize: '12px' }}>
+                          No hay casos de prueba disponibles con los filtros actuales.
                         </div>
-                      );
-                    })}
-                    {availableFilteredTestCases.length > planningAvailVisible && (
-                      <LoadMoreSentinel key={`avl-${planningAvailVisible}`} remaining={availableFilteredTestCases.length - planningAvailVisible} onVisible={() => setPlanningAvailVisible(v => v + LIST_BATCH_SIZE)} />
-                    )}
-                    {availableFilteredTestCases.length === 0 && (
-                      <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', fontSize: '13px' }}>
-                        No hay casos de prueba disponibles con los filtros actuales.
-                      </div>
-                    )}
-                  </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: '350px', padding: '3rem', textAlign: 'center', color: '#626F86', margin: 'auto' }}>
-                <div style={{ width: '48px', height: '48px', borderRadius: '12px', background: '#E9F2FF', color: '#0C66E4', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '1rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: '350px', padding: '3rem', textAlign: 'center', color: '#64748B', margin: 'auto' }}>
+                <div style={{ width: '48px', height: '48px', borderRadius: '12px', background: '#EFF6FF', color: '#0C66E4', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '1rem' }}>
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                    <line x1="16" y1="2" x2="16" y2="6" />
+                    <line x1="8" y1="2" x2="8" y2="6" />
+                    <line x1="3" y1="10" x2="21" y2="10" />
                   </svg>
                 </div>
-                <h3 style={{ margin: '0 0 0.5rem 0', color: '#172B4D', fontSize: '16px', fontWeight: 600 }}>Selecciona un Ciclo de Prueba</h3>
+                <h3 style={{ margin: '0 0 0.5rem 0', color: '#0F172A', fontSize: '16px', fontWeight: 600 }}>Selecciona un Ciclo de Prueba</h3>
                 <p style={{ margin: 0, fontSize: '13px', maxWidth: '400px' }}>
-                  Elige un Test Plan o Ciclo del panel lateral izquierdo para planificar, asignar o gestionar sus casos de prueba.
+                  Elige un Ciclo Planificado del panel izquierdo para configurar su calendario y asignar casos de prueba.
                 </p>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '1.25rem' }}>
-                  {!isFolderSidebarVisible && (
-                    <button
-                      onClick={toggleFolderSidebar}
-                      className="btn-secondary"
-                      style={{ height: '36px', fontSize: '13px' }}
-                    >
-                      📂 Ver Planes y Ciclos
-                    </button>
-                  )}
-                  <button 
-                    className="btn-primary" 
-                    style={{ height: '36px', fontSize: '13px' }}
-                    onClick={handleCreateIssue}
-                  >
-                    + Crear Nuevo Ciclo / Plan
-                  </button>
-                </div>
               </div>
             )}
           </div>
 
-          {/* Subtle Footer Bar - Fixed outside the scroll container */}
-          <footer className="planning-footer-bar">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#0C66E4', display: 'inline-block' }}></span>
-                <span style={{ fontWeight: 600, color: '#172B4D' }}>Progreso del Ciclo:</span>
-                <span>{inCycleCount} de {totalInProject} casos asignados ({cycleProgressPct}%)</span>
-              </div>
-              <span style={{ color: '#DCDFE4' }}>|</span>
-              <span>Plan activo: <strong style={{ color: '#172B4D' }}>{currentPlan?.summary || (selectedPlanId ? 'Plan seleccionado' : 'Sin plan asignado')}</strong></span>
+          {/* Stitch Bottom Workspace Footer */}
+          <footer style={{
+            borderTop: '1px solid #E2E8F0',
+            background: '#FFFFFF',
+            padding: '10px 24px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: '11px',
+            color: '#64748B',
+            flexShrink: 0,
+            flexWrap: 'wrap',
+            gap: '8px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#0C66E4', display: 'inline-block' }} />
+                <strong style={{ color: '#334155' }}>Planeación del Ciclo:</strong>
+                <strong style={{ color: '#0F172A' }}>{inCycleCount}</strong> casos asignados para{' '}
+                <strong style={{ color: '#0F172A' }}>{cycleDaysCalc.naturalDays} días</strong> programados
+              </span>
+              <span style={{ color: '#CBD5E1' }}>|</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                  <line x1="16" y1="2" x2="16" y2="6" />
+                  <line x1="8" y1="2" x2="8" y2="6" />
+                  <line x1="3" y1="10" x2="21" y2="10" />
+                </svg>
+                <span>Fechas programadas:</span>
+                <strong style={{ color: '#334155', fontFamily: 'monospace' }}>
+                  {hasCycleDates ? `${formatShortDateEs(cycleScheduleForm.startDate)} - ${formatShortDateEs(cycleScheduleForm.endDate, true)}` : 'Sin definir'}
+                </strong>
+              </span>
+              <span style={{ color: '#CBD5E1' }}>|</span>
+              <span>
+                Plan activo: <strong style={{ color: '#334155' }}>{currentPlan ? currentPlan.summary : 'Sin plan asignado'}</strong>
+                {planDaysCalc.naturalDays > 0 ? ` (Ventana de ${planDaysCalc.naturalDays} días)` : ''}
+              </span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10B981', display: 'inline-block' }}></span>
-              <span style={{ fontSize: '11px', color: '#626F86' }}>Atlassian Forge Environment • Synchronized</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#3B82F6', display: 'inline-block' }} />
+              <span>Módulo Planning • Definición de Calendario y Asignaciones</span>
             </div>
           </footer>
         </main>
@@ -9198,8 +11866,16 @@ const renderPlanningTab = () => {
     );
   };
 
-  const handleToggleExecutionTest = async (testId) => {
-    if (expandedExecutionTest === testId) {
+  const formatScenarioHtml = (rawHtml) => {
+    if (!rawHtml) return '';
+    return String(rawHtml)
+      .replace(/&lt;&lt;&lt;\s*([^&<>]+?)\s*&gt;&gt;&gt;/g, '<span style="display:inline-block;background:#FAF5FF;color:#6E5DC6;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-weight:600;padding:1px 6px;border-radius:4px;border:1px solid #E9D5FF;font-size:11px;margin:0 2px;">&lt;&lt;&lt;$1&gt;&gt;&gt;</span>')
+      .replace(/<<<\s*([^<>]+?)\s*>>>/g, '<span style="display:inline-block;background:#FAF5FF;color:#6E5DC6;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-weight:600;padding:1px 6px;border-radius:4px;border:1px solid #E9D5FF;font-size:11px;margin:0 2px;">&lt;&lt;&lt;$1&gt;&gt;&gt;</span>')
+      .replace(/\[([^\[\]<>]{2,45})\](?![^<]*>)/g, '<span style="display:inline-block;background:#EFF6FF;color:#0C66E4;font-weight:600;padding:1px 6px;border-radius:4px;border:1px solid #BFDBFE;font-size:11px;margin:0 2px;">[$1]</span>');
+  };
+
+  const handleToggleExecutionTest = async (testId, forceOpen = false) => {
+    if (!forceOpen && String(expandedExecutionTest) === String(testId)) {
       setExpandedExecutionTest(null);
     } else {
       setExpandedExecutionTest(testId);
@@ -9404,165 +12080,507 @@ const renderPlanningTab = () => {
       ? filteredTests
       : filteredTests.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize);
 
-    const currentPlan = testPlans.find(p => p.id === selectedPlanId);
+    const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
+    const sidebarCycles = (selectedPlanId && !planningShowAllCycles)
+      ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId))
+      : filteredTestCycles;
+    const activeCycleIdx = selectedCycle
+      ? sidebarCycles.findIndex(c => String(c.id) === String(selectedCycle.id))
+      : -1;
+
+    // Schedule & Pulse calculations for Plan and Active Cycle
+    const nowDate = new Date();
+    const todayIso = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`;
+
+    const planSched = currentPlan?.schedule || planScheduleForm || {};
+    const planDaysCalc = calcScheduleDays(
+      planSched.startDate,
+      planSched.endDate,
+      planSched.excludeWeekends !== false,
+      planSched.holidays
+    );
+    const planTotalBizDays = planDaysCalc.businessDays || 0;
+    let planElapsedDays = 0;
+    if (planSched.startDate && planSched.endDate && planTotalBizDays > 0) {
+      if (todayIso <= planSched.startDate) {
+        planElapsedDays = todayIso === planSched.startDate ? 1 : 0;
+      } else if (todayIso >= planSched.endDate) {
+        planElapsedDays = planTotalBizDays;
+      } else {
+        planElapsedDays = calcScheduleDays(
+          planSched.startDate,
+          todayIso,
+          planSched.excludeWeekends !== false,
+          planSched.holidays
+        ).businessDays;
+      }
+    }
+    const planElapsedPct = planTotalBizDays > 0
+      ? Math.min(100, Number(((planElapsedDays / planTotalBizDays) * 100).toFixed(1)))
+      : 0;
+    const planRemainingDays = Math.max(0, planTotalBizDays - planElapsedDays);
+    const planShortRange = (planSched.startDate && planSched.endDate)
+      ? `${formatShortDateEs(planSched.startDate)} – ${formatShortDateEs(planSched.endDate)}`
+      : 'Sin fechas definidas';
+
+    const cycleInList = selectedCycle
+      ? (testCycles.find(c => String(c.id) === String(selectedCycle.id)) || selectedCycle)
+      : null;
+    const cycleSched = (cycleInList?.schedule && (cycleInList.schedule.startDate || cycleInList.schedule.endDate))
+      ? cycleInList.schedule
+      : (cycleScheduleForm || {});
+    const cycleDaysCalc = calcScheduleDays(
+      cycleSched.startDate,
+      cycleSched.endDate,
+      cycleSched.excludeWeekends !== false,
+      cycleSched.holidays
+    );
+    const cycleTotalBizDays = cycleDaysCalc.businessDays || 0;
+    let cycleElapsedDays = 0;
+    if (cycleSched.startDate && cycleSched.endDate && cycleTotalBizDays > 0) {
+      if (todayIso <= cycleSched.startDate) {
+        cycleElapsedDays = todayIso === cycleSched.startDate ? 1 : 0;
+      } else if (todayIso >= cycleSched.endDate) {
+        cycleElapsedDays = cycleTotalBizDays;
+      } else {
+        cycleElapsedDays = calcScheduleDays(
+          cycleSched.startDate,
+          todayIso,
+          cycleSched.excludeWeekends !== false,
+          cycleSched.holidays
+        ).businessDays;
+      }
+    }
+    const cycleElapsedPct = cycleTotalBizDays > 0
+      ? Math.min(100, Number(((cycleElapsedDays / cycleTotalBizDays) * 100).toFixed(1)))
+      : 0;
+    const cycleExecPct = totalInCycle > 0
+      ? Number(((executedCount / totalInCycle) * 100).toFixed(1))
+      : 0;
+    const cycleShortRange = (cycleSched.startDate && cycleSched.endDate)
+      ? `${formatShortDateEs(cycleSched.startDate)} – ${formatShortDateEs(cycleSched.endDate)}`
+      : 'Sin fechas';
+    const cycleFullRange = (cycleSched.startDate && cycleSched.endDate)
+      ? `${formatShortDateEs(cycleSched.startDate)} – ${formatShortDateEs(cycleSched.endDate, true)}`
+      : 'Sin ventana programada';
+
+    const targetDailyRate = cycleTotalBizDays > 0
+      ? Math.max(1, Math.round(totalInCycle / cycleTotalBizDays))
+      : (totalInCycle || 0);
+    const actualDailyRate = cycleElapsedDays > 0
+      ? Math.round(executedCount / cycleElapsedDays)
+      : executedCount;
+    const rateDiffPct = targetDailyRate > 0
+      ? Math.round(((actualDailyRate - targetDailyRate) / targetDailyRate) * 100)
+      : 0;
+
+    const rawSlackDays = cycleTotalBizDays > 0
+      ? Number((((cycleExecPct - cycleElapsedPct) / 100) * cycleTotalBizDays).toFixed(1))
+      : 0;
+    const slackFormatted = `${rawSlackDays >= 0 ? '+' : ''}${rawSlackDays}d`;
+
+    // Global Plan metrics computed strictly across ALL cycles belonging to the Plan (never changes when clicking between individual cycles)
+    const planCycles = selectedPlanId
+      ? testCycles.filter(c => isCycleInPlan(c, selectedPlanId))
+      : testCycles;
+    let planTotalCases = 0;
+    let planExecutedCases = 0;
+    let planFailedCases = 0;
+    planCycles.forEach(c => {
+      const cTests = planCyclesSummary[String(c.id)] || c.tests || c.execution || [];
+      planTotalCases += cTests.length;
+      cTests.forEach(t => {
+        const st = (t.status || 'UNEXECUTED').toUpperCase();
+        if (st === 'PASS' || st === 'FAIL' || st === 'BLOCKED') planExecutedCases += 1;
+        if (st === 'FAIL') planFailedCases += 1;
+      });
+    });
+    const planExecPct = planTotalCases > 0
+      ? Number(((planExecutedCases / planTotalCases) * 100).toFixed(1))
+      : planElapsedPct;
+    const planRawSlackDays = (planTotalBizDays > 0 && planTotalCases > 0)
+      ? Number((((planExecPct - planElapsedPct) / 100) * planTotalBizDays).toFixed(1))
+      : 0;
+    const planSlackFormatted = `${planRawSlackDays >= 0 ? '+' : ''}${planRawSlackDays}d`;
+    const planFailRatio = planTotalCases > 0 ? (planFailedCases / planTotalCases) * 100 : 0;
+    const planScheduleLag = planTotalCases > 0 ? Math.max(0, planElapsedPct - planExecPct) : 0;
+    const planHealthPct = planTotalCases > 0
+      ? Math.min(100, Math.max(0, Math.round(100 - planFailRatio * 0.6 - planScheduleLag * 0.4)))
+      : 100;
+    const planHealthStatus = planHealthPct >= 80 ? 'Óptimo' : (planHealthPct >= 55 ? 'Atención' : 'En Riesgo');
+
+    const failRatio = totalInCycle > 0 ? (failedCount / totalInCycle) * 100 : 0;
+    const scheduleLag = Math.max(0, cycleElapsedPct - cycleExecPct);
+    const cycleRiskPct = totalInCycle > 0
+      ? Math.min(100, Math.max(0, Math.round(failRatio * 0.7 + scheduleLag * 0.5)))
+      : 0;
+    const cycleRiskLabel = cycleRiskPct < 15 ? 'Bajo' : (cycleRiskPct < 35 ? 'Medio' : 'Alto');
+    const isPulseOptimal = rawSlackDays >= 0 && failRatio < 20;
+    const isPulseWarning = !isPulseOptimal && rawSlackDays >= -1.5 && failRatio < 35;
+    const pulseBadgeBg = isPulseOptimal ? '#059669' : (isPulseWarning ? '#D97706' : '#DC2626');
+    const pulseStateText = isPulseOptimal ? 'Óptimo' : (isPulseWarning ? 'En Riesgo' : 'Atrasado');
 
     return (
       <div className="tab-layout" style={{ height: '100%', overflow: 'hidden' }}>
-        {/* Left Sidebar: Plans & Cycles */}
+        {/* Left Sidebar: Plans & Cycles (Rediseño Estilo Premium Atlassian Cloud) */}
         {isFolderSidebarVisible && (
           <>
-            <aside className="execution-sidebar" style={{ width: sidebarWidth, flexShrink: 0 }}>
-              {/* Test Plans Selector Header */}
-              <div style={{ padding: '1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+            <aside
+              className="execution-sidebar"
+              style={{
+                width: sidebarWidth,
+                flexShrink: 0,
+                background: '#FFFFFF',
+                borderRight: '1px solid var(--jira-border, #DCDFE4)',
+                display: 'flex',
+                flexDirection: 'column',
+                userSelect: 'none'
+              }}
+            >
+              {/* Current Test Plan Selector Card with Health Indicator */}
+              <div style={{
+                padding: '14px',
+                borderBottom: '1px solid var(--jira-border, #DCDFE4)',
+                background: 'linear-gradient(to bottom, #FFFFFF, #FAFBFC)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                    PLAN DE PRUEBAS ACTIVO
+                  </span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', letterSpacing: '0.04em', textTransform: 'uppercase' }}>TEST PLANS</span>
                     <button
+                      type="button"
                       onClick={handleCreateIssue}
-                      style={{ fontSize: '11px', fontWeight: 600, color: '#0C66E4', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-                      className="hover:underline"
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: '#0C66E4',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        padding: 0
+                      }}
                     >
                       + Nuevo
                     </button>
+                    <button
+                      type="button"
+                      onClick={toggleFolderSidebar}
+                      title="Ocultar panel lateral"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        borderRadius: '4px',
+                        color: '#626F86',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                        <line x1="9" y1="3" x2="9" y2="21" />
+                        <path d="M15 15l-3-3 3-3" />
+                      </svg>
+                    </button>
                   </div>
-                  <button
-                    onClick={toggleFolderSidebar}
-                    title="Ocultar panel lateral (Sidebar)"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      padding: '3px',
-                      borderRadius: '4px',
-                      color: 'var(--jira-subtle, #626F86)',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--jira-bg-subtle, #F1F2F4)'}
-                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                      <line x1="9" y1="3" x2="9" y2="21" />
-                      <path d="M15 15l-3-3 3-3" />
-                    </svg>
-                  </button>
                 </div>
-                <select
-                  value={selectedPlanId || ''}
-                  onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); setExecutionCurrentPage(1); }}
+
+                {/* Select Plan Dropdown Trigger */}
+                <div
                   style={{
-                    width: '100%',
-                    padding: '0.5rem 0.6rem',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    color: '#172B4D',
-                    background: '#FAFBFC',
+                    position: 'relative',
+                    padding: '10px',
+                    background: '#FFFFFF',
                     border: '1px solid #DCDFE4',
-                    borderRadius: '6px',
-                    outline: 'none',
-                    cursor: 'pointer'
+                    borderRadius: '8px',
+                    boxShadow: '0 1px 2px rgba(9, 30, 66, 0.05)',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.15s ease'
                   }}
                 >
-                  <option value="">Seleccionar un Plan de Pruebas...</option>
-                  {testPlans.map(plan => (
-                    <option key={plan.id} value={plan.id}>{plan.summary}</option>
-                  ))}
-                </select>
-              </div>
+                  <select
+                    value={selectedPlanId || ''}
+                    onChange={e => { setSelectedPlanId(e.target.value); setSelectedCycle(null); setExecutionCurrentPage(1); }}
+                    aria-label="Seleccionar Plan de Pruebas Activo"
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      width: '100%',
+                      height: '100%',
+                      opacity: 0,
+                      cursor: 'pointer',
+                      zIndex: 2
+                    }}
+                  >
+                    <option value="">Seleccionar un Plan de Pruebas...</option>
+                    {testPlans.map(plan => (
+                      <option key={plan.id} value={plan.id}>{plan.summary}</option>
+                    ))}
+                  </select>
 
-          {/* Active Cycles Header */}
-          <div style={{ padding: '0.85rem 1rem 0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '11px', fontWeight: 700, color: '#172B4D', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Active Cycles</span>
-              <span style={{ fontSize: '10px', background: '#F1F2F4', color: '#626F86', padding: '1px 6px', borderRadius: '10px', fontWeight: 700 }}>
-                {selectedPlanId ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)).length : filteredTestCycles.length}
-              </span>
-            </div>
-          </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                      <div style={{
+                        width: '28px',
+                        height: '28px',
+                        borderRadius: '6px',
+                        background: '#FAF5FF',
+                        color: '#7E22CE',
+                        border: '1px solid #E9D5FF',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0
+                      }}>
+                        <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: '12px', fontWeight: 700, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {currentPlan ? currentPlan.summary : 'Seleccionar un Plan...'}
+                        </div>
+                        {!currentPlan && (
+                          <div style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {testPlans.length} planes disponibles
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <svg width="16" height="16" fill="#626F86" viewBox="0 0 20 20" style={{ flexShrink: 0 }}>
+                      <path fillRule="evenodd" clipRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                    </svg>
+                  </div>
 
-          {/* Active Cycles List */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            {(selectedPlanId ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId)) : filteredTestCycles).map(cycle => {
-              const isSelected = selectedCycle?.id === cycle.id;
-              return (
-                <div
-                  key={cycle.id}
-                  onClick={() => { handleCycleSelect(cycle); setExecutionCurrentPage(1); }}
-                  style={{
+                  {/* Health & Short Window inside Plan Card */}
+                  <div style={{
+                    marginTop: '10px',
+                    paddingTop: '8px',
+                    borderTop: '1px solid #F3F4F6',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    padding: '0.55rem 0.75rem',
-                    borderRadius: '6px',
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                    background: isSelected ? '#E9F2FF' : 'transparent',
-                    color: isSelected ? '#0C66E4' : '#172B4D',
-                    fontWeight: isSelected ? 600 : 500,
-                    borderLeft: isSelected ? '4px solid #0C66E4' : '4px solid transparent'
-                  }}
-                  onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = '#F4F5F7'; }}
-                  onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={isSelected ? '#0C66E4' : '#FF9800'} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                    </svg>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cycle.summary}</span>
+                    fontSize: '11px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: planHealthPct >= 80 ? '#10B981' : (planHealthPct >= 55 ? '#F59E0B' : '#EF4444'),
+                        display: 'inline-block'
+                      }} />
+                      <span style={{ fontWeight: 600, color: planHealthPct >= 80 ? '#065F46' : (planHealthPct >= 55 ? '#92400E' : '#991B1B') }}>
+                        Salud General: {planHealthPct}%
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#626F86', fontWeight: 500 }}>
+                      {planSched.startDate && planSched.endDate ? planShortRange : 'Sin fechas'}
+                    </span>
                   </div>
                 </div>
-              );
-            })}
-          </div>
+              </div>
 
-          {/* Bottom Persistent Action: + New Execution Cycle */}
-          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
-            <button
-              onClick={handleCreateIssue}
-              style={{
-                width: '100%',
-                padding: '0.45rem 0.75rem',
-                background: '#0C66E4',
-                color: '#FFFFFF',
-                fontSize: '12px',
-                fontWeight: 600,
-                borderRadius: '6px',
-                border: 'none',
-                cursor: 'pointer',
+              {/* Plan Calendar Compact Strip */}
+              <div style={{
+                padding: '10px 14px',
+                background: '#F7F8FA',
+                borderBottom: '1px solid var(--jira-border, #DCDFE4)',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-                transition: 'background 0.15s ease'
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = '#0055CC'}
-              onMouseLeave={e => e.currentTarget.style.background = '#0C66E4'}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-              <span>+ New Execution Cycle</span>
-            </button>
-          </div>
-        </aside>
+                justifyContent: 'space-between',
+                fontSize: '11px'
+              }}>
+                <span style={{ color: '#626F86', fontWeight: 500 }}>
+                  Día <strong style={{ fontWeight: 700, color: '#172B4D' }}>{planElapsedDays} de {planTotalBizDays}</strong> ({planElapsedPct}%)
+                </span>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  color: planRawSlackDays >= 0 ? '#047857' : '#B45309',
+                  background: planRawSlackDays >= 0 ? '#ECFDF5' : '#FFFBEB',
+                  border: `1px solid ${planRawSlackDays >= 0 ? '#A7F3D0' : '#FDE68A'}`,
+                  padding: '2px 8px',
+                  borderRadius: '9999px'
+                }}>
+                  <span>Holgura {planSlackFormatted}</span>
+                </span>
+              </div>
 
-        {/* Resizer Handle */}
-        <div
-          onMouseDown={() => setIsResizing(true)}
-          style={{
-            width: '5px',
-            cursor: 'col-resize',
-            backgroundColor: isResizing ? 'var(--ds-border-focused, #0C66E4)' : 'transparent',
-            zIndex: 10,
-            borderRight: '1px solid var(--jira-border, #DCDFE4)',
-            marginLeft: '-1px'
-          }}
-        />
-        </>
+              {/* Associated Cycles Header */}
+              <div style={{ padding: '12px 14px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h2 style={{ margin: 0, fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#626F86' }}>
+                    CICLOS ASOCIADOS
+                  </h2>
+                  <span style={{ fontSize: '10px', background: '#F1F5F9', color: '#626F86', padding: '1px 6px', fontWeight: 600, borderRadius: '9999px' }}>
+                    {sidebarCycles.length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPlanningShowAllCycles(v => !v)}
+                  title={planningShowAllCycles ? 'Mostrando todos los ciclos (clic para filtrar por plan)' : 'Filtrar / Mostrar todos los ciclos'}
+                  style={{
+                    background: planningShowAllCycles ? '#E9F2FF' : 'none',
+                    border: 'none',
+                    color: planningShowAllCycles ? '#0C66E4' : '#626F86',
+                    cursor: 'pointer',
+                    padding: '4px',
+                    borderRadius: '4px',
+                    display: 'inline-flex',
+                    alignItems: 'center'
+                  }}
+                >
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Active Cycle Subheader & Single-Selection Note */}
+              <div style={{ padding: '10px 14px 8px', borderBottom: '1px solid #F3F4F6' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <h2 style={{ margin: 0, fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#626F86' }}>
+                      CICLO ACTIVO
+                    </h2>
+                    <span style={{ fontSize: '10px', background: '#DBEAFE', color: '#0C66E4', padding: '1px 6px', fontWeight: 700, borderRadius: '9999px' }}>
+                      ÚNICO
+                    </span>
+                  </div>
+                  <span style={{ fontSize: '10px', color: '#626F86', fontWeight: 500 }}>
+                    {activeCycleIdx >= 0 ? `${activeCycleIdx + 1} de ${sidebarCycles.length}` : `0 de ${sidebarCycles.length}`}
+                  </span>
+                </div>
+                <div style={{
+                  marginTop: '6px',
+                  fontSize: '10px',
+                  color: '#626F86',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '6px',
+                  background: '#F9FAFB',
+                  padding: '6px',
+                  borderRadius: '4px',
+                  border: '1px solid #E5E7EB',
+                  lineHeight: 1.35
+                }}>
+                  <svg width="12" height="12" fill="#0C66E4" viewBox="0 0 20 20" style={{ flexShrink: 0, marginTop: '1px' }}>
+                    <path fillRule="evenodd" clipRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" />
+                  </svg>
+                  <span>Selección de ciclo único (para análisis comparativo multi-ciclo consultar Reports)</span>
+                </div>
+              </div>
+
+              {/* Scrollable Cycles List */}
+              <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {sidebarCycles.map(cycle => {
+                  const isSelected = String(selectedCycle?.id) === String(cycle.id);
+                  const cSched = cycle.schedule || {};
+                  const cRange = (cSched.startDate && cSched.endDate)
+                    ? `${formatShortDateEs(cSched.startDate)} – ${formatShortDateEs(cSched.endDate)}`
+                    : '';
+                  return (
+                    <div
+                      key={cycle.id}
+                      onClick={() => { handleCycleSelect(cycle); setExecutionCurrentPage(1); }}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px',
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease',
+                        background: isSelected ? '#E9F2FF' : 'transparent',
+                        color: isSelected ? '#0C66E4' : '#172B4D',
+                        fontWeight: isSelected ? 700 : 500,
+                        border: isSelected ? '1px solid #B2D4FF' : '1px solid transparent',
+                        borderLeft: isSelected ? '4px solid #0C66E4' : '4px solid transparent'
+                      }}
+                      onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = '#F4F5F7'; }}
+                      onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0, overflow: 'hidden' }}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={isSelected ? '#0C66E4' : '#626F86'} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cycle.summary}</span>
+                        </div>
+                        {isSelected && (
+                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#0C66E4', flexShrink: 0 }} />
+                        )}
+                      </div>
+                      {cRange && (
+                        <div style={{ paddingLeft: '21px', fontSize: '10px', color: isSelected ? '#0747A6' : '#626F86', fontWeight: 500 }}>
+                          {cRange}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {sidebarCycles.length === 0 && (
+                  <div style={{ padding: '16px 8px', textAlign: 'center', fontSize: '11px', color: '#626F86' }}>
+                    No hay ciclos asociados a este plan.
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Persistent Action: + Nuevo Ciclo de Ejecución */}
+              <div style={{ padding: '12px', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
+                <button
+                  type="button"
+                  onClick={handleCreateIssue}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    background: '#0C66E4',
+                    color: '#FFFFFF',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    borderRadius: '6px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    boxShadow: '0 1px 2px rgba(9, 30, 66, 0.08)',
+                    transition: 'background 0.15s ease'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#0055CC'}
+                  onMouseLeave={e => e.currentTarget.style.background = '#0C66E4'}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span>+ Nuevo Ciclo de Ejecución</span>
+                </button>
+              </div>
+            </aside>
+
+            {/* Resizer Handle */}
+            <div
+              onMouseDown={() => setIsResizing(true)}
+              style={{
+                width: '5px',
+                cursor: 'col-resize',
+                backgroundColor: isResizing ? 'var(--ds-border-focused, #0C66E4)' : 'transparent',
+                zIndex: 10,
+                borderRight: '1px solid var(--jira-border, #DCDFE4)',
+                marginLeft: '-1px'
+              }}
+            />
+          </>
         )}
 
         {/* Workspace Area */}
@@ -9572,156 +12590,432 @@ const renderPlanningTab = () => {
               {/* Scrollable Container */}
               <div className="execution-scroll-container">
                 <div className="execution-canvas">
-                  {/* Header: Title */}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                        {!isFolderSidebarVisible && (
-                          <button
-                            onClick={toggleFolderSidebar}
-                            className="btn-secondary"
-                            title="Mostrar panel de planes y ciclos"
-                            style={{
+                  {/* BEGIN: Clean Minimalist Cycle Header (Tablero Operativo & Semáforo de Ritmo) */}
+                  <div style={{
+                    background: '#FFFFFF',
+                    border: '1px solid var(--jira-border, #DCDFE4)',
+                    borderRadius: '12px',
+                    padding: '20px',
+                    boxShadow: '0 1px 3px rgba(9, 30, 66, 0.06), 0 1px 2px rgba(9, 30, 66, 0.04)'
+                  }}>
+                    {/* Top Row: Title + Window Info + Actions */}
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '16px',
+                      paddingBottom: '16px',
+                      borderBottom: '1px solid var(--jira-border, #DCDFE4)'
+                    }}>
+                      <div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+                          {!isFolderSidebarVisible && (
+                            <button
+                              type="button"
+                              onClick={toggleFolderSidebar}
+                              className="btn-secondary"
+                              title="Mostrar panel de planes y ciclos"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                                fontSize: '11px',
+                                padding: '4px 8px',
+                                borderRadius: '6px'
+                              }}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                <line x1="9" y1="3" x2="9" y2="21" />
+                                <path d="M13 9l3 3-3 3" />
+                              </svg>
+                              <span>Planes &amp; Ciclos</span>
+                            </button>
+                          )}
+                          <span style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#626F86' }}>
+                            TABLERO OPERATIVO
+                          </span>
+                          <span style={{ color: '#D1D5DB' }}>•</span>
+                          <h1 style={{ fontSize: '20px', fontWeight: 700, color: '#172B4D', margin: 0, letterSpacing: '-0.015em' }}>
+                            {selectedCycle.summary}
+                          </h1>
+                          <span style={{
+                            padding: '2px 10px',
+                            borderRadius: '9999px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            background: '#F3F4F6',
+                            color: '#172B4D',
+                            border: '1px solid #E5E7EB',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px'
+                          }}>
+                            {isLoadingCycleTests ? 'Sincronizando...' : `${totalInCycle} casos totales`}
+                          </span>
+                          <span style={{
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            textTransform: 'uppercase',
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            background: isLoadingCycleTests ? '#F1F2F4' : (completionRate === 100 ? '#DCFFF1' : '#EFF6FF'),
+                            color: isLoadingCycleTests ? '#626F86' : (completionRate === 100 ? '#216E4E' : '#0C66E4'),
+                            border: `1px solid ${isLoadingCycleTests ? '#DCDFE4' : (completionRate === 100 ? '#7EE2B8' : '#BFDBFE')}`
+                          }}>
+                            {isLoadingCycleTests ? 'SINCRONIZANDO...' : (completionRate === 100 ? 'COMPLETADO' : 'EN CURSO')}
+                          </span>
+                        </div>
+
+                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', fontSize: '12px', color: '#626F86' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                            <svg width="14" height="14" fill="none" stroke="#626F86" strokeWidth="2" viewBox="0 0 24 24">
+                              <path d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            <span>
+                              Ventana: <strong style={{ color: '#172B4D', fontWeight: 600 }}>{cycleFullRange}</strong>
+                              {cycleDaysCalc.naturalDays > 0 ? ` (${cycleDaysCalc.businessDays} días hábiles, ${cycleDaysCalc.naturalDays} naturales)` : ''}
+                            </span>
+                          </span>
+                          {cycleSched.sprint && (
+                            <>
+                              <span>•</span>
+                              <span>{cycleSched.sprint}</span>
+                            </>
+                          )}
+                          <span>•</span>
+                          <span style={{ color: '#047857', fontWeight: 500 }}>
+                            Sincronizado con Jira{currentPlan ? ` · ${currentPlan.summary}` : ''}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Header Actions */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearPersistentCache();
+                            queryClient.invalidateQueries();
+                            handleCycleSelect(selectedCycle);
+                            addNotification({
+                              type: 'info',
+                              title: 'Sincronizando información',
+                              description: `Actualizando datos del ciclo ${selectedCycle.summary} desde Jira...`
+                            });
+                          }}
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#172B4D',
+                            background: '#FFFFFF',
+                            border: '1px solid #DCDFE4',
+                            borderRadius: '6px',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <svg width="14" height="14" fill="none" stroke="#0C66E4" strokeWidth="2" viewBox="0 0 24 24">
+                            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                          <span>Sincronizar Info</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearPersistentCache();
+                            queryClient.invalidateQueries();
+                            setRefreshTrigger(prev => prev + 1);
+                            handleCycleSelect(selectedCycle);
+                            addNotification({
+                              type: 'success',
+                              title: 'Estatus sincronizado',
+                              description: 'Estados de ejecución actualizados con Jira.'
+                            });
+                          }}
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#172B4D',
+                            background: '#FFFFFF',
+                            border: '1px solid #DCDFE4',
+                            borderRadius: '6px',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <svg width="14" height="14" fill="none" stroke="#D97706" strokeWidth="2" viewBox="0 0 24 24">
+                            <path d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                          <span>Sincronizar Estatus</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const firstTarget = (groupByFolder ? filteredTests : paginatedTests)[0];
+                            if (firstTarget) {
+                              setExpandedExecutionTest(firstTarget.id);
+                            }
+                          }}
+                          style={{
+                            padding: '6px 14px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#FFFFFF',
+                            background: '#00875A',
+                            border: 'none',
+                            borderRadius: '6px',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.08)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                          <span>Ejecutar Todo</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* SEMÁFORO DE RITMO & PULSO VITAL (2-Column Grid) */}
+                    <div style={{
+                      marginTop: '16px',
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+                      gap: '16px'
+                    }}>
+                      {/* PANEL 1: SALUD GLOBAL DEL PLAN DE PRUEBAS */}
+                      <div style={{
+                        background: 'linear-gradient(to bottom, rgba(250, 245, 255, 0.55), #FFFFFF, rgba(249, 250, 251, 0.55))',
+                        border: '1px solid rgba(233, 213, 255, 0.85)',
+                        borderRadius: '8px',
+                        padding: '16px',
+                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.03)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          paddingBottom: '8px',
+                          marginBottom: '10px',
+                          borderBottom: '1px solid #F3E8FF',
+                          gap: '8px'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#7E22CE', display: 'inline-block' }} />
+                            <span style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#581C87' }}>
+                              SALUD GLOBAL DEL PLAN DE PRUEBAS
+                            </span>
+                          </div>
+                          <span style={{
+                            fontSize: '10px',
+                            fontFamily: 'monospace',
+                            fontWeight: 700,
+                            padding: '2px 8px',
+                            background: '#FAF5FF',
+                            color: '#7E22CE',
+                            border: '1px solid #E9D5FF',
+                            borderRadius: '4px',
+                            maxWidth: '180px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {currentPlan ? currentPlan.summary : 'SIN PLAN ACTIVO'}
+                          </span>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px', fontSize: '12px' }}>
+                            <span style={{ color: '#626F86', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                              <svg width="14" height="14" fill="none" stroke="#7E22CE" strokeWidth="2" viewBox="0 0 24 24">
+                                <path d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                              <span>Ventana total release:</span>
+                              <strong style={{ color: '#172B4D', fontWeight: 600 }}>{planShortRange}</strong>
+                            </span>
+                            <span style={{ color: '#626F86' }}>
+                              Días transcurridos: <strong style={{ color: '#172B4D', fontWeight: 700 }}>Día {planElapsedDays} de {planTotalBizDays}</strong> ({planElapsedPct}%)
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span style={{
+                                  width: '8px',
+                                  height: '8px',
+                                  borderRadius: '50%',
+                                  background: planHealthPct >= 80 ? '#10B981' : (planHealthPct >= 55 ? '#F59E0B' : '#EF4444'),
+                                  display: 'inline-block'
+                                }} />
+                                <span style={{ fontWeight: 700, color: planHealthPct >= 80 ? '#065F46' : (planHealthPct >= 55 ? '#92400E' : '#991B1B') }}>
+                                  {planHealthPct}% Salud Global ({planHealthStatus})
+                                </span>
+                              </div>
+                              <span style={{
+                                fontWeight: 700,
+                                color: planRawSlackDays >= 0 ? '#047857' : '#B45309',
+                                background: planRawSlackDays >= 0 ? '#ECFDF5' : '#FFFBEB',
+                                border: `1px solid ${planRawSlackDays >= 0 ? '#A7F3D0' : '#FDE68A'}`,
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                fontSize: '10px'
+                              }}>
+                                Holgura {planSlackFormatted} {planRawSlackDays >= 0 ? 'favorable' : 'atención'}
+                              </span>
+                            </div>
+
+                            <div style={{ width: '100%', background: 'rgba(243, 232, 255, 0.7)', height: '8px', borderRadius: '9999px', overflow: 'hidden' }}>
+                              <div style={{ background: '#7E22CE', height: '100%', borderRadius: '9999px', width: `${planElapsedPct}%`, transition: 'width 0.3s ease' }} />
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', paddingTop: '2px' }}>
+                              <span>Avance del plan: {planElapsedPct}% del cronograma</span>
+                              <span>{planRemainingDays} días hábiles restantes de release</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* PANEL 2: SALUD Y RITMO DEL CICLO ACTIVO */}
+                      <div style={{
+                        background: 'linear-gradient(to bottom, rgba(239, 246, 255, 0.55), rgba(240, 253, 250, 0.35), rgba(236, 253, 245, 0.45))',
+                        border: '1px solid rgba(12, 102, 228, 0.3)',
+                        borderRadius: '8px',
+                        padding: '16px',
+                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.03)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          paddingBottom: '8px',
+                          marginBottom: '10px',
+                          borderBottom: '1px solid #DBEAFE',
+                          gap: '8px',
+                          flexWrap: 'wrap'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#0C66E4', display: 'inline-block' }} />
+                            <span style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#172B4D' }}>
+                              SALUD Y RITMO DEL CICLO ACTIVO
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{
+                              fontSize: '10px',
+                              fontWeight: 700,
+                              color: '#0C66E4',
+                              background: 'rgba(219, 234, 254, 0.75)',
+                              border: '1px solid #BFDBFE',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              maxWidth: '180px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {selectedCycle.summary} ({cycleTotalBizDays || cycleDaysCalc.naturalDays || 0} DÍAS)
+                            </span>
+                            <span style={{ fontSize: '10px', color: '#626F86', fontWeight: 500 }}>
+                              {cycleShortRange}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                            <span style={{
                               display: 'inline-flex',
                               alignItems: 'center',
-                              gap: '5px',
-                              fontSize: '0.78rem',
-                              padding: '0.35rem 0.65rem',
-                              borderRadius: '6px'
-                            }}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                              <line x1="9" y1="3" x2="9" y2="21" />
-                              <path d="M13 9l3 3-3 3" />
-                            </svg>
-                            <span>Planes &amp; Ciclos</span>
-                          </button>
-                        )}
-                        <h1 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#172B4D', margin: 0, letterSpacing: '-0.01em' }}>
-                          Execution: {selectedCycle.summary}
-                        </h1>
-                        <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '12px', background: isLoadingCycleTests ? '#E9F2FF' : '#F1F2F4', color: isLoadingCycleTests ? '#0C66E4' : '#44546F', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                          {isLoadingCycleTests ? (
-                            <>
-                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
-                              <span>Sincronizando...</span>
-                            </>
-                          ) : (
-                            `${totalInCycle} casos`
-                          )}
-                        </span>
-                        <span style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          letterSpacing: '0.04em',
-                          textTransform: 'uppercase',
-                          padding: '2px 8px',
-                          borderRadius: '4px',
-                          background: isLoadingCycleTests ? '#F1F2F4' : (completionRate === 100 ? '#DCFFF1' : '#E9F2FF'),
-                          color: isLoadingCycleTests ? '#626F86' : (completionRate === 100 ? '#216E4E' : '#0C66E4'),
-                          border: `1px solid ${isLoadingCycleTests ? '#DCDFE4' : (completionRate === 100 ? '#7EE2B8' : '#B2D4FF')}`
-                        }}>
-                          {isLoadingCycleTests ? 'Sincronizando...' : (completionRate === 100 ? 'Completado' : 'En Ejecución')}
-                        </span>
+                              gap: '6px',
+                              padding: '3px 10px',
+                              borderRadius: '9999px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              background: pulseBadgeBg,
+                              color: '#FFFFFF',
+                              boxShadow: '0 1px 2px rgba(0, 0, 0, 0.08)'
+                            }}>
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#FFFFFF', display: 'inline-block' }} />
+                              <span>{pulseStateText} · {rawSlackDays >= 0 ? `+${rawSlackDays}` : rawSlackDays} días de holgura</span>
+                            </span>
+                            <div style={{ fontSize: '11px', fontWeight: 600, color: '#626F86', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <svg width="14" height="14" fill="none" stroke="#0C66E4" strokeWidth="2" viewBox="0 0 24 24">
+                                <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                              <span>
+                                Límite: <strong style={{ color: '#172B4D' }}>{cycleSched.endDate ? `${formatShortDateEs(cycleSched.endDate)}, 18:00 hrs` : 'Sin definir'}</strong>
+                              </span>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px', fontSize: '11px' }}>
+                              <span style={{ color: '#626F86' }}>
+                                Ritmo de ejecución: <strong style={{ color: '#172B4D', fontWeight: 700 }}>{actualDailyRate} casos/día</strong> vs meta {targetDailyRate}/d (
+                                <span style={{ color: rateDiffPct >= 0 ? '#047857' : '#B45309', fontWeight: 600 }}>
+                                  {rateDiffPct >= 0 ? `+${rateDiffPct}%` : `${rateDiffPct}%`} efectividad
+                                </span>)
+                              </span>
+                              <span style={{ color: cycleRiskPct < 15 ? '#047857' : (cycleRiskPct < 35 ? '#B45309' : '#DC2626'), fontWeight: 700, fontSize: '10px' }}>
+                                Riesgo: {cycleRiskPct}% ({cycleRiskLabel})
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px', paddingTop: '2px' }}>
+                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #E5E7EB' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
+                                  <span>Tiempo ciclo consumido</span>
+                                  <span style={{ fontWeight: 700, color: '#172B4D' }}>
+                                    {cycleElapsedPct}% (Día {cycleElapsedDays}/{cycleTotalBizDays})
+                                  </span>
+                                </div>
+                                <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                  <div style={{ background: '#94A3B8', height: '100%', width: `${cycleElapsedPct}%`, transition: 'width 0.3s ease' }} />
+                                </div>
+                              </div>
+
+                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #A7F3D0' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
+                                  <span>Casos ejecutados</span>
+                                  <span style={{ fontWeight: 700, color: '#047857' }}>
+                                    {cycleExecPct}% ({executedCount} de {totalInCycle})
+                                  </span>
+                                </div>
+                                <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                  <div style={{ background: '#10B981', height: '100%', width: `${cycleExecPct}%`, transition: 'width 0.3s ease' }} />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <p style={{ fontSize: '12px', color: '#626F86', margin: '4px 0 0 0' }}>
-                        {selectedCycle.description || `Ejecución activa de pruebas en el ciclo ${selectedCycle.summary}.`}
-                      </p>
                     </div>
                   </div>
-
-                  {/* Metrics & Progress Card */}
-                  <div className="execution-metrics-card">
-                    {isLoadingCycleTests ? (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '0.8rem 0', color: '#0C66E4', fontSize: '12px', fontWeight: 600 }}>
-                        <span style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid #0C66E4', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
-                        <span>Sincronizando métricas de ejecución con Jira...</span>
-                      </div>
-                    ) : (
-                      <>
-                        {/* Top Row: Metrics Breakdown */}
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', fontSize: '12px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '1.25rem' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#36B37E', display: 'inline-block' }}></span>
-                              <span style={{ color: '#626F86' }}>Passed:</span>
-                              <strong style={{ color: '#172B4D' }}>{passedCount}</strong>
-                              <span style={{ fontSize: '11px', color: '#006644', fontWeight: 600 }}>({passedPct}%)</span>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FF5630', display: 'inline-block' }}></span>
-                              <span style={{ color: '#626F86' }}>Failed:</span>
-                              <strong style={{ color: '#172B4D' }}>{failedCount}</strong>
-                              <span style={{ fontSize: '11px', color: '#BF2600', fontWeight: 600 }}>({failedPct}%)</span>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#FFAB00', display: 'inline-block' }}></span>
-                              <span style={{ color: '#626F86' }}>Blocked:</span>
-                              <strong style={{ color: '#172B4D' }}>{blockedCount}</strong>
-                              <span style={{ fontSize: '11px', color: '#974F00', fontWeight: 600 }}>({blockedPct}%)</span>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#0052CC', display: 'inline-block' }}></span>
-                              <span style={{ color: '#626F86' }}>In Progress:</span>
-                              <strong style={{ color: '#172B4D' }}>{inProgressCount}</strong>
-                              <span style={{ fontSize: '11px', color: '#0747A6', fontWeight: 600 }}>({inProgressPct}%)</span>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#DFE1E6', display: 'inline-block' }}></span>
-                              <span style={{ color: '#626F86' }}>Unexecuted:</span>
-                              <strong style={{ color: '#172B4D' }}>{notRunCount}</strong>
-                              <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>({notRunPct}%)</span>
-                            </div>
-                          </div>
-
-                          <div style={{ fontSize: '12px', color: '#626F86' }}>
-                            <span>Tasa de finalización: </span>
-                            <strong style={{ color: '#172B4D', fontSize: '13px' }}>{completionRate}%</strong>
-                          </div>
-                        </div>
-
-                        {/* Segmented Progress Bar */}
-                        <div className="execution-progress-bar">
-                          {passedCount > 0 && (
-                            <div
-                              className="execution-progress-segment"
-                              style={{ width: `${passedPct}%`, background: '#36B37E' }}
-                              title={`Passed: ${passedCount} (${passedPct}%)`}
-                            />
-                          )}
-                          {failedCount > 0 && (
-                            <div
-                              className="execution-progress-segment"
-                              style={{ width: `${failedPct}%`, background: '#FF5630' }}
-                              title={`Failed: ${failedCount} (${failedPct}%)`}
-                            />
-                          )}
-                          {blockedCount > 0 && (
-                            <div
-                              className="execution-progress-segment"
-                              style={{ width: `${blockedPct}%`, background: '#FFAB00' }}
-                              title={`Blocked: ${blockedCount} (${blockedPct}%)`}
-                            />
-                          )}
-                          {inProgressCount > 0 && (
-                            <div
-                              className="execution-progress-segment"
-                              style={{ width: `${inProgressPct}%`, background: '#0052CC' }}
-                              title={`In Progress: ${inProgressCount} (${inProgressPct}%)`}
-                            />
-                          )}
-                          {notRunCount > 0 && (
-                            <div
-                              className="execution-progress-segment"
-                              style={{ width: `${notRunPct}%`, background: '#DFE1E6' }}
-                              title={`Unexecuted: ${notRunCount} (${notRunPct}%)`}
-                            />
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
+                  {/* END: Clean Minimalist Cycle Header */}
 
                   {/* Filter Toolbar */}
                   <div className="execution-filter-toolbar">
@@ -9855,7 +13149,7 @@ const renderPlanningTab = () => {
                           ✕ Limpiar filtros
                         </button>
                       )}
-                      {renderGroupToolbar(`exec-${selectedCycle?.id || ''}`, paginatedTests)}
+                      {renderGroupToolbar(`exec-${selectedCycle?.id || ''}`, filteredTests)}
                     </div>
                     {isAdmin && executionChecked.size > 0 && (
                       <button
@@ -9898,13 +13192,14 @@ const renderPlanningTab = () => {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                         <input
                           type="checkbox"
-                          checked={paginatedTests.length > 0 && paginatedTests.every(t => executionChecked.has(t.id))}
+                          checked={(groupByFolder ? filteredTests : paginatedTests).length > 0 && (groupByFolder ? filteredTests : paginatedTests).every(t => executionChecked.has(t.id))}
                           onChange={e => {
+                            const targetList = groupByFolder ? filteredTests : paginatedTests;
                             const newSet = new Set(executionChecked);
                             if (e.target.checked) {
-                              paginatedTests.forEach(t => newSet.add(t.id));
+                              targetList.forEach(t => newSet.add(t.id));
                             } else {
-                              paginatedTests.forEach(t => newSet.delete(t.id));
+                              targetList.forEach(t => newSet.delete(t.id));
                             }
                             setExecutionChecked(newSet);
                           }}
@@ -9919,7 +13214,7 @@ const renderPlanningTab = () => {
                     </div>
 
                     {/* Test Cards */}
-                    {renderGroupedList(`exec-${selectedCycle?.id || ''}`, paginatedTests, test => {
+                    {renderGroupedList(`exec-${selectedCycle?.id || ''}`, groupByFolder ? filteredTests : paginatedTests, test => {
                       const isExpanded = String(expandedExecutionTest) === String(test.id);
                       const isAuto = getExecVal(test).includes('auto');
                       const testSummary = test.summary || (findTc(test.id)?.summary) || "Caso de prueba";
@@ -9941,9 +13236,9 @@ const renderPlanningTab = () => {
                             {/* Left: Chevron, Checkbox, Type Badge, Key, Summary, Bugs, Lock */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
                               <button
-                                onClick={() => handleToggleExecutionTest(test.id)}
+                                onClick={() => handleToggleExecutionTest(test.id, true)}
                                 style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: '#626F86', display: 'flex', alignItems: 'center', flexShrink: 0 }}
-                                title={isExpanded ? 'Colapsar detalles' : 'Expandir detalles'}
+                                title="Ver detalle del caso en ejecución"
                               >
                                 <svg
                                   width="14"
@@ -10010,7 +13305,7 @@ const renderPlanningTab = () => {
 
                               {/* Test Summary */}
                               <span
-                                onClick={() => handleToggleExecutionTest(test.id)}
+                                onClick={() => handleToggleExecutionTest(test.id, true)}
                                 style={{
                                   fontSize: '12px',
                                   fontWeight: 600,
@@ -10038,7 +13333,7 @@ const renderPlanningTab = () => {
                               {/* Defect Badge */}
                               {test.linkedBugs && test.linkedBugs.length > 0 && (
                                 <span
-                                  onClick={() => handleToggleExecutionTest(test.id)}
+                                  onClick={() => handleToggleExecutionTest(test.id, true)}
                                   style={{
                                     display: 'inline-flex',
                                     alignItems: 'center',
@@ -10079,6 +13374,7 @@ const renderPlanningTab = () => {
                                     handleStopExecution(test.id, test);
                                   } else {
                                     handleRunTest(test.id, test.key, test);
+                                    handleToggleExecutionTest(test.id, true);
                                   }
                                 }}
                                 disabled={runningTests[test.id] === 'capturing' || runningTests[test.id] === 'uploading'}
@@ -10138,604 +13434,1360 @@ const renderPlanningTab = () => {
                               </select>
                             </div>
                           </div>
+                        </div>
+                      );
+                    }, (items) => `${items.filter(t => isPassed(t.status)).length}✓ · ${items.filter(t => isFailed(t.status)).length}✗ · ${items.filter(t => isNotRun(t.status)).length} pendientes`)}
 
-                          {/* Expanded Detail Panel */}
-                          {isExpanded && (
-                            <div className="execution-detail-panel">
-                              {/* 1. Top Bar: Observaciones / Motivo & Defectos Vinculados */}
-                              <div className="execution-top-box">
-                                {/* Left Column: Status Context / Metadata */}
-                                <div style={{ flex: 1, minWidth: '240px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                  <div className="execution-section-heading">
-                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-                                    <span>
-                                      {isBlocked(test.status) ? 'Motivo del Bloqueo / Observaciones' :
-                                       isFailed(test.status) ? 'Detalle del Fallo / Observaciones' :
-                                       'Información de Ejecución'}
-                                    </span>
-                                  </div>
-                                  
-                                  <div style={{ fontSize: '12px', color: '#172B4D', lineHeight: 1.5 }}>
-                                    {test.executionNotes || test.statusReason || (
-                                      <span style={{ color: '#626F86', fontStyle: 'italic' }}>
-                                        {isBlocked(test.status) ? 'Prueba marcada como bloqueada durante la ejecución.' :
-                                         isFailed(test.status) ? 'Prueba marcada como fallida. Revisa o reporta los defectos asociados.' :
-                                         'Sin observaciones registradas para este caso.'}
-                                      </span>
-                                    )}
-                                  </div>
+                    {/* Modal de Detalle del Caso en Ejecución */}
+                    {expandedExecutionTest && (() => {
+                      const modalTest = deduplicatedCycleTests.find(t => String(t.id) === String(expandedExecutionTest)) || cycleTests.find(t => String(t.id) === String(expandedExecutionTest));
+                      if (!modalTest) return null;
+                      const modalTestCaseKey = modalTest.testCaseKey || modalTest.key;
+                      const modalTestSummary = (modalTest.summary || '').replace(/^\[Test Run\]\s*/i, '');
+                      const modalIsAuto = modalTest.isAutomated || modalTest.testType === 'Automated';
+                      const isTestRunning = !!runningTests[modalTest.id];
 
-                                  {/* Metadata Line */}
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', fontSize: '11px', color: '#626F86', marginTop: '2px' }}>
-                                    <span>📋 Caso: <strong onClick={(e) => { e.stopPropagation(); router.open('/browse/' + testCaseKey); }} style={{ color: '#0C66E4', cursor: 'pointer' }} className="hover:underline">{testCaseKey}</strong></span>
-                                    {test.testRunKey && test.testRunKey !== testCaseKey && (
-                                      <span>🏃 Test Run: <strong onClick={(e) => { e.stopPropagation(); router.open('/browse/' + test.testRunKey); }} style={{ color: '#0C66E4', cursor: 'pointer' }} className="hover:underline">{test.testRunKey}</strong></span>
-                                    )}
-                                    {test.executedBy && (
-                                      <span>👤 Ejecutado por: <strong style={{ color: '#172B4D' }}>{test.executedBy.displayName || test.executedBy}</strong></span>
-                                    )}
-                                  </div>
-                                </div>
+                      const modalMatchedTc = (typeof findTc === 'function') ? (findTc(modalTestCaseKey) || findTc(modalTest.id)) : null;
+                      const modalScenarioDesc = modalTest.description || modalMatchedTc?.description || (executionTestDetails[modalTest.id]?.type === 'continuous' ? executionTestDetails[modalTest.id]?.content : null);
 
-                                {/* Right Column: Defect Management */}
-                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px', minWidth: '220px' }}>
-                                  <div className="execution-section-heading" style={{ justifyContent: 'flex-end', width: '100%' }}>
-                                    <span>Defecto Vinculado</span>
-                                  </div>
+                      const iterEvKeys = new Set();
+                      (modalTest.iterations || []).forEach(it => {
+                        (it.evidences || []).forEach(e => {
+                          if (e) {
+                            const id = typeof e === 'object' ? (e.id ? String(e.id) : '') : String(e);
+                            const name = typeof e === 'object' ? (e.filename ? String(e.filename) : '') : '';
+                            const url = typeof e === 'object' ? (e.url ? String(e.url) : '') : '';
+                            if (id) iterEvKeys.add(id);
+                            if (name) iterEvKeys.add(name);
+                            if (url) iterEvKeys.add(url);
+                          }
+                        });
+                      });
+                      const rawEvs = (modalTest.evidences || (modalTest.evidence ? [modalTest.evidence] : [])).filter(ev => {
+                        if (!ev) return false;
+                        const id = typeof ev === 'object' ? (ev.id ? String(ev.id) : '') : String(ev);
+                        const name = typeof ev === 'object' ? (ev.filename ? String(ev.filename) : '') : '';
+                        const url = typeof ev === 'object' ? (ev.url ? String(ev.url) : '') : '';
+                        if (id && iterEvKeys.has(id)) return false;
+                        if (name && iterEvKeys.has(name)) return false;
+                        if (url && iterEvKeys.has(url)) return false;
+                        return true;
+                      });
 
-                                  {/* Defect Chips & Action Buttons */}
-                                  <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', justifyContent: 'flex-end' }}>
-                                    {/* Linked Bugs Chips */}
-                                    {test.linkedBugs && test.linkedBugs.length > 0 && test.linkedBugs.map((bug, idx) => (
+                      return (
+                        <div
+                          onClick={() => setExpandedExecutionTest(null)}
+                          onPaste={(e) => {
+                            if (!isTestRunning) return;
+                            const items = e.clipboardData?.items;
+                            if (!items) return;
+                            for (let i = 0; i < items.length; i++) {
+                              if (items[i].type.indexOf('image') !== -1 || items[i].kind === 'file') {
+                                const file = items[i].getAsFile();
+                                if (file) {
+                                  handleUploadEvidence(modalTest.id, modalTest.key, file);
+                                  break;
+                                }
+                              }
+                            }
+                          }}
+                          style={{
+                            position: 'fixed',
+                            inset: 0,
+                            backgroundColor: 'rgba(9, 30, 66, 0.54)',
+                            backdropFilter: 'blur(2px)',
+                            zIndex: 1200,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '24px'
+                          }}
+                        >
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                              backgroundColor: '#F7F8F9',
+                              borderRadius: '10px',
+                              border: '1px solid #DCDFE4',
+                              boxShadow: '0 20px 25px -5px rgba(9, 30, 66, 0.25), 0 8px 10px -6px rgba(9, 30, 66, 0.1)',
+                              width: '100%',
+                              maxWidth: '980px',
+                              maxHeight: '88vh',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              overflow: 'hidden'
+                            }}
+                          >
+                            {/* Top Modal Bar: Case Info + Play + General Status + Close */}
+                            <div
+                              style={{
+                                backgroundColor: '#FFFFFF',
+                                borderBottom: '1px solid #DCDFE4',
+                                padding: '14px 20px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '16px',
+                                flexWrap: 'wrap',
+                                flexShrink: 0
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
+                                {modalIsAuto ? (
+                                  <span className="planning-badge-auto">⚡ AUTO</span>
+                                ) : (
+                                  <span className="planning-badge-manual">MANUAL</span>
+                                )}
+
+                                <span
+                                  onClick={() => router.open('/browse/' + modalTestCaseKey)}
+                                  style={{ fontWeight: 700, color: '#0C66E4', cursor: 'pointer', fontSize: '12px', flexShrink: 0, fontFamily: 'monospace' }}
+                                  title="Abrir Caso de Prueba en Jira"
+                                  className="hover:underline"
+                                >
+                                  {modalTestCaseKey}
+                                </span>
+
+                                {modalTest.testRunKey && modalTest.testRunKey !== modalTestCaseKey && (
+                                  <span
+                                    onClick={() => router.open('/browse/' + modalTest.testRunKey)}
+                                    style={{
+                                      fontSize: '11px',
+                                      background: '#F1F2F4',
+                                      color: '#44546F',
+                                      padding: '2px 7px',
+                                      borderRadius: '4px',
+                                      border: '1px solid #DCDFE4',
+                                      cursor: 'pointer',
+                                      fontWeight: 600,
+                                      flexShrink: 0
+                                    }}
+                                    title="Abrir Test Run (Ejecución) en Jira"
+                                  >
+                                    Run: {modalTest.testRunKey}
+                                  </span>
+                                )}
+
+                                <span
+                                  style={{
+                                    fontSize: '13px',
+                                    fontWeight: 700,
+                                    color: '#172B4D',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap'
+                                  }}
+                                  title={modalTestSummary}
+                                >
+                                  {modalTestSummary}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                                {/* Play / Stop Button inside Modal */}
+                                <button
+                                  title={isTestRunning ? 'Detener Ejecución' : 'Iniciar Ejecución'}
+                                  onClick={() => {
+                                    if (isTestRunning) {
+                                      handleStopExecution(modalTest.id, modalTest);
+                                    } else {
+                                      handleRunTest(modalTest.id, modalTest.key, modalTest);
+                                    }
+                                  }}
+                                  disabled={runningTests[modalTest.id] === 'capturing' || runningTests[modalTest.id] === 'uploading'}
+                                  style={{
+                                    width: '30px',
+                                    height: '30px',
+                                    borderRadius: '6px',
+                                    background: isTestRunning ? '#FF8B00' : '#0C66E4',
+                                    color: '#FFFFFF',
+                                    border: 'none',
+                                    cursor: (runningTests[modalTest.id] === 'capturing' || runningTests[modalTest.id] === 'uploading') ? 'wait' : 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    boxShadow: '0 1px 2px rgba(9, 30, 66, 0.12)',
+                                    transition: 'background 0.15s ease'
+                                  }}
+                                >
+                                  {runningTests[modalTest.id] === 'capturing' ? '⏹' :
+                                   runningTests[modalTest.id] === 'uploading' ? '⏳' :
+                                   isTestRunning ? '⏹' : '▶'}
+                                </button>
+
+                                {/* General Status Selector */}
+                                <select
+                                  className="status-badge"
+                                  value={isPassed(modalTest.status) ? 'Passed' : (isFailed(modalTest.status) ? 'Failed' : (isBlocked(modalTest.status) ? 'Blocked' : (isInProgress(modalTest.status) ? 'In Progress' : 'Not Run')))}
+                                  onChange={(e) => handleUpdateTestStatus(modalTest.id, e.target.value)}
+                                  disabled={!isTestRunning}
+                                  style={{
+                                    backgroundColor: getStatusColor(modalTest.status),
+                                    color: getStatusTextColor(modalTest.status),
+                                    border: `1px solid ${
+                                      isPassed(modalTest.status) ? '#A3FAD0' :
+                                      isFailed(modalTest.status) ? '#FFBDAD' :
+                                      isBlocked(modalTest.status) ? '#FFE380' :
+                                      isInProgress(modalTest.status) ? '#B2D4FF' : '#DCDFE4'
+                                    }`,
+                                    cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                    opacity: !isTestRunning ? 0.75 : 1,
+                                    padding: '0.35rem 0.6rem',
+                                    width: '118px',
+                                    height: '30px',
+                                    boxSizing: 'border-box',
+                                    textAlign: 'center',
+                                    textAlignLast: 'center',
+                                    fontSize: '11px',
+                                    fontWeight: 700,
+                                    borderRadius: '6px'
+                                  }}
+                                >
+                                  <option value="Not Run" style={{ backgroundColor: '#FFFFFF', color: '#172B4D' }}>Not Run</option>
+                                  <option value="In Progress" style={{ backgroundColor: '#DEEBFF', color: '#0747A6' }}>In Progress</option>
+                                  <option value="Passed" style={{ backgroundColor: '#DCFFF1', color: '#216E4E' }}>Passed</option>
+                                  <option value="Failed" style={{ backgroundColor: '#FFEBE6', color: '#BF2600' }}>Failed</option>
+                                  <option value="Blocked" style={{ backgroundColor: '#FFF0B3', color: '#172B4D' }}>Blocked</option>
+                                </select>
+
+                                {/* Close Modal Button */}
+                                <button
+                                  onClick={() => setExpandedExecutionTest(null)}
+                                  title="Cerrar detalle"
+                                  style={{
+                                    width: '30px',
+                                    height: '30px',
+                                    borderRadius: '6px',
+                                    border: '1px solid #DCDFE4',
+                                    background: '#FFFFFF',
+                                    color: '#44546F',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: '14px',
+                                    fontWeight: 700
+                                  }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Modal Content Area */}
+                            <div style={{ padding: '20px', overflowY: 'auto', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                              {/* 1. DESCRIPCIÓN DEL ESCENARIO (FORMATO HTML CONTINUO) */}
+                              <section
+                                style={{
+                                  backgroundColor: '#FFFFFF',
+                                  borderRadius: '8px',
+                                  border: '1px solid #DCDFE4',
+                                  boxShadow: '0 1px 2px rgba(9, 30, 66, 0.05)',
+                                  flexShrink: 0
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    padding: '12px 16px',
+                                    borderBottom: '1px solid #DCDFE4',
+                                    backgroundColor: '#F7F8F9',
+                                    borderTopLeftRadius: '8px',
+                                    borderTopRightRadius: '8px',
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '12px'
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <div
+                                      style={{
+                                        width: '24px',
+                                        height: '24px',
+                                        borderRadius: '4px',
+                                        backgroundColor: '#E9F2FF',
+                                        color: '#0C66E4',
+                                        border: '1px solid #85B8FF',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        flexShrink: 0
+                                      }}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                        <polyline points="14 2 14 8 20 8"></polyline>
+                                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                                        <line x1="10" y1="9" x2="8" y2="9"></line>
+                                      </svg>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                      <h2 style={{ margin: 0, fontSize: '12px', fontWeight: 700, color: '#091E42', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                        Descripción del Escenario (Formato HTML Continuo)
+                                      </h2>
                                       <span
-                                        key={idx}
                                         style={{
                                           display: 'inline-flex',
                                           alignItems: 'center',
-                                          gap: '4px',
-                                          padding: '3px 8px',
+                                          padding: '2px 8px',
                                           borderRadius: '4px',
-                                          background: '#FFEBE6',
-                                          color: '#BF2600',
-                                          border: '1px solid #FFBDAD',
-                                          fontSize: '11px',
-                                          fontWeight: 700
+                                          fontSize: '10px',
+                                          fontWeight: 700,
+                                          textTransform: 'uppercase',
+                                          letterSpacing: '0.03em',
+                                          backgroundColor: '#F1F2F4',
+                                          color: '#44546F',
+                                          border: '1px solid #DCDFE4'
                                         }}
                                       >
-                                        <span onClick={() => setSelectedBug(bug)} style={{ cursor: 'pointer' }} className="hover:underline" title="Ver detalle del bug en Test Pulse">
-                                          🔴 {bug.key}
-                                        </span>
-                                        <button
-                                          onClick={async () => {
-                                            const updatedBugs = test.linkedBugs.filter((_, i) => i !== idx);
-                                            setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
-                                            invoke('updateTestStatus', {
-                                              cycleId: selectedCycle.id,
-                                              testId: test.id,
-                                              testRunId: test?.testRunId || test?.testRunKey,
-                                              linkedBugs: updatedBugs
-                                            }).catch(err => {
-                                              console.error('Error unlinking bug:', err);
-                                              setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: test.linkedBugs } : t));
-                                              alert('Error al desvincular el bug: ' + (err.message || err));
-                                            });
-                                          }}
-                                          title="Quitar vínculo"
-                                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '11px', padding: '0 2px', lineHeight: 1 }}
-                                        >
-                                          ✕
-                                        </button>
+                                        Texto Enriquecido
                                       </span>
-                                    ))}
-
-                                    {/* Action buttons */}
-                                    <button
-                                      className="btn-secondary"
-                                      style={{ borderColor: '#FF5630', color: '#BF2600', fontSize: '11px', fontWeight: 600, padding: '3px 8px', borderRadius: '4px', background: '#FFF8F7' }}
-                                      onClick={() => handleCreateBug(test)}
-                                      title="Reportar nuevo defecto en Jira"
-                                    >
-                                      🐞 Reportar Bug
-                                    </button>
-
-                                    <button
-                                      className="btn-secondary"
-                                      onClick={() => { setLinkingBugTestId(linkingBugTestId === test.id ? null : test.id); setBugKeyInput(''); }}
-                                      style={{ fontSize: '11px', fontWeight: 600, padding: '3px 8px', borderRadius: '4px', background: '#FFFFFF', border: '1px solid #DCDFE4' }}
-                                      title="Vincular Jira Issue existente"
-                                    >
-                                      🔗 Vincular Bug
-                                    </button>
-                                  </div>
-
-                                  {/* Inline bug input */}
-                                  {linkingBugTestId === test.id && (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
-                                      <input
-                                        autoFocus
-                                        type="text"
-                                        value={bugKeyInput}
-                                        onChange={e => setBugKeyInput(e.target.value.toUpperCase())}
-                                        onKeyDown={async e => {
-                                          if (e.key === 'Enter' && bugKeyInput.trim()) {
-                                            await doLinkBug(test, bugKeyInput.trim());
-                                            setLinkingBugTestId(null); setBugKeyInput('');
-                                          } else if (e.key === 'Escape') { setLinkingBugTestId(null); }
-                                        }}
-                                        placeholder="Key (ej: CEL-10)"
-                                        style={{
-                                          padding: '3px 6px', fontSize: '11px', width: '120px',
-                                          border: '1px solid #0C66E4', borderRadius: '4px',
-                                          background: '#FFFFFF', color: '#172B4D'
-                                        }}
-                                      />
-                                      <button
-                                        onClick={async () => { if (bugKeyInput.trim()) { await doLinkBug(test, bugKeyInput.trim()); setLinkingBugTestId(null); setBugKeyInput(''); } }}
-                                        style={{ padding: '3px 8px', fontSize: '11px', cursor: 'pointer', background: '#0C66E4', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 600 }}
-                                      >
-                                        Vincular
-                                      </button>
-                                      <button
-                                        onClick={() => { setLinkingBugTestId(null); setBugKeyInput(''); }}
-                                        style={{ padding: '3px 6px', fontSize: '11px', cursor: 'pointer', background: 'transparent', border: '1px solid #DCDFE4', borderRadius: '4px', color: '#626F86' }}
-                                      >
-                                        ✕
-                                      </button>
                                     </div>
-                                  )}
+                                  </div>
                                 </div>
-                              </div>
 
-                              {/* 2. Descripción del Escenario */}
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                <div className="execution-section-heading">
-                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
-                                  <span>Descripción del Escenario</span>
-                                </div>
-                                <div className="execution-description-box">
-                                  {test.description ? (
-                                    <div dangerouslySetInnerHTML={{ __html: adfToHtml(test.description) }} />
+                                <div
+                                  className="execution-scenario-content"
+                                  style={{
+                                    padding: '16px 20px',
+                                    backgroundColor: '#FFFFFF',
+                                    borderBottomLeftRadius: '8px',
+                                    borderBottomRightRadius: '8px',
+                                    fontSize: '12px',
+                                    color: '#172B4D',
+                                    lineHeight: 1.65,
+                                    overflowX: 'hidden'
+                                  }}
+                                >
+                                  {modalScenarioDesc ? (
+                                    <div dangerouslySetInnerHTML={{ __html: formatScenarioHtml(adfToHtml(modalScenarioDesc)) }} />
                                   ) : (
                                     <span style={{ color: '#626F86', fontStyle: 'italic', fontSize: '12px' }}>
                                       Sin descripción registrada para este caso de prueba en Jira.
                                     </span>
                                   )}
-                                </div>
-                              </div>
 
-                              {/* 3. Pasos del Caso de Prueba (Tradicionales, si existen) */}
-                              {executionTestDetails[test.id] && executionTestDetails[test.id].type === 'traditional' && executionTestDetails[test.id].content.length > 0 && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                  <div className="execution-section-heading">
-                                    <span>Pasos de Ejecución</span>
-                                  </div>
-                                  <div style={{ border: '1px solid #DCDFE4', borderRadius: '6px', overflow: 'hidden', background: '#FFFFFF' }}>
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-                                      <thead>
-                                        <tr style={{ background: '#FAFBFC', borderBottom: '1px solid #DCDFE4', textAlign: 'left', color: '#626F86', fontSize: '11px' }}>
-                                          <th style={{ width: '50px', padding: '8px 12px', textAlign: 'center' }}>Paso</th>
-                                          <th style={{ padding: '8px 12px' }}>Acción</th>
-                                          <th style={{ padding: '8px 12px' }}>Resultado Esperado</th>
-                                          <th style={{ padding: '8px 12px' }}>Datos</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {executionTestDetails[test.id].content.map((step, idx) => (
-                                          <tr key={idx} style={{ borderBottom: '1px solid #EBECF0' }}>
-                                            <td style={{ textAlign: 'center', fontWeight: 600, color: '#626F86', padding: '8px 12px' }}>{idx + 1}</td>
-                                            <td style={{ padding: '8px 12px' }} dangerouslySetInnerHTML={{ __html: adfToHtml(step.action) }} />
-                                            <td style={{ padding: '8px 12px' }} dangerouslySetInnerHTML={{ __html: adfToHtml(step.expectedResult) }} />
-                                            <td style={{ padding: '8px 12px', color: '#626F86' }}>{step.data || '-'}</td>
-                                          </tr>
+                                  {/* Pasos Tradicionales (si existen en el caso) */}
+                                  {executionTestDetails[modalTest.id] && executionTestDetails[modalTest.id].type === 'traditional' && executionTestDetails[modalTest.id].content.length > 0 && (
+                                    <div style={{ marginTop: modalScenarioDesc ? '14px' : '0' }}>
+                                      <ol style={{ margin: 0, paddingLeft: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                        {executionTestDetails[modalTest.id].content.map((step, idx) => (
+                                          <li key={idx} style={{ paddingLeft: '4px' }}>
+                                            <div dangerouslySetInnerHTML={{ __html: formatScenarioHtml(adfToHtml(step.action)) }} />
+                                            {step.expectedResult && (
+                                              <div style={{ fontSize: '11px', color: '#44546F', marginTop: '2px' }}>
+                                                <strong>Resultado esperado:</strong>{' '}
+                                                <span dangerouslySetInnerHTML={{ __html: formatScenarioHtml(adfToHtml(step.expectedResult)) }} />
+                                              </div>
+                                            )}
+                                            {step.data && (
+                                              <div style={{ marginTop: '6px', display: 'inline-flex', alignItems: 'center', gap: '8px', backgroundColor: '#F8FAFC', padding: '4px 10px', borderRadius: '4px', border: '1px solid #EBECF0' }}>
+                                                <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 500 }}>Datos de prueba:</span>
+                                                <span style={{ backgroundColor: '#FFFFFF', color: '#091E42', fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: '4px', border: '1px solid #DCDFE4', fontSize: '11px' }}>
+                                                  {step.data}
+                                                </span>
+                                              </div>
+                                            )}
+                                          </li>
                                         ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* BDD Scenarios (if any) */}
-                              {executionTestDetails[test.id] && executionTestDetails[test.id].type === 'bdd' && executionTestDetails[test.id].content.length > 0 && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                  <div className="execution-section-heading">
-                                    <span>Escenarios BDD (Gherkin)</span>
-                                  </div>
-                                  {executionTestDetails[test.id].content.map((scenario, idx) => (
-                                    <div key={idx} style={{ background: '#FFFFFF', padding: '0.85rem 1rem', borderRadius: '6px', border: '1px solid #DCDFE4' }}>
-                                      <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '12px', fontWeight: 700, color: '#172B4D' }}>{scenario.title}</h5>
-                                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px', color: '#172B4D', background: '#FAFBFC', padding: '0.5rem', borderRadius: '4px' }}>{scenario.gherkin}</pre>
+                                      </ol>
                                     </div>
-                                  ))}
+                                  )}
+
+                                  {/* Escenarios BDD (si existen en el caso) */}
+                                  {executionTestDetails[modalTest.id] && executionTestDetails[modalTest.id].type === 'bdd' && executionTestDetails[modalTest.id].content.length > 0 && (
+                                    <div style={{ marginTop: modalScenarioDesc ? '14px' : '0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                      {executionTestDetails[modalTest.id].content.map((scenario, idx) => (
+                                        <div key={idx} style={{ background: '#F8FAFC', padding: '10px 12px', borderRadius: '6px', border: '1px solid #DCDFE4' }}>
+                                          <h5 style={{ margin: '0 0 6px 0', fontSize: '12px', fontWeight: 700, color: '#172B4D' }}>{scenario.title}</h5>
+                                          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px', color: '#172B4D' }}>{scenario.gherkin}</pre>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
+                              </section>
 
-                              {/* 4. Evidencias Adjuntas */}
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
-                                  <div className="execution-section-heading">
-                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                              {/* 2. EVIDENCIAS ADJUNTAS */}
+                              <section
+                                style={{
+                                  backgroundColor: '#FFFFFF',
+                                  borderRadius: '8px',
+                                  border: '1px solid #DCDFE4',
+                                  boxShadow: '0 1px 2px rgba(9, 30, 66, 0.05)',
+                                  padding: '16px',
+                                  flexShrink: 0
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '12px',
+                                    paddingBottom: '12px',
+                                    borderBottom: '1px solid #EBECF0',
+                                    marginBottom: '16px'
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                                    </svg>
                                     <span>Evidencias Adjuntas</span>
-                                  </div>
-
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <label
-                                      className="btn-secondary"
+                                    <span
                                       style={{
-                                        padding: '4px 10px',
-                                        border: '1px solid #DCDFE4',
-                                        background: '#FFFFFF',
-                                        color: '#172B4D',
-                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
-                                        gap: '5px',
+                                        padding: '2px 8px',
                                         borderRadius: '4px',
-                                        fontSize: '11px',
-                                        fontWeight: 600,
-                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.03em',
+                                        backgroundColor: '#F1F2F4',
+                                        color: '#172B4D',
+                                        border: '1px solid #DCDFE4'
                                       }}
-                                      title={runningTests[test.id] ? "Adjuntar Archivo de Evidencia" : "Inicia la ejecución (Play) para adjuntar evidencias"}
+                                    >
+                                      {rawEvs.length} {rawEvs.length === 1 ? 'Archivo' : 'Archivos'}
+                                    </span>
+                                  </div>
+
+                                  {/* Botones de Acción de Evidencias */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    {/* Adjuntar Archivo */}
+                                    <label
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        backgroundColor: '#FFFFFF',
+                                        color: '#172B4D',
+                                        border: '1px solid #DCDFE4',
+                                        padding: '6px 12px',
+                                        borderRadius: '6px',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                                        ...(!isTestRunning ? { opacity: 0.55, pointerEvents: 'none' } : {})
+                                      }}
+                                      title={isTestRunning ? 'Adjuntar Archivo de Evidencia' : 'Inicia la ejecución (Play) para adjuntar evidencias'}
                                     >
                                       <input
-                                        disabled={!runningTests[test.id]}
+                                        disabled={!isTestRunning}
                                         type="file"
                                         style={{ display: 'none' }}
                                         onChange={(e) => {
                                           if (e.target.files && e.target.files.length > 0) {
-                                            handleUploadEvidence(test.id, test.key, e.target.files[0]);
+                                            handleUploadEvidence(modalTest.id, modalTest.key, e.target.files[0]);
                                           }
                                         }}
                                       />
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#64748B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                                      </svg>
                                       <span>Archivo</span>
                                     </label>
 
+                                    {/* Grabar Pantalla / Video */}
                                     <button
-                                      className="btn-secondary"
-                                      disabled={!runningTests[test.id]}
+                                      type="button"
+                                      disabled={!isTestRunning}
+                                      onClick={() => handleCaptureScreen(modalTest.id, modalTest.key)}
+                                      title={isTestRunning ? 'Grabar pantalla o capturar pantalla' : 'Inicia la ejecución (Play) para grabar pantalla'}
                                       style={{
-                                        padding: '4px 10px',
-                                        border: '1px solid #DCDFE4',
-                                        background: '#FFFFFF',
-                                        color: '#172B4D',
-                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
-                                        gap: '5px',
-                                        borderRadius: '4px',
-                                        fontSize: '11px',
+                                        gap: '6px',
+                                        backgroundColor: '#FFFFFF',
+                                        color: '#172B4D',
+                                        border: '1px solid #DCDFE4',
+                                        padding: '6px 12px',
+                                        borderRadius: '6px',
+                                        fontSize: '12px',
                                         fontWeight: 600,
-                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                        cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                                        ...(!isTestRunning ? { opacity: 0.55, pointerEvents: 'none' } : {})
                                       }}
-                                      title={runningTests[test.id] ? "Grabar pantalla o capturar pantalla" : "Inicia la ejecución (Play) para grabar pantalla"}
-                                      onClick={() => handleCaptureScreen(test.id, test.key)}
                                     >
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="#F43F5E" stroke="#F43F5E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                                      </svg>
                                       <span>Grabar</span>
                                     </button>
 
+                                    {/* Celular (QR) */}
                                     <button
-                                      className="btn-secondary"
-                                      disabled={!runningTests[test.id]}
+                                      type="button"
+                                      disabled={!isTestRunning}
+                                      onClick={() => handleOpenQrCapture(modalTest)}
+                                      title={isTestRunning ? 'Escanear QR para capturar con cámara del celular' : 'Inicia la ejecución (Play) para capturar con celular'}
                                       style={{
-                                        padding: '4px 10px',
-                                        border: '1px solid #0C66E4',
-                                        background: '#E9F2FF',
-                                        color: '#0C66E4',
-                                        cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
                                         display: 'inline-flex',
                                         alignItems: 'center',
-                                        gap: '5px',
-                                        borderRadius: '4px',
-                                        fontSize: '11px',
-                                        fontWeight: 700,
-                                        ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                        gap: '6px',
+                                        backgroundColor: '#E9F2FF',
+                                        color: '#0C66E4',
+                                        border: '1px solid #85B8FF',
+                                        padding: '6px 12px',
+                                        borderRadius: '6px',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                                        ...(!isTestRunning ? { opacity: 0.55, pointerEvents: 'none' } : {})
                                       }}
-                                      title={runningTests[test.id] ? "Escanear QR para capturar con cámara del celular" : "Inicia la ejecución (Play) para capturar con celular"}
-                                      onClick={() => handleOpenQrCapture(test)}
                                     >
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-                                      <span>📱 Celular (QR)</span>
+                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                        <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                      </svg>
+                                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="3" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="14" width="7" height="7"></rect>
+                                        <rect x="3" y="14" width="7" height="7"></rect>
+                                      </svg>
+                                      <span>Celular (QR)</span>
                                     </button>
                                   </div>
                                 </div>
 
-                                {(() => {
-                                  const iterEvKeys = new Set();
-                                  (test.iterations || []).forEach(it => {
-                                    (it.evidences || []).forEach(e => {
-                                      if (e) {
-                                        const id = typeof e === 'object' ? (e.id ? String(e.id) : '') : String(e);
-                                        const name = typeof e === 'object' ? (e.filename ? String(e.filename) : '') : '';
-                                        const url = typeof e === 'object' ? (e.url ? String(e.url) : '') : '';
-                                        if (id) iterEvKeys.add(id);
-                                        if (name) iterEvKeys.add(name);
-                                        if (url) iterEvKeys.add(url);
-                                      }
-                                    });
-                                  });
-                                  const rawEvs = (test.evidences || (test.evidence ? [test.evidence] : [])).filter(ev => {
-                                    if (!ev) return false;
-                                    const id = typeof ev === 'object' ? (ev.id ? String(ev.id) : '') : String(ev);
-                                    const name = typeof ev === 'object' ? (ev.filename ? String(ev.filename) : '') : '';
-                                    const url = typeof ev === 'object' ? (ev.url ? String(ev.url) : '') : '';
-                                    if (id && iterEvKeys.has(id)) return false;
-                                    if (name && iterEvKeys.has(name)) return false;
-                                    if (url && iterEvKeys.has(url)) return false;
-                                    return true;
-                                  });
+                                {/* Grid de Evidencias Previsualizadas + Dropzone */}
+                                <div
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                                    gap: '12px'
+                                  }}
+                                >
+                                  {rawEvs.map((ev, idx) => {
+                                    const evId = typeof ev === 'string' ? ev : ev.id;
+                                    const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
+                                    const isVideoOrPdf = /\.(mp4|webm|mov|pdf)$/i.test(evName);
+                                    return (
+                                      <div
+                                        key={idx}
+                                        onClick={() => handlePreviewEvidence(ev)}
+                                        style={{
+                                          border: '1px solid #DCDFE4',
+                                          borderRadius: '6px',
+                                          padding: '8px 10px',
+                                          backgroundColor: '#F1F2F4',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '12px',
+                                          cursor: 'pointer',
+                                          position: 'relative'
+                                        }}
+                                        title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
+                                      >
+                                        <div
+                                          style={{
+                                            width: '40px',
+                                            height: '40px',
+                                            borderRadius: '4px',
+                                            backgroundColor: '#E2E8F0',
+                                            border: '1px solid #DCDFE4',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            flexShrink: 0,
+                                            color: '#64748B'
+                                          }}
+                                        >
+                                          {isVideoOrPdf ? (
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                              <polyline points="14 2 14 8 20 8"></polyline>
+                                            </svg>
+                                          ) : (
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                              <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                              <polyline points="21 15 16 10 5 21"></polyline>
+                                            </svg>
+                                          )}
+                                        </div>
 
-                                  return rawEvs.length > 0 ? (
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                                      {rawEvs.map((ev, idx) => {
-                                        const evId = typeof ev === 'string' ? ev : ev.id;
-                                        const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
-                                        return (
-                                          <div
-                                            key={idx}
-                                            className="execution-evidence-pill"
-                                            onClick={() => handlePreviewEvidence(ev)}
-                                            title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
-                                            style={{ cursor: 'pointer' }}
-                                          >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                            <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
-                                              {evName}
-                                            </span>
-                                            {ev.note && (
-                                              <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 5px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                                                💬 Nota
-                                              </span>
-                                            )}
-                                            <button
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                const newName = prompt("Nuevo nombre para la evidencia:", evName);
-                                                if (newName && newName !== evName) {
-                                                  handleRenameEvidence(test.id, idx, newName, undefined);
-                                                }
-                                              }}
-                                              title="Renombrar evidencia"
-                                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#626F86', fontSize: '11px', padding: '0 2px' }}
-                                            >✏️</button>
-                                            <button
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                handleDeleteEvidence(test.id, evId, idx, undefined);
-                                              }}
-                                              title="Quitar evidencia"
-                                              disabled={!runningTests[test.id]}
-                                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '11px', padding: '0 2px' }}
-                                            >✕</button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  ) : (
-                                    <div style={{ fontSize: '11px', color: '#626F86', fontStyle: 'italic' }}>Sin evidencias adjuntas en esta ejecución.</div>
-                                  );
-                                })()}
-                              </div>
-
-                              {/* 5. Iteraciones (Data-Driven) */}
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <div className="execution-section-heading">
-                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-                                    <span>Iteraciones (Data-Driven)</span>
-                                  </div>
-                                  <button onClick={() => handleAddIteration(test)} className="btn-secondary" style={{ fontSize: '11px', padding: '4px 10px', fontWeight: 600, color: '#0C66E4', border: '1px solid #DCDFE4', background: '#FFFFFF', borderRadius: '4px' }}>
-                                    + Agregar iteración
-                                  </button>
-                                </div>
-
-                                {(!test.iterations || test.iterations.length === 0) ? (
-                                  <div style={{ color: '#626F86', fontSize: '11px', fontStyle: 'italic', padding: '0.5rem 0' }}>
-                                    No hay iteraciones. Haz clic en "+ Agregar iteración" para registrar pruebas basadas en diferentes conjuntos de datos.
-                                  </div>
-                                ) : (
-                                  test.iterations.map((iter, idx) => (
-                                    <div key={iter.id} className="execution-iteration-card">
-                                      {/* Iteration Header */}
-                                      <div className="execution-iteration-header">
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                          <span style={{ fontWeight: 700, fontSize: '11px', color: '#172B4D', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px' }}>
-                                            Iteración #{idx + 1}
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                          <p style={{ margin: 0, fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {evName}
+                                          </p>
+                                          <span style={{ fontSize: '10px', color: '#626F86', fontWeight: 500, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {ev.note ? `💬 ${ev.note}` : 'Evidencia adjunta • Clic para ver'}
                                           </span>
                                         </div>
 
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                          {/* Status Lozenge Selector for Iteration */}
-                                          <select
-                                            value={iter.status || 'Not Run'}
-                                            onChange={e => handleIterationChange(test, iter.id, 'status', e.target.value)}
-                                            style={{
-                                              padding: '2px 8px',
-                                              border: '1px solid #DCDFE4',
-                                              borderRadius: '4px',
-                                              cursor: 'pointer',
-                                              background: getStatusColor(iter.status || 'Not Run'),
-                                              color: getStatusTextColor(iter.status || 'Not Run'),
-                                              fontSize: '11px',
-                                              fontWeight: 700,
-                                              textAlign: 'center',
-                                              height: '26px'
-                                            }}
-                                          >
-                                            <option value="Not Run" style={{ background: '#FFFFFF', color: '#172B4D' }}>Not Run</option>
-                                            <option value="Passed" style={{ background: '#DCFFF1', color: '#216E4E' }}>Passed</option>
-                                            <option value="Failed" style={{ background: '#FFEBE6', color: '#BF2600' }}>Failed</option>
-                                            <option value="Blocked" style={{ background: '#FFF0B3', color: '#172B4D' }}>Blocked</option>
-                                          </select>
-
-                                          {/* Iteration Evidence buttons */}
-                                          <label
-                                            className="btn-secondary"
-                                            style={{
-                                              padding: '3px 6px',
-                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                              display: 'flex',
-                                              alignItems: 'center',
-                                              justifyContent: 'center',
-                                              borderRadius: '4px',
-                                              border: '1px solid #DCDFE4',
-                                              background: '#FFFFFF',
-                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
-                                            }}
-                                            title={runningTests[test.id] ? "Adjuntar evidencia a iteración" : "Inicia la ejecución (Play) para adjuntar evidencias"}
-                                          >
-                                            <input
-                                              disabled={!runningTests[test.id]}
-                                              type="file"
-                                              style={{ display: 'none' }}
-                                              onChange={(e) => {
-                                                if (e.target.files && e.target.files.length > 0) {
-                                                  handleUploadEvidence(test.id, test.key, e.target.files[0], iter.id);
-                                                }
-                                              }}
-                                            />
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                          </label>
-
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
                                           <button
-                                            title={runningTests[test.id] ? "Grabar pantalla para iteración" : "Inicia la ejecución (Play) para grabar"}
-                                            disabled={!runningTests[test.id]}
-                                            className="btn-secondary"
-                                            style={{
-                                              padding: '3px 6px',
-                                              display: 'flex',
-                                              alignItems: 'center',
-                                              justifyContent: 'center',
-                                              borderRadius: '4px',
-                                              border: '1px solid #DCDFE4',
-                                              background: '#FFFFFF',
-                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handlePreviewEvidence(ev);
                                             }}
-                                            onClick={() => handleCaptureScreen(test.id, test.key, iter.id)}
+                                            title="Ver evidencia"
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B', padding: '4px', display: 'flex', alignItems: 'center' }}
                                           >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                              <circle cx="12" cy="12" r="3"></circle>
+                                            </svg>
                                           </button>
-
                                           <button
-                                            title={runningTests[test.id] ? "Capturar evidencia con cámara del celular (QR)" : "Inicia la ejecución (Play) para capturar con celular"}
-                                            disabled={!runningTests[test.id]}
-                                            className="btn-secondary"
-                                            style={{
-                                              padding: '3px 6px',
-                                              display: 'flex',
-                                              alignItems: 'center',
-                                              justifyContent: 'center',
-                                              borderRadius: '4px',
-                                              border: '1px solid #0C66E4',
-                                              background: '#E9F2FF',
-                                              color: '#0C66E4',
-                                              cursor: !runningTests[test.id] ? 'not-allowed' : 'pointer',
-                                              ...(!runningTests[test.id] ? { opacity: 0.5, pointerEvents: 'none' } : {})
+                                            type="button"
+                                            disabled={!isTestRunning}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const newName = prompt('Nuevo nombre para la evidencia:', evName);
+                                              if (newName && newName !== evName) {
+                                                handleRenameEvidence(modalTest.id, idx, newName, undefined);
+                                              }
                                             }}
-                                            onClick={() => handleOpenQrCapture(test, iter.id, `Iteración #${idx + 1}`)}
+                                            title="Renombrar evidencia"
+                                            style={{ background: 'none', border: 'none', cursor: !isTestRunning ? 'not-allowed' : 'pointer', color: '#64748B', padding: '4px', fontSize: '11px', opacity: !isTestRunning ? 0.45 : 1 }}
                                           >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+                                            ✏️
                                           </button>
+                                          <button
+                                            type="button"
+                                            disabled={!isTestRunning}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleDeleteEvidence(modalTest.id, evId, idx, undefined);
+                                            }}
+                                            title="Eliminar evidencia"
+                                            style={{ background: 'none', border: 'none', cursor: !isTestRunning ? 'not-allowed' : 'pointer', color: '#E2483D', padding: '4px', display: 'flex', alignItems: 'center', opacity: !isTestRunning ? 0.45 : 1 }}
+                                          >
+                                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                              <polyline points="3 6 5 6 21 6"></polyline>
+                                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                            </svg>
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
 
-                                          {isAdmin && (
-                                            <button
-                                              onClick={() => handleDeleteIteration(test, iter.id)}
-                                              title="Eliminar Iteración"
-                                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '12px', padding: '0 4px', fontWeight: 'bold' }}
-                                            >
-                                              ✕
-                                            </button>
+                                  {/* Dropzone rápido para arrastrar más evidencias */}
+                                  <label
+                                    onDragOver={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                    }}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      if (!isTestRunning) return;
+                                      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+                                        handleUploadEvidence(modalTest.id, modalTest.key, e.dataTransfer.files[0]);
+                                      }
+                                    }}
+                                    style={{
+                                      gridColumn: rawEvs.length === 0 ? '1 / -1' : 'span 2',
+                                      border: '2px dashed #DCDFE4',
+                                      borderRadius: '6px',
+                                      padding: '10px 14px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      gap: '8px',
+                                      fontSize: '12px',
+                                      color: '#626F86',
+                                      backgroundColor: '#FFFFFF',
+                                      cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                      minHeight: '56px',
+                                      transition: 'border-color 0.15s ease, color 0.15s ease',
+                                      ...(!isTestRunning ? { opacity: 0.6 } : {})
+                                    }}
+                                    title={isTestRunning ? 'Haz clic o arrastra un archivo aquí, o presiona Ctrl+V' : 'Inicia la ejecución (Play) para adjuntar evidencias'}
+                                  >
+                                    <input
+                                      disabled={!isTestRunning}
+                                      type="file"
+                                      style={{ display: 'none' }}
+                                      onChange={(e) => {
+                                        if (e.target.files && e.target.files.length > 0) {
+                                          handleUploadEvidence(modalTest.id, modalTest.key, e.target.files[0]);
+                                        }
+                                      }}
+                                    />
+                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <polyline points="16 16 12 12 8 16"></polyline>
+                                      <line x1="12" y1="12" x2="12" y2="21"></line>
+                                      <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
+                                      <polyline points="16 16 12 12 8 16"></polyline>
+                                    </svg>
+                                    <span style={{ fontWeight: 500 }}>
+                                      Arrastra capturas de pantalla adicionales aquí o presiona Ctrl+V
+                                    </span>
+                                  </label>
+                                </div>
+                              </section>
+
+                              {/* Sección 3: ITERACIONES (DATA-DRIVEN) */}
+                              {(() => {
+                                const iters = Array.isArray(modalTest.iterations) ? modalTest.iterations : [];
+                                const iterPassedCount = iters.filter(it => isPassed(it.status)).length;
+                                const iterFailedCount = iters.filter(it => isFailed(it.status)).length;
+                                const iterBlockedCount = iters.filter(it => isBlocked(it.status)).length;
+                                const iterTotal = iters.length;
+                                const iterPassPct = iterTotal > 0 ? Math.round((iterPassedCount / iterTotal) * 100) : 0;
+                                const iterFailPct = iterTotal > 0 ? Math.round((iterFailedCount / iterTotal) * 100) : 0;
+                                const iterBlockPct = iterTotal > 0 ? Math.round((iterBlockedCount / iterTotal) * 100) : 0;
+
+                                return (
+                                  <section
+                                    style={{
+                                      backgroundColor: '#FFFFFF',
+                                      borderRadius: '8px',
+                                      border: '1px solid #DCDFE4',
+                                      padding: '16px 20px',
+                                      boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                                      flexShrink: 0
+                                    }}
+                                  >
+                                    {/* Header & Section Controls */}
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        flexWrap: 'wrap',
+                                        gap: '12px',
+                                        paddingBottom: '12px'
+                                      }}
+                                    >
+                                      {/* Title & Stats Badge */}
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            fontSize: '12px',
+                                            fontFamily: 'monospace',
+                                            fontWeight: 700,
+                                            color: '#334155',
+                                            textTransform: 'uppercase',
+                                            letterSpacing: '-0.01em'
+                                          }}
+                                        >
+                                          <span style={{ color: '#8247E5', fontWeight: 900 }}>&gt;_</span>
+                                          <span>Iteraciones (Data-Driven)</span>
+                                        </div>
+
+                                        {/* Execution summary chip */}
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            backgroundColor: '#F1F5F9',
+                                            color: '#334155',
+                                            padding: '2px 8px',
+                                            borderRadius: '9999px',
+                                            fontSize: '11px',
+                                            fontWeight: 500,
+                                            border: '1px solid #E2E8F0'
+                                          }}
+                                        >
+                                          <span style={{ fontWeight: 600, color: '#1E293B' }}>
+                                            {iterTotal} {iterTotal === 1 ? 'iteración' : 'iteraciones'}
+                                          </span>
+                                          <span style={{ color: '#CBD5E1' }}>|</span>
+                                          <span style={{ color: '#047857', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                            <span style={{ width: '6px', height: '6px', borderRadius: '9999px', backgroundColor: '#10B981' }} />
+                                            {iterPassedCount}
+                                          </span>
+                                          <span style={{ color: '#BE123C', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                            <span style={{ width: '6px', height: '6px', borderRadius: '9999px', backgroundColor: '#F43F5E' }} />
+                                            {iterFailedCount}
+                                          </span>
+                                          {iterBlockedCount > 0 && (
+                                            <span style={{ color: '#B45309', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                              <span style={{ width: '6px', height: '6px', borderRadius: '9999px', backgroundColor: '#F59E0B' }} />
+                                              {iterBlockedCount}
+                                            </span>
                                           )}
                                         </div>
+
+                                        {/* Progress mini-bar */}
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            width: '64px',
+                                            height: '6px',
+                                            backgroundColor: '#E2E8F0',
+                                            borderRadius: '9999px',
+                                            overflow: 'hidden'
+                                          }}
+                                          title={`${iterPassPct}% Aprobado`}
+                                        >
+                                          <div style={{ backgroundColor: '#10B981', width: `${iterPassPct}%`, height: '100%' }} />
+                                          <div style={{ backgroundColor: '#F43F5E', width: `${iterFailPct}%`, height: '100%' }} />
+                                          <div style={{ backgroundColor: '#F59E0B', width: `${iterBlockPct}%`, height: '100%' }} />
+                                        </div>
                                       </div>
 
-                                      {/* Iteration Fields */}
-                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                        <div>
-                                          <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '3px' }}>
-                                            Datos de prueba (Input / Parámetros):
-                                          </label>
-                                          <input
-                                            type="text"
-                                            className="execution-iteration-input"
-                                            placeholder="Ej: Usuario=admin, Rol=Supervisor, Canal=POS"
-                                            value={iter.expectedData ?? ''}
-                                            onChange={e => handleIterationChange(test, iter.id, 'expectedData', e.target.value, { debounceMs: 600 })}
-                                            onBlur={e => handleIterationChange(test, iter.id, 'expectedData', e.target.value, { flush: true })}
-                                          />
-                                        </div>
-
-                                        <div>
-                                          <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '3px' }}>
-                                            Resultado actual / Observaciones:
-                                          </label>
-                                          <textarea
-                                            rows={2}
-                                            className="execution-iteration-input"
-                                            placeholder="Detalles del resultado obtenido en esta iteración..."
-                                            value={iter.actualResult ?? ''}
-                                            onChange={e => handleIterationChange(test, iter.id, 'actualResult', e.target.value, { debounceMs: 600 })}
-                                            onBlur={e => handleIterationChange(test, iter.id, 'actualResult', e.target.value, { flush: true })}
-                                            style={{ resize: 'vertical' }}
-                                          />
-                                        </div>
-
-                                        {/* Iteration Evidences */}
-                                        {iter.evidences && iter.evidences.length > 0 && (
-                                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px' }}>
-                                            {iter.evidences.map((ev, evIdx) => {
-                                              const evId = typeof ev === 'string' ? ev : ev.id;
-                                              const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
-                                              return (
-                                                <div
-                                                  key={evIdx}
-                                                  className="execution-evidence-pill"
-                                                  onClick={() => handlePreviewEvidence(ev)}
-                                                  title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
-                                                  style={{ cursor: 'pointer', padding: '3px 8px', fontSize: '11px' }}
-                                                >
-                                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#0C66E4" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                                  <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{evName}</span>
-                                                  {ev.note && (
-                                                    <span title={`Nota: ${ev.note}`} style={{ fontSize: '10px', background: '#E9F2FF', color: '#0C66E4', padding: '1px 4px', borderRadius: '3px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                                                      💬 Nota
-                                                    </span>
-                                                  )}
-                                                  <button
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      const newName = prompt("Nuevo nombre para la evidencia:", evName);
-                                                      if (newName && newName !== evName) handleRenameEvidence(test.id, evIdx, newName, iter.id);
-                                                    }}
-                                                    title="Renombrar"
-                                                    disabled={!runningTests[test.id]}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#626F86', fontSize: '11px', padding: '0 2px' }}
-                                                  >✏️</button>
-                                                  <button
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      handleDeleteEvidence(test.id, evId, evIdx, iter.id);
-                                                    }}
-                                                    title="Quitar"
-                                                    disabled={!runningTests[test.id]}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#BF2600', fontSize: '11px', padding: '0 2px' }}
-                                                  >✕</button>
-                                                </div>
-                                              );
-                                            })}
-                                          </div>
-                                        )}
+                                      {/* Actions toolbar (Compacta/Expandida omitted per user request) */}
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <button
+                                          type="button"
+                                          disabled={!isTestRunning}
+                                          onClick={() => handleAddIteration(modalTest)}
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            padding: '5px 12px',
+                                            fontSize: '12px',
+                                            fontWeight: 500,
+                                            color: '#FFFFFF',
+                                            backgroundColor: '#0C66E4',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                            opacity: !isTestRunning ? 0.55 : 1,
+                                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.08)'
+                                          }}
+                                          title={!isTestRunning ? 'Inicia la ejecución (Play) para agregar iteraciones' : 'Agregar nueva iteración'}
+                                        >
+                                          <span style={{ fontSize: '13px', fontWeight: 700, lineHeight: 1 }}>+</span>
+                                          <span>Agregar iteración</span>
+                                        </button>
                                       </div>
                                     </div>
-                                  ))
-                                )}
-                              </div>
+
+                                    {/* High-Density Iteration Matrix Table */}
+                                    <div
+                                      style={{
+                                        border: '1px solid #DCDFE4',
+                                        borderRadius: '6px',
+                                        overflow: 'hidden',
+                                        backgroundColor: '#FFFFFF',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.03)'
+                                      }}
+                                    >
+                                      <div style={{ overflowX: 'auto' }}>
+                                        <table
+                                          style={{
+                                            width: '100%',
+                                            textAlign: 'left',
+                                            fontSize: '12px',
+                                            borderCollapse: 'collapse'
+                                          }}
+                                        >
+                                          <thead>
+                                            <tr
+                                              style={{
+                                                backgroundColor: '#F8FAFC',
+                                                color: '#475569',
+                                                borderBottom: '1px solid #DCDFE4',
+                                                fontSize: '11px',
+                                                textTransform: 'uppercase',
+                                                letterSpacing: '0.05em',
+                                                fontWeight: 600
+                                              }}
+                                            >
+                                              <th style={{ padding: '8px 12px', width: '48px', textAlign: 'center' }} scope="col">#</th>
+                                              <th style={{ padding: '8px 12px', width: '132px' }} scope="col">Estado</th>
+                                              <th style={{ padding: '8px 12px', width: '190px' }} scope="col">Datos de Entrada (Input)</th>
+                                              <th style={{ padding: '8px 12px', minWidth: '240px' }} scope="col">Resultado Actual / Observaciones</th>
+                                              <th style={{ padding: '8px 12px', minWidth: '200px' }} scope="col">Evidencias</th>
+                                              <th style={{ padding: '8px 12px', width: '116px', textAlign: 'right' }} scope="col">Acciones</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {iters.length === 0 ? (
+                                              <tr>
+                                                <td
+                                                  colSpan={6}
+                                                  style={{
+                                                    padding: '18px 16px',
+                                                    textAlign: 'center',
+                                                    color: '#64748B',
+                                                    fontSize: '12px',
+                                                    borderBottom: '1px solid #F1F5F9'
+                                                  }}
+                                                >
+                                                  No hay iteraciones registradas para este caso. Haz clic en <strong>+ Agregar iteración</strong> o <strong>+ Añadir fila</strong> para evaluar múltiples entradas de datos.
+                                                </td>
+                                              </tr>
+                                            ) : (
+                                              iters.map((iter, idx) => {
+                                                const iterPass = isPassed(iter.status);
+                                                const iterFail = isFailed(iter.status);
+                                                const iterBlock = isBlocked(iter.status);
+                                                const selectBorder = iterPass ? '#6EE7B7' : iterFail ? '#FDA4AF' : iterBlock ? '#FCD34D' : '#CBD5E1';
+                                                const selectBg = iterPass ? '#ECFDF5' : iterFail ? '#FFF1F2' : iterBlock ? '#FFFBEB' : '#F8FAFC';
+                                                const selectColor = iterPass ? '#065F46' : iterFail ? '#9F1239' : iterBlock ? '#92400E' : '#334155';
+                                                const chevronColor = iterPass ? '#047857' : iterFail ? '#BE123C' : iterBlock ? '#B45309' : '#64748B';
+                                                const iterEvs = Array.isArray(iter.evidences) ? iter.evidences : [];
+
+                                                return (
+                                                  <tr
+                                                    key={iter.id || idx}
+                                                    tabIndex={0}
+                                                    onPaste={(e) => {
+                                                      if (!isTestRunning) return;
+                                                      const items = e.clipboardData?.items;
+                                                      if (!items) return;
+                                                      for (let i = 0; i < items.length; i++) {
+                                                        if (items[i].type.indexOf('image') !== -1) {
+                                                          e.preventDefault();
+                                                          e.stopPropagation();
+                                                          const blob = items[i].getAsFile();
+                                                          if (blob) {
+                                                            const file = new File(
+                                                              [blob],
+                                                              `captura_iter${idx + 1}_${new Date().toISOString().replace(/[:.]/g, '-')}.png`,
+                                                              { type: blob.type || 'image/png' }
+                                                            );
+                                                            handleUploadEvidence(modalTest.id, modalTest.key, file, iter.id);
+                                                          }
+                                                          break;
+                                                        }
+                                                      }
+                                                    }}
+                                                    style={{
+                                                      borderBottom: idx < iters.length - 1 ? '1px solid #E2E8F0' : 'none',
+                                                      transition: 'background-color 0.15s ease',
+                                                      outline: 'none'
+                                                    }}
+                                                  >
+                                                    {/* Iteration Index */}
+                                                    <td
+                                                      style={{
+                                                        padding: '8px 12px',
+                                                        textAlign: 'center',
+                                                        fontWeight: 600,
+                                                        color: '#475569',
+                                                        fontFamily: 'monospace'
+                                                      }}
+                                                    >
+                                                      #{idx + 1}
+                                                    </td>
+
+                                                    {/* Status Selector Dropdown */}
+                                                    <td style={{ padding: '8px 12px' }}>
+                                                      <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}>
+                                                        <select
+                                                          disabled={!isTestRunning}
+                                                          value={iter.status || 'Not Run'}
+                                                          onChange={(e) => handleIterationChange(modalTest, iter.id, 'status', e.target.value)}
+                                                          style={{
+                                                            width: '100%',
+                                                            fontSize: '12px',
+                                                            fontWeight: 600,
+                                                            padding: '4px 24px 4px 10px',
+                                                            borderRadius: '4px',
+                                                            border: `1px solid ${selectBorder}`,
+                                                            backgroundColor: selectBg,
+                                                            color: selectColor,
+                                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                            appearance: 'none',
+                                                            WebkitAppearance: 'none',
+                                                            MozAppearance: 'none',
+                                                            outline: 'none'
+                                                          }}
+                                                        >
+                                                          <option value="Not Run">Not Run</option>
+                                                          <option value="Passed">Passed ✔</option>
+                                                          <option value="Failed">Failed ✘</option>
+                                                          <option value="Blocked">Blocked ⛔</option>
+                                                        </select>
+                                                        <span
+                                                          style={{
+                                                            position: 'absolute',
+                                                            top: 0,
+                                                            bottom: 0,
+                                                            right: '8px',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            pointerEvents: 'none',
+                                                            color: chevronColor,
+                                                            fontSize: '10px'
+                                                          }}
+                                                        >
+                                                          ▼
+                                                        </span>
+                                                      </div>
+                                                    </td>
+
+                                                    {/* Test Parameters Data (Compact code badge with inline edit) */}
+                                                    <td style={{ padding: '8px 12px' }}>
+                                                      <div
+                                                        style={{
+                                                          display: 'inline-flex',
+                                                          alignItems: 'center',
+                                                          gap: '6px',
+                                                          padding: '3px 8px',
+                                                          borderRadius: '4px',
+                                                          backgroundColor: '#F1F5F9',
+                                                          border: '1px solid #E2E8F0',
+                                                          color: '#1E293B',
+                                                          fontFamily: 'monospace',
+                                                          fontSize: '11px',
+                                                          width: '100%',
+                                                          boxSizing: 'border-box'
+                                                        }}
+                                                      >
+                                                        <span style={{ color: '#94A3B8', fontSize: '9px', fontWeight: 700, flexShrink: 0 }}>&gt;_</span>
+                                                        <input
+                                                          type="text"
+                                                          disabled={!isTestRunning}
+                                                          placeholder="Parámetros / Input..."
+                                                          value={iter.expectedData || ''}
+                                                          onChange={(e) => handleIterationChange(modalTest, iter.id, 'expectedData', e.target.value, { debounceMs: 600 })}
+                                                          onBlur={(e) => handleIterationChange(modalTest, iter.id, 'expectedData', e.target.value, { flush: true })}
+                                                          title={iter.expectedData || 'Datos de entrada (Input)'}
+                                                          style={{
+                                                            border: 'none',
+                                                            background: 'transparent',
+                                                            color: '#1E293B',
+                                                            fontFamily: 'monospace',
+                                                            fontSize: '11px',
+                                                            width: '100%',
+                                                            outline: 'none',
+                                                            padding: 0,
+                                                            margin: 0,
+                                                            overflow: 'hidden',
+                                                            textOverflow: 'ellipsis'
+                                                          }}
+                                                        />
+                                                      </div>
+                                                    </td>
+
+                                                    {/* Current Result / Observations (Clean Inline Editable Field) */}
+                                                    <td style={{ padding: '8px 12px' }}>
+                                                      <input
+                                                        type="text"
+                                                        disabled={!isTestRunning}
+                                                        placeholder="Detalles del resultado en esta iteración..."
+                                                        value={iter.actualResult || ''}
+                                                        onChange={(e) => handleIterationChange(modalTest, iter.id, 'actualResult', e.target.value, { debounceMs: 600 })}
+                                                        onBlur={(e) => handleIterationChange(modalTest, iter.id, 'actualResult', e.target.value, { flush: true })}
+                                                        style={{
+                                                          width: '100%',
+                                                          boxSizing: 'border-box',
+                                                          padding: '4px 8px',
+                                                          fontSize: '12px',
+                                                          color: iterFail ? '#BE123C' : '#334155',
+                                                          fontWeight: iterFail ? 500 : 400,
+                                                          backgroundColor: 'transparent',
+                                                          border: '1px solid transparent',
+                                                          borderRadius: '4px',
+                                                          outline: 'none',
+                                                          transition: 'border-color 0.15s ease, background-color 0.15s ease'
+                                                        }}
+                                                        onFocus={(e) => {
+                                                          e.target.style.borderColor = '#0C66E4';
+                                                          e.target.style.backgroundColor = '#FFFFFF';
+                                                        }}
+                                                        onBlurCapture={(e) => {
+                                                          e.target.style.borderColor = 'transparent';
+                                                          e.target.style.backgroundColor = 'transparent';
+                                                        }}
+                                                      />
+                                                    </td>
+
+                                                    {/* Attached Evidences (Chips or Dashed Attach Button) */}
+                                                    <td style={{ padding: '8px 12px' }}>
+                                                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                                        {iterEvs.length > 0 ? (
+                                                          iterEvs.map((ev, evIdx) => {
+                                                            const evId = typeof ev === 'string' ? ev : ev.id;
+                                                            const evName = typeof ev === 'string' ? `evidence_${evId}.jpg` : (ev.filename || `evidence_${evId}.jpg`);
+                                                            return (
+                                                              <span
+                                                                key={evIdx}
+                                                                style={{
+                                                                  display: 'inline-flex',
+                                                                  alignItems: 'center',
+                                                                  gap: '4px',
+                                                                  backgroundColor: '#F1F5F9',
+                                                                  color: '#334155',
+                                                                  fontSize: '11px',
+                                                                  fontFamily: 'monospace',
+                                                                  padding: '2px 8px',
+                                                                  borderRadius: '4px',
+                                                                  border: '1px solid #CBD5E1'
+                                                                }}
+                                                              >
+                                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                                                                </svg>
+                                                                <span
+                                                                  onClick={() => handlePreviewEvidence(ev)}
+                                                                  title={ev.note ? `${evName} — Nota: ${ev.note}` : evName}
+                                                                  style={{
+                                                                    maxWidth: '110px',
+                                                                    overflow: 'hidden',
+                                                                    textOverflow: 'ellipsis',
+                                                                    whiteSpace: 'nowrap',
+                                                                    cursor: 'pointer'
+                                                                  }}
+                                                                >
+                                                                  {evName}
+                                                                </span>
+                                                                <button
+                                                                  type="button"
+                                                                  disabled={!isTestRunning}
+                                                                  onClick={() => {
+                                                                    const newName = prompt('Nuevo nombre para la evidencia:', evName);
+                                                                    if (newName && newName !== evName) {
+                                                                      handleRenameEvidence(modalTest.id, evIdx, newName, iter.id);
+                                                                    }
+                                                                  }}
+                                                                  title="Editar nombre"
+                                                                  style={{
+                                                                    marginLeft: '2px',
+                                                                    background: 'none',
+                                                                    border: 'none',
+                                                                    padding: '0 2px',
+                                                                    color: '#94A3B8',
+                                                                    cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                                    display: 'inline-flex',
+                                                                    alignItems: 'center'
+                                                                  }}
+                                                                >
+                                                                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+                                                                  </svg>
+                                                                </button>
+                                                                <button
+                                                                  type="button"
+                                                                  disabled={!isTestRunning}
+                                                                  onClick={() => handleDeleteEvidence(modalTest.id, evId, evIdx, iter.id)}
+                                                                  title="Eliminar adjunto"
+                                                                  style={{
+                                                                    background: 'none',
+                                                                    border: 'none',
+                                                                    padding: '0 2px',
+                                                                    color: '#94A3B8',
+                                                                    cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                                    fontSize: '10px',
+                                                                    lineHeight: 1
+                                                                  }}
+                                                                >
+                                                                  ✕
+                                                                </button>
+                                                              </span>
+                                                            );
+                                                          })
+                                                        ) : (
+                                                          <label
+                                                            style={{
+                                                              display: 'inline-flex',
+                                                              alignItems: 'center',
+                                                              gap: '4px',
+                                                              fontSize: '11px',
+                                                              color: '#94A3B8',
+                                                              padding: '2px 8px',
+                                                              borderRadius: '4px',
+                                                              border: '1px dashed #CBD5E1',
+                                                              cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                              opacity: !isTestRunning ? 0.55 : 1
+                                                            }}
+                                                            title={!isTestRunning ? 'Inicia la ejecución (Play) para adjuntar evidencia' : 'Adjuntar evidencia a esta iteración'}
+                                                          >
+                                                            <input
+                                                              disabled={!isTestRunning}
+                                                              type="file"
+                                                              style={{ display: 'none' }}
+                                                              onChange={(e) => {
+                                                                if (e.target.files && e.target.files.length > 0) {
+                                                                  handleUploadEvidence(modalTest.id, modalTest.key, e.target.files[0], iter.id);
+                                                                }
+                                                              }}
+                                                            />
+                                                            <span style={{ fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>+</span>
+                                                            <span>Adjuntar evidencia</span>
+                                                          </label>
+                                                        )}
+                                                      </div>
+                                                    </td>
+
+                                                    {/* Quick Action Buttons */}
+                                                    <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                                        {/* Adjuntar archivo local */}
+                                                        <label
+                                                          title="Adjuntar archivo local"
+                                                          style={{
+                                                            padding: '5px',
+                                                            color: '#94A3B8',
+                                                            borderRadius: '4px',
+                                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            opacity: !isTestRunning ? 0.5 : 1
+                                                          }}
+                                                        >
+                                                          <input
+                                                            disabled={!isTestRunning}
+                                                            type="file"
+                                                            style={{ display: 'none' }}
+                                                            onChange={(e) => {
+                                                              if (e.target.files && e.target.files.length > 0) {
+                                                                handleUploadEvidence(modalTest.id, modalTest.key, e.target.files[0], iter.id);
+                                                              }
+                                                            }}
+                                                          />
+                                                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                                                          </svg>
+                                                        </label>
+
+                                                        {/* Capturar pantalla */}
+                                                        <button
+                                                          type="button"
+                                                          disabled={!isTestRunning}
+                                                          onClick={() => handleCaptureScreen(modalTest.id, modalTest.key, iter.id)}
+                                                          title="Capturar pantalla"
+                                                          style={{
+                                                            padding: '5px',
+                                                            color: '#94A3B8',
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            borderRadius: '4px',
+                                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            opacity: !isTestRunning ? 0.5 : 1
+                                                          }}
+                                                        >
+                                                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                                            <polyline points="21 15 16 10 5 21"></polyline>
+                                                          </svg>
+                                                        </button>
+
+                                                        {/* Subir desde celular (QR) */}
+                                                        <button
+                                                          type="button"
+                                                          disabled={!isTestRunning}
+                                                          onClick={() => handleOpenQrCapture(modalTest, iter.id, 'Iteración #' + (idx + 1))}
+                                                          title="Subir desde celular (QR)"
+                                                          style={{
+                                                            padding: '5px',
+                                                            color: '#0C66E4',
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            borderRadius: '4px',
+                                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            opacity: !isTestRunning ? 0.5 : 1
+                                                          }}
+                                                        >
+                                                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                                            <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                                          </svg>
+                                                        </button>
+
+                                                        <span style={{ height: '12px', width: '1px', backgroundColor: '#E2E8F0', margin: '0 2px' }} />
+
+                                                        {/* Eliminar iteración */}
+                                                        <button
+                                                          type="button"
+                                                          disabled={!isTestRunning}
+                                                          onClick={() => handleDeleteIteration(modalTest, iter.id)}
+                                                          title={`Eliminar iteración #${idx + 1}`}
+                                                          style={{
+                                                            padding: '5px',
+                                                            color: '#94A3B8',
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            borderRadius: '4px',
+                                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            opacity: !isTestRunning ? 0.5 : 1
+                                                          }}
+                                                        >
+                                                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                                          </svg>
+                                                        </button>
+                                                      </div>
+                                                    </td>
+                                                  </tr>
+                                                );
+                                              })
+                                            )}
+                                          </tbody>
+                                        </table>
+                                      </div>
+
+                                      {/* Quick Inline Add Iteration Row (Footer) */}
+                                      <div
+                                        style={{
+                                          backgroundColor: 'rgba(248, 250, 252, 0.7)',
+                                          padding: '8px 16px',
+                                          borderTop: '1px solid #DCDFE4',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          flexWrap: 'wrap',
+                                          gap: '8px',
+                                          fontSize: '12px',
+                                          color: '#626F86'
+                                        }}
+                                      >
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                          <svg width="13" height="13" viewBox="0 0 24 24" fill="#8247E5" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <circle cx="12" cy="12" r="10"></circle>
+                                            <line x1="12" y1="16" x2="12" y2="12"></line>
+                                            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                                          </svg>
+                                          <span>
+                                            Consejo: Puedes pegar directamente una captura con <strong>Ctrl+V</strong> sobre la iteración activa.
+                                          </span>
+                                        </span>
+
+                                        <button
+                                          type="button"
+                                          disabled={!isTestRunning}
+                                          onClick={() => handleAddIteration(modalTest)}
+                                          style={{
+                                            color: '#0C66E4',
+                                            fontWeight: 500,
+                                            fontSize: '12px',
+                                            background: 'none',
+                                            border: 'none',
+                                            padding: 0,
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '4px',
+                                            cursor: !isTestRunning ? 'not-allowed' : 'pointer',
+                                            opacity: !isTestRunning ? 0.55 : 1
+                                          }}
+                                        >
+                                          <span style={{ fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>+</span>
+                                          <span>Añadir fila</span>
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </section>
+                                );
+                              })()}
                             </div>
-                          )}
+                          </div>
                         </div>
                       );
-                    }, (items) => `${items.filter(t => isPassed(t.status)).length}✓ · ${items.filter(t => isFailed(t.status)).length}✗ · ${items.filter(t => isNotRun(t.status)).length} pendientes`)}
+                    })()}
 
                     {paginatedTests.length === 0 && (
                       <div style={{ textAlign: 'center', padding: '3rem 1.5rem', background: '#FFFFFF', border: '1px solid #DCDFE4', borderRadius: '8px', color: '#626F86' }}>
@@ -14149,18 +18201,39 @@ const renderPlanningTab = () => {
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-              <h1 className="dashboard-title">
-                {dashboardSubView === 'runs' && 'Dashboard: Métricas de Calidad y Ejecución (Runs)'}
-                {dashboardSubView === 'bugs' && 'Dashboard: Tablero de Defectos y Fallos Críticos (Bugs)'}
-                {dashboardSubView === 'traceability' && 'Dashboard: Matriz de Trazabilidad (Traceability)'}
-              </h1>
-              {circuitBreakerActive && (
-                <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
-                  ⏸ Rate limit activo (3 min)
-                </span>
-              )}
-            </div>
+            {dashboardSubView === 'runs' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '4px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <span>{currentProjectName || 'PROYECTO'}</span>
+                  <span style={{ color: '#CBD5E1' }}>&gt;</span>
+                  <span>TEST MANAGEMENT</span>
+                  <span style={{ color: '#CBD5E1' }}>&gt;</span>
+                  <span style={{ color: '#2563EB', fontWeight: 700 }}>EXECUTION HUB</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em', margin: 0 }}>
+                    Consola de Ejecución &amp; Control Multi-Ciclo
+                  </h1>
+                  {circuitBreakerActive && (
+                    <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
+                      ⏸ Rate limit activo (3 min)
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                <h1 className="dashboard-title">
+                  {dashboardSubView === 'bugs' && 'Dashboard: Tablero de Defectos y Fallos Críticos (Bugs)'}
+                  {dashboardSubView === 'traceability' && 'Dashboard: Matriz de Trazabilidad (Traceability)'}
+                </h1>
+                {circuitBreakerActive && (
+                  <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
+                    ⏸ Rate limit activo (3 min)
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Amber Banner when Snapshot mode is active */}
             {reportData?._isSnapshot && (
@@ -14209,102 +18282,785 @@ const renderPlanningTab = () => {
               </div>
             )}
 
-            {/* Filter Toolbar */}
-            <div className="dashboard-filter-toolbar">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                {/* 1. Plan de Pruebas */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Plan de Pruebas:</span>
-                  <details style={{ position: 'relative' }}>
-                    <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                      {reportSelectedPlans.length === 0 ? "Todos los Planes" : `${reportSelectedPlans.length} Planes seleccionados`}
-                    </summary>
-                    <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
-                       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
-                         <input type="checkbox" checked={reportSelectedPlans.length === 0} onChange={() => { setReportSelectedPlans([]); setReportSelectedCycles([]); }} /> Todos los Planes
-                       </label>
-                       {testPlans.map(p => {
-                         const isSelected = reportSelectedPlans.some(pId => String(pId) === String(p.id));
-                         return (
-                           <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
-                             <input type="checkbox" checked={isSelected} onChange={(e) => {
-                               let newVals = isSelected 
-                                 ? reportSelectedPlans.filter(v => String(v) !== String(p.id))
-                                 : [...reportSelectedPlans, String(p.id)];
-                               setReportSelectedPlans(newVals);
-                               setReportSelectedCycles([]);
-                             }} />
-                             {p.summary}
-                           </label>
-                         );
-                       })}
-                    </div>
-                  </details>
-                </div>
-
-                {/* 2. Ciclo de Pruebas */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ciclo de Pruebas:</span>
-                  <details style={{ position: 'relative' }}>
-                    <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                      {reportSelectedCycles.length === 0 ? "Todos los Ciclos" : `${reportSelectedCycles.length} Ciclos seleccionados`}
-                    </summary>
-                    <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
-                       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
-                         <input type="checkbox" checked={reportSelectedCycles.length === 0} onChange={() => { setReportSelectedCycles([]); }} /> Todos los Ciclos
-                       </label>
-                       {(() => {
-                         const allCyclesList = (testCycles && testCycles.length > 0) ? testCycles : (reportData?.cycles || []);
-                         const filteredForDropdown = reportSelectedPlans.length > 0
-                           ? allCyclesList.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)))
-                           : allCyclesList;
-                         return filteredForDropdown.map(c => {
-                           const isSelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
+            {/* Filter Toolbar (Only shown for non-runs subviews; Runs uses the new Master Test Plan Hero) */}
+            {dashboardSubView !== 'runs' && (
+              <div className="dashboard-filter-toolbar">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  {/* 1. Plan de Pruebas */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Plan de Pruebas:</span>
+                    <details style={{ position: 'relative' }}>
+                      <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
+                        {reportSelectedPlans.length === 0 ? "Todos los Planes" : `${reportSelectedPlans.length} Planes seleccionados`}
+                      </summary>
+                      <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
+                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                           <input type="checkbox" checked={reportSelectedPlans.length === 0} onChange={() => { setReportSelectedPlans([]); setReportSelectedCycles([]); }} /> Todos los Planes
+                         </label>
+                         {testPlans.map(p => {
+                           const isSelected = reportSelectedPlans.some(pId => String(pId) === String(p.id));
                            return (
-                             <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
+                             <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
                                <input type="checkbox" checked={isSelected} onChange={(e) => {
-                                 let newVals = isSelected
-                                   ? reportSelectedCycles.filter(v => String(v) !== String(c.id))
-                                   : [...reportSelectedCycles, String(c.id)];
-                                 setReportSelectedCycles(newVals);
+                                 let newVals = isSelected 
+                                   ? reportSelectedPlans.filter(v => String(v) !== String(p.id))
+                                   : [...reportSelectedPlans, String(p.id)];
+                                 setReportSelectedPlans(newVals);
+                                 setReportSelectedCycles([]);
                                }} />
-                               {c.summary}
+                               {p.summary}
                              </label>
                            );
-                         });
-                       })()}
-                    </div>
-                  </details>
+                         })}
+                      </div>
+                    </details>
+                  </div>
+
+                  {/* 2. Ciclo de Pruebas */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ciclo de Pruebas:</span>
+                    <details style={{ position: 'relative' }}>
+                      <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
+                        {reportSelectedCycles.length === 0 ? "Todos los Ciclos" : `${reportSelectedCycles.length} Ciclos seleccionados`}
+                      </summary>
+                      <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
+                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                           <input type="checkbox" checked={reportSelectedCycles.length === 0} onChange={() => { setReportSelectedCycles([]); }} /> Todos los Ciclos
+                         </label>
+                         {(() => {
+                           const allCyclesList = (testCycles && testCycles.length > 0) ? testCycles : (reportData?.cycles || []);
+                           const filteredForDropdown = reportSelectedPlans.length > 0
+                             ? allCyclesList.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)))
+                             : allCyclesList;
+                           return filteredForDropdown.map(c => {
+                             const isSelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
+                             return (
+                               <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
+                                 <input type="checkbox" checked={isSelected} onChange={(e) => {
+                                   let newVals = isSelected
+                                     ? reportSelectedCycles.filter(v => String(v) !== String(c.id))
+                                     : [...reportSelectedCycles, String(c.id)];
+                                   setReportSelectedCycles(newVals);
+                                 }} />
+                                 {c.summary}
+                               </label>
+                             );
+                           });
+                         })()}
+                      </div>
+                    </details>
+                  </div>
+
+                  {/* 4. Ambiente: QA */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
+                    <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
+                      QA
+                    </span>
+                  </div>
                 </div>
 
-                {/* 4. Ambiente: QA */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
-                  <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                    QA
+                {/* Sincronización */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--jira-subtle, #626F86)' }}>
+                  <span>🕒</span>
+                  <span>
+                    {reportData._loadedAt
+                      ? (Math.floor((Date.now() - reportData._loadedAt) / 60000) < 1
+                          ? 'Sincronizado hace un momento'
+                          : `Sincronizado hace ${Math.floor((Date.now() - reportData._loadedAt) / 60000)} min`)
+                      : 'Sincronizado'}
                   </span>
                 </div>
               </div>
-
-              {/* Sincronización */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--jira-subtle, #626F86)' }}>
-                <span>🕒</span>
-                <span>
-                  {reportData._loadedAt
-                    ? (Math.floor((Date.now() - reportData._loadedAt) / 60000) < 1
-                        ? 'Sincronizado hace un momento'
-                        : `Sincronizado hace ${Math.floor((Date.now() - reportData._loadedAt) / 60000)} min`)
-                    : 'Sincronizado'}
-                </span>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* ═══════════════════════════════════════════════════════ */}
           {/* ─── SUBVIEW 1: RUNS (CUSTOMIZABLE WIDGETS) ─── */}
           {/* ═══════════════════════════════════════════════════════ */}
-          {dashboardSubView === 'runs' && (
+          {dashboardSubView === 'runs' && (() => {
+            // Compute Plan-level metrics across ALL cycles of the selected plan (planCycles)
+            // so clicking individual cycles in the matrix does NOT change the Plan's overall health/progress
+            const activePlanObj = reportSelectedPlans.length === 1
+              ? testPlans.find(p => String(p.id) === String(reportSelectedPlans[0]))
+              : null;
+
+            const getCycleStatsForHero = (c) => {
+              const execArr = Array.isArray(c.execution) && c.execution.length > 0
+                ? c.execution
+                : (perCycleCacheRef.current.get(c.id) || (Array.isArray(c.testCases) ? c.testCases : []));
+              let cTotal = 0, cPass = 0, cFail = 0, cBlock = 0, cNotRun = 0;
+              const bugKeysSet = new Set();
+              if (execArr.length > 0) {
+                const seenTc = new Set();
+                execArr.forEach((ex, idx) => {
+                  const tcKey = ex.key || ex.testCaseKey || (findTc(ex.id)?.key) || '';
+                  const tcId = String(ex.id || ex.testCaseId || '');
+                  const dedupeKey = tcKey ? `key_${tcKey}` : (tcId ? `id_${tcId}` : `item_${idx}`);
+                  if (seenTc.has(dedupeKey)) return;
+                  seenTc.add(dedupeKey);
+                  cTotal++;
+                  const st = String(normalizeUiStatus(ex.status) || '').toUpperCase();
+                  if (st === 'PASSED') cPass++;
+                  else if (st === 'FAILED') cFail++;
+                  else if (st === 'BLOCKED') cBlock++;
+                  else cNotRun++;
+                  const bugsArr = ex.linkedBugs || ex.defects || ex.bugs || [];
+                  if (Array.isArray(bugsArr)) {
+                    bugsArr.forEach(b => {
+                      const bKey = typeof b === 'string' ? b : (b?.key || b?.id);
+                      if (bKey) bugKeysSet.add(String(bKey));
+                    });
+                  }
+                });
+              } else {
+                cTotal = Number(c.totalCases || c.testCasesCount || 0);
+                cPass = Number(c.passed || 0);
+                cFail = Number(c.failed || 0);
+                cBlock = Number(c.blocked || 0);
+                cNotRun = Math.max(0, cTotal - (cPass + cFail + cBlock));
+              }
+              const cBugs = bugKeysSet.size;
+              const cEval = cPass + cFail + cBlock;
+              const cPct = cTotal > 0 ? Math.round((cEval / cTotal) * 100) : 0;
+              const passW = cTotal > 0 ? (cPass / cTotal) * 100 : 0;
+              const failW = cTotal > 0 ? (cFail / cTotal) * 100 : 0;
+              const blockW = cTotal > 0 ? (cBlock / cTotal) * 100 : 0;
+
+              let cStatusKey = 'PENDING';
+              if (cTotal > 0 && cEval === cTotal) cStatusKey = 'COMPLETED';
+              else if (String(c.status || '').toUpperCase().includes('PAUS') || (cBlock > 0 && cPass + cFail === 0)) cStatusKey = 'PAUSED';
+              else if (cEval > 0 || String(c.status || '').toUpperCase().includes('CURSO') || String(c.status || '').toUpperCase().includes('ACTIVE')) cStatusKey = 'IN_PROGRESS';
+
+              return {
+                cTotal, cPass, cFail, cBlock, cNotRun, cEval, cPct,
+                passW, failW, blockW, cBugs, cStatusKey
+              };
+            };
+
+            let planTotalCases = 0, planPass = 0, planFail = 0, planBlock = 0;
+            let planCompletedCyclesCount = 0, planActiveCyclesCount = 0, planPendingCyclesCount = 0;
+            let minStartMs = null, maxEndMs = null;
+
+            planCycles.forEach(c => {
+              const st = getCycleStatsForHero(c);
+              planTotalCases += st.cTotal;
+              planPass += st.cPass;
+              planFail += st.cFail;
+              planBlock += st.cBlock;
+              if (st.cStatusKey === 'COMPLETED') planCompletedCyclesCount++;
+              else if (st.cStatusKey === 'IN_PROGRESS') planActiveCyclesCount++;
+              else planPendingCyclesCount++;
+
+              const sDate = c.startDate || c.plannedStartDate;
+              const eDate = c.endDate || c.plannedEndDate;
+              if (sDate) {
+                const ms = new Date(sDate).getTime();
+                if (!isNaN(ms) && (minStartMs === null || ms < minStartMs)) minStartMs = ms;
+              }
+              if (eDate) {
+                const ms = new Date(eDate).getTime();
+                if (!isNaN(ms) && (maxEndMs === null || ms > maxEndMs)) maxEndMs = ms;
+              }
+            });
+
+            if (activePlanObj) {
+              const pS = activePlanObj.startDate || activePlanObj.plannedStartDate;
+              const pE = activePlanObj.endDate || activePlanObj.plannedEndDate;
+              if (pS) {
+                const ms = new Date(pS).getTime();
+                if (!isNaN(ms)) minStartMs = ms;
+              }
+              if (pE) {
+                const ms = new Date(pE).getTime();
+                if (!isNaN(ms)) maxEndMs = ms;
+              }
+            }
+
+            const planEvalCount = planPass + planFail + planBlock;
+            const planProgressPct = planTotalCases > 0 ? Math.round((planEvalCount / planTotalCases) * 100) : 0;
+            const planPassW = planTotalCases > 0 ? (planPass / planTotalCases) * 100 : 0;
+            const planFailW = planTotalCases > 0 ? (planFail / planTotalCases) * 100 : 0;
+            const planBlockW = planTotalCases > 0 ? (planBlock / planTotalCases) * 100 : 0;
+
+            const planSched = calcScheduleDays(
+              minStartMs ? new Date(minStartMs).toISOString().slice(0, 10) : null,
+              maxEndMs ? new Date(maxEndMs).toISOString().slice(0, 10) : null
+            );
+
+            let planHealthLabel = 'ÓPTIMO';
+            let planHealthBg = '#ECFDF5';
+            let planHealthText = '#047857';
+            let planHealthBorder = '#A7F3D0';
+            let planSlackText = 'En tiempo';
+            let planBurnSubtext = `${planEvalCount} de ${planTotalCases} casos evaluados`;
+
+            if (planTotalCases > 0 && planEvalCount === planTotalCases) {
+              planHealthLabel = 'COMPLETADO';
+              planSlackText = '100% finalizado';
+            } else if (planSched) {
+              const elapsedDays = Math.max(1, planSched.totalDays - planSched.remainingDays);
+              const actualPerDay = Number((planEvalCount / elapsedDays).toFixed(1));
+              const targetPerDay = Number((planTotalCases / Math.max(1, planSched.totalDays)).toFixed(1));
+              const remainingCases = Math.max(0, planTotalCases - planEvalCount);
+              const daysNeededAtTarget = targetPerDay > 0 ? Math.ceil(remainingCases / targetPerDay) : 0;
+              const slackDays = planSched.remainingDays - daysNeededAtTarget;
+              planBurnSubtext = `Ritmo de ejecución: ${actualPerDay} casos/día vs ${targetPerDay} meta`;
+              if (planSched.isOverdue) {
+                planHealthLabel = 'RETRASADO';
+                planHealthBg = '#FFF1F2';
+                planHealthText = '#BE123C';
+                planHealthBorder = '#FECDD3';
+                planSlackText = `Vencido (${Math.abs(planSched.remainingDays)}d)`;
+              } else if (slackDays < 0 || planFail + planBlock > planTotalCases * 0.25) {
+                planHealthLabel = 'EN RIESGO';
+                planHealthBg = '#FFFBEB';
+                planHealthText = '#B45309';
+                planHealthBorder = '#FDE68A';
+                planSlackText = `Holgura: ${slackDays >= 0 ? `+${slackDays}` : slackDays} días`;
+              } else {
+                planSlackText = `Holgura: +${slackDays} días`;
+              }
+            } else if (planEvalCount === 0) {
+              planHealthLabel = 'PENDIENTE';
+              planHealthBg = '#F1F5F9';
+              planHealthText = '#475569';
+              planHealthBorder = '#E2E8F0';
+              planSlackText = 'Sin iniciar';
+            }
+
+            // Velocity for KPI Card 4 (based on active selection)
+            const elapsedDaysForKpi = planSched ? Math.max(1, planSched.totalDays - planSched.remainingDays) : 1;
+            const runsVelocityPerDay = Number((ejecutados / elapsedDaysForKpi).toFixed(1));
+            const remainingSelectedCases = Math.max(0, allTotal - ejecutados);
+            const estDaysToClose = runsVelocityPerDay > 0 ? Math.ceil(remainingSelectedCases / runsVelocityPerDay) : 0;
+
+            return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {/* ═════════════════════════════════════════════════════════════════════════ */}
+              {/* SECTION 1: MASTER TEST PLAN SELECTOR & HORIZONTAL CYCLE DRILL-DOWN HERO */}
+              {/* ═════════════════════════════════════════════════════════════════════════ */}
+              <div style={{
+                background: '#FFFFFF',
+                borderRadius: '12px',
+                border: '1px solid #E2E8F0',
+                boxShadow: '0 1px 3px rgba(15, 23, 42, 0.04)',
+                overflow: ' visible'
+              }}>
+                {/* Top Row: Active Test Plan Selector & Plan-Level Health */}
+                <div style={{
+                  padding: '20px',
+                  background: 'linear-gradient(90deg, #F8FAFC 0%, #FFFFFF 50%, #F8FAFC 100%)',
+                  borderBottom: '1px solid #E2E8F0',
+                  borderTopLeftRadius: '12px',
+                  borderTopRightRadius: '12px',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '16px'
+                }}>
+                  {/* Left: Plan Selector Dropdown */}
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px', flex: '1 1 320px', position: 'relative' }}>
+                    <div style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '12px',
+                      background: 'linear-gradient(135deg, #2563EB 0%, #1E40AF 100%)',
+                      color: '#FFFFFF',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      boxShadow: '0 2px 6px rgba(37, 99, 235, 0.25)',
+                      flexShrink: 0
+                    }}>
+                      <svg style={{ width: '24px', height: '24px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                      </svg>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                        <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#2563EB' }}>
+                          TEST PLAN ACTIVO (NIVEL MAESTRO)
+                        </span>
+                        <span style={{ color: '#CBD5E1' }}>•</span>
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '2px 8px',
+                          borderRadius: '9999px',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          background: planEvalCount === planTotalCases && planTotalCases > 0 ? '#ECFDF5' : '#EFF6FF',
+                          color: planEvalCount === planTotalCases && planTotalCases > 0 ? '#047857' : '#1D4ED8',
+                          border: `1px solid ${planEvalCount === planTotalCases && planTotalCases > 0 ? '#A7F3D0' : '#BFDBFE'}`
+                        }}>
+                          <span style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '9999px',
+                            background: planEvalCount === planTotalCases && planTotalCases > 0 ? '#10B981' : '#2563EB'
+                          }} />
+                          {planEvalCount === planTotalCases && planTotalCases > 0 ? 'COMPLETADO' : 'EN EJECUCIÓN'}
+                        </span>
+                        <span style={{ color: '#CBD5E1' }}>•</span>
+                        <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 500 }}>
+                          Ambiente: <strong style={{ color: '#334155' }}>QA</strong>
+                          {(minStartMs || maxEndMs) && (
+                            <> ({minStartMs ? formatShortDateEs(new Date(minStartMs).toISOString().slice(0, 10)) : '—'} – {maxEndMs ? formatShortDateEs(new Date(maxEndMs).toISOString().slice(0, 10)) : '—'})</>
+                          )}
+                        </span>
+                      </div>
+
+                      {/* Interactive Plan Selector Button */}
+                      <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%' }}>
+                        <button
+                          type="button"
+                          onClick={() => setRunsPlanDropdownOpen(prev => !prev)}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            background: 'transparent',
+                            border: 'none',
+                            padding: '2px 0',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                            color: '#0F172A'
+                          }}
+                        >
+                          <span style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.01em' }}>
+                            {activePlanObj
+                              ? activePlanObj.summary
+                              : reportSelectedPlans.length > 1
+                                ? `${reportSelectedPlans.length} Planes de Prueba Seleccionados`
+                                : 'Todos los Planes de Prueba (Consolidado)'}
+                          </span>
+                          <span style={{
+                            padding: '4px',
+                            borderRadius: '6px',
+                            background: runsPlanDropdownOpen ? '#EFF6FF' : '#F1F5F9',
+                            color: runsPlanDropdownOpen ? '#2563EB' : '#475569',
+                            border: '1px solid #CBD5E1',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'transform 0.2s ease',
+                            transform: runsPlanDropdownOpen ? 'rotate(180deg)' : 'none'
+                          }}>
+                            <svg style={{ width: '16px', height: '16px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </span>
+                        </button>
+
+                        {runsPlanDropdownOpen && (
+                          <div style={{
+                            position: 'absolute',
+                            top: 'calc(100% + 6px)',
+                            left: 0,
+                            minWidth: '340px',
+                            maxWidth: '460px',
+                            maxHeight: '320px',
+                            overflowY: 'auto',
+                            background: '#FFFFFF',
+                            border: '1px solid #E2E8F0',
+                            borderRadius: '10px',
+                            boxShadow: '0 10px 25px -5px rgba(15, 23, 42, 0.15)',
+                            zIndex: 120,
+                            padding: '6px'
+                          }}>
+                            <div style={{ padding: '6px 10px', fontSize: '10px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #F1F5F9', marginBottom: '4px' }}>
+                              Seleccionar Test Plan Maestro
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReportSelectedPlans([]);
+                                setReportSelectedCycles([]);
+                                setRunsPlanDropdownOpen(false);
+                              }}
+                              style={{
+                                width: '100%',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '10px',
+                                padding: '8px 10px',
+                                borderRadius: '8px',
+                                border: 'none',
+                                background: reportSelectedPlans.length === 0 ? '#EFF6FF' : 'transparent',
+                                color: reportSelectedPlans.length === 0 ? '#1D4ED8' : '#1E293B',
+                                fontWeight: reportSelectedPlans.length === 0 ? 700 : 600,
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                textAlign: 'left'
+                              }}
+                            >
+                              <span>Todos los Planes de Prueba (Consolidado)</span>
+                              <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 600 }}>
+                                {testPlans.length} planes
+                              </span>
+                            </button>
+                            {testPlans.map(p => {
+                              const isSelected = reportSelectedPlans.length === 1 && String(reportSelectedPlans[0]) === String(p.id);
+                              const allCyclesList = (testCycles && testCycles.length > 0) ? testCycles : (reportData?.cycles || []);
+                              const pCyclesCount = allCyclesList.filter(c => String(c.planId) === String(p.id)).length;
+                              return (
+                                <button
+                                  key={p.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setReportSelectedPlans([String(p.id)]);
+                                    setReportSelectedCycles([]);
+                                    setRunsPlanDropdownOpen(false);
+                                  }}
+                                  style={{
+                                    width: '100%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '10px',
+                                    padding: '8px 10px',
+                                    borderRadius: '8px',
+                                    border: 'none',
+                                    background: isSelected ? '#EFF6FF' : 'transparent',
+                                    color: isSelected ? '#1D4ED8' : '#1E293B',
+                                    fontWeight: isSelected ? 700 : 500,
+                                    fontSize: '12px',
+                                    cursor: 'pointer',
+                                    textAlign: 'left'
+                                  }}
+                                >
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.summary}</span>
+                                  <span style={{ fontSize: '11px', color: '#64748B', flexShrink: 0 }}>
+                                    {pCyclesCount} {pCyclesCount === 1 ? 'ciclo' : 'ciclos'}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right: Plan-Level Global Progress & Schedule Health */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '20px' }}>
+                    {/* Plan Progress */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: '180px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                        <span style={{ fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em' }}>PROGRESO GLOBAL DEL PLAN</span>
+                        <span style={{ fontWeight: 800, color: '#0F172A', fontSize: '14px' }}>{planProgressPct}%</span>
+                      </div>
+                      <div style={{ width: '100%', height: '8px', background: '#E2E8F0', borderRadius: '9999px', overflow: 'hidden', display: 'flex' }}>
+                        <div style={{ width: `${planPassW}%`, height: '100%', background: '#10B981' }} title={`Passed: ${planPass}`} />
+                        <div style={{ width: `${planFailW}%`, height: '100%', background: '#F43F5E' }} title={`Failed: ${planFail}`} />
+                        <div style={{ width: `${planBlockW}%`, height: '100%', background: '#F59E0B' }} title={`Blocked: ${planBlock}`} />
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', color: '#64748B', fontWeight: 500 }}>
+                        <span>{planEvalCount} / {planTotalCases} casos evaluados en {planCycles.length} {planCycles.length === 1 ? 'ciclo' : 'ciclos'}</span>
+                      </div>
+                    </div>
+
+                    <div style={{ height: '40px', width: '1px', background: '#E2E8F0' }} />
+
+                    {/* Schedule & Slack */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.04em' }}>SALUD DE CRONOGRAMA</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '2px 8px',
+                          borderRadius: '6px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          background: planHealthBg,
+                          color: planHealthText,
+                          border: `1px solid ${planHealthBorder}`
+                        }}>
+                          {planHealthLabel === 'ÓPTIMO' || planHealthLabel === 'COMPLETADO' ? '✓' : '⚠'} {planHealthLabel}
+                        </span>
+                        <span style={{ fontSize: '12px', fontWeight: 700, color: '#1E293B' }}>{planSlackText}</span>
+                      </div>
+                      <span style={{ fontSize: '10px', color: '#64748B' }}>{planBurnSubtext}</span>
+                    </div>
+
+                    <div style={{ height: '40px', width: '1px', background: '#E2E8F0' }} />
+
+                    {/* Environment & Scope */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.04em' }}>AMBIENTE &amp; COBERTURA</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
+                        <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#F1F5F9', color: '#334155', fontSize: '11px', fontWeight: 700, border: '1px solid #CBD5E1' }}>QA</span>
+                        <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#EEF2FF', color: '#4338CA', fontSize: '11px', fontWeight: 700, border: '1px solid #C7D2FE' }}>100% Req. Cubiertos</span>
+                      </div>
+                      <span style={{ fontSize: '10px', color: '#64748B' }}>
+                        {planCompletedCyclesCount} Completados · {planActiveCyclesCount} Activos · {planPendingCyclesCount} Pendientes
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bottom Row: Horizontal Interactive Cycle Matrix */}
+                <div style={{ padding: '20px', background: 'rgba(248, 250, 252, 0.6)', borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px' }}>
+                  {/* Horizontal Cycle Cards Grid */}
+                  {planCycles.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', fontSize: '13px' }}>
+                      No hay ciclos de prueba registrados para este Test Plan.
+                    </div>
+                  ) : (
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+                      gap: '12px'
+                    }}>
+                      {planCycles.map(c => {
+                        const st = getCycleStatsForHero(c);
+                        const isExplicitlySelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
+                        const isSelected = reportSelectedCycles.length === 0 || isExplicitlySelected;
+
+                        let statusBadgeBg = '#F1F5F9', statusBadgeColor = '#475569', statusBadgeLabel = 'PENDIENTE';
+                        if (st.cStatusKey === 'COMPLETED') {
+                          statusBadgeBg = '#ECFDF5';
+                          statusBadgeColor = '#047857';
+                          statusBadgeLabel = 'COMPLETADO';
+                        } else if (st.cStatusKey === 'IN_PROGRESS') {
+                          statusBadgeBg = '#EFF6FF';
+                          statusBadgeColor = '#1D4ED8';
+                          statusBadgeLabel = 'EN CURSO';
+                        } else if (st.cStatusKey === 'PAUSED') {
+                          statusBadgeBg = '#FFFBEB';
+                          statusBadgeColor = '#B45309';
+                          statusBadgeLabel = 'PAUSADO';
+                        }
+
+                        const sDate = c.startDate || c.plannedStartDate;
+                        const eDate = c.endDate || c.plannedEndDate;
+                        const dateRangeLabel = (sDate || eDate)
+                          ? `${sDate ? formatShortDateEs(sDate) : '—'} - ${eDate ? formatShortDateEs(eDate) : '—'}`
+                          : 'Ambiente QA';
+
+                        return (
+                          <div
+                            key={c.id}
+                            onClick={() => {
+                              if (reportSelectedCycles.length === 0) {
+                                // First click focuses on this specific cycle
+                                setReportSelectedCycles([String(c.id)]);
+                              } else if (isExplicitlySelected) {
+                                const next = reportSelectedCycles.filter(rcId => String(rcId) !== String(c.id));
+                                setReportSelectedCycles(next);
+                              } else {
+                                setReportSelectedCycles([...reportSelectedCycles, String(c.id)]);
+                              }
+                            }}
+                            style={{
+                              position: 'relative',
+                              borderRadius: '12px',
+                              border: isSelected ? '2px solid #2563EB' : '1px solid #E2E8F0',
+                              background: '#FFFFFF',
+                              padding: '14px',
+                              boxShadow: isSelected ? '0 2px 6px rgba(37, 99, 235, 0.08)' : 'none',
+                              opacity: isSelected ? 1 : 0.75,
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}
+                          >
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <span style={{
+                                    width: '16px',
+                                    height: '16px',
+                                    borderRadius: '4px',
+                                    background: isSelected ? '#2563EB' : '#FFFFFF',
+                                    border: isSelected ? 'none' : '1px solid #CBD5E1',
+                                    color: '#FFFFFF',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                  }}>
+                                    {isSelected && (
+                                      <svg style={{ width: '10px', height: '10px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                                      </svg>
+                                    )}
+                                  </span>
+                                </div>
+                                <span style={{
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  fontSize: '9px',
+                                  fontWeight: 700,
+                                  background: statusBadgeBg,
+                                  color: statusBadgeColor,
+                                  border: st.cStatusKey === 'IN_PROGRESS' ? '1px solid #BFDBFE' : st.cStatusKey === 'PAUSED' ? '1px solid #FDE68A' : 'none',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px'
+                                }}>
+                                  {st.cStatusKey === 'IN_PROGRESS' && (
+                                    <span style={{ width: '6px', height: '6px', borderRadius: '9999px', background: '#2563EB' }} />
+                                  )}
+                                  {statusBadgeLabel}
+                                </span>
+                              </div>
+                              <div
+                                title={c.summary}
+                                style={{
+                                  fontSize: '12px',
+                                  fontWeight: 700,
+                                  color: '#0F172A',
+                                  marginBottom: '2px',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis'
+                                }}
+                              >
+                                {c.summary}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#64748B', marginBottom: '10px' }}>
+                                {c.environment || 'QA'} · {dateRangeLabel}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', marginBottom: '4px' }}>
+                                <span style={{
+                                  fontWeight: 600,
+                                  color: st.cStatusKey === 'IN_PROGRESS' ? '#1D4ED8' : st.cStatusKey === 'PAUSED' ? '#B45309' : '#475569'
+                                }}>
+                                  {st.cStatusKey === 'IN_PROGRESS' ? 'En Ejecución' : st.cStatusKey === 'PAUSED' ? 'Detenido' : 'Progreso'}
+                                </span>
+                                <span style={{ fontWeight: 800, color: '#0F172A' }}>
+                                  {st.cPct}% ({st.cEval}/{st.cTotal})
+                                </span>
+                              </div>
+                              <div style={{ width: '100%', height: '6px', background: '#F1F5F9', borderRadius: '9999px', overflow: 'hidden', display: 'flex', marginBottom: '8px' }}>
+                                <div style={{ width: `${st.passW}%`, height: '100%', background: '#10B981' }} />
+                                <div style={{ width: `${st.failW}%`, height: '100%', background: '#F43F5E' }} />
+                                <div style={{ width: `${st.blockW}%`, height: '100%', background: '#F59E0B' }} />
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', paddingTop: '6px', borderTop: '1px solid #F1F5F9' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <span style={{ color: '#047857', fontWeight: 700 }}>✓ {st.cPass}</span>
+                                  <span style={{ color: st.cFail > 0 ? '#BE123C' : '#94A3B8', fontWeight: 700 }}>✕ {st.cFail}</span>
+                                  <span style={{ color: st.cBlock > 0 ? '#B45309' : '#94A3B8', fontWeight: 700 }}>⊘ {st.cBlock}</span>
+                                </div>
+                                <span style={{
+                                  color: st.cBugs > 0 ? '#BE123C' : '#64748B',
+                                  fontWeight: st.cBugs > 0 ? 700 : 600,
+                                  background: st.cBugs > 0 ? '#FFF1F2' : 'transparent',
+                                  padding: st.cBugs > 0 ? '1px 6px' : 0,
+                                  borderRadius: '4px'
+                                }}>
+                                  {st.cBugs > 0 ? `🐞 ${st.cBugs} Bugs` : 'Sin Bugs'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Active Selection Summary Bar */}
+                  <div style={{
+                    marginTop: '16px',
+                    paddingTop: '12px',
+                    borderTop: '1px solid rgba(226, 232, 240, 0.8)',
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                    fontSize: '12px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <span style={{ fontWeight: 700, color: '#334155', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                        <svg style={{ width: '16px', height: '16px', color: '#2563EB' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Mostrando métricas consolidadas de:
+                      </span>
+                      {filteredCycles.slice(0, 4).map(fc => (
+                        <span
+                          key={fc.id}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '2px 8px',
+                            borderRadius: '6px',
+                            background: '#EFF6FF',
+                            color: '#1D4ED8',
+                            fontWeight: 700,
+                            border: '1px solid #BFDBFE',
+                            fontSize: '11px'
+                          }}
+                        >
+                          {fc.summary}
+                          {reportSelectedCycles.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setReportSelectedCycles(reportSelectedCycles.filter(rcId => String(rcId) !== String(fc.id)));
+                              }}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#2563EB',
+                                cursor: 'pointer',
+                                fontWeight: 800,
+                                padding: 0,
+                                lineHeight: 1
+                              }}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </span>
+                      ))}
+                      {filteredCycles.length > 4 && (
+                        <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 600 }}>
+                          +{filteredCycles.length - 4} más
+                        </span>
+                      )}
+                      {reportSelectedCycles.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setReportSelectedCycles([])}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#2563EB',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            textDecoration: 'underline'
+                          }}
+                        >
+                          Ver todos ({planCycles.length})
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#475569', fontWeight: 500 }}>
+                      <span>
+                        Total Casos en Selección: <strong style={{ color: '#0F172A' }}>{allTotal} casos</strong> ({passed} Passed · {failed} Failed · {blocked} Blocked · {notRun} Not Run)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {/* Customizer Mode Banner */}
               {isCustomizingDashboard && (
                 <div className="dashboard-customizer-banner">
@@ -14468,85 +19224,187 @@ const renderPlanningTab = () => {
 
                         {/* Widget Content Renderer */}
                         {widget.type === 'kpi_scorecard' && (
-                          <div className="dashboard-kpi-grid">
-                            {/* Card 1: Total Casos */}
-                            <div className="dashboard-kpi-card">
-                              <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>📋 TOTAL CASOS</span>
-                                <span className="dashboard-kpi-pill blue">{allTotal} totales</span>
-                              </div>
-                              <div className="dashboard-kpi-value">{allTotal.toLocaleString()}</div>
-                              <div className="dashboard-kpi-footer">
-                                <span>● {execStats.auto.total} Auto ({allTotal > 0 ? Math.round((execStats.auto.total / allTotal) * 100) : 0}%)</span>
-                                <span>● {execStats.manual.total} Manual ({allTotal > 0 ? Math.round((execStats.manual.total / allTotal) * 100) : 0}%)</span>
-                              </div>
-                            </div>
-
-                            {/* Card 2: Tasa de Éxito */}
-                            <div className="dashboard-kpi-card">
-                              <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#006644' }}>🟢 TASA DE ÉXITO</span>
-                                <span className="dashboard-kpi-pill green">▲ {successRate}%</span>
-                              </div>
-                              <div className="dashboard-kpi-value" style={{ color: '#006644' }}>
-                                {successRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed} pasados</span>
-                              </div>
-                              <div className="dashboard-progress-mini">
-                                <div style={{ width: `${Math.min(100, Math.max(0, Number(successRate)))}%`, height: '100%', backgroundColor: '#36B37E', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
-                              </div>
-                              <div className="dashboard-kpi-footer">
-                                <span>{passed} de {ejecutados} evaluados</span>
-                              </div>
-                            </div>
-
-                            {/* Card 3: Defectos & Bloqueos (Ciclo) */}
-                            <div className="dashboard-kpi-card">
-                              <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-subtle, #626F86)' }}>🐞 DEFECTOS &amp; BLOQUEOS</span>
-                                <span className={`dashboard-kpi-pill ${openCycleBugs > 0 ? 'red' : 'green'}`}>
-                                  {openCycleBugs} Abiertos
+                          <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                            gap: '16px'
+                          }}>
+                            {/* KPI 1: Casos Consolidados */}
+                            <div style={{
+                              background: '#FFFFFF',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid #E2E8F0',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <svg style={{ width: '14px', height: '14px', color: '#475569' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                  </svg>
+                                  CASOS CONSOLIDADOS
+                                </span>
+                                <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#EFF6FF', color: '#1D4ED8' }}>
+                                  {filteredCycles.length} {filteredCycles.length === 1 ? 'Ciclo Activo' : 'Ciclos Activos'}
                                 </span>
                               </div>
-                              <div className="dashboard-kpi-value" style={{ color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-dark, #172B4D)' }}>
-                                {totalCycleBugs} <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>({openCycleBugs} abiertos)</span>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em' }}>{allTotal.toLocaleString()}</span>
+                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>casos totales</span>
                               </div>
-                              <div className="dashboard-kpi-footer">
-                                <span style={{ color: '#006644', fontWeight: 600 }}>{closedCycleBugs} Cerrados</span>
-                                <span style={{ color: openCycleBugs > 0 ? '#DE350B' : 'var(--jira-subtle)', fontWeight: 600 }}>
-                                  {openCycleBugs} Abiertos
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: '#64748B', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #F1F5F9' }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#10B981' }} />
+                                  {execStats.auto.total} Auto ({allTotal > 0 ? Math.round((execStats.auto.total / allTotal) * 100) : 0}%)
+                                </span>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#6366F1' }} />
+                                  {execStats.manual.total} Manual ({allTotal > 0 ? Math.round((execStats.manual.total / allTotal) * 100) : 0}%)
                                 </span>
                               </div>
                             </div>
 
-                            {/* Card 4: Tiempo de Resolución (MTTR) */}
-                            <div className="dashboard-kpi-card">
-                              <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>⏱ RESOLUCIÓN (MTTR)</span>
-                                <span className="dashboard-kpi-pill neutral">SLA: 24h</span>
+                            {/* KPI 2: Tasa de Éxito */}
+                            <div style={{
+                              background: '#FFFFFF',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid #E2E8F0',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: '#047857', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <svg style={{ width: '14px', height: '14px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                  TASA DE ÉXITO
+                                </span>
+                                <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#ECFDF5', color: '#047857' }}>
+                                  ▲ {successRate}%
+                                </span>
                               </div>
-                              <div className="dashboard-kpi-value">
-                                {avgResolutionHours} <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--jira-subtle)' }}>hrs</span>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#047857', letterSpacing: '-0.02em' }}>{successRate}%</span>
+                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>{passed} passed</span>
                               </div>
-                              <div className="dashboard-kpi-footer">
-                                <span style={{ color: '#006644', fontWeight: 600 }}>Media en ciclo</span>
-                                <span>objetivo &lt; 24h</span>
+                              <div style={{ width: '100%', background: '#F1F5F9', height: '6px', borderRadius: '9999px', overflow: 'hidden', marginTop: '8px' }}>
+                                <div style={{ background: '#10B981', height: '100%', width: `${Math.min(100, Math.max(0, Number(successRate)))}%`, borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                              </div>
+                              <div style={{ fontSize: '11px', color: '#64748B', marginTop: '8px', display: 'flex', justifyContent: 'space-between' }}>
+                                <span>{passed} pasados de {ejecutados} evaluados</span>
+                                <span style={{ fontWeight: 600, color: '#334155' }}>Meta: 90%</span>
                               </div>
                             </div>
 
-                            {/* Card 5: Cobertura de Ejecución */}
-                            <div className="dashboard-kpi-card">
-                              <div className="dashboard-kpi-header">
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#0C66E4' }}>🎯 COBERTURA DE EJECUCIÓN</span>
-                                <span className="dashboard-kpi-pill blue">{coverageRate}%</span>
+                            {/* KPI 3: Defectos & Bloqueos */}
+                            <div style={{
+                              background: '#FFFFFF',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid #E2E8F0',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: '#BE123C', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <svg style={{ width: '14px', height: '14px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                  </svg>
+                                  DEFECTOS &amp; BLOQUEOS
+                                </span>
+                                <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#FFF1F2', color: '#BE123C' }}>
+                                  {Array.isArray(criticalCycleBugs) && criticalCycleBugs.length > 0 ? `${criticalCycleBugs.length} Activos` : `${openCycleBugs} Abiertos`}
+                                </span>
                               </div>
-                              <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
-                                {coverageRate}% <span style={{ fontSize: '13px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500 }}>{passed + failed + blocked} / {allTotal}</span>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#BE123C', letterSpacing: '-0.02em' }}>{openCycleBugs}</span>
+                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>bugs abiertos ({blocked} casos bloqueados)</span>
                               </div>
-                              <div className="dashboard-progress-mini">
-                                <div style={{ width: `${Math.min(100, Math.max(0, Number(coverageRate)))}%`, height: '100%', backgroundColor: '#0C66E4', borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #F1F5F9' }}>
+                                <span style={{ color: '#047857', fontWeight: 600 }}>{closedCycleBugs} Cerrados</span>
+                                <span style={{ color: '#BE123C', fontWeight: 700 }}>{openCycleBugs} En Curso</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setDashboardSubView('bugs')}
+                                  style={{ background: 'transparent', border: 'none', color: '#2563EB', fontWeight: 700, fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                                >
+                                  Ver Bugs →
+                                </button>
                               </div>
-                              <div className="dashboard-kpi-footer">
-                                <span>{allTotal - (passed + failed + blocked)} casos pendientes</span>
+                            </div>
+
+                            {/* KPI 4: Ritmo de Ejecución */}
+                            <div style={{
+                              background: '#FFFFFF',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid #E2E8F0',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <svg style={{ width: '14px', height: '14px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                  </svg>
+                                  RITMO DE EJECUCIÓN
+                                </span>
+                                <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#F1F5F9', color: '#475569' }}>
+                                  Vel. Media
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px', margin: '4px 0' }}>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em' }}>{runsVelocityPerDay}</span>
+                                <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748B' }}>casos / día</span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: '#64748B', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #F1F5F9' }}>
+                                <span style={{ color: '#047857', fontWeight: 600 }}>{planSlackText}</span>
+                                <span>{remainingSelectedCases === 0 ? 'Completado' : `Est. cierre: ${estDaysToClose} días`}</span>
+                              </div>
+                            </div>
+
+                            {/* KPI 5: Cobertura Global */}
+                            <div style={{
+                              background: '#FFFFFF',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid #E2E8F0',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <svg style={{ width: '14px', height: '14px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                  </svg>
+                                  COBERTURA GLOBAL
+                                </span>
+                                <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#EFF6FF', color: '#1D4ED8' }}>
+                                  {coverageRate}% Ejec.
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#1D4ED8', letterSpacing: '-0.02em' }}>{coverageRate}%</span>
+                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>{ejecutados} / {allTotal} corridos</span>
+                              </div>
+                              <div style={{ width: '100%', background: '#F1F5F9', height: '6px', borderRadius: '9999px', overflow: 'hidden', marginTop: '8px' }}>
+                                <div style={{ background: '#2563EB', height: '100%', width: `${Math.min(100, Math.max(0, Number(coverageRate)))}%`, borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                              </div>
+                              <div style={{ fontSize: '11px', color: '#64748B', marginTop: '8px', display: 'flex', justifyContent: 'space-between' }}>
+                                <span>{notRun} casos pendientes</span>
+                                <span style={{ color: '#BE123C', fontWeight: 600 }}>{failed} fallidos a re-testear</span>
                               </div>
                             </div>
                           </div>
@@ -14970,7 +19828,8 @@ const renderPlanningTab = () => {
                   })}
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* ═══════════════════════════════════════════════════════ */}
           {/* ─── SUBVIEW 2: BUGS ─── */}
@@ -19173,15 +24032,12 @@ const renderPlanningTab = () => {
       {renderSlidePanel()}
       {previewModalData && (
         <div className="modal-overlay" style={{zIndex: 9999}} onClick={() => {
-          if (previewModalData?.blobUrl) {
-            try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
-          }
           setPreviewModalData(null);
         }}>
           <div className="modal-content glass" style={{width: '92%', height: '90%', maxWidth: '1200px', display: 'flex', flexDirection: 'column'}} onClick={(e) => e.stopPropagation()}>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', gap: '12px'}}>
               <h2 style={{margin: 0, fontSize: '1.15rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, display: 'flex', alignItems: 'center', gap: '8px'}}>
-                <span>{previewModalData.isVideo || previewModalData.filename?.match(/\.(mp4|mov|webm)$/i) ? '🎥' : '📷'}</span>
+                <span>{(previewModalData.isPdf || /\.pdf$/i.test(previewModalData.filename || '')) ? '📄' : (previewModalData.isVideo || previewModalData.filename?.match(/\.(mp4|mov|webm)$/i) ? '🎥' : '📷')}</span>
                 <span>{previewModalData.filename}</span>
               </h2>
               <div style={{display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0}}>
@@ -19207,9 +24063,6 @@ const renderPlanningTab = () => {
                 <button
                   className="btn-secondary"
                   onClick={() => {
-                    if (previewModalData?.blobUrl) {
-                      try { URL.revokeObjectURL(previewModalData.blobUrl); } catch(e){}
-                    }
                     setPreviewModalData(null);
                   }}
                   style={{ padding: '0.4rem 0.8rem', background: 'var(--danger-color, #DE350B)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
@@ -19236,6 +24089,12 @@ const renderPlanningTab = () => {
                     </button>
                   )}
                 </div>
+              ) : (previewModalData.isPdf || /\.pdf$/i.test(previewModalData.filename || '')) ? (
+                <PdfDocumentPreview
+                  byteArray={previewModalData.byteArray}
+                  blobUrl={previewModalData.blobUrl}
+                  filename={previewModalData.filename}
+                />
               ) : (previewModalData.isVideo || previewModalData.filename?.match(/\.(mp4|mov|webm)$/i)) ? (
                 <video
                   controls

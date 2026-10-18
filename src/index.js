@@ -491,14 +491,22 @@ resolver.define('getTestPlans', async ({ payload }) => {
       planType || 'Test Set',
       ['summary', 'status', 'created'],
       null,
-      null
+      ['testpulse-schedule']
     );
-    return allIssues.map(issue => ({
-      id: issue.id,
-      key: issue.key,
-      summary: issue.fields?.summary || issue.key,
-      status: issue.fields?.status?.name || 'To Do'
-    }));
+    return allIssues.map(issue => {
+      const props = issue.properties || {};
+      const rawSchedule = props['testpulse-schedule'];
+      const schedule = (rawSchedule && typeof rawSchedule === 'object')
+        ? (rawSchedule.value && typeof rawSchedule.value === 'object' ? rawSchedule.value : rawSchedule)
+        : null;
+      return {
+        id: issue.id,
+        key: issue.key,
+        summary: issue.fields?.summary || issue.key,
+        status: issue.fields?.status?.name || 'To Do',
+        schedule
+      };
+    });
   } catch (e) {
     console.error("getTestPlans exception:", e);
     return [];
@@ -522,7 +530,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
     ];
 
     // Pass at most 5 properties (Jira allows max 5)
-    const propNames = ['testops-plan-link', 'testpulse-v2', 'execution', 'tests', 'execution-meta'];
+    const propNames = ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2', 'execution', 'execution-meta'];
     const allIssues = await fetchIssuesByCandidateTypes(
       projectId,
       projectJql,
@@ -546,26 +554,23 @@ resolver.define('getTestCycles', async ({ payload }) => {
       
       const rawExec = props['execution'];
       const execVal = Array.isArray(rawExec) ? rawExec : (Array.isArray(rawExec?.value) ? rawExec.value : null);
+      let fallbackStats = null;
       if (!hasMeta && Array.isArray(execVal)) {
+        let passed = 0, failed = 0, blocked = 0, notRun = 0, other = 0;
         for (const item of execVal) {
           const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
           if (id && !seenIds.has(id)) {
             seenIds.add(id);
             totalTests++;
+            const st = String(item?.status || 'Not Run').toLowerCase();
+            if (st === 'passed' || st === 'pass' || st === 'aprobado') passed++;
+            else if (st === 'failed' || st === 'fail' || st === 'fallido') failed++;
+            else if (st === 'blocked' || st === 'bloqueado') blocked++;
+            else if (st === 'in progress' || st === 'en curso' || st === 'retest') other++;
+            else notRun++;
           }
         }
-      }
-      
-      const rawTests = props['tests'];
-      const testsVal = Array.isArray(rawTests) ? rawTests : (Array.isArray(rawTests?.value) ? rawTests.value : null);
-      if (!hasMeta && totalTests === 0 && Array.isArray(testsVal)) {
-        for (const item of testsVal) {
-          const id = typeof item === 'object' && item !== null ? String(item.id || item.testCaseId || '') : String(item);
-          if (id && !seenIds.has(id)) {
-            seenIds.add(id);
-            totalTests++;
-          }
-        }
+        fallbackStats = { total: totalTests, passed, failed, blocked, notRun, other };
       }
       if (hasMeta) totalTests = meta.total;
       
@@ -576,10 +581,19 @@ resolver.define('getTestCycles', async ({ payload }) => {
       const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
 
       const planLink = props['testops-plan-link'];
+      const rawSchedProp = props['testpulse-schedule'];
+      const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
+        ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
+        : null;
       const v2Prop = props['testpulse-v2']?.value || props['testpulse-v2'];
       let planId = (planLink && typeof planLink === 'object')
         ? (planLink.planId || planLink.value?.planId || null)
         : (typeof planLink === 'string' ? planLink : (v2Prop?.planId || null));
+      const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+        ? directSched
+        : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
+          ? (planLink.schedule || planLink.value?.schedule)
+          : (directSched || v2Prop?.schedule || null));
       if (!planId && issue.fields?.parent) {
         const pType = (issue.fields.parent.fields?.issuetype?.name || '').toLowerCase();
         if (pType.includes('plan') || pType.includes('set')) {
@@ -604,12 +618,13 @@ resolver.define('getTestCycles', async ({ payload }) => {
         summary: issue.fields?.summary || issue.key,
         status: issue.fields?.status?.name || 'To Do',
         planId,
+        schedule,
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
         rawFields: issue.fields,
         testCount: totalTests,
-        executionMeta: hasMeta ? meta : null
+        executionMeta: hasMeta ? meta : fallbackStats
       };
     });
   } catch (e) {
@@ -620,20 +635,113 @@ resolver.define('getTestCycles', async ({ payload }) => {
 
 resolver.define('linkCycleToPlan', async ({ payload }) => {
   const { cycleId, planId } = payload;
+  let existingSchedule = null;
+  try {
+    const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+    if (getRes.ok) {
+      const data = await getRes.json();
+      existingSchedule = data?.value?.schedule || data?.schedule || null;
+    }
+  } catch (e) {}
   await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ planId })
+    body: JSON.stringify(existingSchedule ? { planId, schedule: existingSchedule } : { planId })
   });
   return true;
 });
 
 resolver.define('unlinkCycleFromPlan', async ({ payload }) => {
   const { cycleId } = payload;
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
-    method: 'DELETE'
-  });
+  let existingSchedule = null;
+  try {
+    const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+    if (getRes.ok) {
+      const data = await getRes.json();
+      existingSchedule = data?.value?.schedule || data?.schedule || null;
+    }
+  } catch (e) {}
+  if (existingSchedule) {
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planId: null, schedule: existingSchedule })
+    });
+  } else {
+    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'DELETE'
+    });
+  }
   return true;
+});
+
+// Save schedule metadata (startDate, endDate, excludeWeekends, holidays, naturalDays, businessDays, statusBadge) on a Test Plan issue
+resolver.define('savePlanSchedule', async ({ payload }) => {
+  const { planId, schedule } = payload || {};
+  if (!planId || !schedule) throw new Error('Missing planId or schedule');
+  const cleanSchedule = {
+    startDate: schedule.startDate || '',
+    endDate: schedule.endDate || '',
+    excludeWeekends: schedule.excludeWeekends !== false,
+    holidays: Array.isArray(schedule.holidays) ? schedule.holidays : [],
+    naturalDays: Number(schedule.naturalDays) || 0,
+    businessDays: Number(schedule.businessDays) || 0,
+    statusBadge: schedule.statusBadge || 'ACTIVO',
+    updatedAt: new Date().toISOString()
+  };
+  await api.asUser().requestJira(route`/rest/api/3/issue/${planId}/properties/testpulse-schedule`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(cleanSchedule)
+  });
+  return { success: true, schedule: cleanSchedule };
+});
+
+// Save schedule metadata (startDate, endDate, sprint, planningStatus, excludeWeekends, holidays, naturalDays, businessDays) on a Test Cycle issue
+resolver.define('saveCycleSchedule', async ({ payload }) => {
+  const { cycleId, planId, schedule } = payload || {};
+  if (!cycleId || !schedule) throw new Error('Missing cycleId or schedule');
+  let currentPlanId = planId || null;
+  try {
+    const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+    if (getRes.ok) {
+      const data = await getRes.json();
+      if (!currentPlanId) {
+        currentPlanId = data?.value?.planId || data?.planId || null;
+      }
+    }
+  } catch (e) {}
+  const cleanSchedule = {
+    startDate: schedule.startDate || '',
+    endDate: schedule.endDate || '',
+    sprint: schedule.sprint || '',
+    planningStatus: schedule.planningStatus || 'EN CURSO',
+    excludeWeekends: schedule.excludeWeekends !== false,
+    holidays: Array.isArray(schedule.holidays) ? schedule.holidays : [],
+    naturalDays: Number(schedule.naturalDays) || 0,
+    businessDays: Number(schedule.businessDays) || 0,
+    updatedAt: new Date().toISOString()
+  };
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId: currentPlanId, schedule: cleanSchedule })
+  });
+  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testpulse-schedule`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(cleanSchedule)
+  });
+  return { success: true, schedule: cleanSchedule, planId: currentPlanId };
 });
 
 // === Fields Management ===
@@ -2421,8 +2529,8 @@ const fetchBugsBatch = async (keys = []) => {
 
           const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-          const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
-          const estResDate = issue.fields?.[estResField] || issue.fields?.duedate || null;
+          const versionDisplay = fixVersions.length > 0 ? fixVersions.join(', ') : (affectsVersions.length > 0 ? affectsVersions.join(', ') : 'Sin versión');
+          const estResDate = issue.fields?.[estResField] || null;
           const changelogMeta = analyzeBugChangelog(issue);
 
           bugMap[key] = {
@@ -2464,7 +2572,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let token = null;
   let isLast = false;
   while (!isLast) {
-    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created'], null, ['testops-plan-link', 'testpulse-v2'], token, 100);
+    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created'], null, ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2'], token, 100);
     if (page.error) break;
     allIssues = allIssues.concat(page.issues);
     token = page.nextPageToken;
@@ -2558,12 +2666,22 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
       const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
       const planLink = i.properties?.['testops-plan-link'];
+      const rawSchedProp = i.properties?.['testpulse-schedule'];
+      const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
+        ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
+        : null;
       const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (i.properties?.['testpulse-v2']?.planId || null));
+      const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+        ? directSched
+        : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
+          ? (planLink.schedule || planLink.value?.schedule)
+          : (directSched || null));
       return {
         id: i.id,
         key: i.key,
         summary: i.fields?.summary || '',
         planId,
+        schedule,
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
@@ -3965,21 +4083,61 @@ resolver.define('getIssueDescription', async ({ payload }) => {
   }
 });
 
+// Helper to extract plain editable text from Jira's Environment field (which may be ADF or HTML/string)
+function extractPlainTextFromEnv(rawEnv, renderedEnv) {
+  if (!rawEnv && !renderedEnv) return '';
+  if (typeof rawEnv === 'string') {
+    return rawEnv.replace(/<[^>]+>/g, '').trim();
+  }
+  if (rawEnv && typeof rawEnv === 'object') {
+    const walkAdf = (node) => {
+      if (!node) return '';
+      if (Array.isArray(node)) return node.map(walkAdf).join('');
+      if (node.type === 'text') return node.text || '';
+      if (node.type === 'hardBreak') return '\n';
+      const inner = node.content ? walkAdf(node.content) : '';
+      if (node.type === 'paragraph' || node.type === 'heading' || node.type === 'listItem') {
+        return inner + '\n';
+      }
+      return inner;
+    };
+    return walkAdf(rawEnv).replace(/\n{3,}/g, '\n\n').trim();
+  }
+  if (typeof renderedEnv === 'string') {
+    return renderedEnv
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .trim();
+  }
+  return '';
+}
+
 resolver.define('getBugFullDetails', async ({ payload }) => {
   try {
     const { issueIdOrKey } = payload;
     if (!issueIdOrKey) return null;
 
-    const fields = [
-      'summary', 'description', 'attachment', 'comment', 'assignee', 'reporter',
-      'creator', 'priority', 'status', 'resolution', 'created', 'updated',
-      'resolutiondate', 'duedate', 'environment', 'versions', 'fixVersions',
-      'issuetype', 'parent', 'customfield_10238', 'customfield_10763', 'labels', 'issuelinks'
-    ].join(',');
+    // Fetch all relevant fields plus editmeta and transitions in parallel for fast in-app editing
+    const [response, editMetaRes, transitionsRes, resolutionsRes] = await Promise.all([
+      api.asUser().requestJira(
+        route`/rest/api/3/issue/${issueIdOrKey}?expand=renderedFields,changelog,names`
+      ),
+      api.asUser().requestJira(
+        route`/rest/api/3/issue/${issueIdOrKey}/editmeta`
+      ).catch(() => null),
+      api.asUser().requestJira(
+        route`/rest/api/3/issue/${issueIdOrKey}/transitions?expand=transitions.fields`
+      ).catch(() => null),
+      api.asUser().requestJira(
+        route`/rest/api/3/resolution`
+      ).catch(() => null)
+    ]);
 
-    const response = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${issueIdOrKey}?fields=${fields}&expand=renderedFields,changelog`
-    );
     if (!response.ok) {
       console.warn(`[getBugFullDetails] Failed to fetch bug ${issueIdOrKey}:`, response.status);
       return null;
@@ -3987,7 +4145,144 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
     const data = await response.json();
     const f = data.fields || {};
     const rf = data.renderedFields || {};
+    const fieldNamesMap = data.names || {};
     const changelogMeta = analyzeBugChangelog(data);
+
+    // Parse editmeta, transitions, and resolutions
+    const editMetaData = (editMetaRes && editMetaRes.ok) ? await editMetaRes.json().catch(() => ({})) : {};
+    const editFields = editMetaData.fields || {};
+    const transitionsData = (transitionsRes && transitionsRes.ok) ? await transitionsRes.json().catch(() => ({})) : {};
+    const globalResolutions = (resolutionsRes && resolutionsRes.ok) ? await resolutionsRes.json().catch(() => ([])) : [];
+
+    // Project info & project versions for fixVersions
+    const projectKey = f.project?.key || (String(data.key || issueIdOrKey).includes('-') ? String(data.key || issueIdOrKey).split('-')[0] : '');
+    const projectId = f.project?.id ? String(f.project.id) : '';
+    let projectVersionsRaw = [];
+    const projIdentifier = projectKey || projectId;
+    if (projIdentifier) {
+      try {
+        const verRes = await api.asUser().requestJira(route`/rest/api/3/project/${projIdentifier}/versions`);
+        if (verRes && verRes.ok) {
+          const verJson = await verRes.json();
+          if (Array.isArray(verJson)) projectVersionsRaw = verJson;
+        }
+      } catch (verErr) {
+        console.warn(`[getBugFullDetails] Could not fetch versions for project ${projIdentifier}:`, verErr.message);
+      }
+    }
+
+    // Discover *Severity custom field ID & allowed options (strictly *Severity, NOT priority)
+    let severityFieldId = 'customfield_10238';
+    for (const [fKey, fMeta] of Object.entries(editFields)) {
+      const mName = String(fMeta?.name || '').trim();
+      if (/^\*?severity$/i.test(mName) || /^\*?severidad$/i.test(mName) || mName.toLowerCase().includes('severity') || mName.toLowerCase().includes('severidad')) {
+        severityFieldId = fKey;
+        break;
+      }
+    }
+    if (severityFieldId === 'customfield_10238' && !f.customfield_10238 && !editFields.customfield_10238) {
+      for (const [fKey, fLabel] of Object.entries(fieldNamesMap)) {
+        const mName = String(fLabel || '').trim();
+        if (/^\*?severity$/i.test(mName) || /^\*?severidad$/i.test(mName) || mName.toLowerCase().includes('severity') || mName.toLowerCase().includes('severidad')) {
+          severityFieldId = fKey;
+          break;
+        }
+      }
+    }
+
+    const sevAllowedRaw = editFields[severityFieldId]?.allowedValues || editFields.customfield_10238?.allowedValues || [];
+    const severityOptions = sevAllowedRaw.length > 0
+      ? sevAllowedRaw.map(opt => ({
+          id: opt.id ? String(opt.id) : '',
+          value: String(opt.value || opt.name || opt.label || '')
+        })).filter(o => o.value)
+      : [
+          { id: '', value: 'Bloqueante' },
+          { id: '', value: 'Crítico' },
+          { id: '', value: 'Mayor' },
+          { id: '', value: 'Medio' },
+          { id: '', value: 'Menor' }
+        ];
+
+    // Discover Fecha Estimada custom field ID (strictly custom field, NOT duedate)
+    const isEstDateFieldName = (rawName) => {
+      const mName = String(rawName || '').trim().toLowerCase();
+      return (
+        mName.includes('fecha estimada') ||
+        mName.includes('fecha de solución') ||
+        mName.includes('fecha de solucion') ||
+        mName.includes('solución estimada') ||
+        mName.includes('solucion estimada') ||
+        mName.includes('estimated')
+      );
+    };
+    const estDateCandidateIds = [];
+    for (const [fKey, fMeta] of Object.entries(editFields)) {
+      if (fKey === 'duedate') continue;
+      if (isEstDateFieldName(fMeta?.name)) {
+        if (!estDateCandidateIds.includes(fKey)) estDateCandidateIds.push(fKey);
+      }
+    }
+    for (const [fKey, fLabel] of Object.entries(fieldNamesMap)) {
+      if (fKey === 'duedate') continue;
+      if (isEstDateFieldName(fLabel)) {
+        if (!estDateCandidateIds.includes(fKey)) estDateCandidateIds.push(fKey);
+      }
+    }
+    if (!estDateCandidateIds.includes('customfield_10763')) {
+      estDateCandidateIds.push('customfield_10763');
+    }
+    // Prefer a candidate field that currently holds a value, otherwise the first editable/discovered candidate
+    const populatedEstFieldId = estDateCandidateIds.find(id => f[id] !== undefined && f[id] !== null && f[id] !== '');
+    const estDateFieldId = populatedEstFieldId || estDateCandidateIds[0] || 'customfield_10763';
+
+    // Available project versions for fixVersions / versions
+    const editFixVerAllowed = editFields.fixVersions?.allowedValues || [];
+    const editAffVerAllowed = editFields.versions?.allowedValues || [];
+    const verSeen = new Set();
+    const availableVersions = [];
+    for (const v of [...projectVersionsRaw, ...editFixVerAllowed, ...editAffVerAllowed]) {
+      if (!v) continue;
+      const vName = String(v.name || v.value || '').trim();
+      if (!vName || verSeen.has(vName)) continue;
+      verSeen.add(vName);
+      availableVersions.push({
+        id: v.id ? String(v.id) : '',
+        name: vName,
+        released: !!v.released,
+        archived: !!v.archived
+      });
+    }
+
+    // Available transitions for Status workflow
+    const transitions = (transitionsData.transitions || []).map(t => ({
+      id: String(t.id),
+      name: t.name || t.to?.name || '',
+      toStatus: t.to?.name || t.name || '',
+      toCategory: t.to?.statusCategory?.key || '',
+      hasResolutionField: !!(t.fields && t.fields.resolution)
+    }));
+
+    // Available resolutions (from editmeta, transitions, and global Jira resolutions)
+    const resSeen = new Set();
+    const resolutionOptions = [];
+    const editResAllowed = editFields.resolution?.allowedValues || [];
+    const transResAllowed = [];
+    for (const t of (transitionsData.transitions || [])) {
+      if (t.fields?.resolution?.allowedValues) {
+        transResAllowed.push(...t.fields.resolution.allowedValues);
+      }
+    }
+    for (const r of [...editResAllowed, ...transResAllowed, ...(Array.isArray(globalResolutions) ? globalResolutions : [])]) {
+      if (!r) continue;
+      const rName = String(r.name || r.value || '').trim();
+      if (!rName || resSeen.has(rName)) continue;
+      resSeen.add(rName);
+      resolutionOptions.push({
+        id: r.id ? String(r.id) : '',
+        name: rName
+      });
+    }
 
     // 1. Description: rendered HTML or raw ADF (sanitize broken Jira server tags)
     const descriptionRendered = rf.description
@@ -4031,21 +4326,40 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       };
     }).reverse(); // Newest first!
 
-    // 4. Versions
+    // 4. Versions: combine fixVersions and versions (affectsVersions) so any version shown in the table list or Jira is always displayed
     const affectsVersions = (f.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
-    const fixVersions = (f.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const rawFixVersions = (f.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
+    const combinedVersions = Array.from(new Set([...rawFixVersions, ...affectsVersions]));
 
     // 5. Environment
     let environmentText = null;
     if (rf.environment) environmentText = rf.environment;
     else if (typeof f.environment === 'string') environmentText = f.environment;
     else if (f.environment && typeof f.environment === 'object') environmentText = f.environment;
+    const environmentPlainText = extractPlainTextFromEnv(f.environment, rf.environment);
 
-    const estResDate = f.customfield_10763 || f.duedate || null;
+    // 6. Strict Fecha Estimada (custom field, NOT duedate) and *Severity (custom field, NOT priority)
+    let rawEstDateVal = null;
+    for (const candId of estDateCandidateIds) {
+      if (f[candId] !== undefined && f[candId] !== null && f[candId] !== '') {
+        rawEstDateVal = f[candId];
+        break;
+      }
+    }
+    const estResDate = rawEstDateVal
+      ? (typeof rawEstDateVal === 'object' ? (rawEstDateVal.value || rawEstDateVal.name || String(rawEstDateVal)) : String(rawEstDateVal))
+      : null;
+
+    const rawSevObj = f[severityFieldId] || f.customfield_10238 || null;
+    const sevDisplay = rawSevObj
+      ? (typeof rawSevObj === 'object' ? (rawSevObj.value || rawSevObj.name || rawSevObj.label || 'Sin definir') : String(rawSevObj))
+      : 'Sin definir';
 
     return {
       id: data.id,
       key: data.key,
+      projectId,
+      projectKey,
       issueType: f.issuetype?.name || '',
       parent: f.parent ? {
         key: f.parent.key,
@@ -4059,30 +4373,40 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
       attachments,
       comments,
       assignee: f.assignee ? {
+        accountId: f.assignee.accountId || '',
         displayName: f.assignee.displayName || f.assignee.name || 'Sin asignar',
         avatarUrl: f.assignee.avatarUrls?.['32x32'] || f.assignee.avatarUrls?.['24x24'] || null,
         email: f.assignee.emailAddress || ''
       } : null,
       reporter: f.reporter ? {
+        accountId: f.reporter.accountId || '',
         displayName: f.reporter.displayName || f.reporter.name || 'Sin especificar',
         avatarUrl: f.reporter.avatarUrls?.['32x32'] || f.reporter.avatarUrls?.['24x24'] || null,
         email: f.reporter.emailAddress || ''
       } : null,
       status: f.status?.name || 'Abierto',
       statusCategory: f.status?.statusCategory?.key || '',
-      resolution: f.resolution?.name || 'Sin resolver',
+      resolution: f.resolution?.name || '',
       priority: f.priority?.name || 'Media',
       priorityIcon: f.priority?.iconUrl || null,
-      severity: f.customfield_10238 || f.priority?.name || 'Sin definir',
-      rawSeverity: f.customfield_10238 || null,
-      versions: affectsVersions,
-      fixVersions: fixVersions,
+      severity: sevDisplay,
+      rawSeverity: rawSevObj,
+      severityFieldId,
+      severityOptions,
+      estDateFieldId,
+      estDateCandidateIds,
+      versions: combinedVersions,
+      fixVersions: combinedVersions,
+      availableVersions,
+      transitions,
+      resolutionOptions,
       created: f.created,
       updated: f.updated,
       resolutiondate: f.resolutiondate || changelogMeta.lastTerminalAt || null,
       duedate: estResDate,
       estimatedResolutionDate: estResDate,
       environment: environmentText,
+      environmentPlainText,
       labels: f.labels || [],
       ...changelogMeta,
       rawFields: f
@@ -4090,6 +4414,450 @@ resolver.define('getBugFullDetails', async ({ payload }) => {
   } catch (e) {
     console.error("Error in getBugFullDetails:", e);
     return null;
+  }
+});
+
+// Updates a specific field or workflow transition on a Bug issue directly from Test Pulse
+resolver.define('updateBugIssue', async ({ payload }) => {
+  try {
+    const { issueIdOrKey, field, value, extra = {} } = payload || {};
+    if (!issueIdOrKey || !field) {
+      return { error: 'Parámetros incompletos (issueIdOrKey, field).' };
+    }
+
+    // 1. Persona asignada (assignee)
+    if (field === 'assignee') {
+      const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/assignee`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: value || null })
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        return { error: `No se pudo actualizar el responsable (${res.status}): ${errText}` };
+      }
+      return { success: true };
+    }
+
+    // 2. Estado (workflow transition)
+    if (field === 'status') {
+      const transId = payload.transitionId || extra.transitionId || value;
+      const resName = payload.resolution || extra.resolution || null;
+      const transitionBody = {
+        transition: { id: String(transId) }
+      };
+      if (resName) {
+        transitionBody.fields = {
+          resolution: { name: String(resName) }
+        };
+      }
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(transitionBody)
+      });
+      // If the transition requires a resolution field (e.g. moving to Resuelta/Cerrada), supply a valid resolution automatically
+      if (!res.ok) {
+        const transMetaRes = await api.asUser().requestJira(
+          route`/rest/api/3/issue/${issueIdOrKey}/transitions?expand=transitions.fields`
+        ).catch(() => null);
+        if (transMetaRes && transMetaRes.ok) {
+          const transMetaData = await transMetaRes.json().catch(() => ({}));
+          const matchingTrans = (transMetaData.transitions || []).find(t => String(t.id) === String(transId));
+          if (matchingTrans && matchingTrans.fields && matchingTrans.fields.resolution) {
+            const allowedRes = matchingTrans.fields.resolution.allowedValues || [];
+            const fallbackRes = allowedRes[0]
+              ? (allowedRes[0].id ? { id: String(allowedRes[0].id) } : { name: String(allowedRes[0].name || allowedRes[0].value) })
+              : { name: 'Done' };
+            res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+              method: 'POST',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                transition: { id: String(transId) },
+                fields: { resolution: resName ? { name: String(resName) } : fallbackRes }
+              })
+            });
+          }
+        }
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        return { error: `No se pudo cambiar el estado (${res.status}): ${errText}` };
+      }
+      return { success: true };
+    }
+
+    // 3. Severidad (*Severity custom field, e.g. customfield_10238)
+    if (field === 'severity') {
+      const sevFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || 'customfield_10238';
+      const optId = payload.optionId || extra.optionId || null;
+      let payloadVal = null;
+      if (value) {
+        payloadVal = optId ? { id: String(optId) } : { value: String(value) };
+      }
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { [sevFieldId]: payloadVal } })
+      });
+      // Fallback if Jira expects { value } instead of { id } or plain string
+      if (!res.ok && value) {
+        res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { [sevFieldId]: { value: String(value) } } })
+        });
+      }
+      if (!res.ok && value) {
+        res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { [sevFieldId]: String(value) } })
+        });
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        return { error: `No se pudo actualizar *Severity (${res.status}): ${errText}` };
+      }
+      return { success: true };
+    }
+
+    // 4. Versiones afectadas (fixVersions + sync with versions so list and Jira match)
+    if (field === 'fixVersions') {
+      const verArray = Array.isArray(value)
+        ? value.filter(Boolean).map(v => {
+            if (typeof v === 'object') {
+              return v.id ? { id: String(v.id) } : { name: String(v.name || v.value) };
+            }
+            return { name: String(v) };
+          })
+        : [];
+      // Try updating both fixVersions and versions so that whichever field is on the screen (and used by the table list) stays synchronized
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { fixVersions: verArray, versions: verArray } })
+      });
+      if (!res.ok) {
+        const resFix = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { fixVersions: verArray } })
+        });
+        const resAff = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { versions: verArray } })
+        });
+        if (resFix.ok || resAff.ok) {
+          return { success: true };
+        }
+        const errText = await resFix.text().catch(() => '');
+        return { error: `No se pudo actualizar Versiones afectadas (${resFix.status}): ${errText}` };
+      }
+      return { success: true };
+    }
+
+    // 5. Fecha Estimada (custom field, e.g. customfield_10763, NOT duedate)
+    if (field === 'estimatedDate') {
+      const primaryFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || 'customfield_10763';
+      const candidateIdsFromPayload = Array.isArray(payload.candidateFieldIds) ? payload.candidateFieldIds : [];
+      const cleanDate = value && String(value).trim() ? String(value).trim().slice(0, 10) : null;
+
+      // Build ordered list of candidate custom field IDs to try
+      const candidateFieldIds = [];
+      for (const cid of [primaryFieldId, ...candidateIdsFromPayload, 'customfield_10763']) {
+        if (cid && cid !== 'duedate' && !candidateFieldIds.includes(cid)) {
+          candidateFieldIds.push(cid);
+        }
+      }
+
+      // Also inspect issue editmeta / names if needed to discover any other Fecha Estimada custom field
+      const tryUpdateDateOnField = async (fId, dateVal) => {
+        let r = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { [fId]: dateVal } })
+        });
+        if (!r.ok && dateVal) {
+          // Fallback in case the custom field is a DateTime picker expecting ISO timestamp
+          r = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+            method: 'PUT',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: { [fId]: `${dateVal}T12:00:00.000+0000` } })
+          });
+        }
+        return r;
+      };
+
+      let lastRes = null;
+      for (const fId of candidateFieldIds) {
+        const r = await tryUpdateDateOnField(fId, cleanDate);
+        lastRes = r;
+        if (r.ok) {
+          return { success: true, updatedFieldId: fId };
+        }
+      }
+
+      // If none of the known candidates succeeded, query Jira fields to find any custom field matching "Fecha estimada" / "Fecha de solución"
+      const allFieldsRes = await api.asUser().requestJira(route`/rest/api/3/field`).catch(() => null);
+      if (allFieldsRes && allFieldsRes.ok) {
+        const allFields = await allFieldsRes.json().catch(() => []);
+        const matchingCustomFields = (Array.isArray(allFields) ? allFields : []).filter(fObj => {
+          if (!fObj || !fObj.id || !String(fObj.id).startsWith('customfield_')) return false;
+          const nm = String(fObj.name || '').toLowerCase();
+          return (
+            nm.includes('fecha estimada') ||
+            nm.includes('fecha de solución') ||
+            nm.includes('fecha de solucion') ||
+            nm.includes('solución estimada') ||
+            nm.includes('solucion estimada') ||
+            nm.includes('estimated')
+          );
+        });
+        for (const mf of matchingCustomFields) {
+          if (candidateFieldIds.includes(mf.id)) continue;
+          const r = await tryUpdateDateOnField(mf.id, cleanDate);
+          lastRes = r;
+          if (r.ok) {
+            return { success: true, updatedFieldId: mf.id };
+          }
+        }
+      }
+
+      const errText = lastRes ? await lastRes.text().catch(() => '') : 'Campo no disponible en pantalla de edición';
+      return { error: `No se pudo actualizar Fecha Estimada (${lastRes ? lastRes.status : 400}). Verifica que el campo Fecha Estimada esté en la pantalla de Editar del Bug en Jira: ${errText}` };
+    }
+
+    // 6. Ambiente / entorno (environment)
+    if (field === 'environment') {
+      const trimmed = value && String(value).trim() ? String(value).trim() : '';
+      const adfEnv = trimmed
+        ? {
+            type: 'doc',
+            version: 1,
+            content: trimmed.split('\n').map(line => ({
+              type: 'paragraph',
+              content: line.trim() ? [{ type: 'text', text: line }] : []
+            }))
+          }
+        : null;
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { environment: adfEnv } })
+      });
+      if (!res.ok && trimmed) {
+        res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { environment: trimmed } })
+        });
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        return { error: `No se pudo actualizar el ambiente (${res.status}): ${errText}` };
+      }
+      return { success: true };
+    }
+
+    // 7. Resolución (resolution)
+    if (field === 'resolution') {
+      const resId = payload.resolutionId || extra.resolutionId || null;
+      const currentStatus = payload.currentStatus || extra.currentStatus || '';
+      const cleanResName = value && String(value).trim() && String(value) !== 'Sin resolver' ? String(value).trim() : null;
+      const resPayload = cleanResName
+        ? (resId ? { id: String(resId) } : { name: cleanResName })
+        : null;
+
+      let res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { resolution: resPayload } })
+      });
+      if (!res.ok && cleanResName) {
+        res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { resolution: { name: cleanResName } } })
+        });
+      }
+      // If resolution is not on the Edit screen, try updating it via a workflow transition that accepts resolution or transitions to a resolved state
+      if (!res.ok && cleanResName) {
+        const transRes = await api.asUser().requestJira(
+          route`/rest/api/3/issue/${issueIdOrKey}/transitions?expand=transitions.fields`
+        ).catch(() => null);
+        if (transRes && transRes.ok) {
+          const transData = await transRes.json().catch(() => ({}));
+          const allTrans = transData.transitions || [];
+          const transWithResField = allTrans.filter(t => t.fields && t.fields.resolution);
+          const candidateTransitions = transWithResField.length > 0
+            ? transWithResField
+            : allTrans.filter(t => {
+                const toName = String(t.to?.name || t.name || '').toLowerCase();
+                return (
+                  t.to?.name === currentStatus ||
+                  t.to?.statusCategory?.key === 'done' ||
+                  toName.includes('resuelta') ||
+                  toName.includes('resuelto') ||
+                  toName.includes('resolved') ||
+                  toName.includes('validaci') ||
+                  toName.includes('validation') ||
+                  toName.includes('cerrada') ||
+                  toName.includes('cerrado') ||
+                  toName.includes('done') ||
+                  toName.includes('listo')
+                );
+              });
+          const chosenTrans =
+            candidateTransitions.find(t => String(t.to?.name || '').toLowerCase() === String(currentStatus).toLowerCase()) ||
+            candidateTransitions[0];
+
+          if (chosenTrans) {
+            let tExec = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+              method: 'POST',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                transition: { id: String(chosenTrans.id) },
+                fields: { resolution: resId ? { id: String(resId) } : { name: cleanResName } }
+              })
+            });
+            if (!tExec.ok && resId) {
+              tExec = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  transition: { id: String(chosenTrans.id) },
+                  fields: { resolution: { name: cleanResName } }
+                })
+              });
+            }
+            if (tExec.ok) {
+              return { success: true };
+            }
+          }
+        }
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        return { error: `No se pudo actualizar la resolución (${res.status}). Verifica que el campo Resolución esté en la pantalla de edición o transición de Jira: ${errText}` };
+      }
+      return { success: true };
+    }
+
+    return { error: `Campo no soportado: ${field}` };
+  } catch (e) {
+    console.error('[updateBugIssue] Error:', e);
+    return { error: e.message || 'Error inesperado actualizando el bug.' };
+  }
+});
+
+// Adds a comment to a Bug issue and optionally uploads attached files / screenshots in a single action
+resolver.define('addBugComment', async ({ payload }) => {
+  try {
+    const { issueIdOrKey, text = '', commentText = '', files = [] } = payload || {};
+    if (!issueIdOrKey) {
+      return { error: 'Falta issueIdOrKey.' };
+    }
+    const cleanText = String(commentText || text || '').trim();
+    const fileList = Array.isArray(files) ? files : [];
+    if (!cleanText && fileList.length === 0) {
+      return { error: 'Escribe un comentario o adjunta al menos un archivo.' };
+    }
+
+    // 1. Upload any attached files / screenshots to the Jira bug
+    const uploadedAttachments = [];
+    for (const fileItem of fileList) {
+      if (!fileItem || !fileItem.base64Data) continue;
+      const safeFilename = (fileItem.filename || `captura_${Date.now()}.png`).replace(/["\r\n]/g, '_');
+      const boundary = '----ForgeBugUploadBoundary' + Math.random().toString(36).substring(2);
+      const fileBuffer = Buffer.from(fileItem.base64Data, 'base64');
+      const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFilename}"\r\nContent-Type: ${fileItem.mimeType || 'application/octet-stream'}\r\n\r\n`;
+      const footer = `\r\n--${boundary}--\r\n`;
+      const bodyBuffer = Buffer.concat([
+        Buffer.from(header, 'utf-8'),
+        fileBuffer,
+        Buffer.from(footer, 'utf-8')
+      ]);
+
+      const upRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/attachments`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'X-Atlassian-Token': 'no-check',
+          'Content-Type': `multipart/form-data; boundary=${boundary}`
+        },
+        body: bodyBuffer
+      });
+
+      if (upRes.ok) {
+        const upData = await upRes.json().catch(() => []);
+        const attObj = Array.isArray(upData) ? upData[0] : upData;
+        if (attObj && attObj.id) {
+          uploadedAttachments.push({
+            id: String(attObj.id),
+            filename: attObj.filename || safeFilename,
+            size: attObj.size || fileBuffer.length,
+            mimeType: attObj.mimeType || fileItem.mimeType || 'application/octet-stream'
+          });
+        }
+      } else {
+        const errTxt = await upRes.text().catch(() => '');
+        console.warn(`[addBugComment] Failed to upload ${safeFilename}:`, upRes.status, errTxt);
+      }
+    }
+
+    // 2. Build ADF comment body (paragraphs for text + attachment tokens for inline preview in Test Pulse)
+    const adfContent = [];
+    if (cleanText) {
+      const lines = cleanText.split('\n');
+      for (const line of lines) {
+        adfContent.push({
+          type: 'paragraph',
+          content: line.trim() ? [{ type: 'text', text: line }] : []
+        });
+      }
+    }
+    if (uploadedAttachments.length > 0) {
+      for (const att of uploadedAttachments) {
+        adfContent.push({
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: `📎 [Evidencia adjunta: ${att.filename} (#${att.id})]`,
+              marks: [{ type: 'strong' }]
+            }
+          ]
+        });
+      }
+    }
+
+    if (adfContent.length > 0) {
+      const commRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/comment`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          body: {
+            type: 'doc',
+            version: 1,
+            content: adfContent
+          }
+        })
+      });
+      if (!commRes.ok) {
+        const errTxt = await commRes.text();
+        return { error: `No se pudo publicar el comentario (${commRes.status}): ${errTxt}` };
+      }
+    }
+
+    return {
+      success: true,
+      uploadedAttachments
+    };
+  } catch (e) {
+    console.error('[addBugComment] Error:', e);
+    return { error: e.message || 'Error al guardar comentario en el bug.' };
   }
 });
 
@@ -6025,11 +6793,15 @@ resolver.define('checkMobileUploadStatus', async ({ payload }) => {
 
   const uploadResult = await storage.get('qrupload_' + sessionId);
   if (uploadResult && uploadResult.uploaded) {
-    // Delete receipt so it won't duplicate if modal remains open
+    // Delete receipt so consumed items won't duplicate on subsequent polls
     await storage.delete('qrupload_' + sessionId);
+    const evidencesList = Array.isArray(uploadResult.evidences) && uploadResult.evidences.length > 0
+      ? uploadResult.evidences
+      : (uploadResult.evidence ? [uploadResult.evidence] : []);
     return {
       uploaded: true,
-      evidence: uploadResult.evidence,
+      evidence: uploadResult.evidence || evidencesList[evidencesList.length - 1],
+      evidences: evidencesList,
       testId: uploadResult.testId,
       iterId: uploadResult.iterId,
       timestamp: uploadResult.timestamp
@@ -6138,12 +6910,13 @@ export async function mobileUploadHandler(request) {
       const resolvedMime = mimeType || 'image/jpeg';
       const ext = resolvedMime.includes('png') ? 'png' : (resolvedMime.includes('video') || resolvedMime.includes('mp4')) ? 'mp4' : 'jpg';
       
-      // Generar nombre de archivo único con prefijo de Test Run y timestamp exacto (YYYYMMDD_HHmmss)
+      // Generar nombre de archivo único con prefijo de Test Run, timestamp exacto y sufijo aleatorio corto para evitar colisiones en cargas múltiples
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
       const timeStampStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const randSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
       const prefix = session.testRunKey || session.testKey || 'EV';
-      const finalFilename = `EV_${prefix}_${timeStampStr}.${ext}`;
+      const finalFilename = `EV_${prefix}_${timeStampStr}_${randSuffix}.${ext}`;
 
       const blob = new Blob([buffer], { type: resolvedMime });
       const formData = new FormData();
@@ -6202,24 +6975,104 @@ export async function mobileUploadHandler(request) {
       }
 
       const evidenceObject = {
-        id: uploadedItem.id,
+        id: String(uploadedItem.id),
         filename: uploadedItem.filename || finalFilename,
         url: uploadedItem.content,
+        mimeType: resolvedMime,
         note: (note && typeof note === 'string') ? note.trim() : '',
         uploadedAt: new Date().toISOString(),
         source: 'mobile_camera'
       };
 
-      // Store in storage so desktop runner polling picks it up
+      // Persistir directamente en testpulse-run-data del Test Run para que aunque el modal QR en PC se haya cerrado,
+      // todas las fotos tomadas desde el celular se acumulen en el caso o iteración sin sobrescribirse.
+      try {
+        const runRes = await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}?properties=testpulse-run-data`);
+        if (runRes.ok) {
+          const runIssue = await runRes.json();
+          const currentProp = runIssue.properties?.['testpulse-run-data'] || {};
+          let updatedProp = { ...currentProp };
+
+          if (session.iterId && Array.isArray(currentProp.iterations)) {
+            const iters = [...currentProp.iterations];
+            const iterIdx = iters.findIndex(i => String(i.id) === String(session.iterId));
+            if (iterIdx > -1) {
+              const existingIterEvs = Array.isArray(iters[iterIdx].evidences) ? iters[iterIdx].evidences : [];
+              const alreadyExists = existingIterEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
+              if (!alreadyExists) {
+                iters[iterIdx] = {
+                  ...iters[iterIdx],
+                  evidences: [...existingIterEvs, evidenceObject]
+                };
+              }
+              const iterKeys = getIterationEvidenceKeys(iters);
+              const cleanEvs = filterNonIterationEvidences(currentProp.evidences || [], iterKeys);
+              updatedProp = {
+                ...currentProp,
+                iterations: iters,
+                evidences: cleanEvs
+              };
+            } else {
+              const existingEvs = Array.isArray(currentProp.evidences) ? currentProp.evidences : [];
+              const alreadyExists = existingEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
+              if (!alreadyExists) {
+                updatedProp = {
+                  ...currentProp,
+                  evidences: [...existingEvs, evidenceObject]
+                };
+              }
+            }
+          } else {
+            const existingEvs = Array.isArray(currentProp.evidences) ? currentProp.evidences : [];
+            const alreadyExists = existingEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
+            if (!alreadyExists) {
+              updatedProp = {
+                ...currentProp,
+                evidences: [...existingEvs, evidenceObject]
+              };
+            }
+          }
+
+          await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/properties/testpulse-run-data`, {
+            method: 'PUT',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify(updatedProp)
+          });
+        }
+      } catch (propErr) {
+        console.warn('[mobileUploadHandler] Could not persist evidence directly to testpulse-run-data:', propErr);
+      }
+
+      // Acumular en la cola de sesión (qrupload_<sessionId>) para que el polling de escritorio reciba TODAS las evidencias sin sobrescribir
+      const existingQueue = (await storage.get('qrupload_' + sessionId)) || {};
+      const prevEvidences = Array.isArray(existingQueue.evidences)
+        ? existingQueue.evidences
+        : (existingQueue.evidence ? [existingQueue.evidence] : []);
+      const updatedQueueEvidences = [
+        ...prevEvidences.filter(e => String(e.id) !== String(evidenceObject.id)),
+        evidenceObject
+      ];
+
       await storage.set('qrupload_' + sessionId, {
         uploaded: true,
         evidence: evidenceObject,
+        evidences: updatedQueueEvidences,
         testId: session.testId,
         testKey: session.testKey,
         iterId: session.iterId,
         cycleId: session.cycleId,
         timestamp: Date.now()
       });
+
+      // Guardar historial de archivos subidos en la propia sesión para que el celular muestre el acumulado incluso si recarga la página
+      const prevHistory = Array.isArray(session.uploadedHistory) ? session.uploadedHistory : [];
+      await storage.set('qrsession_' + sessionId, {
+        ...session,
+        uploadedHistory: [
+          ...prevHistory.filter(h => String(h.id) !== String(evidenceObject.id)),
+          { id: evidenceObject.id, filename: evidenceObject.filename, uploadedAt: evidenceObject.uploadedAt }
+        ]
+      }).catch(() => {});
 
       return {
         statusCode: 200,

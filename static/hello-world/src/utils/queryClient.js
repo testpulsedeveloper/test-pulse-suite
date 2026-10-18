@@ -210,6 +210,8 @@ const TP_MUTATION_RESOLVERS = new Set([
   'deleteAttachment',
   'linkCycleToPlan',
   'unlinkCycleFromPlan',
+  'savePlanSchedule',
+  'saveCycleSchedule',
   'linkBugToTest',
   'bulkAssignTestRuns',
   'addBulkTestsToCycle',
