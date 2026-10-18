@@ -29,6 +29,9 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
+            if (id.includes('pdf.worker')) return 'pdfjs-worker';
+            if (id.includes('pdfjs-dist')) return 'pdfjs';
+            if (id.includes('@atlaskit/')) return 'atlaskit';
             if (id.includes('@forge/')) return 'forge';
             if (id.includes('@tanstack/')) return 'query';
             return 'vendor';

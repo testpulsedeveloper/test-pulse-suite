@@ -11,9 +11,23 @@ import {
   normalizeJiraStatus
 } from './utils/statusAndAdfHelpers.js';
 import {
-  generateMobileErrorHtml,
-  generateMobileUploadHtml
-} from './utils/mobileUploadTemplates.js';
+  DEFAULT_CUSTOM_FIELDS,
+  resolveCustomFields,
+  getDefaultJqlSafeFields,
+  getTestCaseJqlFields,
+  getRunCandidateJqlFields,
+  getRequirementJqlFields,
+  extractExecutionTypeFromFields
+} from './utils/customFieldConfig.js';
+import { registerFolderResolvers } from './resolvers/folderResolvers.js';
+import {
+  registerReportAutomationResolvers,
+  createScheduledReportHandler
+} from './resolvers/reportAutomationResolvers.js';
+import {
+  registerMobileCompanionResolvers,
+  mobileUploadHandler as modularMobileUploadHandler
+} from './resolvers/mobileCompanionResolvers.js';
 
 // ── Perf instrumentation (Fase 0) ──
 // Counts real Jira REST calls (and 429s) made during each resolver invocation. Output in `forge logs`:
@@ -134,12 +148,12 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
   try {
     let safeFields = fields;
     if (Array.isArray(fields) && fields.includes('*all')) {
-      safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
+      safeFields = getDefaultJqlSafeFields();
       fields.forEach(f => {
         if (f !== '*all' && !safeFields.includes(f)) safeFields.push(f);
       });
     } else if (fields === '*all') {
-      safeFields = ['summary', 'status', 'created', 'issuetype', 'priority', 'assignee', 'reporter', 'resolution', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'customfield_10568', 'customfield_10569', 'customfield_10570'];
+      safeFields = getDefaultJqlSafeFields();
     }
     
     const body = {
@@ -222,78 +236,8 @@ resolver.define('probeAPI', async () => {
     }
 });
 
-
 // === Folder Management (Jira Entity Properties) ===
-const getProjectFolders = async (projectId) => {
-  try {
-    const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`);
-    if (response.status === 404 || !response.ok) return [];
-    const data = await response.json();
-    return data.value || [];
-  } catch(e) {
-    console.error("Error getProjectFolders:", e);
-    return [];
-  }
-};
-
-const setProjectFolders = async (projectId, data) => {
-  await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`, {
-    method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  });
-};
-
-resolver.define('getFolders', async ({ payload }) => {
-  const { projectId } = payload;
-  return await getProjectFolders(projectId);
-});
-
-resolver.define('createFolder', async ({ payload }) => {
-  const { projectId, name, parentId } = payload;
-  const folders = await getProjectFolders(projectId);
-  const newFolder = { id: `folder-${Date.now()}`, name, parentId: parentId || null };
-  folders.push(newFolder);
-  await setProjectFolders(projectId, folders);
-  return folders;
-});
-
-resolver.define('updateFolder', async ({ payload }) => {
-  const { projectId, folderId, newName } = payload;
-  const folders = await getProjectFolders(projectId);
-  const updatedFolders = folders.map(f => f.id === folderId ? { ...f, name: newName } : f);
-  await setProjectFolders(projectId, updatedFolders);
-  return updatedFolders;
-});
-
-resolver.define('deleteFolder', async ({ payload, context }) => {
-  const { projectId, folderId } = payload;
-  // Solo los admin pueden borrar carpetas
-  const permissionRes = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
-  if (permissionRes.ok) {
-    const permissionData = await permissionRes.json();
-    if (!permissionData?.permissions?.ADMINISTER_PROJECTS?.havePermission) {
-      throw new Error("Only Project Admins can delete folders");
-    }
-  } else {
-    throw new Error("Failed to check permissions");
-  }
-
-  const folders = await getProjectFolders(projectId);
-  let toDelete = [folderId];
-  let previousSize = 0;
-  while(toDelete.length > previousSize) {
-    previousSize = toDelete.length;
-    folders.forEach(f => {
-      if (toDelete.includes(f.parentId) && !toDelete.includes(f.id)) {
-        toDelete.push(f.id);
-      }
-    });
-  }
-  const updatedFolders = folders.filter(f => !toDelete.includes(f.id));
-  await setProjectFolders(projectId, updatedFolders);
-  return updatedFolders;
-});
+registerFolderResolvers(resolver);
 
 // === Project Management & Configuration ===
 resolver.define('getProjects', async () => {
@@ -958,16 +902,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
 
   let jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
   
-  let fieldsToFetch = ['summary', 'status', 'created', 'issuelinks', 'issuetype', 'priority', 'labels', 'parent', 'customfield_10014', 'customfield_10534', 'customfield_10530', 'customfield_10535', 'reporter', 'creator', 'assignee'];
-  if (payload?.executionTypeFieldId) {
-     fieldsToFetch.push(payload.executionTypeFieldId);
-  }
-  if (config?.testLevelFieldId) {
-     fieldsToFetch.push(config.testLevelFieldId);
-  }
-  if (config?.testTypeFieldId) {
-     fieldsToFetch.push(config.testTypeFieldId);
-  }
+  let fieldsToFetch = getTestCaseJqlFields(config, payload);
   
   let pageData = await fetchJqlPage(jql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
   if (pageData.error && validTcTypes.length > 1) {
@@ -1020,7 +955,8 @@ resolver.define('getRequirements', async ({ payload, context }) => {
       : [];
 
     let allIssues = [];
-    const fields = ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'];
+    const cf = resolveCustomFields(payload?.config);
+    const fields = getRequirementJqlFields(payload?.config);
 
     if (issueKeys.length > 0) {
       for (let i = 0; i < Math.min(issueKeys.length, 500); i += 100) {
@@ -1042,7 +978,7 @@ resolver.define('getRequirements', async ({ payload, context }) => {
       allIssues = await fetchAllIssues(jql, fields, null, null, 5);
     }
 
-    // Resolve any Epic keys from customfield_10014 or parent where summary is missing
+    // Resolve any Epic keys from configured epicLink / customfield_10014 or parent where summary is missing
     const knownSummaries = {};
     allIssues.forEach(iss => {
       if (iss?.key && iss?.fields?.summary) {
@@ -1053,7 +989,7 @@ resolver.define('getRequirements', async ({ payload, context }) => {
     const missingEpicKeys = new Set();
     allIssues.forEach(iss => {
       const p = iss?.fields?.parent;
-      const cf10014 = iss?.fields?.customfield_10014;
+      const cf10014 = iss?.fields?.[cf.epicLink] || iss?.fields?.customfield_10014;
       if (p?.key) {
         if (p.fields?.summary) {
           knownSummaries[p.key.toUpperCase()] = p.fields.summary;
@@ -1082,7 +1018,7 @@ resolver.define('getRequirements', async ({ payload, context }) => {
     // Enrich each issue with resolved epicKey and epicSummary for direct consumption
     return allIssues.map(iss => {
       const p = iss?.fields?.parent;
-      const cf10014 = iss?.fields?.customfield_10014;
+      const cf10014 = iss?.fields?.[cf.epicLink] || iss?.fields?.customfield_10014;
       let epicKey = null;
       let epicSummary = null;
       if (p?.key) {
@@ -1111,6 +1047,8 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
   try {
     const projectId = payload?.projectId || context?.extension?.project?.id;
     if (!projectId) return { epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {} };
+    const reqFields = getRequirementJqlFields(payload?.config);
+    const cf = resolveCustomFields(payload?.config);
 
     // Step 0: Get project issue types to identify exact Epic and Requirement type IDs and names
     let epicTypeNames = [];
@@ -1195,20 +1133,20 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (validProjectTypes.length > 0) {
       const validTypeIds = validProjectTypes.map(t => t.id).filter(Boolean);
       const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${validTypeIds.join(', ')}) ORDER BY created DESC`;
-      rawStories = await fetchAllIssues(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+      rawStories = await fetchAllIssues(storiesJql, reqFields, null, null, 10);
     } else {
       let reqTypes = configuredReqTypes.length > 0
         ? configuredReqTypes
         : ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
       const typeList = reqTypes.map(t => `"${t}"`).join(', ');
       const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${typeList}) ORDER BY created DESC`;
-      rawStories = await fetchAllIssues(storiesJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+      rawStories = await fetchAllIssues(storiesJql, reqFields, null, null, 10);
     }
 
     // Fallback: si la consulta por issuetype devolvió vacío, consultar issues del proyecto y filtrar en memoria
     if (!rawStories || rawStories.length === 0) {
       const fallbackJql = `project = "${resolvedProjectKey}" ORDER BY created DESC`;
-      rawStories = await fetchAllIssues(fallbackJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 10);
+      rawStories = await fetchAllIssues(fallbackJql, reqFields, null, null, 10);
     }
 
     const stories = (rawStories || [])
@@ -1221,7 +1159,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         statusCategory: issue.fields?.status?.statusCategory?.key || '',
         issuetype: issue.fields?.issuetype?.name || '',
         parent: issue.fields?.parent || null,
-        customfield_10014: issue.fields?.customfield_10014 || null,
+        customfield_10014: issue.fields?.[cf.epicLink] || issue.fields?.customfield_10014 || null,
         issuelinks: issue.fields?.issuelinks || []
       }));
 
@@ -1232,7 +1170,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         const epicChunk = epics.slice(i, i + 50).map(e => `"${e.key}"`).join(', ');
         try {
           const childrenJql = `parent IN (${epicChunk}) ORDER BY created DESC`;
-          const childrenIssues = await fetchAllIssues(childrenJql, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, 3);
+          const childrenIssues = await fetchAllIssues(childrenJql, reqFields, null, null, 3);
           if (Array.isArray(childrenIssues)) {
             childrenIssues.forEach(issue => {
               const issueType = issue.fields?.issuetype?.name || '';
@@ -1247,7 +1185,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
                   statusCategory: issue.fields?.status?.statusCategory?.key || '',
                   issuetype: issueType,
                   parent: issue.fields?.parent || null,
-                  customfield_10014: issue.fields?.customfield_10014 || null,
+                  customfield_10014: issue.fields?.[cf.epicLink] || issue.fields?.customfield_10014 || null,
                   issuelinks: issue.fields?.issuelinks || []
                 });
               }
@@ -1284,7 +1222,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (unseenStoryKeys.size > 0) {
       const unseenArr = Array.from(unseenStoryKeys).slice(0, 100);
       try {
-        const stPage = await fetchJqlPage(`issueKey IN (${unseenArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'issuetype', 'parent', 'customfield_10014', 'status', 'issuelinks'], null, null, null, 100);
+        const stPage = await fetchJqlPage(`issueKey IN (${unseenArr.map(k => `"${k}"`).join(', ')})`, reqFields, null, null, null, 100);
         if (!stPage?.error && Array.isArray(stPage?.issues)) {
           stPage.issues.forEach(issue => {
             const issueType = issue.fields?.issuetype?.name || '';
@@ -1300,7 +1238,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
                 statusCategory: issue.fields?.status?.statusCategory?.key || '',
                 issuetype: issueType,
                 parent: issue.fields?.parent || null,
-                customfield_10014: issue.fields?.customfield_10014 || null,
+                customfield_10014: issue.fields?.[cf.epicLink] || issue.fields?.customfield_10014 || null,
                 issuelinks: issue.fields?.issuelinks || []
               });
             }
@@ -2038,7 +1976,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       // 1. Fetch runs currently linked to the cycle
       let candidateRuns = await fetchAllIssues(
         `issue in linkedIssues("${cycleId}")`,
-        ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
+        getRunCandidateJqlFields(config),
         null,
         ['testpulse-run-data'],
         50
@@ -2056,7 +1994,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
         const jql = chunk.map(id => `issue in linkedIssues("${id}")`).join(' OR ');
         return await fetchAllIssues(
           `(${jql})`,
-          ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
+          getRunCandidateJqlFields(config),
           null,
           ['testpulse-run-data'],
           50
@@ -2335,7 +2273,7 @@ const getCycleExecutionSummary = async (cycleId) => {
     const jql = `issue in linkedIssues("${cycleId}")`;
     const runIssues = await fetchAllIssues(
       jql,
-      ['summary', 'status', 'description', 'assignee', 'created', 'issuelinks', 'attachment', 'priority', 'customfield_10534', 'customfield_10530'],
+      getRunCandidateJqlFields(),
       null,
       ['testpulse-run-data'],
       50
@@ -2449,7 +2387,7 @@ const getCycleExecutionSummary = async (cycleId) => {
             description: effectiveDesc,
             status: normStatus,
             nativeStatus: nativeStatusName || normStatus,
-            executionType: runData.executionType || runData.snapshot?.executionType || (run.fields?.customfield_10534 ? (run.fields.customfield_10534.value || run.fields.customfield_10534) : 'Manual'),
+            executionType: runData.executionType || runData.snapshot?.executionType || extractExecutionTypeFromFields(run.fields),
             assignee: run.fields?.assignee || null,
             executedBy: runData.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
             executedAt: runData.executedAt || null,
@@ -5988,22 +5926,20 @@ const getTestCaseSnapshot = async (testCaseIdOrKey) => {
   try {
     const fieldMap = await resolveSnapshotFieldIds();
     const extraIds = [...fieldMap.precondition, ...fieldMap.steps, ...fieldMap.expected].map(f => f.id);
-    const fieldList = ['description', 'summary', 'issuetype', 'project', 'customfield_10534', 'customfield_10530', 'customfield_10535', ...extraIds].join(',');
+    const fieldList = [
+      'description',
+      'summary',
+      'issuetype',
+      'project',
+      DEFAULT_CUSTOM_FIELDS.executionType,
+      DEFAULT_CUSTOM_FIELDS.testLevel,
+      DEFAULT_CUSTOM_FIELDS.testType,
+      ...extraIds
+    ].join(',');
     const tcRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testCaseIdOrKey}?fields=${fieldList}&expand=renderedFields`);
     if (tcRes.ok) {
       const tcData = await tcRes.json();
-      let executionType = 'Manual';
-      if (tcData.fields?.customfield_10534) {
-        const v = tcData.fields.customfield_10534;
-        if (Array.isArray(v) && v.length > 0) executionType = v[0].value || v[0].name || String(v[0]);
-        else if (typeof v === 'object' && v !== null) executionType = v.value || v.name || '';
-        else executionType = String(v);
-      } else if (tcData.fields?.customfield_10530) {
-        const v = tcData.fields.customfield_10530;
-        if (Array.isArray(v) && v.length > 0) executionType = v[0].value || v[0].name || String(v[0]);
-        else if (typeof v === 'object' && v !== null) executionType = v.value || v.name || '';
-        else executionType = String(v);
-      }
+      const executionType = extractExecutionTypeFromFields(tcData.fields);
 
       const baseAdf = ensureValidAdf(tcData.fields?.description, tcData.fields?.summary);
       const sections = buildSnapshotSections(fieldMap, tcData.fields, tcData.renderedFields);
@@ -6758,634 +6694,14 @@ resolver.define('getProjectCyclesMigrationStatus', async ({ payload }) => {
 // =========================================================================
 // === REPORT AUTOMATION & JIRA AUTOMATION WEBHOOK DISPATCH RESOLVERS ===
 // =========================================================================
-
-resolver.define('getReportAutomationConfig', async ({ payload, context }) => {
-  try {
-    const projectId = String(payload?.projectId || context?.extension?.project?.id || '');
-    if (!projectId) return { success: false, error: 'ProjectId es requerido' };
-    
-    const config = await getAppStorage(`report_automation_config_${projectId}`);
-    const lastDispatch = await getAppStorage(`report_automation_last_dispatch_${projectId}`);
-    
-    return {
-      success: true,
-      config: config || {
-        enabled: false,
-        webhookUrl: '',
-        recipients: '',
-        frequency: 'weekdays', // 'daily', 'weekdays', 'weekly'
-        weeklyDay: '5', // 5 = Friday
-        hour: '18', // 18:00
-        minute: '00',
-        timezone: 'America/Mexico_City',
-        scopePlan: 'all', // 'all', 'latest', or specific planId
-        scopeCycle: 'all', // 'all', 'latest', or specific cycleId
-        sendOnCycleCompleted: false
-      },
-      lastDispatch: lastDispatch || null
-    };
-  } catch (err) {
-    console.error('[getReportAutomationConfig] Error:', err);
-    return { success: false, error: err.message };
-  }
-});
-
-resolver.define('saveReportAutomationConfig', async ({ payload, context }) => {
-  try {
-    const projectId = String(payload?.projectId || context?.extension?.project?.id || '');
-    const config = payload?.config;
-    if (!projectId) return { success: false, error: 'ProjectId es requerido' };
-    if (!config) return { success: false, error: 'Configuración es requerida' };
-
-    await setAppStorage(`report_automation_config_${projectId}`, config);
-
-    // Update active projects registry
-    let activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
-    if (!Array.isArray(activeProjects)) activeProjects = [];
-    
-    if (config.enabled && !activeProjects.includes(projectId)) {
-      activeProjects.push(projectId);
-      await setAppStorage('report_automation_active_projects', activeProjects);
-    } else if (!config.enabled && activeProjects.includes(projectId)) {
-      activeProjects = activeProjects.filter(id => String(id) !== String(projectId));
-      await setAppStorage('report_automation_active_projects', activeProjects);
-    }
-
-    return { success: true, config };
-  } catch (err) {
-    console.error('[saveReportAutomationConfig] Error:', err);
-    return { success: false, error: err.message };
-  }
-});
-
-resolver.define('triggerManualReportDispatch', async ({ payload, context }) => {
-  try {
-    const projectId = String(payload?.projectId || context?.extension?.project?.id || '');
-    const webhookUrl = payload?.webhookUrl;
-    const reportData = payload?.reportData;
-
-    if (!webhookUrl || !webhookUrl.startsWith('http')) {
-      return { success: false, error: 'URL de Webhook inválida o no especificada' };
-    }
-
-    let activeReportData = reportData;
-    if (!activeReportData || !activeReportData.htmlReport) {
-      const projName = activeReportData?.projectName || 'Proyecto Jira';
-      const nowFormatted = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
-      const testHtml = `
-        <div style="max-width: 700px; margin: 0 auto; font-family: sans-serif; border: 1px solid #DFE1E6; border-radius: 8px; overflow: hidden;">
-          <div style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); color: #fff; padding: 18px 24px;">
-            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #FFE0F0;">TEST PULSE SUITE • PRUEBA DE CONEXIÓN</div>
-            <h2 style="margin: 4px 0 0 0; font-size: 20px; color: #ffffff;">Reporte Ejecutivo (Prueba)</h2>
-          </div>
-          <div style="padding: 20px 24px; color: #172B4D;">
-            <p>Este es un correo de prueba de <strong>Test Pulse Suite</strong> enviado mediante <strong>Jira Automation</strong>.</p>
-            <p><strong>Proyecto:</strong> ${projName}</p>
-            <p><strong>Fecha y Hora:</strong> ${nowFormatted} (CDMX)</p>
-            <div style="background: #E3FCEF; border: 1px solid #ABF5D1; color: #006644; padding: 12px 16px; border-radius: 6px; font-weight: 600; margin-top: 14px;">
-              🟢 La integración con el webhook entrante de Jira Automation está operando correctamente.
-            </div>
-          </div>
-        </div>
-      `;
-      activeReportData = {
-        projectName: projName,
-        projectKey: activeReportData?.projectKey || '',
-        recipients: activeReportData?.recipients || '',
-        emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`,
-        htmlReport: testHtml,
-        plainText: `Test Pulse Suite - Prueba de Conexión para ${projName} (${nowFormatted})`,
-        summary: { type: 'TEST_DISPATCH' },
-        stats: {}
-      };
-    }
-
-    const bodyPayload = {
-      timestamp: new Date().toISOString(),
-      source: 'Test Pulse Suite v2.1.0',
-      projectId: projectId || 'N/A',
-      projectName: activeReportData.projectName || 'Proyecto',
-      projectKey: activeReportData.projectKey || '',
-      recipients: activeReportData.recipients || '',
-      emailSubject: activeReportData.emailSubject || `[Reporte Ejecutivo] ${activeReportData.projectName}`,
-      htmlReport: activeReportData.htmlReport || '',
-      plainText: activeReportData.plainText || '',
-      summary: activeReportData.summary || {},
-      stats: activeReportData.stats || {}
-    };
-
-    const webhookRes = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(bodyPayload)
-    });
-
-    const isSuccess = webhookRes.ok || (webhookRes.status >= 200 && webhookRes.status < 300);
-    let resText = '';
-    try {
-      resText = await webhookRes.text();
-    } catch (_) {}
-
-    const dispatchLog = {
-      timestamp: new Date().toISOString(),
-      status: isSuccess ? 'SUCCESS' : 'ERROR',
-      statusCode: webhookRes.status,
-      statusText: webhookRes.statusText || (isSuccess ? 'OK' : 'Error'),
-      responseSummary: resText ? resText.substring(0, 300) : '',
-      recipients: reportData?.recipients || 'Configurados en regla de Jira',
-      emailSubject: bodyPayload.emailSubject
-    };
-
-    if (projectId) {
-      await setAppStorage(`report_automation_last_dispatch_${projectId}`, dispatchLog);
-    }
-
-    if (!isSuccess) {
-      return {
-        success: false,
-        statusCode: webhookRes.status,
-        error: `Jira Automation respondió con código ${webhookRes.status} (${webhookRes.statusText || 'Error'}). ${resText || ''}`,
-        lastDispatch: dispatchLog
-      };
-    }
-
-    return {
-      success: true,
-      statusCode: webhookRes.status,
-      message: 'Reporte ejecutivo enviado exitosamente a Jira Automation',
-      lastDispatch: dispatchLog
-    };
-  } catch (err) {
-    console.error('[triggerManualReportDispatch] Error:', err);
-    return { success: false, error: err.message };
-  }
-});
-
-export async function scheduledReportHandler(event, context) {
-  try {
-    console.log('[scheduledReportHandler] Running scheduled report check...');
-    const activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
-    if (!Array.isArray(activeProjects) || activeProjects.length === 0) {
-      console.log('[scheduledReportHandler] No active report automation projects found.');
-      return;
-    }
-
-    const now = new Date();
-    // Convert to America/Mexico_City time (UTC-6)
-    const cdmxDateStr = now.toLocaleString("en-US", { timeZone: "America/Mexico_City" });
-    const cdmxDate = new Date(cdmxDateStr);
-    const currentHour = cdmxDate.getHours();
-    const currentDay = cdmxDate.getDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday
-
-    for (const projectId of activeProjects) {
-      try {
-        const config = await getAppStorage(`report_automation_config_${projectId}`);
-        if (!config || !config.enabled || !config.webhookUrl) continue;
-
-        const targetHour = parseInt(config.hour || '18', 10);
-        if (currentHour !== targetHour) continue;
-
-        // Check frequency
-        if (config.frequency === 'weekdays' && (currentDay === 0 || currentDay === 6)) {
-          continue; // Skip weekends
-        } else if (config.frequency === 'weekly') {
-          const targetDay = parseInt(config.weeklyDay ?? '5', 10);
-          if (currentDay !== targetDay) continue;
-        }
-
-        // Prevent duplicate execution in the same day & hour
-        const lastDispatch = await getAppStorage(`report_automation_last_dispatch_${projectId}`);
-        if (lastDispatch && lastDispatch.timestamp) {
-          const lastDate = new Date(lastDispatch.timestamp);
-          const lastCdmxStr = lastDate.toLocaleString("en-US", { timeZone: "America/Mexico_City" });
-          const lastCdmxDate = new Date(lastCdmxStr);
-          if (lastCdmxDate.toDateString() === cdmxDate.toDateString() && lastCdmxDate.getHours() === currentHour) {
-            console.log(`[scheduledReportHandler] Project ${projectId} already ran for this hour.`);
-            continue;
-          }
-        }
-
-        // Fetch project metadata
-        let projectName = `Proyecto ${projectId}`;
-        let projectKey = projectId;
-        try {
-          const pRes = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}`);
-          if (pRes.ok) {
-            const pData = await pRes.json();
-            projectName = pData.name || projectName;
-            projectKey = pData.key || projectKey;
-          }
-        } catch (_) {}
-
-        const dateFormatted = cdmxDate.toLocaleDateString('es-ES', { 
-          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' 
-        });
-
-        // Trigger webhook for Jira Automation
-        const bodyPayload = {
-          timestamp: now.toISOString(),
-          source: 'Test Pulse Suite Scheduled Trigger',
-          projectId,
-          projectName,
-          projectKey,
-          recipients: config.recipients || '',
-          emailSubject: `[Reporte Ejecutivo Programado] ${projectName} - ${dateFormatted}`,
-          dateFormatted,
-          scheduledHour: `${config.hour}:00 CDMX`
-        };
-
-        const res = await fetch(config.webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(bodyPayload)
-        });
-
-        await setAppStorage(`report_automation_last_dispatch_${projectId}`, {
-          timestamp: now.toISOString(),
-          status: res.ok ? 'SUCCESS' : 'ERROR',
-          statusCode: res.status,
-          statusText: res.statusText || (res.ok ? 'OK' : 'Error'),
-          recipients: config.recipients || 'Configurados en regla de Jira',
-          emailSubject: bodyPayload.emailSubject
-        });
-        console.log(`[scheduledReportHandler] Project ${projectId} dispatched with status ${res.status}`);
-      } catch (projErr) {
-        console.error(`[scheduledReportHandler] Error processing project ${projectId}:`, projErr);
-      }
-    }
-  } catch (err) {
-    console.error('[scheduledReportHandler] Fatal error:', err);
-  }
-}
+registerReportAutomationResolvers(resolver, { getAppStorage, setAppStorage });
+export const scheduledReportHandler = createScheduledReportHandler({ getAppStorage, setAppStorage });
 
 // ==========================================
 // MOBILE COMPANION / QR EVIDENCE UPLOAD
 // ==========================================
-
-resolver.define('createMobileUploadSession', async ({ payload }) => {
-  const { testId, testKey, testRunKey, testRunId, testSummary, iterId, iterName, cycleId } = payload || {};
-  const sessionId = 'qr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-  
-  let webtriggerUrl = '';
-  try {
-    webtriggerUrl = await webTrigger.getUrl('mobile-upload-webtrigger');
-  } catch (e) {
-    console.error('[createMobileUploadSession] Error getting webTrigger URL:', e);
-    throw new Error('No se pudo obtener la URL de WebTrigger de Forge: ' + (e.message || String(e)));
-  }
-
-  // Attempt to resolve testRunKey from cycle storage if missing
-  let resolvedRunKey = testRunKey;
-  let resolvedRunId = testRunId;
-  if ((!resolvedRunKey || resolvedRunKey === testKey) && cycleId && testId) {
-    try {
-      const cycleKey = 'cycle_' + cycleId + '_tests';
-      const tests = (await storage.get(cycleKey)) || [];
-      const match = tests.find(t => String(t.id) === String(testId) || String(t.key) === String(testKey));
-      if (match) {
-        if (match.testRunKey) resolvedRunKey = match.testRunKey;
-        if (match.testRunId) resolvedRunId = match.testRunId;
-      }
-    } catch (_) {}
-  }
-
-  const sessionData = {
-    sessionId,
-    testId: testId || testKey,
-    testKey: testKey || testId,
-    testRunKey: resolvedRunKey || testRunKey || testKey || testId,
-    testRunId: resolvedRunId || testRunId || resolvedRunKey || testId,
-    testSummary: testSummary || 'Caso de Prueba',
-    iterId: iterId || null,
-    iterName: iterName || null,
-    cycleId: cycleId || null,
-    createdAt: Date.now()
-  };
-
-  await storage.set('qrsession_' + sessionId, sessionData);
-
-  const fullUploadUrl = `${webtriggerUrl}?session=${sessionId}`;
-  return {
-    sessionId,
-    uploadUrl: fullUploadUrl,
-    testKey: sessionData.testKey,
-    testRunKey: sessionData.testRunKey,
-    testRunId: sessionData.testRunId,
-    testSummary: sessionData.testSummary,
-    iterName: sessionData.iterName
-  };
-});
-
-resolver.define('checkMobileUploadStatus', async ({ payload }) => {
-  const { sessionId } = payload || {};
-  if (!sessionId) return { uploaded: false };
-
-  const uploadResult = await storage.get('qrupload_' + sessionId);
-  if (uploadResult && uploadResult.uploaded) {
-    // Delete receipt so consumed items won't duplicate on subsequent polls
-    await storage.delete('qrupload_' + sessionId);
-    const evidencesList = Array.isArray(uploadResult.evidences) && uploadResult.evidences.length > 0
-      ? uploadResult.evidences
-      : (uploadResult.evidence ? [uploadResult.evidence] : []);
-    return {
-      uploaded: true,
-      evidence: uploadResult.evidence || evidencesList[evidencesList.length - 1],
-      evidences: evidencesList,
-      testId: uploadResult.testId,
-      iterId: uploadResult.iterId,
-      timestamp: uploadResult.timestamp
-    };
-  }
-
-  return { uploaded: false };
-});
-
-const QR_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
-
-export async function mobileUploadHandler(request) {
-  const method = request.method ? request.method.toUpperCase() : 'GET';
-
-  // Handle CORS preflight
-  if (method === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': ['*'],
-        'Access-Control-Allow-Methods': ['GET', 'POST', 'OPTIONS'],
-        'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With']
-      },
-      body: ''
-    };
-  }
-
-  const defaultHeaders = {
-    'Access-Control-Allow-Origin': ['*'],
-    'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With']
-  };
-
-  if (method === 'GET') {
-    const query = request.queryParameters || {};
-    let sessionId = (query.session && query.session[0]) || query.session || '';
-    if (!sessionId && request.url) {
-      try {
-        const u = new URL(request.url, 'https://forge.atlassian.com');
-        sessionId = u.searchParams.get('session') || '';
-      } catch (_) {}
-    }
-
-    if (!sessionId) {
-      return {
-        statusCode: 400,
-        headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
-        body: generateMobileErrorHtml('Enlace no válido', 'Falta el identificador de sesión. Por favor escanea el código QR desde la pantalla de ejecución de Test Pulse.')
-      };
-    }
-
-    const session = await storage.get('qrsession_' + sessionId);
-    const isExpired = session?.createdAt && (Date.now() - session.createdAt > QR_SESSION_TTL_MS);
-    if (!session || isExpired) {
-      if (isExpired) await storage.delete('qrsession_' + sessionId).catch(() => {});
-      return {
-        statusCode: 404,
-        headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
-        body: generateMobileErrorHtml('Sesión no encontrada', 'El código QR ha expirado o ya fue utilizado. Por favor abre nuevamente el modal QR en tu computadora.')
-      };
-    }
-
-    const html = generateMobileUploadHtml(session);
-    return {
-      statusCode: 200,
-      headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
-      body: html
-    };
-  }
-
-  if (method === 'POST') {
-    try {
-      let body = {};
-      try {
-        body = typeof request.body === 'string' ? JSON.parse(request.body) : (request.body || {});
-      } catch (e) {
-        return {
-          statusCode: 400,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: 'JSON malformado' })
-        };
-      }
-
-      const { sessionId, base64Data, filename, mimeType, note } = body;
-      if (!sessionId || !base64Data) {
-        return {
-          statusCode: 400,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: 'Faltan datos de sesión o imagen base64' })
-        };
-      }
-
-      const session = await storage.get('qrsession_' + sessionId);
-      const isExpired = session?.createdAt && (Date.now() - session.createdAt > QR_SESSION_TTL_MS);
-      if (!session || isExpired) {
-        if (isExpired) await storage.delete('qrsession_' + sessionId).catch(() => {});
-        return {
-          statusCode: 404,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: 'Sesión expirada. Genera un nuevo QR en la computadora.' })
-        };
-      }
-
-      const targetIssue = session.testRunKey || session.testRunId || session.testKey || session.testId;
-      const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-      const buffer = Buffer.from(cleanBase64, 'base64');
-      const resolvedMime = mimeType || 'image/jpeg';
-      const ext = resolvedMime.includes('png') ? 'png' : (resolvedMime.includes('video') || resolvedMime.includes('mp4')) ? 'mp4' : 'jpg';
-      
-      // Generar nombre de archivo único con prefijo de Test Run, timestamp exacto y sufijo aleatorio corto para evitar colisiones en cargas múltiples
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const timeStampStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const randSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
-      const prefix = session.testRunKey || session.testKey || 'EV';
-      const finalFilename = `EV_${prefix}_${timeStampStr}_${randSuffix}.${ext}`;
-
-      const blob = new Blob([buffer], { type: resolvedMime });
-      const formData = new FormData();
-      formData.append('file', blob, finalFilename);
-
-      const attachRes = await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/attachments`, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'X-Atlassian-Token': 'no-check'
-        },
-        body: formData
-      });
-
-      if (!attachRes.ok) {
-        const errText = await attachRes.text();
-        console.error('[mobileUploadHandler] Jira attachment error:', attachRes.status, errText);
-        return {
-          statusCode: 500,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: `Error Jira (${attachRes.status}): ${errText}` })
-        };
-      }
-
-      const attachData = await attachRes.json();
-      const uploadedItem = Array.isArray(attachData) ? attachData[0] : attachData;
-
-      // Si el tester incluyó una nota desde el smartphone, agregar comentario nativo al Test Run en Jira
-      if (note && typeof note === 'string' && note.trim().length > 0) {
-        try {
-          await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/comment`, {
-            method: 'POST',
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              body: {
-                type: 'doc',
-                version: 1,
-                content: [
-                  {
-                    type: 'paragraph',
-                    content: [
-                      { type: 'text', text: `📸 Evidencia Móvil (${uploadedItem.filename || finalFilename}): `, marks: [{ type: 'strong' }] },
-                      { type: 'text', text: note.trim() }
-                    ]
-                  }
-                ]
-              }
-            })
-          });
-        } catch (commentErr) {
-          console.warn('[mobileUploadHandler] Could not post comment to Jira issue:', commentErr);
-        }
-      }
-
-      const evidenceObject = {
-        id: String(uploadedItem.id),
-        filename: uploadedItem.filename || finalFilename,
-        url: uploadedItem.content,
-        mimeType: resolvedMime,
-        note: (note && typeof note === 'string') ? note.trim() : '',
-        uploadedAt: new Date().toISOString(),
-        source: 'mobile_camera'
-      };
-
-      // Persistir directamente en testpulse-run-data del Test Run para que aunque el modal QR en PC se haya cerrado,
-      // todas las fotos tomadas desde el celular se acumulen en el caso o iteración sin sobrescribirse.
-      try {
-        const runRes = await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}?properties=testpulse-run-data`);
-        if (runRes.ok) {
-          const runIssue = await runRes.json();
-          const currentProp = runIssue.properties?.['testpulse-run-data'] || {};
-          let updatedProp = { ...currentProp };
-
-          if (session.iterId && Array.isArray(currentProp.iterations)) {
-            const iters = [...currentProp.iterations];
-            const iterIdx = iters.findIndex(i => String(i.id) === String(session.iterId));
-            if (iterIdx > -1) {
-              const existingIterEvs = Array.isArray(iters[iterIdx].evidences) ? iters[iterIdx].evidences : [];
-              const alreadyExists = existingIterEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
-              if (!alreadyExists) {
-                iters[iterIdx] = {
-                  ...iters[iterIdx],
-                  evidences: [...existingIterEvs, evidenceObject]
-                };
-              }
-              const iterKeys = getIterationEvidenceKeys(iters);
-              const cleanEvs = filterNonIterationEvidences(currentProp.evidences || [], iterKeys);
-              updatedProp = {
-                ...currentProp,
-                iterations: iters,
-                evidences: cleanEvs
-              };
-            } else {
-              const existingEvs = Array.isArray(currentProp.evidences) ? currentProp.evidences : [];
-              const alreadyExists = existingEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
-              if (!alreadyExists) {
-                updatedProp = {
-                  ...currentProp,
-                  evidences: [...existingEvs, evidenceObject]
-                };
-              }
-            }
-          } else {
-            const existingEvs = Array.isArray(currentProp.evidences) ? currentProp.evidences : [];
-            const alreadyExists = existingEvs.some(e => String(typeof e === 'object' ? e.id : e) === String(evidenceObject.id));
-            if (!alreadyExists) {
-              updatedProp = {
-                ...currentProp,
-                evidences: [...existingEvs, evidenceObject]
-              };
-            }
-          }
-
-          await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/properties/testpulse-run-data`, {
-            method: 'PUT',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedProp)
-          });
-        }
-      } catch (propErr) {
-        console.warn('[mobileUploadHandler] Could not persist evidence directly to testpulse-run-data:', propErr);
-      }
-
-      // Acumular en la cola de sesión (qrupload_<sessionId>) para que el polling de escritorio reciba TODAS las evidencias sin sobrescribir
-      const existingQueue = (await storage.get('qrupload_' + sessionId)) || {};
-      const prevEvidences = Array.isArray(existingQueue.evidences)
-        ? existingQueue.evidences
-        : (existingQueue.evidence ? [existingQueue.evidence] : []);
-      const updatedQueueEvidences = [
-        ...prevEvidences.filter(e => String(e.id) !== String(evidenceObject.id)),
-        evidenceObject
-      ];
-
-      await storage.set('qrupload_' + sessionId, {
-        uploaded: true,
-        evidence: evidenceObject,
-        evidences: updatedQueueEvidences,
-        testId: session.testId,
-        testKey: session.testKey,
-        iterId: session.iterId,
-        cycleId: session.cycleId,
-        timestamp: Date.now()
-      });
-
-      // Guardar historial de archivos subidos en la propia sesión para que el celular muestre el acumulado incluso si recarga la página
-      const prevHistory = Array.isArray(session.uploadedHistory) ? session.uploadedHistory : [];
-      await storage.set('qrsession_' + sessionId, {
-        ...session,
-        uploadedHistory: [
-          ...prevHistory.filter(h => String(h.id) !== String(evidenceObject.id)),
-          { id: evidenceObject.id, filename: evidenceObject.filename, uploadedAt: evidenceObject.uploadedAt }
-        ]
-      }).catch(() => {});
-
-      return {
-        statusCode: 200,
-        headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-        body: JSON.stringify({ success: true, evidence: evidenceObject })
-      };
-    } catch (err) {
-      console.error('[mobileUploadHandler] POST exception:', err);
-      return {
-        statusCode: 500,
-        headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-        body: JSON.stringify({ success: false, error: err.message || String(err) })
-      };
-    }
-  }
-
-  return {
-    statusCode: 405,
-    headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-    body: JSON.stringify({ error: 'Método no permitido' })
-  };
-}
+registerMobileCompanionResolvers(resolver);
+export const mobileUploadHandler = modularMobileUploadHandler;
 
 export const handler = resolver.getDefinitions();
+

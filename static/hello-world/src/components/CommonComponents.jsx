@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
-import 'pdfjs-dist/build/pdf.worker.entry';
-import { formatAttachmentSize } from '../utils/constants';
+import { formatAttachmentSize, normalizeUiStatus } from '../utils/constants';
 import { fetchAttachmentBlobData, getCachedAttachmentBlobUrl } from '../utils/adfUtils';
 
 export const RichTextEditor = ({ value, onChange, disabled }) => {
@@ -291,6 +289,12 @@ export function PdfDocumentPreview({ byteArray, blobUrl, filename }) {
           throw new Error('El archivo PDF está vacío o no se pudo leer.');
         }
 
+        const [pdfjsModule] = await Promise.all([
+          import('pdfjs-dist'),
+          import('pdfjs-dist/build/pdf.worker.entry')
+        ]);
+        const pdfjsLib = pdfjsModule.default || pdfjsModule;
+
         const loadingTask = pdfjsLib.getDocument({
           data: dataBytes,
           isEvalSupported: false
@@ -481,4 +485,131 @@ export const useNotification = () => {
   if (!ctx) return { addNotification: ({ title, description }) => console.warn('Notification:', title, description) };
   return ctx;
 };
+
+export function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmLabel = 'Confirmar', danger = false }) {
+  if (!isOpen) return null;
+  return (
+    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-surface)', borderRadius: '8px', padding: '1.5rem', maxWidth: '400px', width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>{title}</h3>
+        <p style={{ margin: '0 0 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>{message}</p>
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+          <button className="btn-secondary" onClick={onCancel} style={{ padding: '0.4rem 1rem' }}>Cancelar</button>
+          <button onClick={onConfirm} style={{ padding: '0.4rem 1rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, background: danger ? '#de350b' : 'var(--accent-color)', color: 'white' }}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function TextInputModal({ isOpen, title, label, defaultValue = '', placeholder = '', onConfirm, onCancel }) {
+  const [value, setValue] = useState(defaultValue);
+  React.useEffect(() => { if (isOpen) setValue(defaultValue); }, [isOpen, defaultValue]);
+  if (!isOpen) return null;
+  return (
+    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-surface)', borderRadius: '8px', padding: '1.5rem', maxWidth: '380px', width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>{title}</h3>
+        {label && <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>{label}</label>}
+        <input autoFocus type="text" value={value} onChange={e => setValue(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && value.trim()) onConfirm(value.trim()); if (e.key === 'Escape') onCancel(); }}
+          placeholder={placeholder}
+          style={{ width: '100%', boxSizing: 'border-box', padding: '0.5rem 0.75rem', border: '1px solid var(--ds-border)', borderRadius: '4px', background: 'var(--bg-main)', color: 'var(--text-primary)', fontSize: '0.9rem', marginBottom: '1rem', outline: 'none' }} />
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+          <button className="btn-secondary" onClick={onCancel} style={{ padding: '0.4rem 1rem' }}>Cancelar</button>
+          <button onClick={() => { if (value.trim()) onConfirm(value.trim()); }} style={{ padding: '0.4rem 1rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, background: 'var(--accent-color)', color: 'white' }}>Aceptar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export const AtlaskitStatusLozenge = ({ status, style = {} }) => {
+  const norm = normalizeUiStatus(status);
+  let label = 'NOT RUN';
+  let bg = '#F1F2F4';
+  let color = '#44546F';
+  let border = '#DCDFE4';
+
+  if (norm === 'Passed') {
+    label = 'PASSED';
+    bg = '#DCFFF1';
+    color = '#216E4E';
+    border = '#A3FAD0';
+  } else if (norm === 'Failed') {
+    label = 'FAILED';
+    bg = '#FFEBE6';
+    color = '#BF2600';
+    border = '#FFBDAD';
+  } else if (norm === 'Blocked') {
+    label = 'BLOCKED';
+    bg = '#FFF0B3';
+    color = '#172B4D';
+    border = '#FFE380';
+  } else if (norm === 'In Progress') {
+    label = 'IN PROGRESS';
+    bg = '#DEEBFF';
+    color = '#0747A6';
+    border = '#B2D4FF';
+  } else {
+    label = 'NOT RUN';
+    bg = '#F1F2F4';
+    color = '#44546F';
+    border = '#DCDFE4';
+  }
+
+  return (
+    <span
+      className="status-badge"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: bg,
+        color: color,
+        border: `1px solid ${border}`,
+        width: '110px',
+        height: '28px',
+        boxSizing: 'border-box',
+        fontSize: '11px',
+        fontWeight: 700,
+        borderRadius: '4px',
+        letterSpacing: '0.3px',
+        textAlign: 'center',
+        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+        userSelect: 'none',
+        flexShrink: 0,
+        ...style
+      }}
+    >
+      {label}
+    </span>
+  );
+};
+
+export const LIST_BATCH_SIZE = 100;
+
+export function LoadMoreSentinel({ onVisible, remaining }) {
+  const ref = useRef(null);
+  const cbRef = useRef(onVisible);
+  cbRef.current = onVisible;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return undefined;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0] && entries[0].isIntersecting) cbRef.current && cbRef.current();
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div
+      ref={ref}
+      onClick={() => cbRef.current && cbRef.current()}
+      style={{ padding: '0.75rem', textAlign: 'center', fontSize: '12px', color: '#626F86', cursor: 'pointer' }}
+    >
+      Cargando más casos… ({remaining} restantes)
+    </div>
+  );
+}
 
