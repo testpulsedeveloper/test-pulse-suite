@@ -18386,9 +18386,14 @@ Then el sistema valida la identidad.
               : null;
 
             const getCycleStatsForHero = (c) => {
+              const cachedCycleCases = perCycleCacheRef.current
+                ? (perCycleCacheRef.current[String(c.id)] || perCycleCacheRef.current[c.id])
+                : null;
               const execArr = Array.isArray(c.execution) && c.execution.length > 0
                 ? c.execution
-                : (perCycleCacheRef.current.get(c.id) || (Array.isArray(c.testCases) ? c.testCases : []));
+                : (Array.isArray(cachedCycleCases) && cachedCycleCases.length > 0
+                  ? cachedCycleCases
+                  : (Array.isArray(c.testCases) ? c.testCases : []));
               let cTotal = 0, cPass = 0, cFail = 0, cBlock = 0, cNotRun = 0;
               const bugKeysSet = new Set();
               if (execArr.length > 0) {
