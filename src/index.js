@@ -587,7 +587,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
       candidateCycleTypes,
       projectIssueTypes,
       cycleType || 'Test Cycle',
-      ['summary', 'status', 'created', 'versions', 'fixVersions', 'issuelinks', 'parent'],
+      ['summary', 'status', 'created', 'versions', 'fixVersions', 'parent'],
       null,
       propNames
     );
@@ -650,18 +650,6 @@ resolver.define('getTestCycles', async ({ payload }) => {
           planId = issue.fields.parent.id || issue.fields.parent.key;
         }
       }
-      if (!planId && Array.isArray(issue.fields?.issuelinks)) {
-        for (const link of issue.fields.issuelinks) {
-          const cand = link.inwardIssue || link.outwardIssue;
-          if (cand) {
-            const cType = (cand.fields?.issuetype?.name || '').toLowerCase();
-            if (cType.includes('plan') || cType.includes('set')) {
-              planId = cand.id || cand.key;
-              break;
-            }
-          }
-        }
-      }
       return {
         id: issue.id,
         key: issue.key,
@@ -672,7 +660,12 @@ resolver.define('getTestCycles', async ({ payload }) => {
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
-        rawFields: issue.fields,
+        rawFields: {
+          created: issue.fields?.created || null,
+          status: issue.fields?.status ? { name: issue.fields.status.name } : undefined,
+          versions: affectsVersions,
+          fixVersions: fixVersions
+        },
         testCount: totalTests,
         executionMeta: hasMeta ? meta : fallbackStats
       };
@@ -1739,13 +1732,31 @@ const _normalizeShard = (raw) => {
 //   null  → shard 0 does not exist (cycle has never had an index)
 //   []    → shard 0 exists with empty array (index was explicitly cleared)
 //   [...] → tests in the index
-const readCycleIndex = async (cycleId) => {
+const readCycleIndex = async (cycleId, preloadedShard0 = undefined) => {
+  let preloadedEntries = undefined;
+  if (preloadedShard0 !== undefined) {
+    if (preloadedShard0 === null) {
+      return null;
+    }
+    const rawArr = Array.isArray(preloadedShard0)
+      ? preloadedShard0
+      : (Array.isArray(preloadedShard0?.value) ? preloadedShard0.value : null);
+    if (Array.isArray(rawArr)) {
+      if (rawArr.length === 0) return [];
+      preloadedEntries = _normalizeShard(rawArr);
+      if (rawArr.length < SHARD_SIZE) {
+        return preloadedEntries;
+      }
+    }
+  }
+
   const shards = await listCycleShards(cycleId);
 
   if (shards === null) {
     // Legacy fallback: sequential probing (only used if the listing endpoint fails)
-    const allEntries = [];
-    for (let shard = 0; shard <= 100; shard++) {
+    const allEntries = preloadedEntries ? [...preloadedEntries] : [];
+    const startShard = preloadedEntries ? 1 : 0;
+    for (let shard = startShard; shard <= 100; shard++) {
       const r = await _fetchShard(cycleId, shard);
       if (r.missing) { if (shard === 0) return null; break; }
       if (r.error) break;
@@ -1756,13 +1767,28 @@ const readCycleIndex = async (cycleId) => {
     return allEntries;
   }
 
-  if (shards.length === 0 || shards[0] !== 0) return null;
+  if (shards.length === 0 || shards[0] !== 0) return preloadedEntries || null;
 
   // Only consider the contiguous run 0..N (same semantics as the legacy reader)
   const contiguous = [];
   for (let i = 0; i < shards.length && shards[i] === i; i++) contiguous.push(i);
 
-  const results = await mapWithConcurrency(contiguous, 3, (shard) => _fetchShard(cycleId, shard));
+  if (preloadedEntries) {
+    const restShards = contiguous.slice(1);
+    if (restShards.length === 0) return preloadedEntries;
+    const results = await mapWithConcurrency(restShards, 6, (shard) => _fetchShard(cycleId, shard));
+    const allEntries = [...preloadedEntries];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.missing || r.error) break;
+      const entries = _normalizeShard(r.value);
+      if (entries.length === 0) break;
+      allEntries.push(...entries);
+    }
+    return allEntries;
+  }
+
+  const results = await mapWithConcurrency(contiguous, 6, (shard) => _fetchShard(cycleId, shard));
   const allEntries = [];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
@@ -2601,7 +2627,17 @@ const fetchBugsBatch = async (keys = []) => {
             fixVersions: fixVersions,
             version: versionDisplay,
             ...changelogMeta,
-            rawFields: issue.fields
+            rawFields: {
+              created: issue.fields?.created || null,
+              resolutiondate: issue.fields?.resolutiondate || changelogMeta.lastTerminalAt || null,
+              duedate: estResDate,
+              status: issue.fields?.status ? { name: issue.fields.status.name } : undefined,
+              resolution: issue.fields?.resolution ? { name: issue.fields.resolution.name } : undefined,
+              issuetype: issue.fields?.issuetype ? { name: issue.fields.issuetype.name } : undefined,
+              versions: affectsVersions,
+              fixVersions: fixVersions,
+              customfield_10238: sevVal !== 'Sin definir' ? sevVal : undefined
+            }
           };
         }
       }
@@ -2622,7 +2658,14 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let token = null;
   let isLast = false;
   while (!isLast) {
-    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created', 'issuelinks', 'parent'], null, ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2'], token, 100);
+    const page = await fetchJqlPage(
+      jql,
+      ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created', 'parent'],
+      null,
+      ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2', 'execution', 'execution-meta'],
+      token,
+      100
+    );
     if (page.error) break;
     allIssues = allIssues.concat(page.issues);
     token = page.nextPageToken;
@@ -2647,16 +2690,6 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     if (!planId && issue?.fields?.parent?.id) {
       planId = issue.fields.parent.id;
     }
-    if (!planId && Array.isArray(issue?.fields?.issuelinks)) {
-      for (const link of issue.fields.issuelinks) {
-        const linked = link.inwardIssue || link.outwardIssue;
-        const typeName = (linked?.fields?.issuetype?.name || '').toLowerCase();
-        if (typeName.includes('plan')) {
-          planId = linked.id;
-          break;
-        }
-      }
-    }
     const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
       ? directSched
       : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
@@ -2671,9 +2704,10 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const hasMore = !fetchAll && (numOffset + numLimit < allIssues.length);
   const nextOffset = numOffset + numLimit;
   
-  const cycles = await mapWithConcurrency(targetIssues, 2, async (issue) => {
+  const cycles = await mapWithConcurrency(targetIssues, 4, async (issue) => {
     const { planId, schedule } = extractCyclePlanAndSchedule(issue);
-    let rawExecution = (await readCycleIndex(issue.id)) ?? [];
+    const preloadedShard0 = issue.properties ? (issue.properties['execution'] ?? null) : undefined;
+    let rawExecution = (await readCycleIndex(issue.id, preloadedShard0)) ?? [];
     
     // Deduplicate by test case key and ID so count strictly matches Planning & Execution
     const seenTc = new Set();
@@ -2706,7 +2740,12 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       version: versionDisplay,
       versions: affectsVersions,
       fixVersions: fixVersions,
-      rawFields: issue.fields,
+      rawFields: {
+        created: issue.fields?.created || null,
+        status: issue.fields?.status ? { name: issue.fields.status.name } : undefined,
+        versions: affectsVersions,
+        fixVersions: fixVersions
+      },
       execution
     };
   });
@@ -2730,7 +2769,10 @@ resolver.define('getExecutionReport', async ({ payload }) => {
           // Purge any dead or non-existent bugs from Jira
           ex.linkedBugs = ex.linkedBugs
             .filter(b => b && b.key && bugMap[b.key])
-            .map(b => ({ ...b, ...bugMap[b.key] }));
+            .map(b => {
+              const { rawFields: _rf, ...leanBug } = bugMap[b.key];
+              return { ...b, ...leanBug };
+            });
         }
       });
     }
@@ -2739,14 +2781,29 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let plans = [];
   if (numOffset === 0) {
     try {
-      const planCandidates = uniqueIssueTypes([config?.testPlanIssueType, 'Test Plan', 'Plan de Pruebas', 'Plan de Prueba', 'Plan']);
-      const planResult = await fetchIssuesByCandidateTypes({
+      const planType = config?.planIssueType || config?.testPlanIssueType;
+      const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+      const planCandidates = [
+        planType,
+        'Test Plan',
+        'Test Set',
+        'Plan de Pruebas',
+        'Plan de pruebas',
+        'Plan de Prueba',
+        'Conjunto de Pruebas',
+        'Plan'
+      ];
+      const planIssues = await fetchIssuesByCandidateTypes(
         projectId,
-        typeCandidates: planCandidates,
-        fields: ['summary', 'status', 'created', 'description', 'issuetype'],
-        properties: ['testpulse-schedule', 'testpulse-v2']
-      });
-      plans = (planResult.issues || []).map(i => {
+        projectJql,
+        planCandidates,
+        null,
+        planType || 'Test Set',
+        ['summary', 'status', 'created', 'issuetype'],
+        null,
+        ['testpulse-schedule', 'testpulse-v2']
+      );
+      plans = (planIssues || []).map(i => {
         const rawSchedProp = i.properties?.['testpulse-schedule'];
         const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
           ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
@@ -2765,7 +2822,10 @@ resolver.define('getExecutionReport', async ({ payload }) => {
           status: i.fields?.status?.name || 'Active',
           created: i.fields?.created ? i.fields.created.split('T')[0] : '',
           schedule,
-          rawFields: i.fields
+          rawFields: {
+            created: i.fields?.created || null,
+            status: i.fields?.status ? { name: i.fields.status.name } : undefined
+          }
         };
       });
     } catch (e) {}
@@ -2796,7 +2856,12 @@ resolver.define('getExecutionReport', async ({ payload }) => {
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
-        rawFields: i.fields
+        rawFields: {
+          created: i.fields?.created || null,
+          status: i.fields?.status ? { name: i.fields.status.name } : undefined,
+          versions: affectsVersions,
+          fixVersions: fixVersions
+        }
       };
     })
   };
@@ -5284,7 +5349,17 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
       isLinked: isLinkedToTest,
       linkedTests: linkedTests,
       ...changelogMeta,
-      rawFields: issue.fields
+      rawFields: {
+        created: issue.fields?.created || null,
+        resolutiondate: issue.fields?.resolutiondate || changelogMeta.lastTerminalAt || null,
+        duedate: estResDate,
+        status: issue.fields?.status ? { name: issue.fields.status.name } : undefined,
+        resolution: issue.fields?.resolution ? { name: issue.fields.resolution.name } : undefined,
+        issuetype: issue.fields?.issuetype ? { name: issue.fields.issuetype.name } : undefined,
+        versions: affectsVersions,
+        fixVersions: fixVersions,
+        customfield_10238: sev !== 'Sin definir' ? sev : undefined
+      }
     };
   });
 });

@@ -13071,12 +13071,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('ALL'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'ALL' ? 'active' : ''}`}
                           style={{
-                            background: '#0C66E4',
-                            color: '#FFFFFF',
-                            border: '1px solid #0055CC',
+                            background: '#E9F2FF',
+                            color: '#0C66E4',
+                            border: '1px solid #85B8FF',
                             fontWeight: executionStatusFilter === 'ALL' ? 800 : 700,
-                            opacity: executionStatusFilter === 'ALL' ? 1 : 0.9,
-                            boxShadow: executionStatusFilter === 'ALL' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0C66E4' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'ALL' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0C66E4' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'ALL' ? 'translateY(-1px)' : 'none'
                           }}
                         >
@@ -13086,12 +13085,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('Passed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Passed' ? 'active' : ''}`}
                           style={{
-                            background: '#1F845A',
-                            color: '#FFFFFF',
-                            border: '1px solid #216E4E',
+                            background: '#DCFFF1',
+                            color: '#216E4E',
+                            border: '1px solid #7EE2B8',
                             fontWeight: executionStatusFilter === 'Passed' ? 800 : 700,
-                            opacity: executionStatusFilter === 'Passed' ? 1 : 0.9,
-                            boxShadow: executionStatusFilter === 'Passed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #1F845A' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'Passed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #216E4E' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'Passed' ? 'translateY(-1px)' : 'none'
                           }}
                         >
@@ -13101,12 +13099,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('Failed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Failed' ? 'active' : ''}`}
                           style={{
-                            background: '#C9372C',
-                            color: '#FFFFFF',
-                            border: '1px solid #AE2E24',
+                            background: '#FFEBE6',
+                            color: '#AE2E24',
+                            border: '1px solid #FFBDAD',
                             fontWeight: executionStatusFilter === 'Failed' ? 800 : 700,
-                            opacity: executionStatusFilter === 'Failed' ? 1 : 0.9,
-                            boxShadow: executionStatusFilter === 'Failed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #C9372C' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'Failed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #AE2E24' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'Failed' ? 'translateY(-1px)' : 'none'
                           }}
                         >
@@ -13116,12 +13113,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('Blocked'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Blocked' ? 'active' : ''}`}
                           style={{
-                            background: '#E2B203',
-                            color: '#172B4D',
-                            border: '1px solid #CF9F02',
+                            background: '#FFF0B3',
+                            color: '#974F0C',
+                            border: '1px solid #F5CD47',
                             fontWeight: executionStatusFilter === 'Blocked' ? 800 : 700,
-                            opacity: executionStatusFilter === 'Blocked' ? 1 : 0.92,
-                            boxShadow: executionStatusFilter === 'Blocked' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #CF9F02' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'Blocked' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #D97706' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'Blocked' ? 'translateY(-1px)' : 'none'
                           }}
                         >
@@ -13131,12 +13127,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('In Progress'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'In Progress' ? 'active' : ''}`}
                           style={{
-                            background: '#0055CC',
-                            color: '#FFFFFF',
-                            border: '1px solid #0747A6',
+                            background: '#DEEBFF',
+                            color: '#0055CC',
+                            border: '1px solid #85B8FF',
                             fontWeight: executionStatusFilter === 'In Progress' ? 800 : 700,
-                            opacity: executionStatusFilter === 'In Progress' ? 1 : 0.9,
-                            boxShadow: executionStatusFilter === 'In Progress' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0055CC' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'In Progress' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0055CC' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'In Progress' ? 'translateY(-1px)' : 'none'
                           }}
                         >
@@ -13146,12 +13141,11 @@ Then el sistema valida la identidad.
                           onClick={() => { setExecutionStatusFilter('Not Run'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Not Run' ? 'active' : ''}`}
                           style={{
-                            background: '#5E6C84',
-                            color: '#FFFFFF',
-                            border: '1px solid #44546F',
+                            background: '#F1F2F4',
+                            color: '#44546F',
+                            border: '1px solid #C1C7D0',
                             fontWeight: executionStatusFilter === 'Not Run' ? 800 : 700,
-                            opacity: executionStatusFilter === 'Not Run' ? 1 : 0.9,
-                            boxShadow: executionStatusFilter === 'Not Run' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #44546F' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            boxShadow: executionStatusFilter === 'Not Run' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #44546F' : '0 1px 2px rgba(9, 30, 66, 0.08)',
                             transform: executionStatusFilter === 'Not Run' ? 'translateY(-1px)' : 'none'
                           }}
                         >
