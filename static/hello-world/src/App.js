@@ -18021,8 +18021,8 @@ Then el sistema valida la identidad.
         <main className="dashboard-container" style={{ flex: 1, height: '100%', overflowY: 'auto', boxSizing: 'border-box', padding: '1.5rem 2rem 6rem 2rem' }}>
           {/* Top Header & Toolbar */}
           <div className="dashboard-top-header">
-            <div className="dashboard-header-row">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '4px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                 {!isFolderSidebarVisible && (
                   <button
                     onClick={toggleFolderSidebar}
@@ -18097,6 +18097,13 @@ Then el sistema valida la identidad.
                     </button>
                   </div>
                 )}
+
+                <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em', margin: 0 }}>
+                  {dashboardSubView === 'runs' && 'Consola de Ejecución & Control Multi-Ciclo'}
+                  {dashboardSubView === 'bugs' && 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)'}
+                  {dashboardSubView === 'traceability' && 'Reports: Matriz de Trazabilidad (Traceability)'}
+                </h1>
+
                 <span className="dashboard-live-badge">
                   <span className="dashboard-live-dot" />
                   ● {isHydratingReport 
@@ -18105,12 +18112,12 @@ Then el sistema valida la identidad.
                         ? 'Sincronizando...' 
                         : `En vivo · ${reportData._loadedAt ? new Date(reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Auto-sync silencioso'}`}
                 </span>
-                <span className="dashboard-tag-context">
-                  • Jira Forge App
-                </span>
-                <span className="dashboard-tag-context">
-                  • ID: {currentProjectKey}
-                </span>
+
+                {circuitBreakerActive && (
+                  <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
+                    ⏸ Rate limit activo (3 min)
+                  </span>
+                )}
               </div>
               
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -18136,7 +18143,6 @@ Then el sistema valida la identidad.
                     ⚙️ {isCustomizingDashboard ? 'Terminar Personalización' : 'Personalizar Widgets'}
                   </button>
                 )}
-
 
                 <button 
                   className="btn-secondary" 
@@ -18201,40 +18207,6 @@ Then el sistema valida la identidad.
                 </button>
               </div>
             </div>
-
-            {dashboardSubView === 'runs' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '4px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  <span>{currentProjectName || 'PROYECTO'}</span>
-                  <span style={{ color: '#CBD5E1' }}>&gt;</span>
-                  <span>TEST MANAGEMENT</span>
-                  <span style={{ color: '#CBD5E1' }}>&gt;</span>
-                  <span style={{ color: '#2563EB', fontWeight: 700 }}>EXECUTION HUB</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-                  <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em', margin: 0 }}>
-                    Consola de Ejecución &amp; Control Multi-Ciclo
-                  </h1>
-                  {circuitBreakerActive && (
-                    <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
-                      ⏸ Rate limit activo (3 min)
-                    </span>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-                <h1 className="dashboard-title">
-                  {dashboardSubView === 'bugs' && 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)'}
-                  {dashboardSubView === 'traceability' && 'Reports: Matriz de Trazabilidad (Traceability)'}
-                </h1>
-                {circuitBreakerActive && (
-                  <span style={{ fontSize: '12px', color: '#FF8B00', fontWeight: 600 }}>
-                    ⏸ Rate limit activo (3 min)
-                  </span>
-                )}
-              </div>
-            )}
 
             {/* Amber Banner when Snapshot mode is active */}
             {reportData?._isSnapshot && (
