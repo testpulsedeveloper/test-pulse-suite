@@ -162,13 +162,17 @@ const TP_QUERY_RESOLVERS = {
   getFields: 600_000,
   getProjectIssueTypes: 600_000,
   getProjectIssueTypeFields: 600_000,
+  getIssueLinkTypes: 600_000,
   getSnapshotFieldMapping: 600_000,
   getBulkMapping: 600_000,
+  getAttachmentContent: 600_000,
   getProjects: 300_000,
+  getAllowedProjects: 300_000,
   isProjectAllowed: 300_000,
   checkAdminPermission: 300_000,
   getConfig: 180_000,
   getReportAutomationConfig: 180_000,
+  getProjectCyclesMigrationStatus: 180_000,
   // Operational test management data (3 min strict TTL -> 0 JQL calls when re-entering)
   getFolders: 180_000,
   getTestPlans: 180_000,
@@ -180,8 +184,12 @@ const TP_QUERY_RESOLVERS = {
   getProjectUnlinkedBugs: 180_000,
   getCycleExecutionSummary: 120_000,
   getCycleExecution: 120_000,
+  getCycleTestRuns: 120_000,
   getTestCaseDetails: 120_000,
   getTestCaseDetailsBatch: 120_000,
+  getBugsBatch: 120_000,
+  getBugDetailsBatch: 120_000,
+  getBugsResolutionTime: 120_000,
   getTestCaseHistory: 60_000,
   getIssueDescription: 120_000,
   getBugFullDetails: 60_000,
@@ -189,55 +197,192 @@ const TP_QUERY_RESOLVERS = {
   searchAssignableUsers: 120_000,
 };
 
+// Static catalogs that should NEVER be wiped during operational test/cycle/execution mutations
+const TP_STATIC_CATALOG_RESOLVERS = new Set([
+  'getFields',
+  'getProjectIssueTypes',
+  'getProjectIssueTypeFields',
+  'getIssueLinkTypes',
+  'getProjects',
+  'isProjectAllowed',
+  'checkAdminPermission',
+  'getAttachmentContent',
+  'searchAssignableUsers',
+]);
+
+// Mutations that only affect Cycles, Plans, Execution & Reports (preserve Test Case Repository & Requirements cache)
+const TP_EXECUTION_OR_SCHEDULE_MUTATIONS = new Set([
+  'saveCycleSchedule',
+  'savePlanSchedule',
+  'linkCycleToPlan',
+  'unlinkCycleFromPlan',
+  'updateTestStatus',
+  'saveTestExecution',
+  'updateTestRunExecution',
+  'bulkAssignTestRuns',
+  'syncCycleIndexWithRuns',
+  'rebuildCycleIndex',
+]);
+
+// Queries preserved when an execution/schedule mutation occurs
+const TP_REPOSITORY_PRESERVED_ON_EXEC_MUTATION = new Set([
+  ...TP_STATIC_CATALOG_RESOLVERS,
+  'getConfig',
+  'getSnapshotFieldMapping',
+  'getBulkMapping',
+  'getReportAutomationConfig',
+  'getFolders',
+  'getTestCases',
+  'getRequirements',
+]);
+
 // Explicit write/mutation resolvers that modify state and should invalidate cache
 const TP_MUTATION_RESOLVERS = new Set([
   'setConfig',
   'saveReportAutomationConfig',
   'saveBulkMapping',
+  'setSnapshotFieldMapping',
+  'createTestCase',
   'bulkCreateTestCases',
   'bulkLinkToFolder',
   'saveTestCaseDetails',
   'linkCaseToFolder',
+  'linkCasesToRequirement',
   'createFolder',
   'updateFolder',
   'deleteFolder',
+  'createTestSet',
+  'createTestCycle',
   'addTestToCycle',
+  'addMultipleTestsToCycle',
   'removeTestFromCycle',
   'removeManyTestsFromCycle',
   'linkTestToFolder',
   'updateTestStatus',
+  'saveTestExecution',
+  'updateTestRunExecution',
+  'createTestRunsForCycle',
   'uploadAttachment',
   'deleteAttachment',
   'linkCycleToPlan',
   'unlinkCycleFromPlan',
   'savePlanSchedule',
   'saveCycleSchedule',
+  'createBugAndLink',
+  'updateBugIssue',
+  'addBugComment',
   'linkBugToTest',
   'bulkAssignTestRuns',
   'addBulkTestsToCycle',
   'syncCycleIndexWithRuns',
+  'rebuildCycleIndex',
   'setAllowedProjects',
   'resyncTestRunsBatch',
+  'deleteProjectEntity',
 ]);
+
+// Selective cache invalidation: preserves immutable catalogs & unrelated modules to prevent post-mutation JQL storms
+export const invalidateScopedCache = (mutationName) => {
+  const preserveSet = TP_EXECUTION_OR_SCHEDULE_MUTATIONS.has(mutationName)
+    ? TP_REPOSITORY_PRESERVED_ON_EXEC_MUTATION
+    : TP_STATIC_CATALOG_RESOLVERS;
+
+  const keysToDelete = [];
+  for (const key of _l1Cache.keys()) {
+    const resolverName = key.split('|')[0];
+    if (!preserveSet.has(resolverName)) {
+      keysToDelete.push(key);
+    }
+  }
+  keysToDelete.forEach((k) => _l1Cache.delete(k));
+
+  openCacheDb().then((db) => {
+    if (!db || keysToDelete.length === 0) return;
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      keysToDelete.forEach((k) => store.delete(k));
+    } catch (_) {}
+  });
+
+  queryClient.invalidateQueries({
+    predicate: (query) => {
+      const resolverName = Array.isArray(query.queryKey) ? query.queryKey[1] : null;
+      return !resolverName || !preserveSet.has(resolverName);
+    },
+  });
+};
 
 const _tpInFlight = new Map();
 
+// Frontend concurrency semaphore for read queries (prevents simultaneous Forge bridge stampedes -> HTTP 429)
+const MAX_CONCURRENT_READS = 4;
+let _activeReadCount = 0;
+const _readWaitQueue = [];
+
+const acquireReadSlot = () => {
+  if (_activeReadCount < MAX_CONCURRENT_READS) {
+    _activeReadCount++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _readWaitQueue.push(resolve));
+};
+
+const releaseReadSlot = () => {
+  if (_readWaitQueue.length > 0) {
+    const next = _readWaitQueue.shift();
+    next();
+  } else {
+    _activeReadCount = Math.max(0, _activeReadCount - 1);
+  }
+};
+
 export const rawInvoke = async (name, payload) => {
   const s = _tpStat(name);
-  s.calls++;
+  const isReadQuery = TP_QUERY_RESOLVERS[name] !== undefined;
+  if (isReadQuery) {
+    await acquireReadSlot();
+  }
   const t0 = Date.now();
   try {
-    return await forgeInvoke(name, payload);
-  } catch (e) {
-    s.errors++;
-    if (e && (e.status === 429 || String(e.message || '').includes('429'))) s.r429++;
-    console.warn('Forge invoke failed:', e);
-    if (!e) {
-      throw new Error('NEEDS_AUTHENTICATION_ERR');
+    const maxAttempts = isReadQuery ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      s.calls++;
+      try {
+        const res = await forgeInvoke(name, payload);
+        // Check if resolver returned a soft 429 error object
+        if (
+          isReadQuery &&
+          attempt < maxAttempts &&
+          res &&
+          typeof res === 'object' &&
+          String(res.error || '').includes('429')
+        ) {
+          s.r429++;
+          await new Promise((r) => setTimeout(r, 1200 + Math.floor(Math.random() * 600)));
+          continue;
+        }
+        return res;
+      } catch (e) {
+        const is429 = Boolean(e && (e.status === 429 || String(e.message || '').includes('429')));
+        if (is429) s.r429++;
+        if (isReadQuery && is429 && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1400 + Math.floor(Math.random() * 600)));
+          continue;
+        }
+        s.errors++;
+        console.warn('Forge invoke failed:', e);
+        if (!e) {
+          throw new Error('NEEDS_AUTHENTICATION_ERR');
+        }
+        throw e;
+      }
     }
-    throw e;
   } finally {
     s.totalMs += Date.now() - t0;
+    if (isReadQuery) {
+      releaseReadSlot();
+    }
   }
 };
 
@@ -246,9 +391,8 @@ export const invoke = async (name, payload) => {
   if (staleTime === undefined) {
     const res = await rawInvoke(name, payload);
     if (TP_MUTATION_RESOLVERS.has(name)) {
-      // Only actual write mutations clear the cache
-      clearPersistentCache();
-      queryClient.invalidateQueries();
+      // Selective invalidation preserves static catalogs & unaffected modules
+      invalidateScopedCache(name);
     }
     return res;
   }

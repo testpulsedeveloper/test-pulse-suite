@@ -35,7 +35,7 @@ import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.0.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.0.2'}`;
 
 function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmLabel = 'Confirmar', danger = false }) {
   if (!isOpen) return null;
@@ -1701,7 +1701,9 @@ function App() {
     return () => clearInterval(id);
   }, [activeTab, selectedCycle?.id]);
 
-  // Preload execution summaries for ALL cycles of the active Plan atomically so Plan-level health & slack remain constant across cycle clicks
+  // Preload execution summaries for cycles of the active Plan without triggering 429 bursts:
+  // Cycles that already carry preloaded executionMeta from getTestCycles require 0 extra JQL calls.
+  // Any legacy cycle missing executionMeta is fetched in small batches of 2 with 150ms spacing.
   const [planCyclesSummary, setPlanCyclesSummary] = useState({});
   useEffect(() => {
     if (activeTab !== 'execution' || !testCycles || testCycles.length === 0) return;
@@ -1719,29 +1721,53 @@ function App() {
 
     (async () => {
       const nextMap = {};
-      await Promise.all(
-        targetCycles.map(async (c) => {
-          const cid = String(c.id);
-          const cached = perCycleCacheRef.current[cid] || perCycleCacheRef.current[c.id];
-          if (Array.isArray(cached) && cached.length > 0) {
-            nextMap[cid] = cached;
-            return;
-          }
-          try {
-            const summary = await invoke('getCycleExecutionSummary', { cycleId: c.id });
-            if (Array.isArray(summary)) {
-              perCycleCacheRef.current[cid] = summary;
-              nextMap[cid] = summary;
-            } else {
-              nextMap[cid] = c.tests || c.execution || [];
-            }
-          } catch (_) {
-            nextMap[cid] = c.tests || c.execution || [];
-          }
-        })
-      );
-      if (!cancelled) {
+      const missingCycles = [];
+      for (const c of targetCycles) {
+        const cid = String(c.id);
+        const cached = perCycleCacheRef.current[cid] || perCycleCacheRef.current[c.id];
+        if (Array.isArray(cached) && cached.length > 0) {
+          nextMap[cid] = cached;
+        } else if (c.executionMeta && typeof c.executionMeta.total === 'number') {
+          // Already has preloaded execution-meta from getTestCycles -> 0 extra JQL calls needed
+          if (Array.isArray(c.tests) && c.tests.length > 0) nextMap[cid] = c.tests;
+          else if (Array.isArray(c.execution) && c.execution.length > 0) nextMap[cid] = c.execution;
+        } else {
+          missingCycles.push(c);
+        }
+      }
+
+      if (!cancelled && Object.keys(nextMap).length > 0) {
         setPlanCyclesSummary(prev => ({ ...prev, ...nextMap }));
+      }
+
+      // Fetch at most 2 legacy cycles at a time with 150ms spacing, respecting the 429 circuit breaker
+      for (let i = 0; i < missingCycles.length; i += 2) {
+        if (cancelled || isCircuitBroken()) break;
+        const batch = missingCycles.slice(i, i + 2);
+        const batchMap = {};
+        await Promise.all(
+          batch.map(async (c) => {
+            const cid = String(c.id);
+            try {
+              const summary = await invoke('getCycleExecutionSummary', { cycleId: c.id });
+              if (Array.isArray(summary)) {
+                perCycleCacheRef.current[cid] = summary;
+                batchMap[cid] = summary;
+              } else {
+                batchMap[cid] = c.tests || c.execution || [];
+              }
+            } catch (err) {
+              checkAndTripCircuitBreaker(err);
+              batchMap[cid] = c.tests || c.execution || [];
+            }
+          })
+        );
+        if (!cancelled && Object.keys(batchMap).length > 0) {
+          setPlanCyclesSummary(prev => ({ ...prev, ...batchMap }));
+        }
+        if (i + 2 < missingCycles.length && !cancelled) {
+          await new Promise(r => setTimeout(r, 150));
+        }
       }
     })();
 
@@ -12375,12 +12401,18 @@ Then el sistema valida la identidad.
     let planFailedCases = 0;
     planCycles.forEach(c => {
       const cTests = planCyclesSummary[String(c.id)] || c.tests || c.execution || [];
-      planTotalCases += cTests.length;
-      cTests.forEach(t => {
-        const st = (t.status || 'UNEXECUTED').toUpperCase();
-        if (st === 'PASS' || st === 'FAIL' || st === 'BLOCKED') planExecutedCases += 1;
-        if (st === 'FAIL') planFailedCases += 1;
-      });
+      if (cTests.length > 0) {
+        planTotalCases += cTests.length;
+        cTests.forEach(t => {
+          const st = (t.status || 'UNEXECUTED').toUpperCase();
+          if (st === 'PASS' || st === 'PASSED' || st === 'FAIL' || st === 'FAILED' || st === 'BLOCKED') planExecutedCases += 1;
+          if (st === 'FAIL' || st === 'FAILED') planFailedCases += 1;
+        });
+      } else if (c.executionMeta && typeof c.executionMeta.total === 'number') {
+        planTotalCases += Number(c.executionMeta.total || 0);
+        planExecutedCases += Number(c.executionMeta.passed || 0) + Number(c.executionMeta.failed || 0) + Number(c.executionMeta.blocked || 0);
+        planFailedCases += Number(c.executionMeta.failed || 0);
+      }
     });
     const planExecPct = planTotalCases > 0
       ? Number(((planExecutedCases / planTotalCases) * 100).toFixed(1))
@@ -18651,10 +18683,11 @@ Then el sistema valida la identidad.
                   }
                 });
               } else {
-                cTotal = Number(c.totalCases || c.testCasesCount || 0);
-                cPass = Number(c.passed || 0);
-                cFail = Number(c.failed || 0);
-                cBlock = Number(c.blocked || 0);
+                const em = c.executionMeta || {};
+                cTotal = Number(em.total ?? c.testCount ?? c.totalCases ?? c.testCasesCount ?? 0);
+                cPass = Number(em.passed ?? c.passed ?? 0);
+                cFail = Number(em.failed ?? c.failed ?? 0);
+                cBlock = Number(em.blocked ?? c.blocked ?? 0);
                 cNotRun = Math.max(0, cTotal - (cPass + cFail + cBlock));
               }
               const cBugs = bugKeysSet.size;

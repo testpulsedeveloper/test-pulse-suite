@@ -32,10 +32,33 @@ try {
           const origReq = requester.requestJira;
           requester.requestJira = async (...reqArgs) => {
             const store = __perfALS.getStore();
-            if (store) store.calls++;
-            const res = await origReq.apply(requester, reqArgs);
-            if (store && res && res.status === 429) store.r429++;
-            return res;
+            const maxRetries = 3;
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+              if (store) store.calls++;
+              const res = await origReq.apply(requester, reqArgs);
+              if (res && (res.status === 429 || res.status === 503)) {
+                if (store && res.status === 429) store.r429++;
+                const elapsed = store?.startedAt ? (Date.now() - store.startedAt) : 0;
+                // Only retry if we still have safe headroom inside Forge's 25s invocation window
+                if (attempt < maxRetries && elapsed < 17500) {
+                  let delay = (attempt + 1) * 1100 + Math.floor(Math.random() * 650);
+                  try {
+                    const retryAfter = res.headers?.get?.('Retry-After') || res.headers?.get?.('retry-after');
+                    if (retryAfter) {
+                      const sec = parseInt(retryAfter, 10);
+                      if (!isNaN(sec) && sec > 0) {
+                        delay = Math.min(sec * 1000 + Math.floor(Math.random() * 400), 6500);
+                      }
+                    }
+                  } catch (_) {}
+                  if (elapsed + delay < 20000) {
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                  }
+                }
+              }
+              return res;
+            }
           };
           requester.__tpPerf = true;
         }
@@ -175,8 +198,8 @@ const resolver = new Resolver();
 {
   const __origDefine = resolver.define.bind(resolver);
   resolver.define = (name, fn) => __origDefine(name, async (req) => {
-    const store = { calls: 0, r429: 0 };
     const t0 = Date.now();
+    const store = { calls: 0, r429: 0, startedAt: t0 };
     try {
       return await __perfALS.run(store, () => fn(req));
     } finally {
@@ -803,20 +826,24 @@ resolver.define('saveCycleSchedule', async ({ payload }) => {
   if (!cycleId || !schedule) throw new Error('Missing cycleId or schedule');
   let currentPlanId = planId || null;
   let existingSchedule = null;
-  try {
-    const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    });
-    if (getRes.ok) {
-      const data = await getRes.json();
-      if (!currentPlanId) {
-        currentPlanId = data?.value?.planId || data?.planId || null;
+  const hasExplicitEnv = typeof schedule.environment === 'string';
+  // Only perform GET if we are missing either planId or explicit environment
+  if (!currentPlanId || !hasExplicitEnv) {
+    try {
+      const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (getRes.ok) {
+        const data = await getRes.json();
+        if (!currentPlanId) {
+          currentPlanId = data?.value?.planId || data?.planId || null;
+        }
+        existingSchedule = data?.value?.schedule || data?.schedule || null;
       }
-      existingSchedule = data?.value?.schedule || data?.schedule || null;
-    }
-  } catch (e) {}
-  const resolvedEnvironment = typeof schedule.environment === 'string'
+    } catch (e) {}
+  }
+  const resolvedEnvironment = hasExplicitEnv
     ? schedule.environment.trim()
     : (existingSchedule?.environment || '');
   const cleanSchedule = {
@@ -831,16 +858,18 @@ resolver.define('saveCycleSchedule', async ({ payload }) => {
     businessDays: Number(schedule.businessDays) || 0,
     updatedAt: new Date().toISOString()
   };
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
-    method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ planId: currentPlanId, schedule: cleanSchedule })
-  });
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testpulse-schedule`, {
-    method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(cleanSchedule)
-  });
+  await Promise.all([
+    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planId: currentPlanId, schedule: cleanSchedule })
+    }),
+    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testpulse-schedule`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(cleanSchedule)
+    })
+  ]);
   return { success: true, schedule: cleanSchedule, planId: currentPlanId };
 });
 
@@ -4013,80 +4042,89 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
   let bugsReopened = 0;
 
   try {
-    const jql = `key in (${bugKeys.join(',')})`;
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql,
-        expand: 'changelog',
-        fields: ['created', 'status', 'resolutiondate'],
-        maxResults: 100
-      })
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      for (const issue of (data.issues || [])) {
-        const changelog = issue.changelog?.histories || [];
-        const changelogMeta = analyzeBugChangelog(issue);
-        const baseStartStr = (changelogMeta.isReopened && changelogMeta.reopenedAt)
-          ? changelogMeta.reopenedAt
-          : (issue.fields?.created || null);
-        const createdTime = new Date(baseStartStr || Date.now()).getTime();
-        
-        let times = { atencion: null, resuelta: null, cerrada: null };
-        const isReopened = changelogMeta.isReopened;
-        
-        for (const history of changelog) {
-          const time = new Date(history.created).getTime();
-          if (time < createdTime) continue; // Only measure phases within the active cycle (after reopen if reopened)
-          const statusItem = (history.items || []).find(item => item.field === 'status');
-          if (statusItem) {
-            const toString = (statusItem.toString || '').toLowerCase();
-            
-            if (toString.includes('analisis') || toString.includes('análisis') || toString.includes('curso') || toString === 'in progress' || toString.includes('revis') || toString.includes('review')) {
-              if (!times.atencion || time < times.atencion) times.atencion = time;
-            } else if (toString.includes('resuelta') || toString === 'resolved' || toString === 'done' || toString.includes('listo')) {
-              if (!times.resuelta || time < times.resuelta) times.resuelta = time;
-            } else if (toString.includes('cerrada') || toString === 'closed' || toString.includes('aceptado')) {
-              if (!times.cerrada || time < times.cerrada) times.cerrada = time;
-            }
-          }
-        }
-        
-        // Diffs in ms using Business Hours
-        if (times.atencion) {
-          sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.atencion);
-          cntNuevoAnalisis++;
-        } else if (times.resuelta) {
-          sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.resuelta);
-          cntNuevoAnalisis++;
-        }
-        
-        if (times.atencion && times.resuelta && times.resuelta > times.atencion) {
-          sumAnalisisCurso += getBusinessMilliseconds(times.atencion, times.resuelta);
-          cntAnalisisCurso++;
-        }
-        
-        if (times.resuelta && times.cerrada && times.cerrada > times.resuelta) {
-          sumCursoResuelta += getBusinessMilliseconds(times.resuelta, times.cerrada);
-          cntCursoResuelta++;
-        }
-        
-        if (isReopened) {
-          bugsReopened++;
-        }
+    const uniqueBugKeys = Array.from(new Set(bugKeys.map(k => String(k || '').trim()).filter(Boolean)));
+    const allBugIssues = [];
+    for (let i = 0; i < uniqueBugKeys.length; i += 50) {
+      const chunk = uniqueBugKeys.slice(i, i + 50);
+      const jql = `key in (${chunk.map(k => `"${k}"`).join(',')})`;
+      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jql,
+          expand: 'changelog',
+          fields: ['created', 'status', 'resolutiondate'],
+          maxResults: chunk.length
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        allBugIssues.push(...(data.issues || data.values || []));
+      }
+      if (i + 50 < uniqueBugKeys.length) {
+        await new Promise(r => setTimeout(r, 80));
+      }
+    }
 
-        if (typeof changelogMeta.resolutionBusinessHours === 'number' && !isNaN(changelogMeta.resolutionBusinessHours)) {
-          totalHours += changelogMeta.resolutionBusinessHours;
-          countTotal++;
-        } else {
-          const finalTime = times.cerrada || times.resuelta;
-          if (finalTime && finalTime > createdTime) {
-            totalHours += getBusinessMilliseconds(createdTime, finalTime) / (1000 * 60 * 60);
-            countTotal++;
+    for (const issue of allBugIssues) {
+      const changelog = issue.changelog?.histories || [];
+      const changelogMeta = analyzeBugChangelog(issue);
+      const baseStartStr = (changelogMeta.isReopened && changelogMeta.reopenedAt)
+        ? changelogMeta.reopenedAt
+        : (issue.fields?.created || null);
+      const createdTime = new Date(baseStartStr || Date.now()).getTime();
+      
+      let times = { atencion: null, resuelta: null, cerrada: null };
+      const isReopened = changelogMeta.isReopened;
+      
+      for (const history of changelog) {
+        const time = new Date(history.created).getTime();
+        if (time < createdTime) continue; // Only measure phases within the active cycle (after reopen if reopened)
+        const statusItem = (history.items || []).find(item => item.field === 'status');
+        if (statusItem) {
+          const toString = (statusItem.toString || '').toLowerCase();
+          
+          if (toString.includes('analisis') || toString.includes('análisis') || toString.includes('curso') || toString === 'in progress' || toString.includes('revis') || toString.includes('review')) {
+            if (!times.atencion || time < times.atencion) times.atencion = time;
+          } else if (toString.includes('resuelta') || toString === 'resolved' || toString === 'done' || toString.includes('listo')) {
+            if (!times.resuelta || time < times.resuelta) times.resuelta = time;
+          } else if (toString.includes('cerrada') || toString === 'closed' || toString.includes('aceptado')) {
+            if (!times.cerrada || time < times.cerrada) times.cerrada = time;
           }
+        }
+      }
+      
+      // Diffs in ms using Business Hours
+      if (times.atencion) {
+        sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.atencion);
+        cntNuevoAnalisis++;
+      } else if (times.resuelta) {
+        sumNuevoAnalisis += getBusinessMilliseconds(createdTime, times.resuelta);
+        cntNuevoAnalisis++;
+      }
+      
+      if (times.atencion && times.resuelta && times.resuelta > times.atencion) {
+        sumAnalisisCurso += getBusinessMilliseconds(times.atencion, times.resuelta);
+        cntAnalisisCurso++;
+      }
+      
+      if (times.resuelta && times.cerrada && times.cerrada > times.resuelta) {
+        sumCursoResuelta += getBusinessMilliseconds(times.resuelta, times.cerrada);
+        cntCursoResuelta++;
+      }
+      
+      if (isReopened) {
+        bugsReopened++;
+      }
+
+      if (typeof changelogMeta.resolutionBusinessHours === 'number' && !isNaN(changelogMeta.resolutionBusinessHours)) {
+        totalHours += changelogMeta.resolutionBusinessHours;
+        countTotal++;
+      } else {
+        const finalTime = times.cerrada || times.resuelta;
+        if (finalTime && finalTime > createdTime) {
+          totalHours += getBusinessMilliseconds(createdTime, finalTime) / (1000 * 60 * 60);
+          countTotal++;
         }
       }
     }
@@ -4108,32 +4146,41 @@ resolver.define('getBugsResolutionTime', async ({ payload }) => {
 
 resolver.define('getBugDetailsBatch', async ({ payload }) => {
   const { bugKeys } = payload;
-  if (!bugKeys || bugKeys.length === 0) return [];
+  if (!bugKeys || !Array.isArray(bugKeys) || bugKeys.length === 0) return [];
   
   try {
-    const jql = `key in (${bugKeys.join(',')})`;
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jql,
-        fields: ['summary', 'priority', 'status', 'assignee', 'resolution']
-      })
-    });
-    
-    if (!response.ok) {
-       console.error("Error fetching bugs", await response.text());
-       return [];
+    const uniqueBugKeys = Array.from(new Set(bugKeys.map(k => String(k || '').trim()).filter(Boolean)));
+    const allIssues = [];
+    for (let i = 0; i < uniqueBugKeys.length; i += 50) {
+      const chunk = uniqueBugKeys.slice(i, i + 50);
+      const jql = `key in (${chunk.map(k => `"${k}"`).join(',')})`;
+      const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jql,
+          fields: ['summary', 'priority', 'status', 'assignee', 'resolution'],
+          maxResults: chunk.length
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        allIssues.push(...(data.issues || data.values || []));
+      } else {
+        console.error("Error fetching bugs", await response.text());
+      }
+      if (i + 50 < uniqueBugKeys.length) {
+        await new Promise(r => setTimeout(r, 80));
+      }
     }
-    
-    const data = await response.json();
-    return (data.issues || []).map(issue => ({
+
+    return allIssues.map(issue => ({
       key: issue.key,
-      summary: issue.fields.summary,
-      priority: issue.fields.priority?.name || 'N/A',
-      status: issue.fields.status?.name || 'N/A',
-      assignee: issue.fields.assignee?.displayName || 'Unassigned',
-      resolution: issue.fields.resolution?.name || 'Unresolved'
+      summary: issue.fields?.summary,
+      priority: issue.fields?.priority?.name || 'N/A',
+      status: issue.fields?.status?.name || 'N/A',
+      assignee: issue.fields?.assignee?.displayName || 'Unassigned',
+      resolution: issue.fields?.resolution?.name || 'Unresolved'
     }));
   } catch (e) {
     console.error("Exception fetching bugs", e);
