@@ -326,10 +326,35 @@ resolver.define('getIssueLinkTypes', async () => {
   }
 });
 
+const REMOVED_DASHBOARD_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles_progress'];
+const GLOBAL_WIDGETS_KVS_KEY = 'testpulse_global_dashboard_widgets_v2';
+
+const sanitizeDashboardWidgetsList = (widgets) => {
+  if (!Array.isArray(widgets)) return null;
+  const cleaned = widgets.filter(w => w && w.type && !REMOVED_DASHBOARD_WIDGET_TYPES.includes(w.type));
+  return cleaned.length > 0 ? cleaned : null;
+};
+
 resolver.define('getConfig', async ({ payload }) => {
   const { projectId } = payload;
+  let globalWidgets = null;
+  try {
+    const rawGlobal = await storage.get(GLOBAL_WIDGETS_KVS_KEY);
+    globalWidgets = sanitizeDashboardWidgetsList(rawGlobal);
+  } catch (e) {}
+
+  const defaultConf = {
+    testCaseType: 'Test Case',
+    testCycleType: 'Test Cycle',
+    planIssueType: 'Test Set',
+    testRunType: 'Test Run',
+    requirementIssueTypes: [],
+    requirementLinkType: 'ANY',
+    ...(globalWidgets ? { dashboardWidgets: globalWidgets } : {})
+  };
+
   if (!projectId) {
-    return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
+    return defaultConf;
   }
 
   let retries = 3;
@@ -343,7 +368,7 @@ resolver.define('getConfig', async ({ payload }) => {
         continue;
       }
       if (response.status === 404) {
-        return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
+        return defaultConf;
       }
       if (!response.ok) {
         retries--;
@@ -353,7 +378,16 @@ resolver.define('getConfig', async ({ payload }) => {
       }
       const data = await response.json();
       const config = data?.value || {};
-      return {
+      const projectWidgets = sanitizeDashboardWidgetsList(config.dashboardWidgets);
+      const effectiveWidgets = globalWidgets || projectWidgets;
+
+      if (!globalWidgets && projectWidgets) {
+        try {
+          await storage.set(GLOBAL_WIDGETS_KVS_KEY, projectWidgets);
+        } catch (e) {}
+      }
+
+      const merged = {
         testCaseType: config.testCaseType || 'Test Case',
         testCycleType: config.testCycleType || 'Test Cycle',
         planIssueType: config.planIssueType || 'Test Set',
@@ -362,21 +396,37 @@ resolver.define('getConfig', async ({ payload }) => {
         requirementLinkType: config.requirementLinkType || 'ANY',
         ...config
       };
+
+      if (effectiveWidgets) {
+        merged.dashboardWidgets = effectiveWidgets;
+      } else {
+        delete merged.dashboardWidgets;
+      }
+
+      return merged;
     } catch (e) {
       retries--;
       if (retries < 0) break;
       await new Promise(r => setTimeout(r, 600));
     }
   }
-  return { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' };
+  return defaultConf;
 });
 
 resolver.define('setConfig', async ({ payload }) => {
   const { projectId, config } = payload;
+  const nextConfig = { ...(config || {}) };
+  if (Array.isArray(nextConfig.dashboardWidgets)) {
+    const sanitized = sanitizeDashboardWidgetsList(nextConfig.dashboardWidgets) || [];
+    nextConfig.dashboardWidgets = sanitized;
+    try {
+      await storage.set(GLOBAL_WIDGETS_KVS_KEY, sanitized);
+    } catch (e) {}
+  }
   const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(config)
+    body: JSON.stringify(nextConfig)
   });
   return { success: response.status >= 200 && response.status < 300 };
 });

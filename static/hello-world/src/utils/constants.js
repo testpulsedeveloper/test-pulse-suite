@@ -33,6 +33,8 @@ export const normalizeUiStatus = (status) => {
   return 'Not Run';
 };
 
+export const REMOVED_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles_progress'];
+
 export const DEFAULT_DASHBOARD_WIDGETS = [
   { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
   { id: 'w_tester_stats', type: 'tester_stats', title: 'Estado por QA Tester', width: 'half', visible: true },
@@ -48,24 +50,6 @@ export const AVAILABLE_WIDGET_CATALOG = [
     icon: '📊',
     defaultWidth: 'full',
     description: 'Scorecard con 5 tarjetas ejecutivas: Total de Casos, Tasa de Éxito, Defectos Abiertos, MTTR y Cobertura.'
-  },
-  {
-    type: 'general_status',
-    title: 'Estado General de Pruebas',
-    category: 'Calidad',
-    categoryColor: '#36B37E',
-    icon: '🍩',
-    defaultWidth: 'half',
-    description: 'Gráfico Donut interactivo con desglose de casos Pasados, Fallados, Bloqueados y Sin Ejecutar.'
-  },
-  {
-    type: 'manual_vs_auto',
-    title: 'Ejecución: Manual vs Auto',
-    category: 'Automatización',
-    categoryColor: '#6554C0',
-    icon: '⚡',
-    defaultWidth: 'half',
-    description: 'Comparativa de volumen, tasas de aprobación y velocidad entre pruebas automatizadas y manuales.'
   },
   {
     type: 'tester_stats',
@@ -84,15 +68,6 @@ export const AVAILABLE_WIDGET_CATALOG = [
     icon: '🧱',
     defaultWidth: 'half',
     description: 'Cobertura funcional agrupada por carpetas/módulos con semáforo de nivel de riesgo (Alto, Medio, Estable).'
-  },
-  {
-    type: 'cycles_progress',
-    title: 'Progreso por Ciclo de Pruebas',
-    category: 'Métricas',
-    categoryColor: '#0C66E4',
-    icon: '🔄',
-    defaultWidth: 'full',
-    description: 'Barras apiladas de avance individual para cada Ciclo de Pruebas activo en el proyecto.'
   },
   {
     type: 'severity_breakdown',

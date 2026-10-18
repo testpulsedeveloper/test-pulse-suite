@@ -13,6 +13,7 @@ import { generateQrSvg, generateQrDataUrl } from './utils/qrCodeGenerator';
 import {
   generateUUID,
   normalizeUiStatus,
+  REMOVED_WIDGET_TYPES,
   DEFAULT_DASHBOARD_WIDGETS,
   AVAILABLE_WIDGET_CATALOG,
   formatAttachmentSize,
@@ -881,38 +882,67 @@ function App() {
     !!(circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current)
   , []);
 
-  // Dashboard Customizable Widgets State
+  // Dashboard Customizable Widgets State (Global across all projects in Test Pulse)
+  const GLOBAL_WIDGETS_STORAGE_KEY = 'testpulse_global_dashboard_widgets_v2';
+  const sanitizeDashboardWidgets = (list) => {
+    if (!Array.isArray(list)) return [];
+    const allowedTypes = new Set(AVAILABLE_WIDGET_CATALOG.map(c => c.type));
+    return list.filter(w => w && w.type && !REMOVED_WIDGET_TYPES.includes(w.type) && allowedTypes.has(w.type));
+  };
+
   const [dashboardWidgets, setDashboardWidgets] = useState(DEFAULT_DASHBOARD_WIDGETS);
   const [isCustomizingDashboard, setIsCustomizingDashboard] = useState(false);
   const [showAddWidgetModal, setShowAddWidgetModal] = useState(false);
   const [draggedWidgetIndex, setDraggedWidgetIndex] = useState(null);
 
-  // Sync dashboardWidgets with projectConfig or localStorage
+  // Sync dashboardWidgets globally across projects
   useEffect(() => {
-    if (projectConfig?.dashboardWidgets && Array.isArray(projectConfig.dashboardWidgets) && projectConfig.dashboardWidgets.length > 0) {
-      setDashboardWidgets(projectConfig.dashboardWidgets);
-    } else if (selectedProjectId) {
+    const fromConfig = sanitizeDashboardWidgets(projectConfig?.dashboardWidgets);
+    if (fromConfig.length > 0) {
+      setDashboardWidgets(fromConfig);
       try {
-        const cached = localStorage.getItem(`testpulse_widgets_${selectedProjectId}`);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setDashboardWidgets(parsed);
+        localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(fromConfig));
+      } catch (e) {}
+      return;
+    }
+
+    try {
+      const globalCached = localStorage.getItem(GLOBAL_WIDGETS_STORAGE_KEY);
+      if (globalCached) {
+        const parsedGlobal = sanitizeDashboardWidgets(JSON.parse(globalCached));
+        if (parsedGlobal.length > 0) {
+          setDashboardWidgets(parsedGlobal);
+          return;
+        }
+      }
+      if (selectedProjectId) {
+        const legacyCached = localStorage.getItem(`testpulse_widgets_${selectedProjectId}`);
+        if (legacyCached) {
+          const parsedLegacy = sanitizeDashboardWidgets(JSON.parse(legacyCached));
+          if (parsedLegacy.length > 0) {
+            setDashboardWidgets(parsedLegacy);
+            localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(parsedLegacy));
             return;
           }
         }
-      } catch (e) {}
-      setDashboardWidgets(DEFAULT_DASHBOARD_WIDGETS);
-    }
+      }
+    } catch (e) {}
+
+    setDashboardWidgets(DEFAULT_DASHBOARD_WIDGETS);
   }, [projectConfig?.dashboardWidgets, selectedProjectId]);
 
   const handleSaveDashboardLayout = (newWidgets) => {
-    setDashboardWidgets(newWidgets);
+    const sanitized = sanitizeDashboardWidgets(newWidgets);
+    const finalWidgets = sanitized.length > 0 ? sanitized : DEFAULT_DASHBOARD_WIDGETS;
+    setDashboardWidgets(finalWidgets);
+    try {
+      localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(finalWidgets));
+      if (selectedProjectId) {
+        localStorage.setItem(`testpulse_widgets_${selectedProjectId}`, JSON.stringify(finalWidgets));
+      }
+    } catch (e) {}
     if (selectedProjectId) {
-      try {
-        localStorage.setItem(`testpulse_widgets_${selectedProjectId}`, JSON.stringify(newWidgets));
-      } catch (e) {}
-      const updatedConf = { ...projectConfig, dashboardWidgets: newWidgets };
+      const updatedConf = { ...projectConfig, dashboardWidgets: finalWidgets };
       setProjectConfig(updatedConf);
       invoke('setConfig', { projectId: selectedProjectId, config: updatedConf }).catch(() => {});
     }
@@ -13059,54 +13089,90 @@ Then el sistema valida la identidad.
                         <button
                           onClick={() => { setExecutionStatusFilter('ALL'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'ALL' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'ALL'
-                            ? { background: '#0C66E4', color: '#FFFFFF', border: '1px solid #0C66E4', boxShadow: '0 0 0 2px rgba(12, 102, 228, 0.22)', fontWeight: 700 }
-                            : { background: '#E9F2FF', color: '#0C66E4', border: '1px solid #B3D4FF', fontWeight: 600 }}
+                          style={{
+                            background: '#0C66E4',
+                            color: '#FFFFFF',
+                            border: '1px solid #0055CC',
+                            fontWeight: executionStatusFilter === 'ALL' ? 800 : 700,
+                            opacity: executionStatusFilter === 'ALL' ? 1 : 0.9,
+                            boxShadow: executionStatusFilter === 'ALL' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0C66E4' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'ALL' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           Todos {isLoadingCycleTests ? '(...)' : `(${pill.all})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Passed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Passed' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Passed'
-                            ? { background: '#216E4E', color: '#FFFFFF', border: '1px solid #216E4E', boxShadow: '0 0 0 2px rgba(33, 110, 78, 0.25)', fontWeight: 700 }
-                            : { background: '#DCFFF1', color: '#216E4E', border: '1px solid #7EE2B8', fontWeight: 600 }}
+                          style={{
+                            background: '#1F845A',
+                            color: '#FFFFFF',
+                            border: '1px solid #216E4E',
+                            fontWeight: executionStatusFilter === 'Passed' ? 800 : 700,
+                            opacity: executionStatusFilter === 'Passed' ? 1 : 0.9,
+                            boxShadow: executionStatusFilter === 'Passed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #1F845A' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'Passed' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           Passed {isLoadingCycleTests ? '(...)' : `(${pill.passed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Failed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Failed' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Failed'
-                            ? { background: '#C9372C', color: '#FFFFFF', border: '1px solid #C9372C', boxShadow: '0 0 0 2px rgba(201, 55, 44, 0.25)', fontWeight: 700 }
-                            : { background: '#FFECEB', color: '#AE2E24', border: '1px solid #FD9891', fontWeight: 600 }}
+                          style={{
+                            background: '#C9372C',
+                            color: '#FFFFFF',
+                            border: '1px solid #AE2E24',
+                            fontWeight: executionStatusFilter === 'Failed' ? 800 : 700,
+                            opacity: executionStatusFilter === 'Failed' ? 1 : 0.9,
+                            boxShadow: executionStatusFilter === 'Failed' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #C9372C' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'Failed' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           Failed {isLoadingCycleTests ? '(...)' : `(${pill.failed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Blocked'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Blocked' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Blocked'
-                            ? { background: '#E2B203', color: '#172B4D', border: '1px solid #CF9F02', boxShadow: '0 0 0 2px rgba(226, 178, 3, 0.3)', fontWeight: 700 }
-                            : { background: '#FFF7D6', color: '#946F00', border: '1px solid #F5CD47', fontWeight: 600 }}
+                          style={{
+                            background: '#E2B203',
+                            color: '#172B4D',
+                            border: '1px solid #CF9F02',
+                            fontWeight: executionStatusFilter === 'Blocked' ? 800 : 700,
+                            opacity: executionStatusFilter === 'Blocked' ? 1 : 0.92,
+                            boxShadow: executionStatusFilter === 'Blocked' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #CF9F02' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'Blocked' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           Blocked {isLoadingCycleTests ? '(...)' : `(${pill.blocked})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('In Progress'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'In Progress' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'In Progress'
-                            ? { background: '#0055CC', color: '#FFFFFF', border: '1px solid #0055CC', boxShadow: '0 0 0 2px rgba(0, 85, 204, 0.25)', fontWeight: 700 }
-                            : { background: '#E9F2FF', color: '#0055CC', border: '1px solid #85B8FF', fontWeight: 600 }}
+                          style={{
+                            background: '#0055CC',
+                            color: '#FFFFFF',
+                            border: '1px solid #0747A6',
+                            fontWeight: executionStatusFilter === 'In Progress' ? 800 : 700,
+                            opacity: executionStatusFilter === 'In Progress' ? 1 : 0.9,
+                            boxShadow: executionStatusFilter === 'In Progress' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #0055CC' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'In Progress' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           In Progress {isLoadingCycleTests ? '(...)' : `(${pill.inProgress})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Not Run'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Not Run' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Not Run'
-                            ? { background: '#44546F', color: '#FFFFFF', border: '1px solid #44546F', boxShadow: '0 0 0 2px rgba(68, 84, 111, 0.25)', fontWeight: 700 }
-                            : { background: '#F1F2F4', color: '#44546F', border: '1px solid #B3B9C4', fontWeight: 600 }}
+                          style={{
+                            background: '#5E6C84',
+                            color: '#FFFFFF',
+                            border: '1px solid #44546F',
+                            fontWeight: executionStatusFilter === 'Not Run' ? 800 : 700,
+                            opacity: executionStatusFilter === 'Not Run' ? 1 : 0.9,
+                            boxShadow: executionStatusFilter === 'Not Run' ? '0 0 0 2px #FFFFFF, 0 0 0 4px #44546F' : '0 1px 2px rgba(9, 30, 66, 0.12)',
+                            transform: executionStatusFilter === 'Not Run' ? 'translateY(-1px)' : 'none'
+                          }}
                         >
                           Not Run {isLoadingCycleTests ? '(...)' : `(${pill.notRun})`}
                         </button>
@@ -14349,10 +14415,11 @@ Then el sistema valida la identidad.
                                                 const iterPass = isPassed(iter.status);
                                                 const iterFail = isFailed(iter.status);
                                                 const iterBlock = isBlocked(iter.status);
-                                                const selectBorder = iterPass ? '#6EE7B7' : iterFail ? '#FDA4AF' : iterBlock ? '#FCD34D' : '#CBD5E1';
-                                                const selectBg = iterPass ? '#ECFDF5' : iterFail ? '#FFF1F2' : iterBlock ? '#FFFBEB' : '#F8FAFC';
-                                                const selectColor = iterPass ? '#065F46' : iterFail ? '#9F1239' : iterBlock ? '#92400E' : '#334155';
-                                                const chevronColor = iterPass ? '#047857' : iterFail ? '#BE123C' : iterBlock ? '#B45309' : '#64748B';
+                                                const iterInProg = isInProgress(iter.status);
+                                                const selectBorder = iterPass ? '#6EE7B7' : iterFail ? '#FDA4AF' : iterBlock ? '#FCD34D' : iterInProg ? '#85B8FF' : '#CBD5E1';
+                                                const selectBg = iterPass ? '#ECFDF5' : iterFail ? '#FFF1F2' : iterBlock ? '#FFFBEB' : iterInProg ? '#DEEBFF' : '#F8FAFC';
+                                                const selectColor = iterPass ? '#065F46' : iterFail ? '#9F1239' : iterBlock ? '#92400E' : iterInProg ? '#0747A6' : '#334155';
+                                                const chevronColor = iterPass ? '#047857' : iterFail ? '#BE123C' : iterBlock ? '#B45309' : iterInProg ? '#0055CC' : '#64748B';
                                                 const iterEvs = Array.isArray(iter.evidences) ? iter.evidences : [];
 
                                                 return (
