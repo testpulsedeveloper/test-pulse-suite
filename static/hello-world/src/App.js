@@ -35,7 +35,7 @@ import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '3.11.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.0.0'}`;
 
 function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmLabel = 'Confirmar', danger = false }) {
   if (!isOpen) return null;
