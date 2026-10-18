@@ -596,6 +596,7 @@ function App() {
   };
   const [reportSelectedPlans, setReportSelectedPlans] = useState([]);
   const [runsPlanDropdownOpen, setRunsPlanDropdownOpen] = useState(false);
+  const runsCycleCarouselRef = useRef(null);
   const [bugResolutionTime, setBugResolutionTime] = useState(null);
   const [reportSelectedCycles, setReportSelectedCycles] = useState([]);
   const [reportSelectedVersions, setReportSelectedVersions] = useState([]);
@@ -18818,169 +18819,329 @@ Then el sistema valida la identidad.
                   </div>
                 </div>
 
-                {/* Bottom Row: Horizontal Interactive Cycle Matrix */}
-                <div style={{ padding: '20px', background: 'rgba(248, 250, 252, 0.6)', borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px' }}>
-                  {/* Horizontal Cycle Cards Grid */}
+                {/* Bottom Row: Horizontal Interactive Cycle Carousel (Single Row: Newest -> Oldest) */}
+                <div style={{ padding: '16px 20px 20px 20px', background: 'rgba(248, 250, 252, 0.6)', borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px' }}>
                   {planCycles.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', fontSize: '13px' }}>
                       No hay ciclos de prueba registrados para este Test Plan.
                     </div>
                   ) : (
-                    <div style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
-                      gap: '12px'
-                    }}>
-                      {planCycles.map(c => {
-                        const st = getCycleStatsForHero(c);
-                        const isExplicitlySelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
-                        const isSelected = reportSelectedCycles.length === 0 || isExplicitlySelected;
+                    <div>
+                      {/* Carousel Header & Navigation Controls */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        marginBottom: '10px',
+                        flexWrap: 'wrap',
+                        gap: '8px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#475569' }}>
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '2px 8px',
+                            borderRadius: '9999px',
+                            background: '#EFF6FF',
+                            color: '#1D4ED8',
+                            fontWeight: 700,
+                            border: '1px solid #BFDBFE'
+                          }}>
+                            ← Más reciente a más antiguo →
+                          </span>
+                          <span style={{ color: '#64748B', fontWeight: 500 }}>
+                            {planCycles.length} {planCycles.length === 1 ? 'ciclo en este plan' : 'ciclos en este plan'} · Desliza horizontalmente para explorar el historial
+                          </span>
+                        </div>
 
-                        let statusBadgeBg = '#F1F5F9', statusBadgeColor = '#475569', statusBadgeLabel = 'PENDIENTE';
-                        if (st.cStatusKey === 'COMPLETED') {
-                          statusBadgeBg = '#ECFDF5';
-                          statusBadgeColor = '#047857';
-                          statusBadgeLabel = 'COMPLETADO';
-                        } else if (st.cStatusKey === 'IN_PROGRESS') {
-                          statusBadgeBg = '#EFF6FF';
-                          statusBadgeColor = '#1D4ED8';
-                          statusBadgeLabel = 'EN CURSO';
-                        } else if (st.cStatusKey === 'PAUSED') {
-                          statusBadgeBg = '#FFFBEB';
-                          statusBadgeColor = '#B45309';
-                          statusBadgeLabel = 'PAUSADO';
-                        }
-
-                        const sDate = c.startDate || c.plannedStartDate;
-                        const eDate = c.endDate || c.plannedEndDate;
-                        const dateRangeLabel = (sDate || eDate)
-                          ? `${sDate ? formatShortDateEs(sDate) : '—'} - ${eDate ? formatShortDateEs(eDate) : '—'}`
-                          : 'Ambiente QA';
-
-                        return (
-                          <div
-                            key={c.id}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <button
+                            type="button"
                             onClick={() => {
-                              if (reportSelectedCycles.length === 0) {
-                                // First click focuses on this specific cycle
-                                setReportSelectedCycles([String(c.id)]);
-                              } else if (isExplicitlySelected) {
-                                const next = reportSelectedCycles.filter(rcId => String(rcId) !== String(c.id));
-                                setReportSelectedCycles(next);
-                              } else {
-                                setReportSelectedCycles([...reportSelectedCycles, String(c.id)]);
+                              if (runsCycleCarouselRef.current) {
+                                runsCycleCarouselRef.current.scrollTo({ left: 0, behavior: 'smooth' });
                               }
                             }}
+                            title="Ir al ciclo más reciente (inicio)"
                             style={{
-                              position: 'relative',
-                              borderRadius: '12px',
-                              border: isSelected ? '2px solid #2563EB' : '1px solid #E2E8F0',
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
                               background: '#FFFFFF',
-                              padding: '14px',
-                              boxShadow: isSelected ? '0 2px 6px rgba(37, 99, 235, 0.08)' : 'none',
-                              opacity: isSelected ? 1 : 0.75,
+                              color: '#334155',
+                              fontSize: '11px',
+                              fontWeight: 600,
                               cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              justifyContent: 'space-between'
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
                             }}
                           >
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  <span style={{
-                                    width: '16px',
-                                    height: '16px',
-                                    borderRadius: '4px',
-                                    background: isSelected ? '#2563EB' : '#FFFFFF',
-                                    border: isSelected ? 'none' : '1px solid #CBD5E1',
-                                    color: '#FFFFFF',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center'
-                                  }}>
-                                    {isSelected && (
-                                      <svg style={{ width: '10px', height: '10px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
-                                      </svg>
-                                    )}
-                                  </span>
-                                </div>
-                                <span style={{
-                                  padding: '2px 6px',
-                                  borderRadius: '4px',
-                                  fontSize: '9px',
-                                  fontWeight: 700,
-                                  background: statusBadgeBg,
-                                  color: statusBadgeColor,
-                                  border: st.cStatusKey === 'IN_PROGRESS' ? '1px solid #BFDBFE' : st.cStatusKey === 'PAUSED' ? '1px solid #FDE68A' : 'none',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px'
-                                }}>
-                                  {st.cStatusKey === 'IN_PROGRESS' && (
-                                    <span style={{ width: '6px', height: '6px', borderRadius: '9999px', background: '#2563EB' }} />
-                                  )}
-                                  {statusBadgeLabel}
-                                </span>
-                              </div>
+                            ⏮ Más reciente
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (runsCycleCarouselRef.current) {
+                                runsCycleCarouselRef.current.scrollBy({ left: -700, behavior: 'smooth' });
+                              }
+                            }}
+                            title="Desplazar hacia la izquierda (más recientes)"
+                            style={{
+                              width: '28px',
+                              height: '26px',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
+                              background: '#FFFFFF',
+                              color: '#0F172A',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            ◀
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (runsCycleCarouselRef.current) {
+                                runsCycleCarouselRef.current.scrollBy({ left: 700, behavior: 'smooth' });
+                              }
+                            }}
+                            title="Desplazar hacia la derecha (más antiguos)"
+                            style={{
+                              width: '28px',
+                              height: '26px',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
+                              background: '#FFFFFF',
+                              color: '#0F172A',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            ▶
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (runsCycleCarouselRef.current) {
+                                runsCycleCarouselRef.current.scrollTo({
+                                  left: runsCycleCarouselRef.current.scrollWidth,
+                                  behavior: 'smooth'
+                                });
+                              }
+                            }}
+                            title="Ir al ciclo más antiguo (final)"
+                            style={{
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
+                              background: '#FFFFFF',
+                              color: '#334155',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                          >
+                            Más antiguo ⏭
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Single-Row Horizontal Carousel Track */}
+                      <div style={{ position: 'relative' }}>
+                        <div
+                          ref={runsCycleCarouselRef}
+                          style={{
+                            display: 'flex',
+                            flexWrap: 'nowrap',
+                            gap: '12px',
+                            overflowX: 'auto',
+                            scrollBehavior: 'smooth',
+                            padding: '2px 2px 10px 2px',
+                            scrollbarWidth: 'thin'
+                          }}
+                        >
+                          {planCycles.map((c, cIdx) => {
+                            const st = getCycleStatsForHero(c);
+                            const isExplicitlySelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
+                            const isSelected = reportSelectedCycles.length === 0 || isExplicitlySelected;
+
+                            let statusBadgeBg = '#F1F5F9', statusBadgeColor = '#475569', statusBadgeLabel = 'PENDIENTE';
+                            if (st.cStatusKey === 'COMPLETED') {
+                              statusBadgeBg = '#ECFDF5';
+                              statusBadgeColor = '#047857';
+                              statusBadgeLabel = 'COMPLETADO';
+                            } else if (st.cStatusKey === 'IN_PROGRESS') {
+                              statusBadgeBg = '#EFF6FF';
+                              statusBadgeColor = '#1D4ED8';
+                              statusBadgeLabel = 'EN CURSO';
+                            } else if (st.cStatusKey === 'PAUSED') {
+                              statusBadgeBg = '#FFFBEB';
+                              statusBadgeColor = '#B45309';
+                              statusBadgeLabel = 'PAUSADO';
+                            }
+
+                            const sDate = c.startDate || c.plannedStartDate;
+                            const eDate = c.endDate || c.plannedEndDate;
+                            const dateRangeLabel = (sDate || eDate)
+                              ? `${sDate ? formatShortDateEs(sDate) : '—'} - ${eDate ? formatShortDateEs(eDate) : '—'}`
+                              : 'Ambiente QA';
+
+                            return (
                               <div
-                                title={c.summary}
+                                key={c.id}
+                                onClick={() => {
+                                  if (reportSelectedCycles.length === 0) {
+                                    // First click focuses on this specific cycle
+                                    setReportSelectedCycles([String(c.id)]);
+                                  } else if (isExplicitlySelected) {
+                                    const next = reportSelectedCycles.filter(rcId => String(rcId) !== String(c.id));
+                                    setReportSelectedCycles(next);
+                                  } else {
+                                    setReportSelectedCycles([...reportSelectedCycles, String(c.id)]);
+                                  }
+                                }}
                                 style={{
-                                  fontSize: '12px',
-                                  fontWeight: 700,
-                                  color: '#0F172A',
-                                  marginBottom: '2px',
-                                  whiteSpace: 'nowrap',
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis'
+                                  flex: '0 0 225px',
+                                  minWidth: '225px',
+                                  maxWidth: '225px',
+                                  position: 'relative',
+                                  borderRadius: '12px',
+                                  border: isSelected ? '2px solid #2563EB' : '1px solid #E2E8F0',
+                                  background: '#FFFFFF',
+                                  padding: '14px',
+                                  boxShadow: isSelected ? '0 2px 6px rgba(37, 99, 235, 0.08)' : 'none',
+                                  opacity: isSelected ? 1 : 0.75,
+                                  cursor: 'pointer',
+                                  transition: 'all 0.15s ease',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  justifyContent: 'space-between',
+                                  boxSizing: 'border-box'
                                 }}
                               >
-                                {c.summary}
-                              </div>
-                              <div style={{ fontSize: '10px', color: '#64748B', marginBottom: '10px' }}>
-                                {c.environment || 'QA'} · {dateRangeLabel}
-                              </div>
-                            </div>
-
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', marginBottom: '4px' }}>
-                                <span style={{
-                                  fontWeight: 600,
-                                  color: st.cStatusKey === 'IN_PROGRESS' ? '#1D4ED8' : st.cStatusKey === 'PAUSED' ? '#B45309' : '#475569'
-                                }}>
-                                  {st.cStatusKey === 'IN_PROGRESS' ? 'En Ejecución' : st.cStatusKey === 'PAUSED' ? 'Detenido' : 'Progreso'}
-                                </span>
-                                <span style={{ fontWeight: 800, color: '#0F172A' }}>
-                                  {st.cPct}% ({st.cEval}/{st.cTotal})
-                                </span>
-                              </div>
-                              <div style={{ width: '100%', height: '6px', background: '#F1F5F9', borderRadius: '9999px', overflow: 'hidden', display: 'flex', marginBottom: '8px' }}>
-                                <div style={{ width: `${st.passW}%`, height: '100%', background: '#10B981' }} />
-                                <div style={{ width: `${st.failW}%`, height: '100%', background: '#F43F5E' }} />
-                                <div style={{ width: `${st.blockW}%`, height: '100%', background: '#F59E0B' }} />
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', paddingTop: '6px', borderTop: '1px solid #F1F5F9' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  <span style={{ color: '#047857', fontWeight: 700 }}>✓ {st.cPass}</span>
-                                  <span style={{ color: st.cFail > 0 ? '#BE123C' : '#94A3B8', fontWeight: 700 }}>✕ {st.cFail}</span>
-                                  <span style={{ color: st.cBlock > 0 ? '#B45309' : '#94A3B8', fontWeight: 700 }}>⊘ {st.cBlock}</span>
+                                <div>
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <span style={{
+                                        width: '16px',
+                                        height: '16px',
+                                        borderRadius: '4px',
+                                        background: isSelected ? '#2563EB' : '#FFFFFF',
+                                        border: isSelected ? 'none' : '1px solid #CBD5E1',
+                                        color: '#FFFFFF',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center'
+                                      }}>
+                                        {isSelected && (
+                                          <svg style={{ width: '10px', height: '10px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                                          </svg>
+                                        )}
+                                      </span>
+                                      {cIdx === 0 && (
+                                        <span style={{
+                                          fontSize: '9px',
+                                          fontWeight: 700,
+                                          color: '#2563EB',
+                                          background: '#EFF6FF',
+                                          padding: '1px 5px',
+                                          borderRadius: '4px'
+                                        }}>
+                                          NUEVO
+                                        </span>
+                                      )}
+                                    </div>
+                                    <span style={{
+                                      padding: '2px 6px',
+                                      borderRadius: '4px',
+                                      fontSize: '9px',
+                                      fontWeight: 700,
+                                      background: statusBadgeBg,
+                                      color: statusBadgeColor,
+                                      border: st.cStatusKey === 'IN_PROGRESS' ? '1px solid #BFDBFE' : st.cStatusKey === 'PAUSED' ? '1px solid #FDE68A' : 'none',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '4px'
+                                    }}>
+                                      {st.cStatusKey === 'IN_PROGRESS' && (
+                                        <span style={{ width: '6px', height: '6px', borderRadius: '9999px', background: '#2563EB' }} />
+                                      )}
+                                      {statusBadgeLabel}
+                                    </span>
+                                  </div>
+                                  <div
+                                    title={c.summary}
+                                    style={{
+                                      fontSize: '12px',
+                                      fontWeight: 700,
+                                      color: '#0F172A',
+                                      marginBottom: '2px',
+                                      whiteSpace: 'nowrap',
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis'
+                                    }}
+                                  >
+                                    {c.summary}
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#64748B', marginBottom: '10px' }}>
+                                    {c.environment || 'QA'} · {dateRangeLabel}
+                                  </div>
                                 </div>
-                                <span style={{
-                                  color: st.cBugs > 0 ? '#BE123C' : '#64748B',
-                                  fontWeight: st.cBugs > 0 ? 700 : 600,
-                                  background: st.cBugs > 0 ? '#FFF1F2' : 'transparent',
-                                  padding: st.cBugs > 0 ? '1px 6px' : 0,
-                                  borderRadius: '4px'
-                                }}>
-                                  {st.cBugs > 0 ? `🐞 ${st.cBugs} Bugs` : 'Sin Bugs'}
-                                </span>
+
+                                <div>
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', marginBottom: '4px' }}>
+                                    <span style={{
+                                      fontWeight: 600,
+                                      color: st.cStatusKey === 'IN_PROGRESS' ? '#1D4ED8' : st.cStatusKey === 'PAUSED' ? '#B45309' : '#475569'
+                                    }}>
+                                      {st.cStatusKey === 'IN_PROGRESS' ? 'En Ejecución' : st.cStatusKey === 'PAUSED' ? 'Detenido' : 'Progreso'}
+                                    </span>
+                                    <span style={{ fontWeight: 800, color: '#0F172A' }}>
+                                      {st.cPct}% ({st.cEval}/{st.cTotal})
+                                    </span>
+                                  </div>
+                                  <div style={{ width: '100%', height: '6px', background: '#F1F5F9', borderRadius: '9999px', overflow: 'hidden', display: 'flex', marginBottom: '8px' }}>
+                                    <div style={{ width: `${st.passW}%`, height: '100%', background: '#10B981' }} />
+                                    <div style={{ width: `${st.failW}%`, height: '100%', background: '#F43F5E' }} />
+                                    <div style={{ width: `${st.blockW}%`, height: '100%', background: '#F59E0B' }} />
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', paddingTop: '6px', borderTop: '1px solid #F1F5F9' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <span style={{ color: '#047857', fontWeight: 700 }}>✓ {st.cPass}</span>
+                                      <span style={{ color: st.cFail > 0 ? '#BE123C' : '#94A3B8', fontWeight: 700 }}>✕ {st.cFail}</span>
+                                      <span style={{ color: st.cBlock > 0 ? '#B45309' : '#94A3B8', fontWeight: 700 }}>⊘ {st.cBlock}</span>
+                                    </div>
+                                    <span style={{
+                                      color: st.cBugs > 0 ? '#BE123C' : '#64748B',
+                                      fontWeight: st.cBugs > 0 ? 700 : 600,
+                                      background: st.cBugs > 0 ? '#FFF1F2' : 'transparent',
+                                      padding: st.cBugs > 0 ? '1px 6px' : 0,
+                                      borderRadius: '4px'
+                                    }}>
+                                      {st.cBugs > 0 ? `🐞 ${st.cBugs} Bugs` : 'Sin Bugs'}
+                                    </span>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        );
-                      })}
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   )}
 
@@ -19179,7 +19340,7 @@ Then el sistema valida la identidad.
             {/* Dynamic Grid of Configured Widgets */}
               <div className="dashboard-widgets-grid">
                 {dashboardWidgets
-                  .filter(w => w.visible !== false)
+                  .filter(w => w.visible !== false && !['general_status', 'manual_vs_auto', 'cycles_progress'].includes(w.type))
                   .map((widget, index) => {
                     const isFull = widget.width === 'full';
                     const isDragging = draggedWidgetIndex === index;
@@ -19423,154 +19584,6 @@ Then el sistema valida la identidad.
                           </div>
                         )}
 
-                        {widget.type === 'general_status' && (
-                          <div className="dashboard-card" style={{ height: '100%' }}>
-                            <div className="dashboard-card-header">
-                              <div className="dashboard-card-title">
-                                <span>🔄</span>
-                                <span>Estado General de Pruebas</span>
-                              </div>
-                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
-                                {allTotal.toLocaleString()} TOTAL
-                              </span>
-                            </div>
-
-                            <div className="dashboard-donut-wrapper">
-                              <div style={{ position: 'relative', width: '150px', height: '150px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                <svg viewBox="0 0 42 42" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
-                                  <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#EBECF0" strokeWidth="7.5" />
-                                  {allTotal > 0 && (
-                                    <>
-                                      {pPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#36B37E" strokeWidth="7.5" strokeDasharray={`${pPct} ${100 - pPct}`} strokeDashoffset="0" />}
-                                      {fPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#DE350B" strokeWidth="7.5" strokeDasharray={`${fPct} ${100 - fPct}`} strokeDashoffset={`${-pPct}`} />}
-                                      {bPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#FFAB00" strokeWidth="7.5" strokeDasharray={`${bPct} ${100 - bPct}`} strokeDashoffset={`${-(pPct + fPct)}`} />}
-                                      {nPct > 0 && <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#0C66E4" strokeWidth="7.5" strokeDasharray={`${nPct} ${100 - nPct}`} strokeDashoffset={`${-(pPct + fPct + bPct)}`} />}
-                                    </>
-                                  )}
-                                </svg>
-                              </div>
-
-                              <div className="dashboard-status-list" style={{ flex: 1 }}>
-                                <div className="dashboard-status-row">
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#36B37E' }} />
-                                    <span style={{ fontWeight: 600 }}>Pasados</span>
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontWeight: 700 }}>{passed}</span>
-                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({pPct.toFixed(1)}%)</span>
-                                  </div>
-                                </div>
-
-                                <div className="dashboard-status-row">
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#DE350B' }} />
-                                    <span style={{ fontWeight: 600 }}>Fallados</span>
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontWeight: 700 }}>{failed}</span>
-                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({fPct.toFixed(1)}%)</span>
-                                  </div>
-                                </div>
-
-                                <div className="dashboard-status-row">
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#FFAB00' }} />
-                                    <span style={{ fontWeight: 600 }}>Bloqueados</span>
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontWeight: 700 }}>{blocked}</span>
-                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({bPct.toFixed(1)}%)</span>
-                                  </div>
-                                </div>
-
-                                <div className="dashboard-status-row">
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', backgroundColor: '#0C66E4' }} />
-                                    <span style={{ fontWeight: 600 }}>Sin Ejecutar</span>
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontWeight: 700 }}>{notRun}</span>
-                                    <span style={{ fontSize: '11px', color: 'var(--jira-subtle)' }}>({nPct.toFixed(1)}%)</span>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {widget.type === 'manual_vs_auto' && (
-                          <div className="dashboard-card" style={{ height: '100%' }}>
-                            <div className="dashboard-card-header">
-                              <div className="dashboard-card-title">
-                                <span>⚡</span>
-                                <span>Ejecución: Manual vs Auto</span>
-                              </div>
-                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                                Velocidad &amp; Calidad
-                              </span>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '0.5rem 0' }}>
-                              {/* Automatizada */}
-                              <div className="dashboard-track-box">
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span>🤖 Automatizada</span>
-                                    <span className="ads-lozenge ads-lozenge-success" style={{ fontSize: '10px' }}>{autoPassPct}% Pass</span>
-                                  </div>
-                                  <span style={{ color: 'var(--jira-subtle)' }}>{execStats.auto.total} pruebas</span>
-                                </div>
-                                <div className="dashboard-stacked-bar">
-                                  {execStats.auto.total > 0 ? (
-                                    <>
-                                      {execStats.auto.passed > 0 && <div style={{ width: `${(execStats.auto.passed / execStats.auto.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.auto.passed}`} />}
-                                      {execStats.auto.failed > 0 && <div style={{ width: `${(execStats.auto.failed / execStats.auto.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.auto.failed}`} />}
-                                      {execStats.auto.blocked > 0 && <div style={{ width: `${(execStats.auto.blocked / execStats.auto.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.auto.blocked}`} />}
-                                      {execStats.auto.notRun > 0 && <div style={{ width: `${(execStats.auto.notRun / execStats.auto.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.auto.notRun}`} />}
-                                    </>
-                                  ) : (
-                                    <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                                  )}
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
-                                  <span>● {execStats.auto.passed} Pasadas</span>
-                                  <span>● {execStats.auto.failed} Falladas</span>
-                                  <span>● {execStats.auto.notRun} Pendientes</span>
-                                </div>
-                              </div>
-
-                              {/* Manual */}
-                              <div className="dashboard-track-box">
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span>👤 Manual (QA)</span>
-                                    <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{manualPassPct}% Pass</span>
-                                  </div>
-                                  <span style={{ color: 'var(--jira-subtle)' }}>{execStats.manual.total} pruebas</span>
-                                </div>
-                                <div className="dashboard-stacked-bar">
-                                  {execStats.manual.total > 0 ? (
-                                    <>
-                                      {execStats.manual.passed > 0 && <div style={{ width: `${(execStats.manual.passed / execStats.manual.total) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasadas: ${execStats.manual.passed}`} />}
-                                      {execStats.manual.failed > 0 && <div style={{ width: `${(execStats.manual.failed / execStats.manual.total) * 100}%`, backgroundColor: '#DE350B' }} title={`Falladas: ${execStats.manual.failed}`} />}
-                                      {execStats.manual.blocked > 0 && <div style={{ width: `${(execStats.manual.blocked / execStats.manual.total) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueadas: ${execStats.manual.blocked}`} />}
-                                      {execStats.manual.notRun > 0 && <div style={{ width: `${(execStats.manual.notRun / execStats.manual.total) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${execStats.manual.notRun}`} />}
-                                    </>
-                                  ) : (
-                                    <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                                  )}
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--jira-subtle)' }}>
-                                  <span>● {execStats.manual.passed} Pasadas</span>
-                                  <span>● {execStats.manual.failed} Falladas</span>
-                                  <span>● {execStats.manual.notRun} Pendientes</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
                         {widget.type === 'tester_stats' && (
                           <div className="dashboard-card" style={{ height: '100%' }}>
                             <div className="dashboard-card-header">
@@ -19658,66 +19671,6 @@ Then el sistema valida la identidad.
                               ) : (
                                 <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px' }}>
                                   Sin pruebas funcionales registradas
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        {widget.type === 'cycles_progress' && (
-                          <div className="dashboard-card" style={{ height: '100%' }}>
-                            <div className="dashboard-card-header">
-                              <div className="dashboard-card-title">
-                                <span>🔄</span>
-                                <span>Progreso por Ciclo de Pruebas</span>
-                              </div>
-                              <span style={{ fontSize: '11px', background: '#F1F2F4', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                                {filteredCycles.length} Ciclos Activos
-                              </span>
-                            </div>
-
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.85rem', padding: '0.5rem 0', maxHeight: '280px', overflowY: 'auto' }}>
-                              {filteredCycles.length > 0 ? (
-                                filteredCycles.map(cycle => {
-                                  let cPassed = 0, cFailed = 0, cBlocked = 0, cNotRun = 0;
-                                  if (cycle.execution && Array.isArray(cycle.execution)) {
-                                    cycle.execution.forEach(ex => {
-                                      const normS = normalizeUiStatus(ex.status);
-                                      if (normS === 'Passed') cPassed++;
-                                      else if (normS === 'Failed') cFailed++;
-                                      else if (normS === 'Blocked') cBlocked++;
-                                      else cNotRun++;
-                                    });
-                                  }
-                                  const cTotal = cPassed + cFailed + cBlocked + cNotRun;
-                                  const cPassPct = cTotal > 0 ? Math.round((cPassed / cTotal) * 100) : 0;
-
-                                  return (
-                                    <div key={cycle.id} className="dashboard-track-box" style={{ margin: 0 }}>
-                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
-                                        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '180px' }} title={cycle.summary}>
-                                          {cycle.summary}
-                                        </span>
-                                        <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>{cTotal} casos · {cPassPct}%</span>
-                                      </div>
-                                      <div className="dashboard-stacked-bar" style={{ height: '10px' }}>
-                                        {cTotal > 0 ? (
-                                          <>
-                                            {cPassed > 0 && <div style={{ width: `${(cPassed / cTotal) * 100}%`, backgroundColor: '#36B37E' }} title={`Pasados: ${cPassed}`} />}
-                                            {cFailed > 0 && <div style={{ width: `${(cFailed / cTotal) * 100}%`, backgroundColor: '#DE350B' }} title={`Fallados: ${cFailed}`} />}
-                                            {cBlocked > 0 && <div style={{ width: `${(cBlocked / cTotal) * 100}%`, backgroundColor: '#FFAB00' }} title={`Bloqueados: ${cBlocked}`} />}
-                                            {cNotRun > 0 && <div style={{ width: `${(cNotRun / cTotal) * 100}%`, backgroundColor: '#0C66E4' }} title={`Sin ejecutar: ${cNotRun}`} />}
-                                          </>
-                                        ) : (
-                                          <div style={{ width: '100%', height: '100%', backgroundColor: '#F1F2F4' }} />
-                                        )}
-                                      </div>
-                                    </div>
-                                  );
-                                })
-                              ) : (
-                                <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '1rem', fontSize: '12px', gridColumn: '1 / -1' }}>
-                                  No hay ciclos de prueba seleccionados
                                 </div>
                               )}
                             </div>

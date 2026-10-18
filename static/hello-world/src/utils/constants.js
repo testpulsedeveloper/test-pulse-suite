@@ -35,11 +35,8 @@ export const normalizeUiStatus = (status) => {
 
 export const DEFAULT_DASHBOARD_WIDGETS = [
   { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
-  { id: 'w_general_status', type: 'general_status', title: 'Estado General de Pruebas', width: 'half', visible: true },
-  { id: 'w_manual_vs_auto', type: 'manual_vs_auto', title: 'Ejecución: Manual vs Auto', width: 'half', visible: true },
   { id: 'w_tester_stats', type: 'tester_stats', title: 'Estado por QA Tester', width: 'half', visible: true },
   { id: 'w_module_stats', type: 'module_stats', title: 'Estado por Módulo / Funcionalidad', width: 'half', visible: true },
-  { id: 'w_cycles_progress', type: 'cycles_progress', title: 'Progreso por Ciclo de Pruebas', width: 'full', visible: true },
 ];
 
 export const AVAILABLE_WIDGET_CATALOG = [
