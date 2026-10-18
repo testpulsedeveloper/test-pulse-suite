@@ -18983,7 +18983,7 @@ Then el sistema valida la identidad.
                 </div>
 
                 {/* Bottom Row: Horizontal Interactive Cycle Carousel (Single Row: Newest -> Oldest) */}
-                <div style={{ padding: '16px 20px 20px 20px', background: 'rgba(248, 250, 252, 0.6)', borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px' }}>
+                <div style={{ padding: '12px 20px 14px 20px', background: 'rgba(248, 250, 252, 0.6)', borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px' }}>
                   {planCycles.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', fontSize: '13px' }}>
                       No hay ciclos de prueba registrados para este Test Plan.
@@ -18995,7 +18995,7 @@ Then el sistema valida la identidad.
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        marginBottom: '10px',
+                        marginBottom: '8px',
                         flexWrap: 'wrap',
                         gap: '8px'
                       }}>
@@ -19014,7 +19014,7 @@ Then el sistema valida la identidad.
                             ← Más reciente a más antiguo →
                           </span>
                           <span style={{ color: '#64748B', fontWeight: 500 }}>
-                            {planCycles.length} {planCycles.length === 1 ? 'ciclo en este plan' : 'ciclos en este plan'} · Desliza horizontalmente para explorar el historial
+                            {planCycles.length} {planCycles.length === 1 ? 'ciclo en este plan' : 'ciclos en este plan'} · Pasa el cursor sobre los ciclos para ver el detalle o desliza horizontalmente
                           </span>
                         </div>
 
@@ -19124,7 +19124,7 @@ Then el sistema valida la identidad.
                       </div>
 
                       {/* Single-Row Horizontal Carousel Track */}
-                      <div style={{ position: 'relative' }}>
+                      <div className="runs-cycle-carousel-zone" style={{ position: 'relative' }}>
                         <div
                           ref={runsCycleCarouselRef}
                           style={{
@@ -19133,7 +19133,7 @@ Then el sistema valida la identidad.
                             gap: '12px',
                             overflowX: 'auto',
                             scrollBehavior: 'smooth',
-                            padding: '2px 2px 10px 2px',
+                            padding: '2px 2px 8px 2px',
                             scrollbarWidth: 'thin'
                           }}
                         >
@@ -19166,6 +19166,7 @@ Then el sistema valida la identidad.
                             return (
                               <div
                                 key={c.id}
+                                className="runs-cycle-card"
                                 onClick={() => {
                                   if (reportSelectedCycles.length === 0) {
                                     // First click focuses on this specific cycle
@@ -19185,12 +19186,10 @@ Then el sistema valida la identidad.
                                   borderRadius: '12px',
                                   border: isSelected ? '2px solid #2563EB' : '1px solid #CBD5E1',
                                   background: isSelected ? '#FFFFFF' : '#F1F5F9',
-                                  padding: '14px',
                                   boxShadow: isSelected ? '0 2px 6px rgba(37, 99, 235, 0.08)' : 'none',
                                   opacity: isSelected ? 1 : 0.45,
                                   filter: isSelected ? 'none' : 'grayscale(100%)',
                                   cursor: 'pointer',
-                                  transition: 'all 0.15s ease',
                                   display: 'flex',
                                   flexDirection: 'column',
                                   justifyContent: 'space-between',
@@ -19198,7 +19197,7 @@ Then el sistema valida la identidad.
                                 }}
                               >
                                 <div>
-                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                       <span style={{
                                         width: '16px',
@@ -19254,7 +19253,6 @@ Then el sistema valida la identidad.
                                       fontSize: '12px',
                                       fontWeight: 700,
                                       color: '#0F172A',
-                                      marginBottom: '2px',
                                       whiteSpace: 'nowrap',
                                       overflow: 'hidden',
                                       textOverflow: 'ellipsis'
@@ -19262,12 +19260,12 @@ Then el sistema valida la identidad.
                                   >
                                     {c.summary}
                                   </div>
-                                  <div style={{ fontSize: '10px', color: '#64748B', marginBottom: '10px' }}>
-                                    {c.environment || 'QA'} · {dateRangeLabel}
-                                  </div>
                                 </div>
 
-                                <div>
+                                <div className="runs-cycle-card-collapsible">
+                                  <div style={{ fontSize: '10px', color: '#64748B', marginTop: '2px', marginBottom: '10px' }}>
+                                    {c.environment || 'QA'} · {dateRangeLabel}
+                                  </div>
                                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', marginBottom: '4px' }}>
                                     <span style={{
                                       fontWeight: 600,
@@ -19311,8 +19309,8 @@ Then el sistema valida la identidad.
 
                   {/* Active Selection Summary Bar */}
                   <div style={{
-                    marginTop: '16px',
-                    paddingTop: '12px',
+                    marginTop: '10px',
+                    paddingTop: '10px',
                     borderTop: '1px solid rgba(226, 232, 240, 0.8)',
                     display: 'flex',
                     flexWrap: 'wrap',
