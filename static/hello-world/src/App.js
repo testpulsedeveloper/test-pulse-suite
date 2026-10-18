@@ -19119,20 +19119,6 @@ Then el sistema valida la identidad.
                       </div>
                       <span style={{ fontSize: '10px', color: '#64748B' }}>{planBurnSubtext}</span>
                     </div>
-
-                    <div style={{ height: '40px', width: '1px', background: '#E2E8F0' }} />
-
-                    {/* Environment & Scope */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.04em' }}>AMBIENTE &amp; COBERTURA</span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#F1F5F9', color: '#334155', fontSize: '11px', fontWeight: 700, border: '1px solid #CBD5E1' }}>QA</span>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#EEF2FF', color: '#4338CA', fontSize: '11px', fontWeight: 700, border: '1px solid #C7D2FE' }}>100% Req. Cubiertos</span>
-                      </div>
-                      <span style={{ fontSize: '10px', color: '#64748B' }}>
-                        {planCompletedCyclesCount} Completados · {planActiveCyclesCount} Activos · {planPendingCyclesCount} Pendientes
-                      </span>
-                    </div>
                   </div>
                 </div>
 
