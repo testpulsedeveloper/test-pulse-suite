@@ -385,13 +385,62 @@ export function registerConfigResolvers(resolver) {
     }
   });
 
+  /**
+   * ==========================================================================
+   * IMMUTABLE ATTACHMENT BINARY CACHE (LRU + In-Flight Deduplication)
+   * ==========================================================================
+   * Jira attachment IDs are immutable once uploaded. Caching the resolved
+   * base64 payload in a bounded LRU map (max 40 items / 25 MB total base64 chars)
+   * prevents redundant downloads when multiple users or views inspect the same
+   * evidence screenshot/PDF/video, while strictly bounding Lambda memory.
+   */
+  const MAX_ATTACHMENT_CACHE_ITEMS = 40;
+  const MAX_ATTACHMENT_CACHE_CHARS = 25 * 1024 * 1024; // ~25 MB base64 cap
+  const MAX_SINGLE_CACHED_CHARS = 6 * 1024 * 1024; // Only cache individual files up to ~4.5 MB raw
+  const _attachmentContentCache = new Map();
+  const _attachmentInFlight = new Map();
+  let _attachmentCacheTotalChars = 0;
+
+  const evictAttachmentFromCache = (attId) => {
+    const key = String(attId || '');
+    const existing = _attachmentContentCache.get(key);
+    if (existing) {
+      _attachmentCacheTotalChars = Math.max(0, _attachmentCacheTotalChars - (existing.base64?.length || 0));
+      _attachmentContentCache.delete(key);
+    }
+  };
+
+  const storeAttachmentInCache = (attId, entry) => {
+    const key = String(attId || '');
+    const size = entry?.base64?.length || 0;
+    if (!size || size > MAX_SINGLE_CACHED_CHARS) return;
+
+    if (_attachmentContentCache.has(key)) {
+      evictAttachmentFromCache(key);
+    }
+    while (
+      _attachmentContentCache.size >= MAX_ATTACHMENT_CACHE_ITEMS ||
+      (_attachmentCacheTotalChars + size > MAX_ATTACHMENT_CACHE_CHARS && _attachmentContentCache.size > 0)
+    ) {
+      const oldestKey = _attachmentContentCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      evictAttachmentFromCache(oldestKey);
+    }
+    _attachmentContentCache.set(key, entry);
+    _attachmentCacheTotalChars += size;
+  };
+
   resolver.define('deleteAttachment', async ({ payload }) => {
     const { attachmentId } = payload;
     try {
       const response = await api.asUser().requestJira(route`/rest/api/3/attachment/${attachmentId}`, {
         method: 'DELETE'
       });
-      return { success: response.status === 204 || response.status === 200 };
+      const ok = response.status === 204 || response.status === 200;
+      if (ok) {
+        evictAttachmentFromCache(attachmentId);
+      }
+      return { success: ok };
     } catch (e) {
       console.error('deleteAttachment error:', e);
       return { success: false, error: e.message };
@@ -400,17 +449,46 @@ export function registerConfigResolvers(resolver) {
 
   resolver.define('getAttachmentContent', async ({ payload }) => {
     const { attachmentId } = payload;
-    try {
-      const response = await api.asUser().requestJira(route`/rest/api/3/attachment/content/${attachmentId}`);
-      if (response.status !== 200) {
-        throw new Error(`Failed to fetch attachment content, status: ${response.status}`);
-      }
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      return { base64: buffer.toString('base64'), mimeType: response.headers.get('content-type') };
-    } catch (e) {
-      console.error('getAttachmentContent error:', e);
-      return { error: e.message };
+    const key = String(attachmentId || '');
+    if (!key) return { error: 'Missing attachmentId' };
+
+    // 1. Return immediately if present in bounded LRU cache
+    if (_attachmentContentCache.has(key)) {
+      const hit = _attachmentContentCache.get(key);
+      // Refresh LRU position
+      _attachmentContentCache.delete(key);
+      _attachmentContentCache.set(key, hit);
+      return hit;
     }
+
+    // 2. Deduplicate concurrent requests for the same attachmentId
+    if (_attachmentInFlight.has(key)) {
+      return _attachmentInFlight.get(key);
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const response = await api.asUser().requestJira(route`/rest/api/3/attachment/content/${attachmentId}`);
+        if (response.status !== 200) {
+          throw new Error(`Failed to fetch attachment content, status: ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const result = {
+          base64: buffer.toString('base64'),
+          mimeType: response.headers.get('content-type')
+        };
+        storeAttachmentInCache(key, result);
+        return result;
+      } catch (e) {
+        console.error('getAttachmentContent error:', e);
+        return { error: e.message };
+      } finally {
+        _attachmentInFlight.delete(key);
+      }
+    })();
+
+    _attachmentInFlight.set(key, fetchPromise);
+    return fetchPromise;
   });
 }

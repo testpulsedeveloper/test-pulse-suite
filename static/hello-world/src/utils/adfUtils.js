@@ -6,16 +6,48 @@ import { formatAttachmentSize } from './constants';
  * Prevents redundant network calls when the same image appears both inline in
  * the ADF description/comments and in the attachment gallery below.
  */
+const MAX_ATTACHMENT_BLOB_CACHE = 80;
 const attachmentBlobCache = new Map();
 const attachmentPendingMap = new Map();
+
+/**
+ * Stores a resolved blob entry in the bounded LRU cache and revokes the oldest
+ * ObjectURL if the cache exceeds MAX_ATTACHMENT_BLOB_CACHE entries.
+ */
+function setCachedAttachmentBlob(key, entry) {
+  if (attachmentBlobCache.has(key)) {
+    attachmentBlobCache.delete(key);
+  } else if (attachmentBlobCache.size >= MAX_ATTACHMENT_BLOB_CACHE) {
+    const oldestKey = attachmentBlobCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      const oldest = attachmentBlobCache.get(oldestKey);
+      attachmentBlobCache.delete(oldestKey);
+      if (oldest && oldest.blobUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        try {
+          URL.revokeObjectURL(oldest.blobUrl);
+        } catch (_e) {
+          // Ignore revoke errors
+        }
+      }
+    }
+  }
+  attachmentBlobCache.set(key, entry);
+}
 
 /**
  * Synchronously retrieves a previously cached blobUrl for an attachment ID, if available.
  */
 export function getCachedAttachmentBlobUrl(attachmentId) {
   if (!attachmentId) return null;
-  const cached = attachmentBlobCache.get(String(attachmentId));
-  return cached ? cached.blobUrl : null;
+  const key = String(attachmentId);
+  const cached = attachmentBlobCache.get(key);
+  if (cached) {
+    // Refresh LRU order on access
+    attachmentBlobCache.delete(key);
+    attachmentBlobCache.set(key, cached);
+    return cached.blobUrl;
+  }
+  return null;
 }
 
 /**
@@ -29,7 +61,10 @@ export async function fetchAttachmentBlobData(attachmentId, fallbackMimeType = '
   const key = String(attachmentId);
 
   if (attachmentBlobCache.has(key)) {
-    return attachmentBlobCache.get(key);
+    const hit = attachmentBlobCache.get(key);
+    attachmentBlobCache.delete(key);
+    attachmentBlobCache.set(key, hit);
+    return hit;
   }
   if (attachmentPendingMap.has(key)) {
     return attachmentPendingMap.get(key);
@@ -96,7 +131,7 @@ export async function fetchAttachmentBlobData(attachmentId, fallbackMimeType = '
     const blob = new Blob([byteArray], { type: resolvedMime });
     const blobUrl = URL.createObjectURL(blob);
     const result = { blobUrl, mimeType: resolvedMime, byteArray };
-    attachmentBlobCache.set(key, result);
+    setCachedAttachmentBlob(key, result);
     return result;
   })();
 

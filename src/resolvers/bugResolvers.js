@@ -11,6 +11,7 @@
 
 import api, { route } from '@forge/api';
 import { getBusinessMilliseconds, analyzeBugChangelog } from '../utils/slaHelpers.js';
+import { invalidateProjectReportCache } from '../utils/reportSnapshotCache.js';
 
 // Helper to extract plain editable text from Jira's Environment field (which may be ADF or HTML/string)
 function extractPlainTextFromEnv(rawEnv, renderedEnv) {
@@ -518,6 +519,7 @@ export function registerBugResolvers(resolver) {
 
   // Updates a specific field or workflow transition on a Bug issue directly from Test Pulse
   resolver.define('updateBugIssue', async ({ payload }) => {
+    const runBugUpdate = async () => {
     try {
       const { issueIdOrKey, field, value, extra = {} } = payload || {};
       if (!issueIdOrKey || !field) {
@@ -843,6 +845,12 @@ export function registerBugResolvers(resolver) {
       console.error('[updateBugIssue] Error:', e);
       return { error: e.message || 'Error inesperado actualizando el bug.' };
     }
+    };
+    const result = await runBugUpdate();
+    if (result && result.success) {
+      await invalidateProjectReportCache();
+    }
+    return result;
   });
 
   // Adds a comment to a Bug issue and optionally uploads attached files / screenshots in a single action

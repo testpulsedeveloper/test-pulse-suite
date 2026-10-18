@@ -30,6 +30,73 @@ import {
   registerMobileCompanionResolvers,
   mobileUploadHandler as modularMobileUploadHandler
 } from './resolvers/mobileCompanionResolvers.js';
+import {
+  getCachedExecutionReport,
+  invalidateProjectReportCache
+} from './utils/reportSnapshotCache.js';
+
+// ── Enterprise Scalability Caches (Stage 3A+) ──
+// In-memory 10-minute TTL caches for `/rest/api/3/myself` and `/rest/api/3/mypermissions`
+// keyed by Forge accountId so every test execution click avoids 2 sequential HTTP roundtrips.
+const USER_CACHE_TTL_MS = 10 * 60 * 1000;
+const _userProfileCache = new Map();
+const _adminPermCache = new Map();
+
+async function getCachedMyself(context) {
+  const key = String(context?.accountId || 'default_user');
+  const now = Date.now();
+  const cached = _userProfileCache.get(key);
+  if (cached && now - cached.at < USER_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  try {
+    const response = await api.asUser().requestJira(route`/rest/api/3/myself`);
+    if (response.ok) {
+      const data = await response.json();
+      if (_userProfileCache.size >= 100) {
+        const oldest = _userProfileCache.keys().next().value;
+        if (oldest !== undefined) _userProfileCache.delete(oldest);
+      }
+      _userProfileCache.set(key, { at: now, data });
+      if (data?.accountId && data.accountId !== key) {
+        _userProfileCache.set(String(data.accountId), { at: now, data });
+      }
+      return data;
+    }
+  } catch (e) {
+    console.error('Error fetching myself data', e);
+  }
+  return null;
+}
+
+async function getCachedIsProjectAdmin(projectId, context) {
+  if (!projectId) return false;
+  const userKey = String(context?.accountId || 'default_user');
+  const cacheKey = `${userKey}::${projectId}`;
+  const now = Date.now();
+  const cached = _adminPermCache.get(cacheKey);
+  if (cached && now - cached.at < USER_CACHE_TTL_MS) {
+    return cached.isAdmin;
+  }
+  try {
+    const permRes = await api.asUser().requestJira(
+      route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`
+    );
+    if (permRes.ok) {
+      const permData = await permRes.json();
+      const isAdmin = permData?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+      if (_adminPermCache.size >= 200) {
+        const oldest = _adminPermCache.keys().next().value;
+        if (oldest !== undefined) _adminPermCache.delete(oldest);
+      }
+      _adminPermCache.set(cacheKey, { at: now, isAdmin });
+      return isAdmin;
+    }
+  } catch (e) {
+    console.error('Error checking admin permissions', e);
+  }
+  return false;
+}
 
 // ── Perf instrumentation (Fase 0) ──
 // Counts real Jira REST calls (and 429s) made during each resolver invocation. Output in `forge logs`:
@@ -2035,7 +2102,14 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
   return createdRuns;
 }
 
+const _cycleSummaryInFlight = new Map();
+
 const getCycleExecutionSummary = async (cycleId) => {
+  const inflightKey = String(cycleId || '');
+  if (inflightKey && _cycleSummaryInFlight.has(inflightKey)) {
+    return _cycleSummaryInFlight.get(inflightKey);
+  }
+  const runSummary = async () => {
   try {
     // 1. Fetch native Test Runs linked to this cycle in real time via JQL
     const jql = `issue in linkedIssues("${cycleId}")`;
@@ -2258,19 +2332,25 @@ const getCycleExecutionSummary = async (cycleId) => {
           }
         }
 
-        // Reconcile cycle sharded index before returning so Forge runtime does not freeze mid-write
-        await writeCycleIndex(cycleId, cleanEntries.map(e => ({
-          id: String(e.id),
-          key: e.key,
-          testCaseKey: e.testCaseKey || e.key,
-          testRunId: e.testRunId,
-          testRunKey: e.testRunKey,
-          summary: e.summary,
-          status: e.status,
-          nativeStatus: e.nativeStatus || e.status,
+        // Reconcile cycle sharded index ONLY if the compact snapshot actually changed,
+        // avoiding redundant Jira issue property PUT writes on every cycle read/open.
+        const toCompactEntry = (e) => ({
+          id: String(e.id || ''),
+          key: e.key || e.testCaseKey || '',
+          testCaseKey: e.testCaseKey || e.key || '',
+          testRunId: e.testRunId || null,
+          testRunKey: e.testRunKey || null,
+          summary: e.summary || '',
+          status: normalizeJiraStatus(e.status || 'Not Run'),
+          nativeStatus: normalizeJiraStatus(e.nativeStatus || e.status || 'Not Run'),
           executionType: e.executionType || 'Manual',
-          linkedBugs: e.linkedBugs || []
-        }))).catch(() => {});
+          linkedBugs: trimBugsForIndex(e.linkedBugs || [])
+        });
+        const nextCompact = cleanEntries.map(toCompactEntry);
+        const prevCompact = (Array.isArray(previousIndex) ? previousIndex : []).map(toCompactEntry);
+        if (JSON.stringify(nextCompact) !== JSON.stringify(prevCompact)) {
+          await writeCycleIndex(cycleId, nextCompact).catch(() => {});
+        }
 
         return cleanEntries;
       }
@@ -2325,6 +2405,13 @@ const getCycleExecutionSummary = async (cycleId) => {
       _detailLoaded: true
     }));
   }
+  };
+
+  const p = runSummary().finally(() => {
+    if (inflightKey) _cycleSummaryInFlight.delete(inflightKey);
+  });
+  if (inflightKey) _cycleSummaryInFlight.set(inflightKey, p);
+  return p;
 };
 
 
@@ -2441,8 +2528,15 @@ const fetchBugsBatch = async (keys = []) => {
 };
 
 resolver.define('getExecutionReport', async ({ payload }) => {
-  const { projectId, config, limit = 8, offset = 0, fetchAll = false } = payload || {};
+  const { projectId, config, limit = 8, offset = 0, fetchAll = false, forceRefresh = false } = payload || {};
   const cycleType = config?.testCycleType || 'Test Cycle';
+  const numLimit = typeof limit === 'number' && limit > 0 ? limit : 8;
+  const numOffset = typeof offset === 'number' && offset >= 0 ? offset : 0;
+  if (forceRefresh) {
+    await invalidateProjectReportCache(projectId || null);
+  }
+  const reportCacheKey = `${projectId || 'ALL'}_${numOffset}_${numLimit}_${fetchAll ? '1' : '0'}_${cycleType}`;
+  return await getCachedExecutionReport(reportCacheKey, projectId, async () => {
   const cycleTypes = Array.from(new Set([cycleType, 'Test Cycle', 'Ciclo de Pruebas', 'Ciclo de Prueba'])).map(t => `"${t}"`).join(', ');
   
   const jql = `project = "${projectId}" AND issuetype in (${cycleTypes}) ORDER BY created DESC`;
@@ -2490,8 +2584,6 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     return { planId: planId ? String(planId) : null, schedule };
   };
 
-  const numLimit = typeof limit === 'number' && limit > 0 ? limit : 8;
-  const numOffset = typeof offset === 'number' && offset >= 0 ? offset : 0;
   const targetIssues = fetchAll ? allIssues : allIssues.slice(numOffset, numOffset + numLimit);
   const hasMore = !fetchAll && (numOffset + numLimit < allIssues.length);
   const nextOffset = numOffset + numLimit;
@@ -2659,6 +2751,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       };
     })
   };
+  });
 });
 
 resolver.define('getBugsBatch', async ({ payload }) => {
@@ -2818,6 +2911,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
       await writeCycleIndex(cycleId, updatedIndex);
     }
 
+    await invalidateProjectReportCache(projectId || null);
     return { success: true, addedTests: allCreatedRuns };
   }
 
@@ -2825,7 +2919,7 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
 });
 
 resolver.define('syncCycleIndexWithRuns', async ({ payload }) => {
-  const { cycleId, addedRuns } = payload;
+  const { cycleId, addedRuns, projectId } = payload;
   if (!cycleId || !addedRuns || !Array.isArray(addedRuns) || addedRuns.length === 0) {
     return { success: true };
   }
@@ -2850,6 +2944,7 @@ resolver.define('syncCycleIndexWithRuns', async ({ payload }) => {
   });
 
   await writeCycleIndex(cycleId, updatedIndex);
+  await invalidateProjectReportCache(projectId || null);
   return { success: true };
 });
 
@@ -2902,6 +2997,7 @@ resolver.define('addTestToCycle', async ({ payload }) => {
     return lw;
   });
 
+  await invalidateProjectReportCache(projectId || null);
   return { success: true, addedTest: created };
 });
 
@@ -2938,6 +3034,7 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
     return lw;
   });
 
+  await invalidateProjectReportCache(projectId || null);
   return { success: true, addedTests: createdRuns };
 });
 
@@ -3060,6 +3157,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
     console.warn('[performRemoveTestsFromCycle] Error during cleanup:', err);
   }
 
+  await invalidateProjectReportCache();
   return { success: true, removed: ids.length };
 }
 
@@ -3077,43 +3175,30 @@ resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
 
 
 
-resolver.define('updateTestStatus', async ({ payload }) => {
+resolver.define('updateTestStatus', async ({ payload, context }) => {
   const { cycleId, testId, testRunId, status, comment, evidence, evidences, linkedBugs, steps, iterations, projectId, takeover } = payload;
-  
-  let userData = null;
-  try {
-    const response = await api.asUser().requestJira(route`/rest/api/3/myself`);
-    if (response.ok) {
-      userData = await response.json();
-    }
-  } catch (e) {
-    console.error('Error fetching myself data', e);
-  }
 
-  let isAdmin = false;
-  if (projectId) {
-    try {
-      const permRes = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
-      if (permRes.ok) {
-        const permData = await permRes.json();
-        isAdmin = permData.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
-      }
-    } catch (e) {
-      console.error('Error checking admin permissions', e);
-    }
-  }
-
-  let executorInfo = undefined;
-  if ((status && status !== 'Not Run' && status !== 'To Do' && userData) || (takeover && userData)) {
-    executorInfo = {
-      accountId: userData.accountId,
-      displayName: userData.displayName
-    };
-  }
-
-  // Resolve target Test Run issue (native V2)
+  // Resolve target Test Run issue (native V2) and parallelize initial reads
   let targetRunId = testRunId;
-  if (!targetRunId) {
+  let userData = null;
+  let isAdmin = false;
+  let prefetchedRunRes = null;
+
+  if (targetRunId) {
+    // Fast Path (99% of V2 executions): Fetch cached user profile, cached admin permission,
+    // and target Test Run (including `labels`) in a single parallel roundtrip.
+    [userData, isAdmin, prefetchedRunRes] = await Promise.all([
+      getCachedMyself(context),
+      getCachedIsProjectAdmin(projectId, context),
+      api.asUser().requestJira(
+        route`/rest/api/3/issue/${targetRunId}?properties=testpulse-run-data&fields=summary,status,assignee,attachment,description,issuelinks,labels`
+      ).catch(() => null)
+    ]);
+  } else {
+    [userData, isAdmin] = await Promise.all([
+      getCachedMyself(context),
+      getCachedIsProjectAdmin(projectId, context)
+    ]);
     try {
       const cycleRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?properties=testpulse-cycle-index`);
       if (cycleRes.ok) {
@@ -3125,45 +3210,55 @@ resolver.define('updateTestStatus', async ({ payload }) => {
         }
       }
     } catch (e) {}
-  }
-  if (!targetRunId) {
-    try {
-      const runIssues = await fetchAllIssues(
-        `issue in linkedIssues("${cycleId}")`,
-        ['summary', 'status', 'description', 'assignee', 'issuelinks'],
-        null,
-        ['testpulse-run-data'],
-        500
-      );
-      if (Array.isArray(runIssues)) {
-        const found = runIssues.find(r => {
-          const prop = r.properties?.['testpulse-run-data'] || {};
-          return String(r.id) === String(testId) || 
-                 r.key === String(testId) ||
-                 String(prop.testCaseId) === String(testId) ||
-                 prop.testCaseKey === String(testId) ||
-                 r.fields?.summary?.includes(`[Run] ${testId}:`) ||
-                 (r.fields?.issuelinks || []).some(l => {
-                   const linked = l.outwardIssue || l.inwardIssue;
-                   return linked && (String(linked.id) === String(testId) || linked.key === String(testId));
-                 });
-        });
-        if (found) targetRunId = found.id;
+    if (!targetRunId) {
+      try {
+        const runIssues = await fetchAllIssues(
+          `issue in linkedIssues("${cycleId}")`,
+          ['summary', 'status', 'description', 'assignee', 'issuelinks'],
+          null,
+          ['testpulse-run-data'],
+          500
+        );
+        if (Array.isArray(runIssues)) {
+          const found = runIssues.find(r => {
+            const prop = r.properties?.['testpulse-run-data'] || {};
+            return String(r.id) === String(testId) || 
+                   r.key === String(testId) ||
+                   String(prop.testCaseId) === String(testId) ||
+                   prop.testCaseKey === String(testId) ||
+                   r.fields?.summary?.includes(`[Run] ${testId}:`) ||
+                   (r.fields?.issuelinks || []).some(l => {
+                     const linked = l.outwardIssue || l.inwardIssue;
+                     return linked && (String(linked.id) === String(testId) || linked.key === String(testId));
+                   });
+          });
+          if (found) targetRunId = found.id;
+        }
+      } catch (e) {
+        console.warn('[updateTestStatus] Error finding Test Run:', e.message);
       }
-    } catch (e) {
-      console.warn('[updateTestStatus] Error finding Test Run:', e.message);
     }
+  }
+
+  let executorInfo = undefined;
+  if ((status && status !== 'Not Run' && status !== 'To Do' && userData) || (takeover && userData)) {
+    executorInfo = {
+      accountId: userData.accountId,
+      displayName: userData.displayName
+    };
   }
 
   const TERMINAL = ['Pass', 'Passed', 'Fail', 'Failed', 'Blocked'];
   let updatedTest = null;
 
   if (targetRunId) {
-    // Read directly from target Jira Test Run issue
-    const runRes = await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}?properties=testpulse-run-data&fields=summary,status,assignee,attachment,description,issuelinks`);
+    // Use prefetched Test Run response or fetch it now (including `labels`)
+    const runRes = prefetchedRunRes || await api.asUser().requestJira(
+      route`/rest/api/3/issue/${targetRunId}?properties=testpulse-run-data&fields=summary,status,assignee,attachment,description,issuelinks,labels`
+    );
     let runIssue = null;
     let currentProp = {};
-    if (runRes.ok) {
+    if (runRes && runRes.ok) {
       runIssue = await runRes.json();
       currentProp = runIssue.properties?.['testpulse-run-data'] || {};
     }
@@ -3222,7 +3317,8 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       executedAt: Date.now(),
       evidences: newEvidences,
       linkedBugs: newLinkedBugs,
-      lockedAt: newLockedAt
+      lockedAt: newLockedAt,
+      _v2Clean: true
     };
     await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
       method: 'PUT',
@@ -3230,21 +3326,28 @@ resolver.define('updateTestStatus', async ({ payload }) => {
       body: JSON.stringify(newProp)
     }).catch(console.warn);
 
-    // 2. Transition status in Jira
+    // 2. Execute all secondary Jira synchronization tasks in parallel (Promise.allSettled)
+    // and skip no-op mutations (assignee already matches, labels already match, legacy property already cleaned).
+    const secondaryTasks = [];
+
+    // 2a. Transition status in Jira
     if (status !== undefined) {
-      await transitionJiraIssue(targetRunId, newStatus).catch(console.warn);
+      secondaryTasks.push(transitionJiraIssue(targetRunId, newStatus).catch(console.warn));
     }
 
-    // 3. Assignee (Tester)
-    if (newExecutedBy?.accountId) {
-      await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/assignee`, {
-        method: 'PUT',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: newExecutedBy.accountId })
-      }).catch(console.warn);
+    // 2b. Assignee (Tester) — skip PUT if assignee already matches newExecutedBy.accountId
+    const currentAssigneeId = runIssue?.fields?.assignee?.accountId || null;
+    if (newExecutedBy?.accountId && currentAssigneeId !== newExecutedBy.accountId) {
+      secondaryTasks.push(
+        api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/assignee`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId: newExecutedBy.accountId })
+        }).catch(console.warn)
+      );
     }
 
-    // 4. Execution comment in Jira
+    // 2c. Execution comment in Jira
     if (newStatus !== 'Not Run' || newComment || (newIterations && newIterations.length > 0)) {
       const commentAdf = buildExecutionAdfComment({
         cycleKey: cycleId,
@@ -3254,53 +3357,60 @@ resolver.define('updateTestStatus', async ({ payload }) => {
         iterations: newIterations,
         executedBy: newExecutedBy
       });
-      await syncExecutionComment(targetRunId, commentAdf).catch(console.warn);
+      secondaryTasks.push(syncExecutionComment(targetRunId, commentAdf).catch(console.warn));
     }
 
-    // 5. Update status labels in Jira
-    try {
-      const issueRes = await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}?fields=labels`);
-      if (issueRes.ok) {
-        const issueData = await issueRes.json();
-        const existingLabels = issueData.fields?.labels || [];
-        const statusSlug = (newStatus || 'not-run').toLowerCase().replace(/\s+/g, '-');
-        const cleanLabels = existingLabels.filter(l => 
-          !l.startsWith('testpulse-status-') && 
-          !l.startsWith('testpulse-passed') && 
-          !l.startsWith('testpulse-failed') && 
-          !l.startsWith('testpulse-blocked') && 
-          !l.startsWith('testpulse-in-progress') && 
-          !l.startsWith('testpulse-not-run') &&
-          !l.startsWith('testpulse-pass') &&
-          !l.startsWith('testpulse-fail')
-        );
-        const newLabels = [...cleanLabels, `testpulse-${statusSlug}`];
-        await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}`, {
+    // 2d. Update status labels in Jira (using labels already loaded on runIssue; skip PUT if unchanged)
+    const existingLabels = Array.isArray(runIssue?.fields?.labels) ? runIssue.fields.labels : [];
+    const statusSlug = (newStatus || 'not-run').toLowerCase().replace(/\s+/g, '-');
+    const cleanLabels = existingLabels.filter(l =>
+      !l.startsWith('testpulse-status-') &&
+      !l.startsWith('testpulse-passed') &&
+      !l.startsWith('testpulse-failed') &&
+      !l.startsWith('testpulse-blocked') &&
+      !l.startsWith('testpulse-in-progress') &&
+      !l.startsWith('testpulse-not-run') &&
+      !l.startsWith('testpulse-pass') &&
+      !l.startsWith('testpulse-fail')
+    );
+    const newLabels = [...cleanLabels, `testpulse-${statusSlug}`];
+    const labelsUnchanged =
+      existingLabels.length === newLabels.length &&
+      existingLabels.every((lbl, idx) => lbl === newLabels[idx]);
+    if (!labelsUnchanged) {
+      secondaryTasks.push(
+        api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
           body: JSON.stringify({ fields: { labels: newLabels } })
-        }).catch(console.warn);
-      }
-    } catch (e) {
-      console.warn('[updateTestStatus] Labels sync error:', e.message);
+        }).catch(console.warn)
+      );
     }
 
-    // 6. Update lightweight index on Cycle
-    await updateLightweightIndex(cycleId, (lw) => {
-      const item = lw.find(l => String(l.id) === String(testId) || String(l.testRunId) === String(targetRunId));
-      if (item) {
-        item.status = newStatus;
-        item.linkedBugs = trimBugsForIndex(newLinkedBugs);
-        item.executedBy = newExecutedBy;
-        if (newLockedAt) item.lockedAt = newLockedAt;
-      }
-      return lw;
-    });
+    // 2e. Update lightweight index on Cycle
+    secondaryTasks.push(
+      updateLightweightIndex(cycleId, (lw) => {
+        const item = lw.find(l => String(l.id) === String(testId) || String(l.testRunId) === String(targetRunId));
+        if (item) {
+          item.status = newStatus;
+          item.linkedBugs = trimBugsForIndex(newLinkedBugs);
+          item.executedBy = newExecutedBy;
+          if (newLockedAt) item.lockedAt = newLockedAt;
+        }
+        return lw;
+      })
+    );
 
-    // 7. Delete any residual legacy exec_ property on the cycle issue to eliminate ghost states
-    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
-      method: 'DELETE'
-    }).catch(() => {});
+    // 2f. Delete residual legacy exec_ property on the cycle issue only once per V2 Test Run
+    if (!currentProp._v2Clean) {
+      secondaryTasks.push(
+        api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`, {
+          method: 'DELETE'
+        }).catch(() => {})
+      );
+    }
+
+    await Promise.allSettled(secondaryTasks);
 
   } else {
     // No targetRunId found — attempt to create a Test Run now so future calls work
@@ -3417,6 +3527,7 @@ resolver.define('updateTestStatus', async ({ payload }) => {
     });
   }
 
+  await invalidateProjectReportCache(projectId || null);
   return { success: true, lockedAt: updatedTest?.lockedAt || null, test: updatedTest };
 });
 
@@ -3507,6 +3618,8 @@ resolver.define('linkBugToTest', async ({ payload }) => {
     const affectsVersions = (issueData.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issueData.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
+
+    await invalidateProjectReportCache();
 
     return { 
       success: true,
@@ -4421,26 +4534,26 @@ resolver.define('getCycleTestRuns', async ({ payload }) => {
 });
 
 // Resolver: Updates execution data and transitions the Test Run issue (V2)
-resolver.define('updateTestRunExecution', async ({ payload }) => {
+resolver.define('updateTestRunExecution', async ({ payload, context }) => {
   const { testRunId, status, iterations, comment, evidences, linkedBugs, projectId, takeover } = payload;
 
-  let userData = null;
-  try {
-    const response = await api.asUser().requestJira(route`/rest/api/3/myself`);
-    if (response.ok) userData = await response.json();
-  } catch (e) {
-    console.warn('Error fetching myself data:', e);
-  }
+  // 1. Fetch cached user profile and current run issue/property in parallel
+  const [userData, runRes] = await Promise.all([
+    getCachedMyself(context),
+    api.asUser().requestJira(
+      route`/rest/api/3/issue/${testRunId}?properties=testpulse-run-data&fields=status,assignee`
+    ).catch(() => null)
+  ]);
 
-  // 1. Fetch current run property
   let currentRunData = {};
-  try {
-    const propRes = await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/properties/testpulse-run-data`);
-    if (propRes.ok) {
-      const propJson = await propRes.json();
-      currentRunData = propJson.value || {};
-    }
-  } catch (e) {}
+  let currentAssigneeId = null;
+  if (runRes && runRes.ok) {
+    try {
+      const runJson = await runRes.json();
+      currentRunData = runJson?.properties?.['testpulse-run-data'] || {};
+      currentAssigneeId = runJson?.fields?.assignee?.accountId || null;
+    } catch (e) {}
+  }
 
   let executorInfo = currentRunData.executedBy;
   if ((status && status !== 'Not Run' && userData) || (takeover && userData)) {
@@ -4466,28 +4579,30 @@ resolver.define('updateTestRunExecution', async ({ payload }) => {
     executedAt: status && status !== 'Not Run' ? (currentRunData.executedAt || Date.now()) : currentRunData.executedAt
   };
 
-  // 2. Save property on Test Run issue
+  // 2. Save property on Test Run issue FIRST
   await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/properties/testpulse-run-data`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(updatedRunData)
   });
 
-  // 3. Transition Jira Status if status was updated
+  // 3. Execute secondary updates in parallel (status transition, conditional assignee, ADF comment)
+  const secondaryTasks = [];
+
   if (status) {
-    await transitionJiraIssue(testRunId, status);
+    secondaryTasks.push(transitionJiraIssue(testRunId, status).catch(console.warn));
   }
 
-  // 4. Update Assignee to tester
-  if (executorInfo?.accountId) {
-    await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/assignee`, {
-      method: 'PUT',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountId: executorInfo.accountId })
-    }).catch(console.warn);
+  if (executorInfo?.accountId && currentAssigneeId !== executorInfo.accountId) {
+    secondaryTasks.push(
+      api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/assignee`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: executorInfo.accountId })
+      }).catch(console.warn)
+    );
   }
 
-  // 5. Post or update execution comment on Jira Issue
   if (updatedRunData.status !== 'Not Run' || updatedRunData.comment || (updatedRunData.iterations && updatedRunData.iterations.length > 0)) {
     const commentAdf = buildExecutionAdfComment({
       cycleKey: updatedRunData.cycleKey,
@@ -4497,8 +4612,11 @@ resolver.define('updateTestRunExecution', async ({ payload }) => {
       iterations: updatedRunData.iterations,
       executedBy: updatedRunData.executedBy
     });
-    await syncExecutionComment(testRunId, commentAdf);
+    secondaryTasks.push(syncExecutionComment(testRunId, commentAdf).catch(console.warn));
   }
+
+  await Promise.allSettled(secondaryTasks);
+  await invalidateProjectReportCache(projectId || null);
 
   return { success: true, updated: updatedRunData };
 });
@@ -4629,14 +4747,8 @@ const getTestCaseSnapshot = async (testCaseIdOrKey) => {
 };
 
 // ─── Admin: re-sync Test Runs from their current Test Case (keeps audit history) ───
-const _isProjectAdmin = async (projectId) => {
-  if (!projectId) return false;
-  try {
-    const r = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
-    if (!r.ok) return false;
-    const d = await r.json();
-    return d?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
-  } catch (e) { return false; }
+const _isProjectAdmin = async (projectId, context) => {
+  return getCachedIsProjectAdmin(projectId, context);
 };
 
 resolver.define('getSnapshotFieldMapping', async () => {
