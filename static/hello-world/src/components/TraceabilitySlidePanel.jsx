@@ -36,9 +36,9 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from './PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './PanelDockSwitcher';
 
-const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 export default function TraceabilitySlidePanel({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
@@ -440,8 +440,8 @@ export default function TraceabilitySlidePanel({ ctx }) {
             centerHeight: '90vh',
             centerMinHeight: '640px',
             centerMaxHeight: '920px',
-            drawerWidth: 'min(940px, 64vw)',
-            drawerMinWidth: '580px'
+            drawerWidth: DOCK_SPLIT_WIDTH,
+            drawerMinWidth: '420px'
           })}
         >
           {/* Header */}
@@ -1035,7 +1035,7 @@ export default function TraceabilitySlidePanel({ ctx }) {
             </div>
 
             {/* Columna Derecha / Panel Lateral de Metadatos (320px) */}
-            <div style={{ width: dockPosition === 'center' ? '320px' : '270px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+            <div style={{ width: dockPosition === 'center' ? '320px' : '235px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
               <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px' }}>
                 Detalles &amp; Metadatos
               </div>

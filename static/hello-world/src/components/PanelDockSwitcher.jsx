@@ -13,6 +13,12 @@ const DOCK_STORAGE_KEY = 'tp_panel_dock_position';
 const DOCK_SYNC_EVENT = 'tp-panel-dock-change';
 
 /**
+ * Ancho estándar del panel acoplado en modo Split-View integrado (Izquierda / Derecha).
+ * Permite calcular simétricamente el espacio restante de la mesa de trabajo principal.
+ */
+export const DOCK_SPLIT_WIDTH = 'min(740px, 48vw)';
+
+/**
  * Lee de forma segura la posición guardada en localStorage.
  * Valores soportados: 'left' | 'center' | 'right'. Por defecto retorna 'center'.
  */
@@ -63,30 +69,49 @@ export function usePanelDockPosition() {
 /**
  * Calcula los estilos CSS del contenedor de fondo (overlay) según la posición elegida.
  * - En modo 'center' (modal tradicional): aplica fondo oscuro translúcido con desenfoque y cierra al hacer clic afuera.
- * - En modo 'left' o 'right' (panel lateral Split-View): deja libre de bloqueo el resto de la pantalla
- *   (pointerEvents: 'none' en el envoltorio externo) para permitir hacer clic directamente en otras filas de la tabla.
+ * - En modo 'left' o 'right' (Split-View integrado en ventana): se ancla debajo de la barra superior (top: 56px)
+ *   y deja libre de bloqueo el resto de la pantalla (pointerEvents: 'none') mientras la tabla principal ajusta su ancho.
  */
 export function getDockOverlayStyle(dockPosition, baseZIndex = 1050) {
   const isCenter = dockPosition === 'center';
   const isLeft = dockPosition === 'left';
 
+  if (isCenter) {
+    return {
+      position: 'fixed',
+      inset: 0,
+      zIndex: baseZIndex,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px',
+      backgroundColor: 'rgba(9, 30, 66, 0.54)',
+      backdropFilter: 'blur(2px)',
+      pointerEvents: 'auto',
+      transition: 'background-color 0.18s ease'
+    };
+  }
+
   return {
     position: 'fixed',
-    inset: 0,
+    top: '56px',
+    bottom: 0,
+    left: 0,
+    right: 0,
     zIndex: baseZIndex,
     display: 'flex',
-    alignItems: isCenter ? 'center' : 'stretch',
-    justifyContent: isCenter ? 'center' : (isLeft ? 'flex-start' : 'flex-end'),
-    padding: isCenter ? '20px' : '0px',
-    backgroundColor: isCenter ? 'rgba(9, 30, 66, 0.54)' : 'transparent',
-    backdropFilter: isCenter ? 'blur(2px)' : 'none',
-    pointerEvents: isCenter ? 'auto' : 'none',
+    alignItems: 'stretch',
+    justifyContent: isLeft ? 'flex-start' : 'flex-end',
+    padding: '0px',
+    backgroundColor: 'transparent',
+    backdropFilter: 'none',
+    pointerEvents: 'none',
     transition: 'background-color 0.18s ease'
   };
 }
 
 /**
- * Calcula los estilos CSS de la tarjeta principal del modal o panel lateral acoplado.
+ * Calcula los estilos CSS de la tarjeta principal del modal o panel lateral integrado en la ventana.
  * Reactiva pointerEvents: 'auto' para que todo el contenido del panel sea interactivo.
  */
 export function getDockContainerStyle(dockPosition, options = {}) {
@@ -98,8 +123,8 @@ export function getDockContainerStyle(dockPosition, options = {}) {
   const centerHeight = options.centerHeight || '90vh';
   const centerMinHeight = options.centerMinHeight || '620px';
   const centerMaxHeight = options.centerMaxHeight || '920px';
-  const drawerWidth = options.drawerWidth || 'min(920px, 62vw)';
-  const drawerMinWidth = options.drawerMinWidth || '520px';
+  const drawerWidth = options.drawerWidth || DOCK_SPLIT_WIDTH;
+  const drawerMinWidth = options.drawerMinWidth || '420px';
   const bg = options.backgroundColor || '#FFFFFF';
 
   if (isCenter) {
@@ -124,24 +149,24 @@ export function getDockContainerStyle(dockPosition, options = {}) {
   return {
     pointerEvents: 'auto',
     backgroundColor: bg,
-    borderRadius: isLeft ? '0 12px 12px 0' : '12px 0 0 12px',
-    borderTop: '1px solid #DCDFE4',
-    borderBottom: '1px solid #DCDFE4',
-    borderLeft: isLeft ? 'none' : '1px solid #C1C7D0',
-    borderRight: isLeft ? '1px solid #C1C7D0' : 'none',
+    borderRadius: '0px',
+    borderTop: 'none',
+    borderBottom: 'none',
+    borderLeft: isLeft ? 'none' : '2px solid #DCDFE4',
+    borderRight: isLeft ? '2px solid #DCDFE4' : 'none',
     boxShadow: isLeft
-      ? '14px 0 36px -4px rgba(9, 30, 66, 0.24), 4px 0 12px rgba(9, 30, 66, 0.10)'
-      : '-14px 0 36px -4px rgba(9, 30, 66, 0.24), -4px 0 12px rgba(9, 30, 66, 0.10)',
+      ? '6px 0 18px -4px rgba(9, 30, 66, 0.10)'
+      : '-6px 0 18px -4px rgba(9, 30, 66, 0.10)',
     width: drawerWidth,
     minWidth: drawerMinWidth,
-    maxWidth: '94vw',
-    height: '100vh',
-    minHeight: '100vh',
-    maxHeight: '100vh',
+    maxWidth: '52vw',
+    height: 'calc(100vh - 56px)',
+    minHeight: 'calc(100vh - 56px)',
+    maxHeight: 'calc(100vh - 56px)',
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
-    transition: 'width 0.2s ease, transform 0.2s ease'
+    transition: 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s ease'
   };
 }
 

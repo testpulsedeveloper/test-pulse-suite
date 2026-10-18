@@ -36,9 +36,9 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from '../components/PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
 
-const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 export default function ExecutionView({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
@@ -1725,8 +1725,8 @@ export default function ExecutionView({ ctx }) {
                               centerHeight: 'auto',
                               centerMinHeight: '420px',
                               centerMaxHeight: '88vh',
-                              drawerWidth: 'min(780px, 56vw)',
-                              drawerMinWidth: '480px',
+                              drawerWidth: DOCK_SPLIT_WIDTH,
+                              drawerMinWidth: '420px',
                               backgroundColor: '#F7F8F9'
                             })}
                           >

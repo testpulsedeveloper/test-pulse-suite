@@ -36,9 +36,9 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from './PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './PanelDockSwitcher';
 
-const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 export default function BugSlidePanel({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
@@ -465,8 +465,8 @@ export default function BugSlidePanel({ ctx }) {
             centerHeight: '90vh',
             centerMinHeight: '640px',
             centerMaxHeight: '920px',
-            drawerWidth: 'min(940px, 64vw)',
-            drawerMinWidth: '580px'
+            drawerWidth: DOCK_SPLIT_WIDTH,
+            drawerMinWidth: '420px'
           })}
         >
           {/* Header */}
@@ -904,7 +904,7 @@ export default function BugSlidePanel({ ctx }) {
             </div>
 
             {/* Columna Derecha / Panel Lateral de Metadatos Editables (35%) */}
-            <div style={{ width: dockPosition === 'center' ? '340px' : '275px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+            <div style={{ width: dockPosition === 'center' ? '340px' : '235px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
               <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span>Detalles &amp; Edición Rápida</span>
                 <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 700 }}>En vivo</span>

@@ -38,11 +38,11 @@ import {
 } from './components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from './components/PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './components/PanelDockSwitcher';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -3699,8 +3699,8 @@ Then el sistema valida la identidad.
               centerHeight: '92vh',
               centerMinHeight: '620px',
               centerMaxHeight: '940px',
-              drawerWidth: 'min(920px, 62vw)',
-              drawerMinWidth: '540px',
+              drawerWidth: DOCK_SPLIT_WIDTH,
+              drawerMinWidth: '420px',
               backgroundColor: '#FFFFFF'
             }),
             color: '#172B4D'
@@ -3744,9 +3744,14 @@ Then el sistema valida la identidad.
                 {/* Epic Lozenge if present */}
                 {modalEpicReq.epicKey && (
                   <span
-                    onClick={() => openTraceabilityItemModal('epic', modalEpicReq.epicKey, {
-                      summary: modalEpicReq.epicSummary || ''
-                    })}
+                    onClick={() => {
+                      if (dockPosition !== 'center') {
+                        setSelectedTestCase(null);
+                      }
+                      openTraceabilityItemModal('epic', modalEpicReq.epicKey, {
+                        summary: modalEpicReq.epicSummary || ''
+                      });
+                    }}
                     className="ads-lozenge ads-lozenge-subtle"
                     style={{ fontSize: '10px', color: '#6554C0', background: '#EAE6FF', fontWeight: 700, cursor: 'pointer' }}
                     title={modalEpicReq.epicSummary ? `Ver detalle de Épica ${modalEpicReq.epicKey}: ${modalEpicReq.epicSummary}` : `Ver detalle de Épica ${modalEpicReq.epicKey}`}
@@ -3758,11 +3763,16 @@ Then el sistema valida la identidad.
                 {/* Requirement / Story Lozenge if present */}
                 {modalEpicReq.reqKey && (
                   <span
-                    onClick={() => openTraceabilityItemModal('story', modalEpicReq.reqKey, {
-                      summary: modalEpicReq.reqSummary || '',
-                      epicKey: modalEpicReq.epicKey || null,
-                      epicSummary: modalEpicReq.epicSummary || ''
-                    })}
+                    onClick={() => {
+                      if (dockPosition !== 'center') {
+                        setSelectedTestCase(null);
+                      }
+                      openTraceabilityItemModal('story', modalEpicReq.reqKey, {
+                        summary: modalEpicReq.reqSummary || '',
+                        epicKey: modalEpicReq.epicKey || null,
+                        epicSummary: modalEpicReq.epicSummary || ''
+                      });
+                    }}
                     className="ads-lozenge ads-lozenge-subtle"
                     style={{ fontSize: '10px', color: '#0065FF', background: '#DEEBFF', fontWeight: 700, cursor: 'pointer' }}
                     title={modalEpicReq.reqSummary ? `Ver detalle de Historia ${modalEpicReq.reqKey}: ${modalEpicReq.reqSummary}` : `Ver detalle de Historia ${modalEpicReq.reqKey}`}
@@ -3859,7 +3869,7 @@ Then el sistema valida la identidad.
           {/* Modal Body */}
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: '1.25rem 1.5rem 1.75rem 1.5rem', backgroundColor: '#FAFBFC', display: 'flex', flexDirection: 'column' }}>
             {modalDetailTab === 'details' ? (
-              <div style={{ display: 'grid', gridTemplateColumns: dockPosition === 'center' ? 'minmax(0, 1fr) 290px' : 'minmax(0, 1fr) 255px', gap: '1.25rem', height: '100%', minHeight: 0, alignItems: 'stretch' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: dockPosition === 'center' ? 'minmax(0, 1fr) 290px' : 'minmax(0, 1fr) 230px', gap: '1.25rem', height: '100%', minHeight: 0, alignItems: 'stretch' }}>
                 {/* Left Column (65%): Scenario Description */}
                 <div style={{ backgroundColor: '#FFFFFF', borderRadius: '6px', border: '1px solid #DCDFE4', padding: '1.25rem', boxShadow: '0 1px 2px rgba(9,30,66,0.04)', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid #F1F2F4', flexShrink: 0 }}>
@@ -7589,34 +7599,65 @@ Then el sistema valida la identidad.
     );
   }
 
+  // Determina si alguno de los 4 paneles acoplables está abierto en modo lateral ('left' o 'right')
+  // para dividir simétricamente la ventana debajo del TopNav (Split-Pane / Master-Detail real).
+  const isSideSplitOpen = Boolean(
+    dockPosition !== 'center' && (
+      selectedTestCase ||
+      selectedBug ||
+      selectedTraceabilityItem ||
+      (activeTab === 'execution' && expandedExecutionTest)
+    )
+  );
+
   return (
     <div className="app-container">
       {renderTopNav()}
       
-      {!isProjectAllowed && isAdmin && (
-        <div style={{ background: 'var(--warning-color)', color: '#fff', padding: '0.5rem 1rem', textAlign: 'center', fontSize: '0.9rem', fontWeight: 'bold' }}>
-          ⚠️ Este proyecto no está en el Allowlist. Lo puedes ver porque eres Administrador.
-        </div>
-      )}
-
-      {isGlobal && !selectedProjectId ? (
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', flex: 1, backgroundColor: 'var(--bg-main)' }}>
-          <div style={{ textAlign: 'center', padding: '3rem', backgroundColor: 'var(--bg-surface)', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <span style={{ fontSize: '40px', marginBottom: '1rem', display: 'inline-block' }}>📁</span>
-            <h2 style={{ color: 'var(--text-primary)', marginTop: 0 }}>Select a Project</h2>
-            <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto' }}>Please select a Jira project from the dropdown in the top navigation bar to view and manage its tests.</p>
+      <div
+        className="workspace-split-host"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          overflow: 'hidden',
+          width: isSideSplitOpen ? `calc(100vw - ${DOCK_SPLIT_WIDTH})` : '100%',
+          marginLeft: isSideSplitOpen && dockPosition === 'left' ? DOCK_SPLIT_WIDTH : '0px',
+          marginRight: isSideSplitOpen && dockPosition === 'right' ? DOCK_SPLIT_WIDTH : '0px',
+          transition: 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), margin 0.18s cubic-bezier(0.16, 1, 0.3, 1)'
+        }}
+      >
+        {!isProjectAllowed && isAdmin && (
+          <div style={{ background: 'var(--warning-color)', color: '#fff', padding: '0.5rem 1rem', textAlign: 'center', fontSize: '0.9rem', fontWeight: 'bold' }}>
+            ⚠️ Este proyecto no está en el Allowlist. Lo puedes ver porque eres Administrador.
           </div>
+        )}
+
+        {isGlobal && !selectedProjectId ? (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', flex: 1, backgroundColor: 'var(--bg-main)' }}>
+            <div style={{ textAlign: 'center', padding: '3rem', backgroundColor: 'var(--bg-surface)', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+              <span style={{ fontSize: '40px', marginBottom: '1rem', display: 'inline-block' }}>📁</span>
+              <h2 style={{ color: 'var(--text-primary)', marginTop: 0 }}>Select a Project</h2>
+              <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto' }}>Please select a Jira project from the dropdown in the top navigation bar to view and manage its tests.</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {activeTab === 'design' && renderDesignTab()}
+            {activeTab === 'planning' && renderPlanningTab()}
+            {activeTab === 'execution' && renderExecutionTab()}
+            {renderAssignModal()}
+            {activeTab === 'reports' && renderReportsTab()}
+            {activeTab === 'config' && isAdmin && renderConfigTab()}
+          </>
+        )}
+
+        <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
+          <strong>Test Pulse Suite</strong> {APP_VERSION} © El Puerto de Liverpool
         </div>
-      ) : (
-        <>
-          {activeTab === 'design' && renderDesignTab()}
-          {activeTab === 'planning' && renderPlanningTab()}
-          {activeTab === 'execution' && renderExecutionTab()}
-          {renderAssignModal()}
-          {activeTab === 'reports' && renderReportsTab()}
-          {activeTab === 'config' && isAdmin && renderConfigTab()}
-        </>
-      )}
+      </div>
       {renderModal()}
       {renderSlidePanel()}
       {previewModalData && (
@@ -7712,10 +7753,6 @@ Then el sistema valida la identidad.
           </div>
         </div>
       )}
-
-      <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
-        <strong>Test Pulse Suite</strong> {APP_VERSION} © El Puerto de Liverpool
-      </div>
       {renderModals()}
     </div>
   );
