@@ -17910,7 +17910,7 @@ Then el sistema valida la identidad.
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>📊</span>
-                  <span>Runs</span>
+                  <span>Reports</span>
                 </div>
                 <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', fontWeight: 700 }}>
                   {totalCases}
@@ -18061,7 +18061,7 @@ Then el sistema valida la identidad.
                         boxShadow: dashboardSubView === 'runs' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none'
                       }}
                     >
-                      📊 Runs
+                      📊 Reports
                     </button>
                     <button
                       onClick={() => setDashboardSubView('bugs')}
@@ -19020,11 +19020,12 @@ Then el sistema valida la identidad.
                                   maxWidth: '225px',
                                   position: 'relative',
                                   borderRadius: '12px',
-                                  border: isSelected ? '2px solid #2563EB' : '1px solid #E2E8F0',
-                                  background: '#FFFFFF',
+                                  border: isSelected ? '2px solid #2563EB' : '1px solid #CBD5E1',
+                                  background: isSelected ? '#FFFFFF' : '#F1F5F9',
                                   padding: '14px',
                                   boxShadow: isSelected ? '0 2px 6px rgba(37, 99, 235, 0.08)' : 'none',
-                                  opacity: isSelected ? 1 : 0.75,
+                                  opacity: isSelected ? 1 : 0.45,
+                                  filter: isSelected ? 'none' : 'grayscale(100%)',
                                   cursor: 'pointer',
                                   transition: 'all 0.15s ease',
                                   display: 'flex',
@@ -19495,12 +19496,12 @@ Then el sistema valida la identidad.
                                   DEFECTOS &amp; BLOQUEOS
                                 </span>
                                 <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#FFF1F2', color: '#BE123C' }}>
-                                  {Array.isArray(criticalCycleBugs) && criticalCycleBugs.length > 0 ? `${criticalCycleBugs.length} Activos` : `${openCycleBugs} Abiertos`}
+                                  {`${openCycleBugs} Activos`}
                                 </span>
                               </div>
                               <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
-                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#BE123C', letterSpacing: '-0.02em' }}>{openCycleBugs}</span>
-                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>bugs abiertos ({blocked} casos bloqueados)</span>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#BE123C', letterSpacing: '-0.02em' }}>{totalCycleBugs}</span>
+                                <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>bugs totales ({blocked} casos bloqueados)</span>
                               </div>
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #F1F5F9' }}>
                                 <span style={{ color: '#047857', fontWeight: 600 }}>{closedCycleBugs} Cerrados</span>
