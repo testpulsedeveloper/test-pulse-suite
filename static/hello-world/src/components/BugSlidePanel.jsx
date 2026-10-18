@@ -36,10 +36,12 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from './PanelDockSwitcher';
 
-const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
 
 export default function BugSlidePanel({ ctx }) {
+  const [dockPosition, setDockPosition] = usePanelDockPosition();
   const {
     addNotification,
     bugAddingVersion,
@@ -440,18 +442,8 @@ export default function BugSlidePanel({ ctx }) {
     return (
       <div 
         className="jira-modal-overlay"
-        onClick={() => setSelectedBug(null)}
-        style={{
-          position: 'fixed',
-          inset: 0,
-          backgroundColor: 'rgba(9, 30, 66, 0.54)',
-          backdropFilter: 'blur(2px)',
-          zIndex: 1050,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          animation: 'fadeIn 0.15s ease-out'
-        }}
+        onClick={() => { if (dockPosition === 'center') setSelectedBug(null); }}
+        style={getDockOverlayStyle(dockPosition, 1050)}
       >
         <div 
           className="jira-modal-content"
@@ -467,19 +459,15 @@ export default function BugSlidePanel({ ctx }) {
               }
             }
           }}
-          style={{
-            maxWidth: '1380px',
-            width: '95%',
-            height: '90vh',
-            minHeight: '640px',
-            maxHeight: '920px',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '10px',
-            display: 'flex',
-            flexDirection: 'column',
-            boxShadow: '0 20px 32px -8px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31)',
-            overflow: 'hidden'
-          }}
+          style={getDockContainerStyle(dockPosition, {
+            centerMaxWidth: '1380px',
+            centerWidth: '95%',
+            centerHeight: '90vh',
+            centerMinHeight: '640px',
+            centerMaxHeight: '920px',
+            drawerWidth: 'min(940px, 64vw)',
+            drawerMinWidth: '580px'
+          })}
         >
           {/* Header */}
           <div style={{
@@ -489,7 +477,9 @@ export default function BugSlidePanel({ ctx }) {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            flexShrink: 0
+            flexShrink: 0,
+            flexWrap: 'wrap',
+            gap: '8px'
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               <span style={{ 
@@ -525,11 +515,12 @@ export default function BugSlidePanel({ ctx }) {
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <PanelDockSwitcher dockPosition={dockPosition} onChange={setDockPosition} />
               <button
                 className="btn-icon"
                 onClick={() => setSelectedBug(null)}
                 style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '6px', borderRadius: '4px', color: '#626F86', fontSize: '16px', lineHeight: 1 }}
-                title="Cerrar modal"
+                title="Cerrar panel"
               >
                 ✕
               </button>
@@ -913,7 +904,7 @@ export default function BugSlidePanel({ ctx }) {
             </div>
 
             {/* Columna Derecha / Panel Lateral de Metadatos Editables (35%) */}
-            <div style={{ width: '340px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+            <div style={{ width: dockPosition === 'center' ? '340px' : '275px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
               <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span>Detalles &amp; Edición Rápida</span>
                 <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 700 }}>En vivo</span>

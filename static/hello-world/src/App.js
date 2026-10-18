@@ -38,10 +38,11 @@ import {
 } from './components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from './components/PanelDockSwitcher';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -53,6 +54,7 @@ const SettingsView = React.lazy(() => import('./views/SettingsView'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
 
 function App() {
+  const [dockPosition, setDockPosition] = usePanelDockPosition();
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
   
   // Design Tab State
@@ -3680,40 +3682,34 @@ Then el sistema valida la identidad.
 
     return (
       <div 
-        style={{
-          position: 'fixed',
-          inset: 0,
-          backgroundColor: 'rgba(9, 30, 66, 0.54)',
-          backdropFilter: 'blur(2px)',
-          zIndex: 1000,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '1.5rem'
+        style={getDockOverlayStyle(dockPosition, 1000)}
+        onClick={() => {
+          if (dockPosition === 'center') {
+            setSelectedTestCase(null);
+            setTestCaseDetails({ type: 'traditional', content: [] });
+            setTestCaseHistory([]);
+          }
         }}
-        onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}
       >
         <div 
           style={{
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            boxShadow: '0 20px 32px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31)',
-            width: '98%',
-            maxWidth: '1440px',
-            height: '92vh',
-            minHeight: '620px',
-            maxHeight: '940px',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            border: '1px solid #DCDFE4',
+            ...getDockContainerStyle(dockPosition, {
+              centerMaxWidth: '1440px',
+              centerWidth: '98%',
+              centerHeight: '92vh',
+              centerMinHeight: '620px',
+              centerMaxHeight: '940px',
+              drawerWidth: 'min(920px, 62vw)',
+              drawerMinWidth: '540px',
+              backgroundColor: '#FFFFFF'
+            }),
             color: '#172B4D'
           }}
           onClick={e => e.stopPropagation()}
         >
           {/* Modal Header */}
           <div style={{ padding: '1.25rem 1.5rem 0.75rem 1.5rem', borderBottom: '1px solid #DCDFE4', backgroundColor: '#FFFFFF', flexShrink: 0 }}>
-            {/* Top Meta Line: Folder Path, Issue Key, Lozenges, Close button */}
+            {/* Top Meta Line: Folder Path, Issue Key, Lozenges, Dock Switcher, Close button */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
                 {/* Folder Path Breadcrumb */}
@@ -3776,8 +3772,9 @@ Then el sistema valida la identidad.
                 )}
               </div>
 
-              {/* Header Right Actions */}
+              {/* Header Right Actions: Dock Switcher + Close */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <PanelDockSwitcher dockPosition={dockPosition} onChange={setDockPosition} />
                 <button 
                   onClick={() => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); }}
                   style={{
@@ -3862,7 +3859,7 @@ Then el sistema valida la identidad.
           {/* Modal Body */}
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: '1.25rem 1.5rem 1.75rem 1.5rem', backgroundColor: '#FAFBFC', display: 'flex', flexDirection: 'column' }}>
             {modalDetailTab === 'details' ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 290px', gap: '1.25rem', height: '100%', minHeight: 0, alignItems: 'stretch' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: dockPosition === 'center' ? 'minmax(0, 1fr) 290px' : 'minmax(0, 1fr) 255px', gap: '1.25rem', height: '100%', minHeight: 0, alignItems: 'stretch' }}>
                 {/* Left Column (65%): Scenario Description */}
                 <div style={{ backgroundColor: '#FFFFFF', borderRadius: '6px', border: '1px solid #DCDFE4', padding: '1.25rem', boxShadow: '0 1px 2px rgba(9,30,66,0.04)', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid #F1F2F4', flexShrink: 0 }}>

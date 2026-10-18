@@ -36,10 +36,12 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle } from '../components/PanelDockSwitcher';
 
-const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.5.0'}`;
 
 export default function ExecutionView({ ctx }) {
+  const [dockPosition, setDockPosition] = usePanelDockPosition();
   const {
     _uid,
     _uname,
@@ -1443,6 +1445,7 @@ export default function ExecutionView({ ctx }) {
                         <div
                           key={test.id}
                           className={`execution-test-card ${isExpanded ? 'expanded' : ''} ${cardStatusClass}`}
+                          style={isExpanded ? { boxShadow: '0 0 0 2px #0C66E4', backgroundColor: '#F4F8FF' } : undefined}
                         >
                           {/* Card Row Header */}
                           <div style={{ padding: '0.75rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
@@ -1651,7 +1654,7 @@ export default function ExecutionView({ ctx }) {
                       );
                     }, (items) => `${items.filter(t => isPassed(t.status)).length}✓ · ${items.filter(t => isFailed(t.status)).length}✗ · ${items.filter(t => isNotRun(t.status)).length} pendientes`)}
 
-                    {/* Modal de Detalle del Caso en Ejecución */}
+                    {/* Modal / Panel Acoplable de Detalle del Caso en Ejecución */}
                     {expandedExecutionTest && (() => {
                       const modalTest = deduplicatedCycleTests.find(t => String(t.id) === String(expandedExecutionTest)) || cycleTests.find(t => String(t.id) === String(expandedExecutionTest));
                       if (!modalTest) return null;
@@ -1662,6 +1665,12 @@ export default function ExecutionView({ ctx }) {
 
                       const modalMatchedTc = (typeof findTc === 'function') ? (findTc(modalTestCaseKey) || findTc(modalTest.id)) : null;
                       const modalScenarioDesc = modalTest.description || modalMatchedTc?.description || (executionTestDetails[modalTest.id]?.type === 'continuous' ? executionTestDetails[modalTest.id]?.content : null);
+
+                      // Lista navegable de casos activos en el ciclo para botones Anterior / Siguiente
+                      const navTestsList = (Array.isArray(filteredTests) && filteredTests.length > 0) ? filteredTests : deduplicatedCycleTests;
+                      const currentModalTestIdx = navTestsList.findIndex(t => String(t.id) === String(modalTest.id));
+                      const prevModalTest = currentModalTestIdx > 0 ? navTestsList[currentModalTestIdx - 1] : null;
+                      const nextModalTest = (currentModalTestIdx >= 0 && currentModalTestIdx < navTestsList.length - 1) ? navTestsList[currentModalTestIdx + 1] : null;
 
                       const iterEvKeys = new Set();
                       (modalTest.iterations || []).forEach(it => {
@@ -1689,7 +1698,9 @@ export default function ExecutionView({ ctx }) {
 
                       return (
                         <div
-                          onClick={() => setExpandedExecutionTest(null)}
+                          onClick={() => {
+                            if (dockPosition === 'center') setExpandedExecutionTest(null);
+                          }}
                           onPaste={(e) => {
                             if (!isTestRunning) return;
                             const items = e.clipboardData?.items;
@@ -1704,48 +1715,36 @@ export default function ExecutionView({ ctx }) {
                               }
                             }
                           }}
-                          style={{
-                            position: 'fixed',
-                            inset: 0,
-                            backgroundColor: 'rgba(9, 30, 66, 0.54)',
-                            backdropFilter: 'blur(2px)',
-                            zIndex: 1200,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            padding: '24px'
-                          }}
+                          style={getDockOverlayStyle(dockPosition, 1200)}
                         >
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            style={{
-                              backgroundColor: '#F7F8F9',
-                              borderRadius: '10px',
-                              border: '1px solid #DCDFE4',
-                              boxShadow: '0 20px 25px -5px rgba(9, 30, 66, 0.25), 0 8px 10px -6px rgba(9, 30, 66, 0.1)',
-                              width: '100%',
-                              maxWidth: '980px',
-                              maxHeight: '88vh',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              overflow: 'hidden'
-                            }}
+                            style={getDockContainerStyle(dockPosition, {
+                              centerMaxWidth: '980px',
+                              centerWidth: '100%',
+                              centerHeight: 'auto',
+                              centerMinHeight: '420px',
+                              centerMaxHeight: '88vh',
+                              drawerWidth: 'min(780px, 56vw)',
+                              drawerMinWidth: '480px',
+                              backgroundColor: '#F7F8F9'
+                            })}
                           >
-                            {/* Top Modal Bar: Case Info + Play + General Status + Close */}
+                            {/* Top Modal Bar: Case Info + Play + General Status + Nav + Dock + Close */}
                             <div
                               style={{
                                 backgroundColor: '#FFFFFF',
                                 borderBottom: '1px solid #DCDFE4',
-                                padding: '14px 20px',
+                                padding: '12px 18px',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'space-between',
-                                gap: '16px',
+                                gap: '12px',
                                 flexWrap: 'wrap',
                                 flexShrink: 0
                               }}
                             >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
                                 {modalIsAuto ? (
                                   <span className="planning-badge-auto">⚡ AUTO</span>
                                 ) : (
@@ -1796,7 +1795,65 @@ export default function ExecutionView({ ctx }) {
                                 </span>
                               </div>
 
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, flexWrap: 'wrap' }}>
+                                {/* Navegación Rápida: Caso Anterior / Siguiente */}
+                                {navTestsList.length > 1 && (
+                                  <div
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      backgroundColor: '#F7F8F9',
+                                      border: '1px solid #DCDFE4',
+                                      borderRadius: '6px',
+                                      padding: '2px',
+                                      gap: '2px'
+                                    }}
+                                    title="Navegar entre los casos de prueba del ciclo actual sin cerrar el panel"
+                                  >
+                                    <button
+                                      type="button"
+                                      disabled={!prevModalTest}
+                                      onClick={() => prevModalTest && handleToggleExecutionTest(prevModalTest.id, true)}
+                                      title={prevModalTest ? `Caso anterior: ${prevModalTest.testCaseKey || prevModalTest.key}` : 'Primer caso de la lista'}
+                                      style={{
+                                        border: 'none',
+                                        background: 'transparent',
+                                        color: prevModalTest ? '#172B4D' : '#B3BAC5',
+                                        cursor: prevModalTest ? 'pointer' : 'not-allowed',
+                                        padding: '3px 6px',
+                                        borderRadius: '4px',
+                                        fontSize: '11px',
+                                        fontWeight: 700,
+                                        lineHeight: 1
+                                      }}
+                                    >
+                                      ▲ Ant
+                                    </button>
+                                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', padding: '0 4px', fontFamily: 'monospace' }}>
+                                      {currentModalTestIdx >= 0 ? `${currentModalTestIdx + 1}/${navTestsList.length}` : navTestsList.length}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      disabled={!nextModalTest}
+                                      onClick={() => nextModalTest && handleToggleExecutionTest(nextModalTest.id, true)}
+                                      title={nextModalTest ? `Siguiente caso: ${nextModalTest.testCaseKey || nextModalTest.key}` : 'Último caso de la lista'}
+                                      style={{
+                                        border: 'none',
+                                        background: 'transparent',
+                                        color: nextModalTest ? '#172B4D' : '#B3BAC5',
+                                        cursor: nextModalTest ? 'pointer' : 'not-allowed',
+                                        padding: '3px 6px',
+                                        borderRadius: '4px',
+                                        fontSize: '11px',
+                                        fontWeight: 700,
+                                        lineHeight: 1
+                                      }}
+                                    >
+                                      Sig ▼
+                                    </button>
+                                  </div>
+                                )}
+
                                 {/* Play / Stop Button inside Modal */}
                                 <button
                                   title={isTestRunning ? 'Detener Ejecución' : 'Iniciar Ejecución'}
@@ -1846,7 +1903,7 @@ export default function ExecutionView({ ctx }) {
                                     cursor: !isTestRunning ? 'not-allowed' : 'pointer',
                                     opacity: !isTestRunning ? 0.75 : 1,
                                     padding: '0.35rem 0.6rem',
-                                    width: '118px',
+                                    width: '114px',
                                     height: '30px',
                                     boxSizing: 'border-box',
                                     textAlign: 'center',
@@ -1862,6 +1919,9 @@ export default function ExecutionView({ ctx }) {
                                   <option value="Failed" style={{ backgroundColor: '#FFEBE6', color: '#BF2600' }}>Failed</option>
                                   <option value="Blocked" style={{ backgroundColor: '#FFF0B3', color: '#172B4D' }}>Blocked</option>
                                 </select>
+
+                                {/* Selector de Posición: Izquierda | Centro | Derecha */}
+                                <PanelDockSwitcher dockPosition={dockPosition} onChange={setDockPosition} />
 
                                 {/* Close Modal Button */}
                                 <button
