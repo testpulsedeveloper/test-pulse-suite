@@ -13047,44 +13047,58 @@ Then el sistema valida la identidad.
                       </div>
 
                       {/* Status Pills */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', borderLeft: '1px solid #DCDFE4', paddingLeft: '0.75rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', borderLeft: '1px solid #DCDFE4', paddingLeft: '0.75rem', flexWrap: 'wrap' }}>
                         <button
                           onClick={() => { setExecutionStatusFilter('ALL'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'ALL' ? 'active' : ''}`}
+                          style={executionStatusFilter === 'ALL'
+                            ? { background: '#0C66E4', color: '#FFFFFF', border: '1px solid #0C66E4', boxShadow: '0 0 0 2px rgba(12, 102, 228, 0.22)', fontWeight: 700 }
+                            : { background: '#E9F2FF', color: '#0C66E4', border: '1px solid #B3D4FF', fontWeight: 600 }}
                         >
                           Todos {isLoadingCycleTests ? '(...)' : `(${pill.all})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Passed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Passed' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Passed' ? { background: '#216E4E', color: '#FFFFFF' } : {}}
+                          style={executionStatusFilter === 'Passed'
+                            ? { background: '#216E4E', color: '#FFFFFF', border: '1px solid #216E4E', boxShadow: '0 0 0 2px rgba(33, 110, 78, 0.25)', fontWeight: 700 }
+                            : { background: '#DCFFF1', color: '#216E4E', border: '1px solid #7EE2B8', fontWeight: 600 }}
                         >
                           Passed {isLoadingCycleTests ? '(...)' : `(${pill.passed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Failed'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Failed' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Failed' ? { background: '#BF2600', color: '#FFFFFF' } : {}}
+                          style={executionStatusFilter === 'Failed'
+                            ? { background: '#C9372C', color: '#FFFFFF', border: '1px solid #C9372C', boxShadow: '0 0 0 2px rgba(201, 55, 44, 0.25)', fontWeight: 700 }
+                            : { background: '#FFECEB', color: '#AE2E24', border: '1px solid #FD9891', fontWeight: 600 }}
                         >
                           Failed {isLoadingCycleTests ? '(...)' : `(${pill.failed})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Blocked'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Blocked' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'Blocked' ? { background: '#FFAB00', color: '#172B4D' } : {}}
+                          style={executionStatusFilter === 'Blocked'
+                            ? { background: '#E2B203', color: '#172B4D', border: '1px solid #CF9F02', boxShadow: '0 0 0 2px rgba(226, 178, 3, 0.3)', fontWeight: 700 }
+                            : { background: '#FFF7D6', color: '#946F00', border: '1px solid #F5CD47', fontWeight: 600 }}
                         >
                           Blocked {isLoadingCycleTests ? '(...)' : `(${pill.blocked})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('In Progress'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'In Progress' ? 'active' : ''}`}
-                          style={executionStatusFilter === 'In Progress' ? { background: '#0747A6', color: '#FFFFFF' } : {}}
+                          style={executionStatusFilter === 'In Progress'
+                            ? { background: '#0055CC', color: '#FFFFFF', border: '1px solid #0055CC', boxShadow: '0 0 0 2px rgba(0, 85, 204, 0.25)', fontWeight: 700 }
+                            : { background: '#E9F2FF', color: '#0055CC', border: '1px solid #85B8FF', fontWeight: 600 }}
                         >
                           In Progress {isLoadingCycleTests ? '(...)' : `(${pill.inProgress})`}
                         </button>
                         <button
                           onClick={() => { setExecutionStatusFilter('Not Run'); setExecutionCurrentPage(1); }}
                           className={`execution-status-pill ${executionStatusFilter === 'Not Run' ? 'active' : ''}`}
+                          style={executionStatusFilter === 'Not Run'
+                            ? { background: '#44546F', color: '#FFFFFF', border: '1px solid #44546F', boxShadow: '0 0 0 2px rgba(68, 84, 111, 0.25)', fontWeight: 700 }
+                            : { background: '#F1F2F4', color: '#44546F', border: '1px solid #B3B9C4', fontWeight: 600 }}
                         >
                           Not Run {isLoadingCycleTests ? '(...)' : `(${pill.notRun})`}
                         </button>
@@ -18358,6 +18372,21 @@ Then el sistema valida la identidad.
               ? testPlans.find(p => String(p.id) === String(reportSelectedPlans[0]))
               : null;
 
+            const scopedPlans = reportSelectedPlans.length > 0
+              ? testPlans.filter(p => reportSelectedPlans.some(sp => String(sp) === String(p.id) || String(sp) === String(p.key)))
+              : (() => {
+                  const cPlanIds = new Set(planCycles.map(c => String(c.planId || c.testPlanId || '')).filter(Boolean));
+                  const matched = cPlanIds.size > 0
+                    ? testPlans.filter(p => cPlanIds.has(String(p.id)) || cPlanIds.has(String(p.key)))
+                    : [];
+                  if (matched.length > 0) return matched;
+                  if (selectedPlanId) {
+                    const selP = testPlans.find(p => String(p.id) === String(selectedPlanId));
+                    if (selP) return [selP];
+                  }
+                  return testPlans;
+                })();
+
             const getCycleStatsForHero = (c) => {
               const cachedCycleCases = perCycleCacheRef.current
                 ? (perCycleCacheRef.current[String(c.id)] || perCycleCacheRef.current[c.id])
@@ -18418,7 +18447,7 @@ Then el sistema valida la identidad.
 
             let planTotalCases = 0, planPass = 0, planFail = 0, planBlock = 0;
             let planCompletedCyclesCount = 0, planActiveCyclesCount = 0, planPendingCyclesCount = 0;
-            let minStartMs = null, maxEndMs = null;
+            let cycleMinStartMs = null, cycleMaxEndMs = null;
 
             planCycles.forEach(c => {
               const st = getCycleStatsForHero(c);
@@ -18434,25 +18463,44 @@ Then el sistema valida la identidad.
               const eDate = c.schedule?.endDate || c.endDate || c.plannedEndDate;
               if (sDate) {
                 const ms = new Date(sDate).getTime();
-                if (!isNaN(ms) && (minStartMs === null || ms < minStartMs)) minStartMs = ms;
+                if (!isNaN(ms) && (cycleMinStartMs === null || ms < cycleMinStartMs)) cycleMinStartMs = ms;
               }
               if (eDate) {
                 const ms = new Date(eDate).getTime();
-                if (!isNaN(ms) && (maxEndMs === null || ms > maxEndMs)) maxEndMs = ms;
+                if (!isNaN(ms) && (cycleMaxEndMs === null || ms > cycleMaxEndMs)) cycleMaxEndMs = ms;
               }
             });
 
-            if (activePlanObj) {
-              const pS = activePlanObj.schedule?.startDate || activePlanObj.startDate || activePlanObj.plannedStartDate;
-              const pE = activePlanObj.schedule?.endDate || activePlanObj.endDate || activePlanObj.plannedEndDate;
+            let planStartMs = null, planEndMs = null;
+            let planExcludeWeekends = true;
+            let planHolidays = [];
+            scopedPlans.forEach(p => {
+              const isSelectedInPlanning = selectedPlanId && String(p.id) === String(selectedPlanId);
+              const pSched = p.schedule || (isSelectedInPlanning ? planScheduleForm : null) || {};
+              const pS = pSched.startDate || p.startDate || p.plannedStartDate || (isSelectedInPlanning ? planScheduleForm?.startDate : null);
+              const pE = pSched.endDate || p.endDate || p.plannedEndDate || (isSelectedInPlanning ? planScheduleForm?.endDate : null);
               if (pS) {
                 const ms = new Date(pS).getTime();
-                if (!isNaN(ms)) minStartMs = ms;
+                if (!isNaN(ms) && (planStartMs === null || ms < planStartMs)) planStartMs = ms;
               }
               if (pE) {
                 const ms = new Date(pE).getTime();
-                if (!isNaN(ms)) maxEndMs = ms;
+                if (!isNaN(ms) && (planEndMs === null || ms > planEndMs)) planEndMs = ms;
               }
+              if (pSched.excludeWeekends !== undefined) {
+                planExcludeWeekends = pSched.excludeWeekends !== false;
+              }
+              if (Array.isArray(pSched.holidays) && pSched.holidays.length > 0) {
+                planHolidays = pSched.holidays;
+              }
+            });
+            if (planStartMs === null && planScheduleForm?.startDate) {
+              const ms = new Date(planScheduleForm.startDate).getTime();
+              if (!isNaN(ms)) planStartMs = ms;
+            }
+            if (planEndMs === null && planScheduleForm?.endDate) {
+              const ms = new Date(planScheduleForm.endDate).getTime();
+              if (!isNaN(ms)) planEndMs = ms;
             }
 
             const planEvalCount = planPass + planFail + planBlock;
@@ -18461,11 +18509,27 @@ Then el sistema valida la identidad.
             const planFailW = planTotalCases > 0 ? (planFail / planTotalCases) * 100 : 0;
             const planBlockW = planTotalCases > 0 ? (planBlock / planTotalCases) * 100 : 0;
 
-            const startIso = minStartMs ? new Date(minStartMs).toISOString().slice(0, 10) : null;
-            const endIso = maxEndMs ? new Date(maxEndMs).toISOString().slice(0, 10) : null;
+            const planStartIso = planStartMs ? new Date(planStartMs).toISOString().slice(0, 10) : null;
+            const planEndIso = planEndMs ? new Date(planEndMs).toISOString().slice(0, 10) : null;
+            const cycleMinStartIso = cycleMinStartMs ? new Date(cycleMinStartMs).toISOString().slice(0, 10) : null;
+            const cycleMaxEndIso = cycleMaxEndMs ? new Date(cycleMaxEndMs).toISOString().slice(0, 10) : null;
+
+            const startIso = planStartIso || cycleMinStartIso;
+            const endIso = planEndIso || cycleMaxEndIso;
+            const hasCycleOverrun = Boolean(planEndIso && cycleMaxEndIso && cycleMaxEndIso > planEndIso);
+            const extraCyclesAfterPlanEnd = planEndIso
+              ? planCycles.filter(c => {
+                  const ce = c.schedule?.endDate || c.endDate || c.plannedEndDate;
+                  const cs = c.schedule?.startDate || c.startDate || c.plannedStartDate;
+                  return (ce && ce > planEndIso) || (cs && cs > planEndIso);
+                }).length
+              : 0;
+
             const nowD = new Date();
             const todayIso = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;
-            const planDaysObj = (startIso && endIso) ? calcScheduleDays(startIso, endIso) : { businessDays: 0 };
+            const planDaysObj = (startIso && endIso)
+              ? calcScheduleDays(startIso, endIso, planExcludeWeekends, planHolidays)
+              : { businessDays: 0 };
             const planTotalBizDays = Number(planDaysObj?.businessDays || 0);
             let planElapsedBizDays = 0;
             if (startIso && endIso && planTotalBizDays > 0) {
@@ -18474,11 +18538,14 @@ Then el sistema valida la identidad.
               } else if (todayIso >= endIso) {
                 planElapsedBizDays = planTotalBizDays;
               } else {
-                planElapsedBizDays = Number(calcScheduleDays(startIso, todayIso)?.businessDays || 0);
+                planElapsedBizDays = Number(calcScheduleDays(startIso, todayIso, planExcludeWeekends, planHolidays)?.businessDays || 0);
               }
             }
-            const planRemainingBizDays = Math.max(0, planTotalBizDays - planElapsedBizDays);
-            const isPlanOverdue = Boolean(endIso && todayIso > endIso && planEvalCount < planTotalCases);
+            const isPastPlanEnd = Boolean(endIso && todayIso > endIso);
+            const isPlanOverdue = Boolean(
+              (isPastPlanEnd && planEvalCount < planTotalCases) ||
+              (hasCycleOverrun && isPastPlanEnd)
+            );
 
             let planHealthLabel = 'ÓPTIMO';
             let planHealthBg = '#ECFDF5';
@@ -18487,7 +18554,7 @@ Then el sistema valida la identidad.
             let planSlackText = 'En tiempo';
             let planBurnSubtext = `${planEvalCount} de ${planTotalCases} casos evaluados`;
 
-            if (planTotalCases > 0 && planEvalCount === planTotalCases) {
+            if (planTotalCases > 0 && planEvalCount === planTotalCases && !hasCycleOverrun && !isPastPlanEnd) {
               planHealthLabel = 'COMPLETADO';
               planSlackText = '100% finalizado';
             } else if (planTotalBizDays > 0) {
@@ -18497,13 +18564,23 @@ Then el sistema valida la identidad.
               const planExecPctVal = planTotalCases > 0 ? (planEvalCount / planTotalCases) * 100 : 0;
               const planElapsedPctVal = (planElapsedBizDays / planTotalBizDays) * 100;
               const slackDays = Number((((planExecPctVal - planElapsedPctVal) / 100) * planTotalBizDays).toFixed(1));
-              planBurnSubtext = `Ritmo de ejecución: ${actualPerDay} casos/día vs ${targetPerDay} meta`;
+              planBurnSubtext = extraCyclesAfterPlanEnd > 0
+                ? `+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo extra' : 'ciclos extra'} · Ritmo: ${actualPerDay}/día vs ${targetPerDay} meta`
+                : `Ritmo de ejecución: ${actualPerDay} casos/día vs ${targetPerDay} meta`;
               if (isPlanOverdue) {
                 planHealthLabel = 'RETRASADO';
                 planHealthBg = '#FFF1F2';
                 planHealthText = '#BE123C';
                 planHealthBorder = '#FECDD3';
-                planSlackText = 'Plazo vencido';
+                planSlackText = hasCycleOverrun
+                  ? `Debió cerrar ${formatShortDateEs(endIso)} (Ext. ${formatShortDateEs(cycleMaxEndIso)})`
+                  : `Plazo vencido (${formatShortDateEs(endIso)})`;
+              } else if (hasCycleOverrun) {
+                planHealthLabel = (planTotalCases > 0 && planEvalCount === planTotalCases) ? 'CERRADO CON RETRASO' : 'EN RIESGO';
+                planHealthBg = '#FFFBEB';
+                planHealthText = '#B45309';
+                planHealthBorder = '#FDE68A';
+                planSlackText = `Desfase: ${formatShortDateEs(endIso)} → ${formatShortDateEs(cycleMaxEndIso)}`;
               } else if (slackDays < 0 || planFail + planBlock > planTotalCases * 0.25) {
                 planHealthLabel = 'EN RIESGO';
                 planHealthBg = '#FFFBEB';
@@ -18593,8 +18670,13 @@ Then el sistema valida la identidad.
                         <span style={{ color: '#CBD5E1' }}>•</span>
                         <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 500 }}>
                           Ambiente: <strong style={{ color: '#334155' }}>QA</strong>
-                          {(minStartMs || maxEndMs) && (
-                            <> ({minStartMs ? formatShortDateEs(new Date(minStartMs).toISOString().slice(0, 10)) : '—'} – {maxEndMs ? formatShortDateEs(new Date(maxEndMs).toISOString().slice(0, 10)) : '—'})</>
+                          {(startIso || endIso) && (
+                            <> ({startIso ? formatShortDateEs(startIso) : '—'} – {endIso ? formatShortDateEs(endIso) : '—'})</>
+                          )}
+                          {hasCycleOverrun && (
+                            <span style={{ color: '#BE123C', fontWeight: 700, marginLeft: '4px' }}>
+                              · Ext. {formatShortDateEs(cycleMaxEndIso)}{extraCyclesAfterPlanEnd > 0 ? ` (+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo' : 'ciclos'})` : ''}
+                            </span>
                           )}
                         </span>
                       </div>
