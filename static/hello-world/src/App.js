@@ -813,12 +813,77 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [isGlobal, setIsGlobal] = useState(false);
-  const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY' });
+  const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY', environments: [] });
   const [projectIssueTypes, setProjectIssueTypes] = useState([]);
   const [linkTypes, setLinkTypes] = useState([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadError, setLoadError] = useState(null);
+
+  // Catálogo configurable de Ambientes de Ejecución para Ciclos de Prueba
+  const DEFAULT_EXECUTION_ENVIRONMENTS = useMemo(() => ([
+    { id: 'env-qa', name: 'QA', description: 'Ambiente de Aseguramiento de Calidad (QA)', active: true },
+    { id: 'env-uat', name: 'UAT', description: 'Pruebas de Aceptación de Usuario (UAT)', active: true },
+    { id: 'env-staging', name: 'Staging / Pre-Prod', description: 'Ambiente Pre-Productivo / Staging', active: true },
+    { id: 'env-sit', name: 'Integración (SIT)', description: 'Pruebas de Integración de Sistemas', active: true },
+    { id: 'env-prod', name: 'Producción', description: 'Validación Smoke / Post-Deploy en Producción', active: true }
+  ]), []);
+
+  const availableEnvironments = useMemo(() => {
+    const rawList = Array.isArray(projectConfig?.environments) && projectConfig.environments.length > 0
+      ? projectConfig.environments
+      : DEFAULT_EXECUTION_ENVIRONMENTS;
+    return rawList.map((item, idx) => {
+      if (typeof item === 'string') {
+        return { id: `env-${idx}`, name: item.trim(), description: '', active: true };
+      }
+      return {
+        id: String(item?.id || `env-${idx}`),
+        name: String(item?.name || item?.key || '').trim(),
+        description: String(item?.description || '').trim(),
+        active: item?.active !== false
+      };
+    }).filter(e => Boolean(e.name));
+  }, [projectConfig?.environments, DEFAULT_EXECUTION_ENVIRONMENTS]);
+
+  const [newEnvName, setNewEnvName] = useState('');
+  const [newEnvDesc, setNewEnvDesc] = useState('');
+  const [editingEnvId, setEditingEnvId] = useState(null);
+  const [editingEnvName, setEditingEnvName] = useState('');
+  const [editingEnvDesc, setEditingEnvDesc] = useState('');
+  const [isSavingEnvCatalog, setIsSavingEnvCatalog] = useState(false);
+
+  const handleUpdateEnvironmentsCatalog = async (nextEnvironments, successMessage = 'Catálogo de ambientes actualizado.') => {
+    const updatedConfig = {
+      ...projectConfig,
+      environments: nextEnvironments
+    };
+    setProjectConfig(updatedConfig);
+    if (!selectedProjectId) return;
+    setIsSavingEnvCatalog(true);
+    try {
+      await invoke('setConfig', {
+        projectId: selectedProjectId,
+        config: updatedConfig
+      });
+      clearPersistentCache();
+      queryClient.invalidateQueries();
+      addNotification({
+        type: 'success',
+        title: 'Ambientes actualizados',
+        description: successMessage
+      });
+    } catch (e) {
+      console.error('Error saving environments catalog:', e);
+      addNotification({
+        type: 'error',
+        title: 'Error al guardar catálogo de ambientes',
+        description: e.message || String(e)
+      });
+    } finally {
+      setIsSavingEnvCatalog(false);
+    }
+  };
 
   // Traceability hierarchy state (Épicas ➔ Historias ➔ Casos de Prueba)
   const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {}, _projectId: null });
@@ -9664,6 +9729,7 @@ Then el sistema valida la identidad.
     startDate: '',
     endDate: '',
     sprint: '',
+    environment: 'QA',
     planningStatus: 'EN CURSO',
     excludeWeekends: true,
     holidays: []
@@ -9696,15 +9762,17 @@ Then el sistema valida la identidad.
     const sched = cycleInList?.schedule || selectedCycle?.schedule || {};
     const parentPlan = testPlans.find(p => String(p.id) === String(cycleInList?.planId || selectedPlanId));
     const parentHolidays = Array.isArray(parentPlan?.schedule?.holidays) ? parentPlan.schedule.holidays : [];
+    const defaultEnvName = availableEnvironments[0]?.name || 'QA';
     setCycleScheduleForm({
       startDate: sched.startDate || '',
       endDate: sched.endDate || '',
       sprint: sched.sprint || '',
+      environment: sched.environment || cycleInList?.environment || selectedCycle?.environment || defaultEnvName,
       planningStatus: sched.planningStatus || 'EN CURSO',
       excludeWeekends: sched.excludeWeekends !== undefined ? sched.excludeWeekends !== false : (parentPlan?.schedule?.excludeWeekends !== false),
       holidays: Array.isArray(sched.holidays) && sched.holidays.length > 0 ? sched.holidays : parentHolidays
     });
-  }, [selectedCycle?.id, testCycles, selectedPlanId, testPlans]);
+  }, [selectedCycle?.id, testCycles, selectedPlanId, testPlans, availableEnvironments]);
 
   // Helper: Calculate natural and business days between two YYYY-MM-DD dates
   const calcScheduleDays = (startStr, endStr, excludeWeekends = true, holidays = []) => {
@@ -9804,6 +9872,7 @@ Then el sistema valida la identidad.
       );
       const schedulePayload = {
         ...mergedForm,
+        environment: mergedForm.environment || availableEnvironments[0]?.name || 'QA',
         naturalDays,
         businessDays
       };
@@ -9817,18 +9886,22 @@ Then el sistema valida la identidad.
       queryClient.invalidateQueries();
       const savedSchedule = res?.schedule || schedulePayload;
       const savedPlanId = res?.planId !== undefined ? res.planId : targetPlanId;
-      setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, schedule: savedSchedule, planId: savedPlanId || c.planId } : c));
-      setSelectedCycle(prev => prev ? { ...prev, schedule: savedSchedule, planId: savedPlanId || prev.planId } : prev);
+      const savedEnv = savedSchedule.environment || schedulePayload.environment || 'QA';
+      setTestCycles(prev => prev.map(c => String(c.id) === String(selectedCycle.id) ? { ...c, schedule: savedSchedule, environment: savedEnv, planId: savedPlanId || c.planId } : c));
+      setSelectedCycle(prev => prev ? { ...prev, schedule: savedSchedule, environment: savedEnv, planId: savedPlanId || prev.planId } : prev);
+      const isEnvOnlyUpdate = Boolean(overrideFields && Object.keys(overrideFields).length === 1 && overrideFields.environment !== undefined);
       addNotification({
         type: 'success',
-        title: 'Fechas del Ciclo guardadas',
-        description: savedSchedule.startDate && savedSchedule.endDate
-          ? `${formatShortDateEs(savedSchedule.startDate)} → ${formatShortDateEs(savedSchedule.endDate)} (${savedSchedule.businessDays}d hábiles)`
-          : 'Metadatos del ciclo actualizados en Jira.'
+        title: isEnvOnlyUpdate ? `Ambiente del Ciclo guardado (${savedEnv})` : 'Propiedades del Ciclo guardadas',
+        description: isEnvOnlyUpdate
+          ? `Se actualizó el ambiente de ejecución a "${savedEnv}" en las propiedades del ciclo en Jira.`
+          : (savedSchedule.startDate && savedSchedule.endDate
+            ? `${formatShortDateEs(savedSchedule.startDate)} → ${formatShortDateEs(savedSchedule.endDate)} (${savedSchedule.businessDays}d hábiles · Amb: ${savedEnv})`
+            : `Metadatos del ciclo actualizados en Jira (Ambiente: ${savedEnv}).`)
       });
     } catch (e) {
       console.error('Error saving cycle schedule:', e);
-      addNotification({ type: 'error', title: 'Error al guardar fechas del ciclo', description: e.message || String(e) });
+      addNotification({ type: 'error', title: 'Error al guardar propiedades del ciclo', description: e.message || String(e) });
     } finally {
       setIsSavingCycleSchedule(false);
     }
@@ -10903,45 +10976,120 @@ Then el sistema valida la identidad.
                       </div>
                     </div>
 
-                    {/* Column 3: Cálculo de Duración */}
+                    {/* Column 3: Banner Dividido — Izquierda: Cálculo de Días Hábiles (Automático) | Derecha: Ambiente de Ejecución (Propiedad del Ciclo) */}
                     <div style={{
                       background: 'rgba(248, 250, 252, 0.7)',
                       border: '1px solid #E2E8F0',
                       borderRadius: '6px',
-                      padding: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between'
+                      padding: '10px 12px',
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: '10px',
+                      alignItems: 'stretch'
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
-                          Cálculo de Duración
-                        </span>
-                        <span style={{
-                          padding: '1px 6px',
-                          borderRadius: '4px',
-                          fontSize: '10px',
-                          fontWeight: 600,
-                          background: '#ECFDF5',
-                          color: '#047857',
-                          border: '1px solid #A7F3D0'
-                        }}>
-                          Automático
-                        </span>
+                      {/* Lado Izquierdo: Cálculo de Días Hábiles en Automático */}
+                      <div style={{
+                        background: '#FFFFFF',
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '6px',
+                        padding: '8px 10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                          <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748B' }}>
+                            Días Hábiles
+                          </span>
+                          <span style={{
+                            padding: '1px 6px',
+                            borderRadius: '4px',
+                            fontSize: '9px',
+                            fontWeight: 700,
+                            background: '#ECFDF5',
+                            color: '#047857',
+                            border: '1px solid #A7F3D0'
+                          }}>
+                            Automático
+                          </span>
+                        </div>
+                        <div style={{ marginTop: '6px', display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '6px', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '15px', fontWeight: 800, color: '#0C66E4', fontFamily: 'monospace' }}>
+                            {cycleDaysCalc.businessDays} hábiles
+                          </span>
+                          <span style={{ fontSize: '10px', color: '#64748B', fontFamily: 'monospace' }} title="Días naturales totales en el rango">
+                            ({cycleDaysCalc.naturalDays}d nat.)
+                          </span>
+                        </div>
                       </div>
 
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
-                        <div style={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '4px', padding: '8px 10px' }}>
-                          <div style={{ fontSize: '10px', color: '#64748B' }}>Días Naturales</div>
-                          <div style={{ fontSize: '14px', fontWeight: 700, color: '#1E293B', fontFamily: 'monospace', marginTop: '2px' }}>
-                            {cycleDaysCalc.naturalDays} días
-                          </div>
+                      {/* Lado Derecho: Configuración de Ambiente de Ejecución del Ciclo */}
+                      <div style={{
+                        background: '#FFFFFF',
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '6px',
+                        padding: '8px 10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                          <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748B' }}>
+                            Ambiente Ciclo
+                          </span>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('config')}
+                              title="Administrar catálogo de ambientes en Configuración"
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                padding: 0,
+                                fontSize: '9px',
+                                fontWeight: 700,
+                                color: '#0C66E4',
+                                cursor: 'pointer',
+                                textDecoration: 'underline'
+                              }}
+                            >
+                              + Catálogo
+                            </button>
+                          )}
                         </div>
-                        <div style={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '4px', padding: '8px 10px' }}>
-                          <div style={{ fontSize: '10px', color: '#64748B' }}>Días Hábiles</div>
-                          <div style={{ fontSize: '14px', fontWeight: 700, color: '#0C66E4', fontFamily: 'monospace', marginTop: '2px' }}>
-                            {cycleDaysCalc.businessDays} hábiles
-                          </div>
+                        <div style={{ marginTop: '5px' }}>
+                          <select
+                            value={cycleScheduleForm.environment || availableEnvironments[0]?.name || 'QA'}
+                            disabled={isSavingCycleSchedule}
+                            onChange={(e) => {
+                              const nextEnv = e.target.value;
+                              setCycleScheduleForm(prev => ({ ...prev, environment: nextEnv }));
+                              handleSaveCycleSchedule({ environment: nextEnv });
+                            }}
+                            style={{
+                              width: '100%',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              color: '#0F172A',
+                              background: '#F8FAFC',
+                              border: '1px solid #CBD5E1',
+                              borderRadius: '4px',
+                              padding: '4px 6px',
+                              cursor: isSavingCycleSchedule ? 'wait' : 'pointer',
+                              outline: 'none'
+                            }}
+                          >
+                            {availableEnvironments.map(envObj => (
+                              <option key={envObj.id || envObj.name} value={envObj.name}>
+                                🌐 {envObj.name}
+                              </option>
+                            ))}
+                            {cycleScheduleForm.environment && !availableEnvironments.some(e => e.name === cycleScheduleForm.environment) && (
+                              <option value={cycleScheduleForm.environment}>
+                                🌐 {cycleScheduleForm.environment}
+                              </option>
+                            )}
+                          </select>
                         </div>
                       </div>
                     </div>
@@ -12958,6 +13106,18 @@ Then el sistema valida la identidad.
                               whiteSpace: 'nowrap'
                             }}>
                               {selectedCycle.summary} ({cycleTotalBizDays || cycleDaysCalc.naturalDays || 0} DÍAS)
+                            </span>
+                            <span style={{
+                              fontSize: '10px',
+                              fontWeight: 700,
+                              color: '#0F172A',
+                              background: '#F1F5F9',
+                              border: '1px solid #CBD5E1',
+                              padding: '2px 7px',
+                              borderRadius: '4px',
+                              whiteSpace: 'nowrap'
+                            }} title="Ambiente de ejecución configurado para este ciclo">
+                              🌐 {selectedCycle.schedule?.environment || selectedCycle.environment || cycleScheduleForm.environment || availableEnvironments[0]?.name || 'QA'}
                             </span>
                             <span style={{ fontSize: '10px', color: '#626F86', fontWeight: 500 }}>
                               {cycleShortRange}
@@ -18396,11 +18556,18 @@ Then el sistema valida la identidad.
                     </details>
                   </div>
 
-                  {/* 4. Ambiente: QA */}
+                  {/* 4. Ambiente */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
                     <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                      QA
+                      {(() => {
+                        const envSet = new Set(
+                          filteredCycles
+                            .map(c => c.schedule?.environment || c.environment)
+                            .filter(Boolean)
+                        );
+                        return envSet.size > 0 ? Array.from(envSet).join(', ') : (availableEnvironments[0]?.name || 'QA');
+                      })()}
                     </span>
                   </div>
                 </div>
@@ -18753,7 +18920,16 @@ Then el sistema valida la identidad.
                         </span>
                         <span style={{ color: '#CBD5E1' }}>•</span>
                         <span style={{ fontSize: '11px', color: '#64748B', fontWeight: 500 }}>
-                          Ambiente: <strong style={{ color: '#334155' }}>QA</strong>
+                          Ambiente: <strong style={{ color: '#334155' }}>
+                            {(() => {
+                              const envSet = new Set(
+                                activeCyclesForOverview
+                                  .map(c => c.schedule?.environment || c.environment)
+                                  .filter(Boolean)
+                              );
+                              return envSet.size > 0 ? Array.from(envSet).join(', ') : (availableEnvironments[0]?.name || 'QA');
+                            })()}
+                          </strong>
                           {(startIso || endIso) && (
                             <> ({startIso ? formatShortDateEs(startIso) : '—'} – {endIso ? formatShortDateEs(endIso) : '—'})</>
                           )}
@@ -19132,11 +19308,12 @@ Then el sistema valida la identidad.
                               statusBadgeLabel = 'PAUSADO';
                             }
 
+                            const cycleEnvLabel = c.schedule?.environment || c.environment || availableEnvironments[0]?.name || 'QA';
                             const sDate = c.startDate || c.plannedStartDate;
                             const eDate = c.endDate || c.plannedEndDate;
                             const dateRangeLabel = (sDate || eDate)
                               ? `${sDate ? formatShortDateEs(sDate) : '—'} - ${eDate ? formatShortDateEs(eDate) : '—'}`
-                              : 'Ambiente QA';
+                              : `Ambiente ${cycleEnvLabel}`;
 
                             return (
                               <div
@@ -19239,7 +19416,7 @@ Then el sistema valida la identidad.
 
                                 <div className="runs-cycle-card-collapsible">
                                   <div style={{ fontSize: '10px', color: '#64748B', marginTop: '2px', marginBottom: '10px' }}>
-                                    {c.environment || 'QA'} · {dateRangeLabel}
+                                    {cycleEnvLabel} · {dateRangeLabel}
                                   </div>
                                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', marginBottom: '4px' }}>
                                     <span style={{
@@ -22459,6 +22636,399 @@ Then el sistema valida la identidad.
                       Almacena snapshots 1:1, pasos, evidencias y comentarios en Jira.
                     </span>
                   </div>
+                </div>
+              </div>
+
+              {/* Card 1.5: Catálogo de Ambientes de Ejecución (Formato Tabla para Administradores) */}
+              <div className="glass" style={{
+                background: 'var(--bg-surface, #161b22)',
+                border: '1px solid var(--ds-border, #30363d)',
+                borderRadius: '10px',
+                padding: '1.5rem 1.75rem',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.4rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                    <span style={{ fontSize: '1.3rem' }}>🌐</span>
+                    <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '600', color: 'var(--text-primary, #e6edf3)' }}>
+                      Catálogo de Ambientes de Ejecución (Ciclos de Prueba)
+                    </h2>
+                    <span style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      background: 'rgba(12, 102, 228, 0.12)',
+                      color: '#2563EB',
+                      border: '1px solid rgba(37, 99, 235, 0.28)'
+                    }}>
+                      {availableEnvironments.length} {availableEnvironments.length === 1 ? 'ambiente' : 'ambientes'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isSavingEnvCatalog}
+                    onClick={() => {
+                      handleUpdateEnvironmentsCatalog(
+                        DEFAULT_EXECUTION_ENVIRONMENTS,
+                        'Se restauraron los ambientes predeterminados (QA, UAT, Staging, SIT, Producción).'
+                      );
+                    }}
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid var(--ds-border, #CBD5E1)',
+                      color: 'var(--text-secondary, #475569)',
+                      borderRadius: '6px',
+                      padding: '5px 10px',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      cursor: isSavingEnvCatalog ? 'wait' : 'pointer'
+                    }}
+                  >
+                    ↺ Restaurar predeterminados
+                  </button>
+                </div>
+                <p style={{ margin: '0 0 1.1rem 0', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' }}>
+                  Da de alta, edita o administra los ambientes disponibles para configurar en el banner de cada Ciclo de Prueba (se guardan en las propiedades del ciclo en Jira).
+                </p>
+
+                {/* Formulario rápido para dar de alta un nuevo ambiente */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(180px, 1fr) minmax(240px, 2fr) auto',
+                  gap: '0.75rem',
+                  alignItems: 'end',
+                  marginBottom: '1rem',
+                  padding: '0.85rem 1rem',
+                  background: 'var(--bg-subtle, rgba(248, 250, 252, 0.6))',
+                  border: '1px solid var(--ds-border, #E2E8F0)',
+                  borderRadius: '8px'
+                }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)' }}>
+                      Nombre del Ambiente <span style={{ color: '#E11D48' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej. QA, UAT, Pre-Prod, Sandbox..."
+                      value={newEnvName}
+                      onChange={(e) => setNewEnvName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const cleanName = newEnvName.trim();
+                          if (!cleanName) return;
+                          if (availableEnvironments.some(env => env.name.toLowerCase() === cleanName.toLowerCase())) {
+                            addNotification({ type: 'warning', title: 'Ambiente duplicado', description: `El ambiente "${cleanName}" ya existe en el catálogo.` });
+                            return;
+                          }
+                          const nextList = [
+                            ...availableEnvironments,
+                            {
+                              id: `env-${Date.now()}`,
+                              name: cleanName,
+                              description: newEnvDesc.trim(),
+                              active: true
+                            }
+                          ];
+                          setNewEnvName('');
+                          setNewEnvDesc('');
+                          handleUpdateEnvironmentsCatalog(nextList, `Ambiente "${cleanName}" dado de alta en el catálogo.`);
+                        }
+                      }}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--ds-border, #CBD5E1)',
+                        background: 'var(--bg-surface, #FFFFFF)',
+                        color: 'var(--text-primary, #0F172A)',
+                        fontSize: '0.85rem',
+                        fontWeight: 600
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)' }}>
+                      Descripción / URL / Notas (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej. Servidor de pruebas integrales o URL del entorno..."
+                      value={newEnvDesc}
+                      onChange={(e) => setNewEnvDesc(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const cleanName = newEnvName.trim();
+                          if (!cleanName) return;
+                          if (availableEnvironments.some(env => env.name.toLowerCase() === cleanName.toLowerCase())) {
+                            addNotification({ type: 'warning', title: 'Ambiente duplicado', description: `El ambiente "${cleanName}" ya existe en el catálogo.` });
+                            return;
+                          }
+                          const nextList = [
+                            ...availableEnvironments,
+                            {
+                              id: `env-${Date.now()}`,
+                              name: cleanName,
+                              description: newEnvDesc.trim(),
+                              active: true
+                            }
+                          ];
+                          setNewEnvName('');
+                          setNewEnvDesc('');
+                          handleUpdateEnvironmentsCatalog(nextList, `Ambiente "${cleanName}" dado de alta en el catálogo.`);
+                        }
+                      }}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--ds-border, #CBD5E1)',
+                        background: 'var(--bg-surface, #FFFFFF)',
+                        color: 'var(--text-primary, #0F172A)',
+                        fontSize: '0.85rem'
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!newEnvName.trim() || isSavingEnvCatalog}
+                    onClick={() => {
+                      const cleanName = newEnvName.trim();
+                      if (!cleanName) return;
+                      if (availableEnvironments.some(env => env.name.toLowerCase() === cleanName.toLowerCase())) {
+                        addNotification({ type: 'warning', title: 'Ambiente duplicado', description: `El ambiente "${cleanName}" ya existe en el catálogo.` });
+                        return;
+                      }
+                      const nextList = [
+                        ...availableEnvironments,
+                        {
+                          id: `env-${Date.now()}`,
+                          name: cleanName,
+                          description: newEnvDesc.trim(),
+                          active: true
+                        }
+                      ];
+                      setNewEnvName('');
+                      setNewEnvDesc('');
+                      handleUpdateEnvironmentsCatalog(nextList, `Ambiente "${cleanName}" dado de alta en el catálogo.`);
+                    }}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: !newEnvName.trim() ? '#94A3B8' : '#0C66E4',
+                      color: '#FFFFFF',
+                      fontSize: '0.84rem',
+                      fontWeight: 700,
+                      cursor: !newEnvName.trim() || isSavingEnvCatalog ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
+                      height: '36px'
+                    }}
+                  >
+                    + Agregar Ambiente
+                  </button>
+                </div>
+
+                {/* Tabla de Ambientes Configurados */}
+                <div style={{
+                  border: '1px solid var(--ds-border, #E2E8F0)',
+                  borderRadius: '8px',
+                  overflow: 'hidden',
+                  background: 'var(--bg-surface, #FFFFFF)'
+                }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--bg-subtle, #F8FAFC)', borderBottom: '1px solid var(--ds-border, #E2E8F0)' }}>
+                        <th style={{ textAlign: 'left', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)', width: '28%' }}>
+                          Ambiente
+                        </th>
+                        <th style={{ textAlign: 'left', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)' }}>
+                          Descripción / Notas
+                        </th>
+                        <th style={{ textAlign: 'center', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)', width: '120px' }}>
+                          Disponibilidad
+                        </th>
+                        <th style={{ textAlign: 'right', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)', width: '170px' }}>
+                          Acciones
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {availableEnvironments.map((envItem, idx) => {
+                        const isEditingRow = editingEnvId === envItem.id;
+                        return (
+                          <tr
+                            key={envItem.id || idx}
+                            style={{
+                              borderBottom: idx < availableEnvironments.length - 1 ? '1px solid var(--ds-border, #F1F5F9)' : 'none',
+                              background: isEditingRow ? 'rgba(37, 99, 235, 0.04)' : 'transparent'
+                            }}
+                          >
+                            <td style={{ padding: '10px 14px', verticalAlign: 'middle' }}>
+                              {isEditingRow ? (
+                                <input
+                                  type="text"
+                                  value={editingEnvName}
+                                  onChange={(e) => setEditingEnvName(e.target.value)}
+                                  style={{
+                                    width: '100%',
+                                    padding: '5px 8px',
+                                    borderRadius: '4px',
+                                    border: '1px solid #2563EB',
+                                    fontSize: '0.84rem',
+                                    fontWeight: 700
+                                  }}
+                                />
+                              ) : (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <span style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '5px',
+                                    padding: '3px 9px',
+                                    borderRadius: '6px',
+                                    background: '#EFF6FF',
+                                    color: '#1D4ED8',
+                                    border: '1px solid #BFDBFE',
+                                    fontWeight: 700,
+                                    fontSize: '0.8rem'
+                                  }}>
+                                    🌐 {envItem.name}
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ padding: '10px 14px', verticalAlign: 'middle', color: 'var(--text-secondary, #64748B)' }}>
+                              {isEditingRow ? (
+                                <input
+                                  type="text"
+                                  value={editingEnvDesc}
+                                  onChange={(e) => setEditingEnvDesc(e.target.value)}
+                                  placeholder="Descripción o URL..."
+                                  style={{
+                                    width: '100%',
+                                    padding: '5px 8px',
+                                    borderRadius: '4px',
+                                    border: '1px solid #CBD5E1',
+                                    fontSize: '0.84rem'
+                                  }}
+                                />
+                              ) : (
+                                <span>{envItem.description || '—'}</span>
+                              )}
+                            </td>
+                            <td style={{ padding: '10px 14px', textAlign: 'center', verticalAlign: 'middle' }}>
+                              <span style={{
+                                padding: '2px 8px',
+                                borderRadius: '999px',
+                                fontSize: '0.72rem',
+                                fontWeight: 700,
+                                background: '#ECFDF5',
+                                color: '#047857',
+                                border: '1px solid #A7F3D0'
+                              }}>
+                                Activo
+                              </span>
+                            </td>
+                            <td style={{ padding: '10px 14px', textAlign: 'right', verticalAlign: 'middle' }}>
+                              {isEditingRow ? (
+                                <div style={{ display: 'inline-flex', gap: '6px' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const cleanName = editingEnvName.trim();
+                                      if (!cleanName) return;
+                                      const nextList = availableEnvironments.map(item =>
+                                        item.id === envItem.id
+                                          ? { ...item, name: cleanName, description: editingEnvDesc.trim() }
+                                          : item
+                                      );
+                                      setEditingEnvId(null);
+                                      handleUpdateEnvironmentsCatalog(nextList, `Ambiente "${cleanName}" actualizado.`);
+                                    }}
+                                    style={{
+                                      padding: '4px 10px',
+                                      borderRadius: '4px',
+                                      border: 'none',
+                                      background: '#0C66E4',
+                                      color: '#FFFFFF',
+                                      fontSize: '0.76rem',
+                                      fontWeight: 700,
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    Guardar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingEnvId(null)}
+                                    style={{
+                                      padding: '4px 8px',
+                                      borderRadius: '4px',
+                                      border: '1px solid #CBD5E1',
+                                      background: '#FFFFFF',
+                                      color: '#475569',
+                                      fontSize: '0.76rem',
+                                      fontWeight: 600,
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    Cancelar
+                                  </button>
+                                </div>
+                              ) : (
+                                <div style={{ display: 'inline-flex', gap: '6px' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingEnvId(envItem.id);
+                                      setEditingEnvName(envItem.name);
+                                      setEditingEnvDesc(envItem.description || '');
+                                    }}
+                                    style={{
+                                      padding: '4px 9px',
+                                      borderRadius: '4px',
+                                      border: '1px solid var(--ds-border, #CBD5E1)',
+                                      background: 'var(--bg-surface, #FFFFFF)',
+                                      color: 'var(--text-primary, #334155)',
+                                      fontSize: '0.76rem',
+                                      fontWeight: 600,
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    ✏️ Editar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={availableEnvironments.length <= 1 || isSavingEnvCatalog}
+                                    title={availableEnvironments.length <= 1 ? 'Debe existir al menos un ambiente en el catálogo' : 'Eliminar ambiente'}
+                                    onClick={() => {
+                                      if (availableEnvironments.length <= 1) return;
+                                      const nextList = availableEnvironments.filter(item => item.id !== envItem.id);
+                                      handleUpdateEnvironmentsCatalog(nextList, `Ambiente "${envItem.name}" eliminado del catálogo.`);
+                                    }}
+                                    style={{
+                                      padding: '4px 9px',
+                                      borderRadius: '4px',
+                                      border: '1px solid #FECDD3',
+                                      background: '#FFF1F2',
+                                      color: '#E11D48',
+                                      fontSize: '0.76rem',
+                                      fontWeight: 600,
+                                      cursor: availableEnvironments.length <= 1 ? 'not-allowed' : 'pointer',
+                                      opacity: availableEnvironments.length <= 1 ? 0.5 : 1
+                                    }}
+                                  >
+                                    🗑️ Eliminar
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
 

@@ -1,6 +1,6 @@
 {
   "name": "jira-project-page-custom-ui-static",
-  "version": "3.13.15",
+  "version": "3.13.16",
   "private": true,
   "homepage": ".",
   "dependencies": {

@@ -328,6 +328,15 @@ resolver.define('getIssueLinkTypes', async () => {
 
 const REMOVED_DASHBOARD_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles_progress'];
 const GLOBAL_WIDGETS_KVS_KEY = 'testpulse_global_dashboard_widgets_v2';
+const GLOBAL_ENVIRONMENTS_KVS_KEY = 'testpulse_global_environments_v1';
+
+const DEFAULT_EXECUTION_ENVIRONMENTS = [
+  { id: 'env-qa', name: 'QA', description: 'Ambiente de Aseguramiento de Calidad (Pruebas Funcionales)' },
+  { id: 'env-uat', name: 'UAT', description: 'Ambiente de Pruebas de Aceptación de Usuario (UAT)' },
+  { id: 'env-staging', name: 'Staging / Pre-Prod', description: 'Ambiente Pre-Productivo / Homologación' },
+  { id: 'env-int', name: 'Integración (SIT)', description: 'Ambiente de Pruebas de Integración de Sistemas' },
+  { id: 'env-prod', name: 'Producción', description: 'Ambiente Productivo (Smoke / Sanity Post-Release)' }
+];
 
 const sanitizeDashboardWidgetsList = (widgets) => {
   if (!Array.isArray(widgets)) return null;
@@ -335,12 +344,36 @@ const sanitizeDashboardWidgetsList = (widgets) => {
   return cleaned.length > 0 ? cleaned : null;
 };
 
+const sanitizeEnvironmentsList = (envs) => {
+  if (!Array.isArray(envs)) return null;
+  const cleaned = envs
+    .filter(e => e && (typeof e === 'string' || (typeof e === 'object' && e.name)))
+    .map((e, idx) => {
+      if (typeof e === 'string') {
+        const trimmed = e.trim();
+        return { id: `env-${idx}-${trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, name: trimmed, description: '' };
+      }
+      return {
+        id: String(e.id || `env-${idx}-${String(e.name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+        name: String(e.name || '').trim(),
+        description: String(e.description || '').trim()
+      };
+    })
+    .filter(e => e.name.length > 0);
+  return cleaned.length > 0 ? cleaned : null;
+};
+
 resolver.define('getConfig', async ({ payload }) => {
   const { projectId } = payload;
   let globalWidgets = null;
+  let globalEnvironments = null;
   try {
-    const rawGlobal = await storage.get(GLOBAL_WIDGETS_KVS_KEY);
+    const [rawGlobal, rawGlobalEnvs] = await Promise.all([
+      storage.get(GLOBAL_WIDGETS_KVS_KEY).catch(() => null),
+      storage.get(GLOBAL_ENVIRONMENTS_KVS_KEY).catch(() => null)
+    ]);
     globalWidgets = sanitizeDashboardWidgetsList(rawGlobal);
+    globalEnvironments = sanitizeEnvironmentsList(rawGlobalEnvs);
   } catch (e) {}
 
   const defaultConf = {
@@ -350,6 +383,7 @@ resolver.define('getConfig', async ({ payload }) => {
     testRunType: 'Test Run',
     requirementIssueTypes: [],
     requirementLinkType: 'ANY',
+    environments: globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS,
     ...(globalWidgets ? { dashboardWidgets: globalWidgets } : {})
   };
 
@@ -381,9 +415,17 @@ resolver.define('getConfig', async ({ payload }) => {
       const projectWidgets = sanitizeDashboardWidgetsList(config.dashboardWidgets);
       const effectiveWidgets = globalWidgets || projectWidgets;
 
+      const projectEnvs = sanitizeEnvironmentsList(config.environments);
+      const effectiveEnvironments = globalEnvironments || projectEnvs || DEFAULT_EXECUTION_ENVIRONMENTS;
+
       if (!globalWidgets && projectWidgets) {
         try {
           await storage.set(GLOBAL_WIDGETS_KVS_KEY, projectWidgets);
+        } catch (e) {}
+      }
+      if (!globalEnvironments && projectEnvs) {
+        try {
+          await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, projectEnvs);
         } catch (e) {}
       }
 
@@ -394,7 +436,8 @@ resolver.define('getConfig', async ({ payload }) => {
         testRunType: config.testRunType || 'Test Run',
         requirementIssueTypes: Array.isArray(config.requirementIssueTypes) ? config.requirementIssueTypes : [],
         requirementLinkType: config.requirementLinkType || 'ANY',
-        ...config
+        ...config,
+        environments: effectiveEnvironments
       };
 
       if (effectiveWidgets) {
@@ -421,6 +464,13 @@ resolver.define('setConfig', async ({ payload }) => {
     nextConfig.dashboardWidgets = sanitized;
     try {
       await storage.set(GLOBAL_WIDGETS_KVS_KEY, sanitized);
+    } catch (e) {}
+  }
+  if (Array.isArray(nextConfig.environments)) {
+    const sanitizedEnvs = sanitizeEnvironmentsList(nextConfig.environments) || DEFAULT_EXECUTION_ENVIRONMENTS;
+    nextConfig.environments = sanitizedEnvs;
+    try {
+      await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, sanitizedEnvs);
     } catch (e) {}
   }
   const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
@@ -639,7 +689,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
       let planId = (planLink && typeof planLink === 'object')
         ? (planLink.planId || planLink.value?.planId || null)
         : (typeof planLink === 'string' ? planLink : (v2Prop?.planId || null));
-      const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+      const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays || directSched.environment))
         ? directSched
         : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
           ? (planLink.schedule || planLink.value?.schedule)
@@ -657,6 +707,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
         status: issue.fields?.status?.name || 'To Do',
         planId,
         schedule,
+        environment: schedule?.environment || '',
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
@@ -746,11 +797,12 @@ resolver.define('savePlanSchedule', async ({ payload }) => {
   return { success: true, schedule: cleanSchedule };
 });
 
-// Save schedule metadata (startDate, endDate, sprint, planningStatus, excludeWeekends, holidays, naturalDays, businessDays) on a Test Cycle issue
+// Save schedule metadata (startDate, endDate, sprint, planningStatus, environment, excludeWeekends, holidays, naturalDays, businessDays) on a Test Cycle issue
 resolver.define('saveCycleSchedule', async ({ payload }) => {
   const { cycleId, planId, schedule } = payload || {};
   if (!cycleId || !schedule) throw new Error('Missing cycleId or schedule');
   let currentPlanId = planId || null;
+  let existingSchedule = null;
   try {
     const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
       method: 'GET',
@@ -761,13 +813,18 @@ resolver.define('saveCycleSchedule', async ({ payload }) => {
       if (!currentPlanId) {
         currentPlanId = data?.value?.planId || data?.planId || null;
       }
+      existingSchedule = data?.value?.schedule || data?.schedule || null;
     }
   } catch (e) {}
+  const resolvedEnvironment = typeof schedule.environment === 'string'
+    ? schedule.environment.trim()
+    : (existingSchedule?.environment || '');
   const cleanSchedule = {
     startDate: schedule.startDate || '',
     endDate: schedule.endDate || '',
     sprint: schedule.sprint || '',
     planningStatus: schedule.planningStatus || 'EN CURSO',
+    environment: resolvedEnvironment,
     excludeWeekends: schedule.excludeWeekends !== false,
     holidays: Array.isArray(schedule.holidays) ? schedule.holidays : [],
     naturalDays: Number(schedule.naturalDays) || 0,
@@ -2690,7 +2747,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     if (!planId && issue?.fields?.parent?.id) {
       planId = issue.fields.parent.id;
     }
-    const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+    const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays || directSched.environment))
       ? directSched
       : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
         ? (planLink.schedule || planLink.value?.schedule)
@@ -2737,6 +2794,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       summary: issue.fields?.summary || '',
       planId,
       schedule,
+      environment: schedule?.environment || '',
       version: versionDisplay,
       versions: affectsVersions,
       fixVersions: fixVersions,
@@ -2853,6 +2911,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
         summary: i.fields?.summary || '',
         planId,
         schedule,
+        environment: schedule?.environment || '',
         version: versionDisplay,
         versions: affectsVersions,
         fixVersions: fixVersions,
