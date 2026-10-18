@@ -18457,8 +18457,8 @@ Then el sistema valida la identidad.
               else if (st.cStatusKey === 'IN_PROGRESS') planActiveCyclesCount++;
               else planPendingCyclesCount++;
 
-              const sDate = c.startDate || c.plannedStartDate;
-              const eDate = c.endDate || c.plannedEndDate;
+              const sDate = c.schedule?.startDate || c.startDate || c.plannedStartDate;
+              const eDate = c.schedule?.endDate || c.endDate || c.plannedEndDate;
               if (sDate) {
                 const ms = new Date(sDate).getTime();
                 if (!isNaN(ms) && (minStartMs === null || ms < minStartMs)) minStartMs = ms;
@@ -18470,8 +18470,8 @@ Then el sistema valida la identidad.
             });
 
             if (activePlanObj) {
-              const pS = activePlanObj.startDate || activePlanObj.plannedStartDate;
-              const pE = activePlanObj.endDate || activePlanObj.plannedEndDate;
+              const pS = activePlanObj.schedule?.startDate || activePlanObj.startDate || activePlanObj.plannedStartDate;
+              const pE = activePlanObj.schedule?.endDate || activePlanObj.endDate || activePlanObj.plannedEndDate;
               if (pS) {
                 const ms = new Date(pS).getTime();
                 if (!isNaN(ms)) minStartMs = ms;
@@ -18488,10 +18488,24 @@ Then el sistema valida la identidad.
             const planFailW = planTotalCases > 0 ? (planFail / planTotalCases) * 100 : 0;
             const planBlockW = planTotalCases > 0 ? (planBlock / planTotalCases) * 100 : 0;
 
-            const planSched = calcScheduleDays(
-              minStartMs ? new Date(minStartMs).toISOString().slice(0, 10) : null,
-              maxEndMs ? new Date(maxEndMs).toISOString().slice(0, 10) : null
-            );
+            const startIso = minStartMs ? new Date(minStartMs).toISOString().slice(0, 10) : null;
+            const endIso = maxEndMs ? new Date(maxEndMs).toISOString().slice(0, 10) : null;
+            const nowD = new Date();
+            const todayIso = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;
+            const planDaysObj = (startIso && endIso) ? calcScheduleDays(startIso, endIso) : { businessDays: 0 };
+            const planTotalBizDays = Number(planDaysObj?.businessDays || 0);
+            let planElapsedBizDays = 0;
+            if (startIso && endIso && planTotalBizDays > 0) {
+              if (todayIso <= startIso) {
+                planElapsedBizDays = todayIso === startIso ? 1 : 0;
+              } else if (todayIso >= endIso) {
+                planElapsedBizDays = planTotalBizDays;
+              } else {
+                planElapsedBizDays = Number(calcScheduleDays(startIso, todayIso)?.businessDays || 0);
+              }
+            }
+            const planRemainingBizDays = Math.max(0, planTotalBizDays - planElapsedBizDays);
+            const isPlanOverdue = Boolean(endIso && todayIso > endIso && planEvalCount < planTotalCases);
 
             let planHealthLabel = 'ÓPTIMO';
             let planHealthBg = '#ECFDF5';
@@ -18503,20 +18517,20 @@ Then el sistema valida la identidad.
             if (planTotalCases > 0 && planEvalCount === planTotalCases) {
               planHealthLabel = 'COMPLETADO';
               planSlackText = '100% finalizado';
-            } else if (planSched) {
-              const elapsedDays = Math.max(1, planSched.totalDays - planSched.remainingDays);
+            } else if (planTotalBizDays > 0) {
+              const elapsedDays = Math.max(1, planElapsedBizDays);
               const actualPerDay = Number((planEvalCount / elapsedDays).toFixed(1));
-              const targetPerDay = Number((planTotalCases / Math.max(1, planSched.totalDays)).toFixed(1));
-              const remainingCases = Math.max(0, planTotalCases - planEvalCount);
-              const daysNeededAtTarget = targetPerDay > 0 ? Math.ceil(remainingCases / targetPerDay) : 0;
-              const slackDays = planSched.remainingDays - daysNeededAtTarget;
+              const targetPerDay = Number((planTotalCases / Math.max(1, planTotalBizDays)).toFixed(1));
+              const planExecPctVal = planTotalCases > 0 ? (planEvalCount / planTotalCases) * 100 : 0;
+              const planElapsedPctVal = (planElapsedBizDays / planTotalBizDays) * 100;
+              const slackDays = Number((((planExecPctVal - planElapsedPctVal) / 100) * planTotalBizDays).toFixed(1));
               planBurnSubtext = `Ritmo de ejecución: ${actualPerDay} casos/día vs ${targetPerDay} meta`;
-              if (planSched.isOverdue) {
+              if (isPlanOverdue) {
                 planHealthLabel = 'RETRASADO';
                 planHealthBg = '#FFF1F2';
                 planHealthText = '#BE123C';
                 planHealthBorder = '#FECDD3';
-                planSlackText = `Vencido (${Math.abs(planSched.remainingDays)}d)`;
+                planSlackText = 'Plazo vencido';
               } else if (slackDays < 0 || planFail + planBlock > planTotalCases * 0.25) {
                 planHealthLabel = 'EN RIESGO';
                 planHealthBg = '#FFFBEB';
@@ -18533,12 +18547,6 @@ Then el sistema valida la identidad.
               planHealthBorder = '#E2E8F0';
               planSlackText = 'Sin iniciar';
             }
-
-            // Velocity for KPI Card 4 (based on active selection)
-            const elapsedDaysForKpi = planSched ? Math.max(1, planSched.totalDays - planSched.remainingDays) : 1;
-            const runsVelocityPerDay = Number((ejecutados / elapsedDaysForKpi).toFixed(1));
-            const remainingSelectedCases = Math.max(0, allTotal - ejecutados);
-            const estDaysToClose = runsVelocityPerDay > 0 ? Math.ceil(remainingSelectedCases / runsVelocityPerDay) : 0;
 
             return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -19346,7 +19354,7 @@ Then el sistema valida la identidad.
                               </div>
                             </div>
 
-                            {/* KPI 4: Ritmo de Ejecución */}
+                            {/* KPI 4: Tiempo de Resolución (MTTR) */}
                             <div style={{
                               background: '#FFFFFF',
                               padding: '16px',
@@ -19360,21 +19368,21 @@ Then el sistema valida la identidad.
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                                 <span style={{ fontSize: '11px', fontWeight: 700, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '0.04em', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                                   <svg style={{ width: '14px', height: '14px' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                                   </svg>
-                                  RITMO DE EJECUCIÓN
+                                  RESOLUCIÓN (MTTR)
                                 </span>
                                 <span style={{ padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 700, background: '#F1F5F9', color: '#475569' }}>
-                                  Vel. Media
+                                  SLA: 24h
                                 </span>
                               </div>
                               <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px', margin: '4px 0' }}>
-                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em' }}>{runsVelocityPerDay}</span>
-                                <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748B' }}>casos / día</span>
+                                <span style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em' }}>{avgResolutionHours}</span>
+                                <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748B' }}>hrs</span>
                               </div>
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: '#64748B', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #F1F5F9' }}>
-                                <span style={{ color: '#047857', fontWeight: 600 }}>{planSlackText}</span>
-                                <span>{remainingSelectedCases === 0 ? 'Completado' : `Est. cierre: ${estDaysToClose} días`}</span>
+                                <span style={{ color: '#047857', fontWeight: 600 }}>Media en ciclo</span>
+                                <span>objetivo &lt; 24h</span>
                               </div>
                             </div>
 
