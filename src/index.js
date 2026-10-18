@@ -2572,13 +2572,48 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   let token = null;
   let isLast = false;
   while (!isLast) {
-    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created'], null, ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2'], token, 100);
+    const page = await fetchJqlPage(jql, ['summary', 'issuetype', 'versions', 'fixVersions', 'status', 'created', 'issuelinks', 'parent'], null, ['testops-plan-link', 'testpulse-schedule', 'testpulse-v2'], token, 100);
     if (page.error) break;
     allIssues = allIssues.concat(page.issues);
     token = page.nextPageToken;
     isLast = page.isLast;
     if (!token || allIssues.length >= 500) break;
   }
+
+  const extractCyclePlanAndSchedule = (issue) => {
+    const properties = issue?.properties || {};
+    const planLink = properties['testops-plan-link'];
+    const rawSchedProp = properties['testpulse-schedule'];
+    const tpV2Prop = properties['testpulse-v2'];
+    const tpV2Val = (tpV2Prop && typeof tpV2Prop === 'object')
+      ? (tpV2Prop.value && typeof tpV2Prop.value === 'object' ? tpV2Prop.value : tpV2Prop)
+      : null;
+    const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
+      ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
+      : null;
+    let planId = (planLink && typeof planLink === 'object')
+      ? (planLink.planId || planLink.value?.planId || null)
+      : (typeof planLink === 'string' ? planLink : (tpV2Val?.planId || null));
+    if (!planId && issue?.fields?.parent?.id) {
+      planId = issue.fields.parent.id;
+    }
+    if (!planId && Array.isArray(issue?.fields?.issuelinks)) {
+      for (const link of issue.fields.issuelinks) {
+        const linked = link.inwardIssue || link.outwardIssue;
+        const typeName = (linked?.fields?.issuetype?.name || '').toLowerCase();
+        if (typeName.includes('plan')) {
+          planId = linked.id;
+          break;
+        }
+      }
+    }
+    const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+      ? directSched
+      : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
+        ? (planLink.schedule || planLink.value?.schedule)
+        : (tpV2Val?.schedule || directSched || null));
+    return { planId: planId ? String(planId) : null, schedule };
+  };
 
   const numLimit = typeof limit === 'number' && limit > 0 ? limit : 8;
   const numOffset = typeof offset === 'number' && offset >= 0 ? offset : 0;
@@ -2587,8 +2622,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   const nextOffset = numOffset + numLimit;
   
   const cycles = await mapWithConcurrency(targetIssues, 2, async (issue) => {
-    const properties = issue.properties || {};
-    const planId = properties['testops-plan-link']?.planId || properties['testpulse-v2']?.planId || null;
+    const { planId, schedule } = extractCyclePlanAndSchedule(issue);
     let rawExecution = (await readCycleIndex(issue.id)) ?? [];
     
     // Deduplicate by test case key and ID so count strictly matches Planning & Execution
@@ -2618,6 +2652,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       key: issue.key,
       summary: issue.fields?.summary || '',
       planId,
+      schedule,
       version: versionDisplay,
       versions: affectsVersions,
       fixVersions: fixVersions,
@@ -2651,8 +2686,44 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     }
   });
 
+  let plans = [];
+  if (numOffset === 0) {
+    try {
+      const planCandidates = uniqueIssueTypes([config?.testPlanIssueType, 'Test Plan', 'Plan de Pruebas', 'Plan de Prueba', 'Plan']);
+      const planResult = await fetchIssuesByCandidateTypes({
+        projectId,
+        typeCandidates: planCandidates,
+        fields: ['summary', 'status', 'created', 'description', 'issuetype'],
+        properties: ['testpulse-schedule', 'testpulse-v2']
+      });
+      plans = (planResult.issues || []).map(i => {
+        const rawSchedProp = i.properties?.['testpulse-schedule'];
+        const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
+          ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
+          : null;
+        const tpV2Prop = i.properties?.['testpulse-v2'];
+        const tpV2Val = (tpV2Prop && typeof tpV2Prop === 'object')
+          ? (tpV2Prop.value && typeof tpV2Prop.value === 'object' ? tpV2Prop.value : tpV2Prop)
+          : null;
+        const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
+          ? directSched
+          : (tpV2Val?.schedule || directSched || null);
+        return {
+          id: i.id,
+          key: i.key,
+          summary: i.fields?.summary || '',
+          status: i.fields?.status?.name || 'Active',
+          created: i.fields?.created ? i.fields.created.split('T')[0] : '',
+          schedule,
+          rawFields: i.fields
+        };
+      });
+    } catch (e) {}
+  }
+
   return {
     cycles,
+    plans,
     bugMap,
     totalCycles: allIssues.length,
     hasMore,
@@ -2665,17 +2736,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
       const affectsVersions = (Array.isArray(rawAff) ? rawAff : [rawAff]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
       const fixVersions = (Array.isArray(rawFix) ? rawFix : [rawFix]).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
       const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
-      const planLink = i.properties?.['testops-plan-link'];
-      const rawSchedProp = i.properties?.['testpulse-schedule'];
-      const directSched = (rawSchedProp && typeof rawSchedProp === 'object')
-        ? (rawSchedProp.value && typeof rawSchedProp.value === 'object' ? rawSchedProp.value : rawSchedProp)
-        : null;
-      const planId = (planLink && typeof planLink === 'object') ? (planLink.planId || planLink.value?.planId || null) : (typeof planLink === 'string' ? planLink : (i.properties?.['testpulse-v2']?.planId || null));
-      const schedule = (directSched && (directSched.startDate || directSched.endDate || directSched.holidays))
-        ? directSched
-        : ((planLink && typeof planLink === 'object' && (planLink.schedule || planLink.value?.schedule))
-          ? (planLink.schedule || planLink.value?.schedule)
-          : (directSched || null));
+      const { planId, schedule } = extractCyclePlanAndSchedule(i);
       return {
         id: i.id,
         key: i.key,

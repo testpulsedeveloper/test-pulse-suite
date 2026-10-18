@@ -8795,6 +8795,9 @@ Then el sistema valida la identidad.
             if (parsed.allCycleSummaries && Array.isArray(parsed.allCycleSummaries)) {
               setTestCycles(parsed.allCycleSummaries);
             }
+            if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+              setTestPlans(parsed.plans);
+            }
           }
         }
       } catch (e) {}
@@ -8828,6 +8831,10 @@ Then el sistema valida la identidad.
       const initialCycles = data?.cycles || [];
       const initialBugMap = data?.bugMap || {};
       const totalCycles = data?.totalCycles || initialCycles.length;
+      if (Array.isArray(data?.plans) && data.plans.length > 0) {
+        setTestPlans(data.plans);
+        setSelectedPlanId(prev => prev || data.plans[0]?.id || null);
+      }
 
       // Silent background sync with history already loaded: merge only the recent cycles into the
       // existing data. Replacing would drop historical cycles and force a full re-hydration (N extra calls).
@@ -8862,6 +8869,7 @@ Then el sistema valida la identidad.
           localStorage.setItem(snapshotKey, JSON.stringify({
             reportData: { cycles: initialCycles, bugMap: initialBugMap, totalCycles },
             allCycleSummaries: data?.allCycleSummaries || [],
+            plans: data?.plans || [],
             timestamp: Date.now()
           }));
         }
@@ -8880,8 +8888,8 @@ Then el sistema valida la identidad.
               key: s.key,
               summary: s.summary,
               status: existing?.status || 'To Do',
-              planId: s.planId || existing?.planId || null,
-              schedule: s.schedule || existing?.schedule || null,
+              planId: s.planId || loadedCycle?.planId || existing?.planId || null,
+              schedule: s.schedule || loadedCycle?.schedule || existing?.schedule || null,
               testCount: loadedCycle ? (loadedCycle.execution?.length || 0) : (existing?.testCount || 0)
             };
           });
@@ -15013,9 +15021,16 @@ Then el sistema valida la identidad.
     const baseReportCycles = reportData.cycles || [];
     let planCycles = baseReportCycles.map(c => {
       const tcCycle = (testCycles || []).find(tc => String(tc.id) === String(c.id));
+      const rawCSched = c.schedule?.value || c.schedule;
+      const rawTcSched = tcCycle?.schedule?.value || tcCycle?.schedule;
+      const mergedSchedule = (rawCSched && (rawCSched.startDate || rawCSched.endDate))
+        ? rawCSched
+        : ((rawTcSched && (rawTcSched.startDate || rawTcSched.endDate)) ? rawTcSched : (rawCSched || rawTcSched || null));
       const cMerged = {
         ...tcCycle,
         ...c,
+        planId: c.planId || tcCycle?.planId || null,
+        schedule: mergedSchedule,
         version: c.version || tcCycle?.version,
         versions: c.versions || tcCycle?.versions,
         fixVersions: c.fixVersions || tcCycle?.fixVersions,
@@ -15067,6 +15082,7 @@ Then el sistema valida la identidad.
           key: tcCycle.key,
           summary: tcCycle.summary,
           planId: tcCycle.planId,
+          schedule: tcCycle.schedule?.value || tcCycle.schedule || null,
           version: tcCycle.version,
           versions: tcCycle.versions,
           fixVersions: tcCycle.fixVersions,
@@ -15079,7 +15095,7 @@ Then el sistema valida la identidad.
     });
 
     if (reportSelectedPlans && reportSelectedPlans.length > 0) {
-      planCycles = planCycles.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)));
+      planCycles = planCycles.filter(c => reportSelectedPlans.some(pId => isCycleInPlan(c, pId) || String(pId) === String(c.planId)));
     }
 
     // Helper to extract clean version strings and semantic versions from an entity (bug, cycle, etc.)
@@ -18376,9 +18392,11 @@ Then el sistema valida la identidad.
               ? testPlans.filter(p => reportSelectedPlans.some(sp => String(sp) === String(p.id) || String(sp) === String(p.key)))
               : (() => {
                   const cPlanIds = new Set(planCycles.map(c => String(c.planId || c.testPlanId || '')).filter(Boolean));
-                  const matched = cPlanIds.size > 0
-                    ? testPlans.filter(p => cPlanIds.has(String(p.id)) || cPlanIds.has(String(p.key)))
-                    : [];
+                  const matched = testPlans.filter(p =>
+                    cPlanIds.has(String(p.id)) ||
+                    cPlanIds.has(String(p.key)) ||
+                    planCycles.some(c => isCycleInPlan(c, p.id))
+                  );
                   if (matched.length > 0) return matched;
                   if (selectedPlanId) {
                     const selP = testPlans.find(p => String(p.id) === String(selectedPlanId));
@@ -18445,9 +18463,14 @@ Then el sistema valida la identidad.
               };
             };
 
+            const nowD = new Date();
+            const todayIso = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;
+
             let planTotalCases = 0, planPass = 0, planFail = 0, planBlock = 0;
             let planCompletedCyclesCount = 0, planActiveCyclesCount = 0, planPendingCyclesCount = 0;
             let cycleMinStartMs = null, cycleMaxEndMs = null;
+            let completedCycleMaxEndMs = null;
+            let overdueIncompleteCyclesCount = 0;
 
             planCycles.forEach(c => {
               const st = getCycleStatsForHero(c);
@@ -18459,15 +18482,25 @@ Then el sistema valida la identidad.
               else if (st.cStatusKey === 'IN_PROGRESS') planActiveCyclesCount++;
               else planPendingCyclesCount++;
 
-              const sDate = c.schedule?.startDate || c.startDate || c.plannedStartDate;
-              const eDate = c.schedule?.endDate || c.endDate || c.plannedEndDate;
+              const cSched = c.schedule?.value || c.schedule || {};
+              const sDate = cSched.startDate || c.startDate || c.plannedStartDate;
+              const eDate = cSched.endDate || c.endDate || c.plannedEndDate;
               if (sDate) {
                 const ms = new Date(sDate).getTime();
                 if (!isNaN(ms) && (cycleMinStartMs === null || ms < cycleMinStartMs)) cycleMinStartMs = ms;
               }
               if (eDate) {
                 const ms = new Date(eDate).getTime();
-                if (!isNaN(ms) && (cycleMaxEndMs === null || ms > cycleMaxEndMs)) cycleMaxEndMs = ms;
+                if (!isNaN(ms)) {
+                  if (cycleMaxEndMs === null || ms > cycleMaxEndMs) cycleMaxEndMs = ms;
+                  if (st.cStatusKey === 'COMPLETED' && (completedCycleMaxEndMs === null || ms > completedCycleMaxEndMs)) {
+                    completedCycleMaxEndMs = ms;
+                  }
+                  const cEndIso = new Date(ms).toISOString().slice(0, 10);
+                  if (st.cStatusKey !== 'COMPLETED' && cEndIso < todayIso) {
+                    overdueIncompleteCyclesCount++;
+                  }
+                }
               }
             });
 
@@ -18476,7 +18509,10 @@ Then el sistema valida la identidad.
             let planHolidays = [];
             scopedPlans.forEach(p => {
               const isSelectedInPlanning = selectedPlanId && String(p.id) === String(selectedPlanId);
-              const pSched = p.schedule || (isSelectedInPlanning ? planScheduleForm : null) || {};
+              const rawPSched = p.schedule?.value || p.schedule;
+              const pSched = (rawPSched && (rawPSched.startDate || rawPSched.endDate))
+                ? rawPSched
+                : ((isSelectedInPlanning ? planScheduleForm : null) || rawPSched || {});
               const pS = pSched.startDate || p.startDate || p.plannedStartDate || (isSelectedInPlanning ? planScheduleForm?.startDate : null);
               const pE = pSched.endDate || p.endDate || p.plannedEndDate || (isSelectedInPlanning ? planScheduleForm?.endDate : null);
               if (pS) {
@@ -18485,7 +18521,7 @@ Then el sistema valida la identidad.
               }
               if (pE) {
                 const ms = new Date(pE).getTime();
-                if (!isNaN(ms) && (planEndMs === null || ms > planEndMs)) planEndMs = ms;
+                if (!isNaN(ms) && (planEndMs === null || ms < planEndMs)) planEndMs = ms;
               }
               if (pSched.excludeWeekends !== undefined) {
                 planExcludeWeekends = pSched.excludeWeekends !== false;
@@ -18513,20 +18549,26 @@ Then el sistema valida la identidad.
             const planEndIso = planEndMs ? new Date(planEndMs).toISOString().slice(0, 10) : null;
             const cycleMinStartIso = cycleMinStartMs ? new Date(cycleMinStartMs).toISOString().slice(0, 10) : null;
             const cycleMaxEndIso = cycleMaxEndMs ? new Date(cycleMaxEndMs).toISOString().slice(0, 10) : null;
+            const completedCycleMaxEndIso = completedCycleMaxEndMs ? new Date(completedCycleMaxEndMs).toISOString().slice(0, 10) : null;
+
+            const effectivePlanEndIso = (planEndIso && (!cycleMaxEndIso || planEndIso < cycleMaxEndIso))
+              ? planEndIso
+              : ((completedCycleMaxEndIso && cycleMaxEndIso && completedCycleMaxEndIso < cycleMaxEndIso && planCompletedCyclesCount > 0)
+                ? completedCycleMaxEndIso
+                : (planEndIso || cycleMaxEndIso));
 
             const startIso = planStartIso || cycleMinStartIso;
-            const endIso = planEndIso || cycleMaxEndIso;
-            const hasCycleOverrun = Boolean(planEndIso && cycleMaxEndIso && cycleMaxEndIso > planEndIso);
-            const extraCyclesAfterPlanEnd = planEndIso
+            const endIso = effectivePlanEndIso || cycleMaxEndIso;
+            const hasCycleOverrun = Boolean(endIso && cycleMaxEndIso && cycleMaxEndIso > endIso);
+            const extraCyclesAfterPlanEnd = endIso
               ? planCycles.filter(c => {
-                  const ce = c.schedule?.endDate || c.endDate || c.plannedEndDate;
-                  const cs = c.schedule?.startDate || c.startDate || c.plannedStartDate;
-                  return (ce && ce > planEndIso) || (cs && cs > planEndIso);
+                  const cSched = c.schedule?.value || c.schedule || {};
+                  const ce = cSched.endDate || c.endDate || c.plannedEndDate;
+                  const cs = cSched.startDate || c.startDate || c.plannedStartDate;
+                  return (ce && ce > endIso) || (cs && cs > endIso);
                 }).length
               : 0;
 
-            const nowD = new Date();
-            const todayIso = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;
             const planDaysObj = (startIso && endIso)
               ? calcScheduleDays(startIso, endIso, planExcludeWeekends, planHolidays)
               : { businessDays: 0 };
@@ -18543,8 +18585,8 @@ Then el sistema valida la identidad.
             }
             const isPastPlanEnd = Boolean(endIso && todayIso > endIso);
             const isPlanOverdue = Boolean(
-              (isPastPlanEnd && planEvalCount < planTotalCases) ||
-              (hasCycleOverrun && isPastPlanEnd)
+              (isPastPlanEnd && (planEvalCount < planTotalCases || hasCycleOverrun)) ||
+              overdueIncompleteCyclesCount > 0
             );
 
             let planHealthLabel = 'ÓPTIMO';
@@ -18565,7 +18607,7 @@ Then el sistema valida la identidad.
               const planElapsedPctVal = (planElapsedBizDays / planTotalBizDays) * 100;
               const slackDays = Number((((planExecPctVal - planElapsedPctVal) / 100) * planTotalBizDays).toFixed(1));
               planBurnSubtext = extraCyclesAfterPlanEnd > 0
-                ? `+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo extra' : 'ciclos extra'} · Ritmo: ${actualPerDay}/día vs ${targetPerDay} meta`
+                ? `+${extraCyclesAfterPlanEnd} ${extraCyclesAfterPlanEnd === 1 ? 'ciclo extra' : 'ciclos extra'} tras ${formatShortDateEs(endIso)} · Ritmo: ${actualPerDay}/día vs ${targetPerDay} meta`
                 : `Ritmo de ejecución: ${actualPerDay} casos/día vs ${targetPerDay} meta`;
               if (isPlanOverdue) {
                 planHealthLabel = 'RETRASADO';
