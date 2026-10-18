@@ -12120,7 +12120,7 @@ Then el sistema valida la identidad.
       : filteredTests.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize);
 
     const currentPlan = testPlans.find(p => String(p.id) === String(selectedPlanId));
-    const sidebarCycles = (selectedPlanId && !planningShowAllCycles)
+    const sidebarCycles = selectedPlanId
       ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId))
       : filteredTestCycles;
     const activeCycleIdx = selectedCycle
@@ -12462,25 +12462,6 @@ Then el sistema valida la identidad.
                     {sidebarCycles.length}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setPlanningShowAllCycles(v => !v)}
-                  title={planningShowAllCycles ? 'Mostrando todos los ciclos (clic para filtrar por plan)' : 'Filtrar / Mostrar todos los ciclos'}
-                  style={{
-                    background: planningShowAllCycles ? '#E9F2FF' : 'none',
-                    border: 'none',
-                    color: planningShowAllCycles ? '#0C66E4' : '#626F86',
-                    cursor: 'pointer',
-                    padding: '4px',
-                    borderRadius: '4px',
-                    display: 'inline-flex',
-                    alignItems: 'center'
-                  }}
-                >
-                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
               </div>
 
               {/* Active Cycle Subheader & Single-Selection Note */}
