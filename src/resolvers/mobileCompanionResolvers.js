@@ -18,8 +18,21 @@ import {
   generateMobileErrorHtml,
   generateMobileUploadHtml
 } from '../utils/mobileUploadTemplates.js';
+import {
+  QR_SESSION_TTL_MS,
+  MAX_UPLOADS_PER_SESSION,
+  signMobileSessionToken,
+  verifyMobileSessionToken,
+  resolveSafeCorsOrigin
+} from '../utils/mobileSecurity.js';
 
-const QR_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+export {
+  QR_SESSION_TTL_MS,
+  MAX_UPLOADS_PER_SESSION,
+  signMobileSessionToken,
+  verifyMobileSessionToken,
+  resolveSafeCorsOrigin
+};
 
 /**
  * Registers `createMobileUploadSession` and `checkMobileUploadStatus` resolvers.
@@ -29,7 +42,9 @@ const QR_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 export function registerMobileCompanionResolvers(resolver) {
   resolver.define('createMobileUploadSession', async ({ payload }) => {
     const { testId, testKey, testRunKey, testRunId, testSummary, iterId, iterName, cycleId } = payload || {};
-    const sessionId = 'qr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    const createdAt = Date.now();
+    const sessionId = 'qr_' + createdAt + '_' + Math.random().toString(36).substring(2, 9);
+    const sessionToken = signMobileSessionToken(sessionId, createdAt);
 
     let webtriggerUrl = '';
     try {
@@ -56,6 +71,7 @@ export function registerMobileCompanionResolvers(resolver) {
 
     const sessionData = {
       sessionId,
+      sessionToken,
       testId: testId || testKey,
       testKey: testKey || testId,
       testRunKey: resolvedRunKey || testRunKey || testKey || testId,
@@ -64,14 +80,15 @@ export function registerMobileCompanionResolvers(resolver) {
       iterId: iterId || null,
       iterName: iterName || null,
       cycleId: cycleId || null,
-      createdAt: Date.now()
+      createdAt
     };
 
     await storage.set('qrsession_' + sessionId, sessionData);
 
-    const fullUploadUrl = `${webtriggerUrl}?session=${sessionId}`;
+    const fullUploadUrl = `${webtriggerUrl}?session=${encodeURIComponent(sessionId)}&sig=${encodeURIComponent(sessionToken)}`;
     return {
       sessionId,
+      sessionToken,
       uploadUrl: fullUploadUrl,
       testKey: sessionData.testKey,
       testRunKey: sessionData.testRunKey,
@@ -115,32 +132,37 @@ export function registerMobileCompanionResolvers(resolver) {
  */
 export async function mobileUploadHandler(request) {
   const method = request.method ? request.method.toUpperCase() : 'GET';
+  const corsOrigin = resolveSafeCorsOrigin(request.headers);
 
   // Handle CORS preflight
   if (method === 'OPTIONS') {
     return {
       statusCode: 200,
       headers: {
-        'Access-Control-Allow-Origin': ['*'],
+        'Access-Control-Allow-Origin': [corsOrigin],
         'Access-Control-Allow-Methods': ['GET', 'POST', 'OPTIONS'],
-        'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With']
+        'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
+        'Vary': ['Origin']
       },
       body: ''
     };
   }
 
   const defaultHeaders = {
-    'Access-Control-Allow-Origin': ['*'],
-    'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With']
+    'Access-Control-Allow-Origin': [corsOrigin],
+    'Access-Control-Allow-Headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
+    'Vary': ['Origin']
   };
 
   if (method === 'GET') {
     const query = request.queryParameters || {};
     let sessionId = (query.session && query.session[0]) || query.session || '';
+    let querySig = (query.sig && query.sig[0]) || query.sig || '';
     if (!sessionId && request.url) {
       try {
         const u = new URL(request.url, 'https://forge.atlassian.com');
         sessionId = u.searchParams.get('session') || '';
+        querySig = querySig || u.searchParams.get('sig') || '';
       } catch (_) {}
     }
 
@@ -169,6 +191,17 @@ export async function mobileUploadHandler(request) {
       };
     }
 
+    if (session.sessionToken && querySig && !verifyMobileSessionToken(sessionId, session.createdAt, querySig)) {
+      return {
+        statusCode: 403,
+        headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
+        body: generateMobileErrorHtml(
+          'Firma de seguridad inválida',
+          'El código QR escaneado no superó la verificación criptográfica HMAC. Genera un nuevo código QR desde tu computadora.'
+        )
+      };
+    }
+
     const html = generateMobileUploadHtml(session);
     return {
       statusCode: 200,
@@ -190,7 +223,7 @@ export async function mobileUploadHandler(request) {
         };
       }
 
-      const { sessionId, base64Data, mimeType, note } = body;
+      const { sessionId, sessionToken, base64Data, mimeType, note } = body;
       if (!sessionId || !base64Data) {
         return {
           statusCode: 400,
@@ -207,6 +240,26 @@ export async function mobileUploadHandler(request) {
           statusCode: 404,
           headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
           body: JSON.stringify({ success: false, error: 'Sesión expirada. Genera un nuevo QR en la computadora.' })
+        };
+      }
+
+      if (session.sessionToken && sessionToken && !verifyMobileSessionToken(sessionId, session.createdAt, sessionToken)) {
+        return {
+          statusCode: 403,
+          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
+          body: JSON.stringify({ success: false, error: 'Firma HMAC de sesión inválida.' })
+        };
+      }
+
+      const prevHistoryForLimit = Array.isArray(session.uploadedHistory) ? session.uploadedHistory : [];
+      if (prevHistoryForLimit.length >= MAX_UPLOADS_PER_SESSION) {
+        return {
+          statusCode: 429,
+          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
+          body: JSON.stringify({
+            success: false,
+            error: `Se alcanzó el límite de ${MAX_UPLOADS_PER_SESSION} evidencias por sesión QR. Genera un nuevo QR en tu computadora.`
+          })
         };
       }
 

@@ -25,39 +25,41 @@ export const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
     config?.testRunType
   ].filter(Boolean).map(t => String(t).toLowerCase().trim());
 
-  const isBlacklistedOrEpic = (typeStr) => {
-    const t = String(typeStr || '').toLowerCase().trim();
-    if (!t) return false;
-    if (customTestTypes.some(ct => t === ct || t.includes(ct))) return true;
-    return (
-      t.includes('test run') || t.includes('testrun') || t.includes('ejecuc') ||
-      t.includes('test case') || t.includes('testcase') || t.includes('caso de prueba') ||
-      t.includes('test cycle') || t.includes('ciclo') ||
-      t.includes('test plan') || t.includes('test set') || t.includes('plan de prueba') ||
-      t.includes('bug') || t.includes('defecto') || t.includes('error') || t.includes('incidencia') ||
-      t === 'epic' || t === 'épica' || t === 'epica' || t.includes('epic') || t.includes('épica')
-    );
-  };
-
   const isEpicType = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
     return t === 'epic' || t === 'épica' || t === 'epica' || t.includes('epic') || t.includes('épica');
   };
 
+  const isBlacklistedOrEpic = (typeStr) => {
+    const t = String(typeStr || '').toLowerCase().trim();
+    if (!t) return false;
+    if (customTestTypes.some(ct => t === ct || t.includes(ct))) return true;
+    return (
+      t === 'task' || t === 'tarea' || t.includes('task') || t.includes('tarea') ||
+      t.includes('sub-task') || t.includes('subtarea') || t.includes('subtask') ||
+      t.includes('test run') || t.includes('testrun') || t.includes('ejecuc') ||
+      t.includes('test case') || t.includes('testcase') || t.includes('caso de prueba') ||
+      t.includes('test cycle') || t.includes('ciclo') ||
+      t.includes('test plan') || t.includes('test set') || t.includes('plan de prueba') ||
+      t.includes('bug') || t.includes('defecto') || t.includes('error') || t.includes('incidencia') ||
+      isEpicType(t)
+    );
+  };
+
+  const configuredStoryTypes = reqTypesConfig.filter(t => !isBlacklistedOrEpic(t));
+
   const isReqType = (typeStr) => {
     const t = String(typeStr || '').toLowerCase().trim();
     if (!t) return false;
     if (isBlacklistedOrEpic(t)) return false;
-    return true;
+    if (configuredStoryTypes.length > 0) {
+      return configuredStoryTypes.some(cfgT => t === cfgT || t.includes(cfgT) || cfgT.includes(t));
+    }
+    return ['story', 'historia', 'historia de usuario', 'user story'].some(w => t === w || t.includes(w));
   };
 
   const isPreferredReqType = (typeStr) => {
-    const t = String(typeStr || '').toLowerCase().trim();
-    if (!isReqType(t)) return false;
-    if (reqTypesConfig.length > 0) {
-      return reqTypesConfig.some(cfgT => t === cfgT || t.includes(cfgT) || cfgT.includes(t));
-    }
-    return ['story', 'historia', 'historia de usuario', 'user story', 'requisito', 'requirement', 'requerimiento', 'task', 'tarea', 'feature'].some(w => t === w || t.includes(w));
+    return isReqType(typeStr);
   };
 
   // 1. Explicit properties on tc
@@ -89,7 +91,7 @@ export const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
         epicKey = pKey;
         epicSummary = pSummary;
       }
-    } else if (isReqType(pType) || (!pType && pKey)) {
+    } else if (isReqType(pType)) {
       if (!reqKey) {
         reqKey = pKey;
         reqSummary = pSummary;
@@ -127,8 +129,8 @@ export const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
           continue;
         }
 
-        // Candidate is Requirement / Story (either by explicit non-blacklisted type or present in reqMap)
-        if (isReqType(cType) || (!cType && reqMap[cKey] && !isBlacklistedOrEpic(reqMap[cKey].issueType))) {
+        // Candidate is strictly a valid Story (never Task, Test Case, Bug, etc.)
+        if (isReqType(cType)) {
           const reqItem = { key: cKey, summary: cSummary, parent: cand.fields?.parent };
           if (isConfiguredLinkType && !matchedLinkReq) {
             matchedLinkReq = reqItem;
@@ -149,7 +151,7 @@ export const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
       }
       if (!epicKey && chosenReq.parent) {
         const cpType = chosenReq.parent.fields?.issuetype?.name || '';
-        if (isEpicType(cpType) || chosenReq.parent.key) {
+        if (isEpicType(cpType)) {
           epicKey = chosenReq.parent.key;
           epicSummary = chosenReq.parent.fields?.summary || null;
         }

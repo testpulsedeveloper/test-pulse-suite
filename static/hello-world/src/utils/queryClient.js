@@ -116,6 +116,11 @@ export const clearPersistentCache = () => {
 
 // ── Perf instrumentation (Fase 0) + @tanstack/react-query + IndexedDB Cache Bridge ──
 const TP_PERF = { startedAt: Date.now(), byName: {} };
+const _computePercentile = (sortedArr, p) => {
+  if (!sortedArr.length) return 0;
+  const idx = Math.min(sortedArr.length - 1, Math.max(0, Math.ceil((p / 100) * sortedArr.length) - 1));
+  return sortedArr[idx];
+};
 const _tpStat = (name) =>
   (TP_PERF.byName[name] = TP_PERF.byName[name] || {
     calls: 0,
@@ -125,6 +130,8 @@ const _tpStat = (name) =>
     errors: 0,
     r429: 0,
     totalMs: 0,
+    maxMs: 0,
+    samples: [],
   });
 
 if (typeof window !== 'undefined') {
@@ -138,16 +145,25 @@ if (typeof window !== 'undefined') {
     }
     const mins = ((Date.now() - TP_PERF.startedAt) / 60000).toFixed(1);
     const rows = Object.entries(TP_PERF.byName)
-      .map(([name, s]) => ({
-        resolver: name,
-        calls: s.calls,
-        deduped: s.deduped,
-        ramHits: s.cached,
-        diskHits: s.diskHits,
-        errors: s.errors,
-        r429: s.r429,
-        avgMs: s.calls ? Math.round(s.totalMs / s.calls) : 0,
-      }))
+      .map(([name, s]) => {
+        const sorted = Array.isArray(s.samples) ? [...s.samples].sort((a, b) => a - b) : [];
+        const p50 = _computePercentile(sorted, 50);
+        const p95 = _computePercentile(sorted, 95);
+        const maxMs = sorted.length ? sorted[sorted.length - 1] : (s.maxMs || 0);
+        return {
+          resolver: name,
+          calls: s.calls,
+          deduped: s.deduped,
+          ramHits: s.cached,
+          diskHits: s.diskHits,
+          errors: s.errors,
+          r429: s.r429,
+          avgMs: s.calls ? Math.round(s.totalMs / s.calls) : 0,
+          p50,
+          p95,
+          maxMs,
+        };
+      })
       .sort((a, b) => b.calls - a.calls);
     const total = rows.reduce((acc, r) => acc + r.calls, 0);
     console.log(`[tpStats] ${total} llamadas reales al backend en ${mins} min`);
@@ -379,7 +395,13 @@ export const rawInvoke = async (name, payload) => {
       }
     }
   } finally {
-    s.totalMs += Date.now() - t0;
+    const elapsed = Date.now() - t0;
+    s.totalMs += elapsed;
+    if (elapsed > (s.maxMs || 0)) s.maxMs = elapsed;
+    if (Array.isArray(s.samples)) {
+      s.samples.push(elapsed);
+      if (s.samples.length > 200) s.samples.shift();
+    }
     if (isReadQuery) {
       releaseReadSlot();
     }

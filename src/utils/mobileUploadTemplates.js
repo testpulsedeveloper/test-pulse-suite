@@ -204,6 +204,7 @@ export function generateMobileUploadHtml(session) {
 
   <script>
     const SESSION_ID = ${JSON.stringify(String(session.sessionId || ''))};
+    const SESSION_TOKEN = ${JSON.stringify(String(session.sessionToken || ''))};
     // Lista acumulativa de archivos en preparación antes de enviar
     let stagedItems = [];
     // Historial de evidencias ya enviadas durante esta sesión QR (persistido en servidor + cliente)
@@ -384,6 +385,7 @@ export function generateMobileUploadHtml(session) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sessionId: SESSION_ID,
+              sessionToken: SESSION_TOKEN,
               filename: item.name || ('foto_' + Date.now() + '.jpg'),
               mimeType: item.mime,
               base64Data: item.base64,

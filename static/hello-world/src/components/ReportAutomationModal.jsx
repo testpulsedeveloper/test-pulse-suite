@@ -287,14 +287,14 @@ export default function ReportAutomationModal({ ctx }) {
                   <span><strong>Zona Horaria:</strong> América/Ciudad de México (CDMX / GMT-6)</span>
                 </div>
 
-                {/* Field 1: Jira Automation Webhook URL */}
+                {/* Field 1: Native Jira Channel / Optional Target Issue Key */}
                 <div>
                   <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#002D62', marginBottom: '6px' }}>
-                    🔗 URL del Webhook de Jira Automation <span style={{ color: '#DE350B' }}>*</span>
+                    🛡️ Canal Nativo de Jira / Clave de Incidencia (Runs on Atlassian • Opcional)
                   </label>
                   <input
-                    type="url"
-                    placeholder="https://automation.atlassian.com/pro/hooks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    type="text"
+                    placeholder="NATIVE_JIRA (o clave de ticket ej. QA-100 para publicar comentario ADF nativo)"
                     value={reportAutomationConfig.webhookUrl || ''}
                     onChange={(e) => setReportAutomationConfig(prev => ({ ...prev, webhookUrl: e.target.value.trim() }))}
                     style={{
@@ -310,7 +310,7 @@ export default function ReportAutomationModal({ ctx }) {
                     }}
                   />
                   <div style={{ fontSize: '11px', color: '#626F86', marginTop: '4px' }}>
-                    Obtén esta URL creando una regla en <strong>Jira Automation</strong> con el disparador <em>"Incoming Webhook"</em>.
+                    En modo <strong>100% Nativo en Jira (Runs on Atlassian)</strong>, el reporte se publica como propiedad del proyecto (<code>testpulse-executive-report</code>). Si indicas una clave (ej. <code>QA-100</code>), también agregará un comentario ADF nativo para disparar Jira Automation sin webhooks externos.
                   </div>
                 </div>
 
@@ -648,7 +648,7 @@ export default function ReportAutomationModal({ ctx }) {
           }}>
             <button
               type="button"
-              disabled={reportAutomationTesting || !reportAutomationConfig.webhookUrl}
+              disabled={reportAutomationTesting}
               onClick={handleGlobalTestAutomatedReportDispatch}
               style={{
                 padding: '8px 16px',
@@ -658,14 +658,14 @@ export default function ReportAutomationModal({ ctx }) {
                 border: '1px solid #002D62',
                 background: '#FFFFFF',
                 color: '#002D62',
-                cursor: (reportAutomationTesting || !reportAutomationConfig.webhookUrl) ? 'not-allowed' : 'pointer',
+                cursor: reportAutomationTesting ? 'not-allowed' : 'pointer',
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '6px'
               }}
-              title="Envía una prueba real a Jira Automation en este momento"
+              title="Publica una prueba inmediata del reporte ejecutivo de forma 100% nativa en Jira"
             >
-              {reportAutomationTesting ? '⏳ Probando Envío...' : '⚡ Probar Envío Inmediato'}
+              {reportAutomationTesting ? '⏳ Publicando en Jira...' : '⚡ Probar Publicación Inmediata'}
             </button>
 
             <div style={{ display: 'flex', gap: '10px' }}>

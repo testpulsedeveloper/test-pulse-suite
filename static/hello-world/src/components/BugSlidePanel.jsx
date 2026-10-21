@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef } from 'react';
 import { view, router, requestJira } from '@forge/bridge';
 import { CreateIssueModal } from '@forge/jira-bridge';
 import Lozenge from '@atlaskit/lozenge';
@@ -36,12 +36,32 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './PanelDockSwitcher';
+import PanelDockSwitcher, {
+  usePanelDockPosition,
+  usePanelDockWidth,
+  PanelResizeHandle,
+  getDockOverlayStyle,
+  getDockContainerStyle,
+  DOCK_SPLIT_WIDTH
+} from './PanelDockSwitcher';
 
 const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
+const BUG_META_WIDTH_KEY = 'tp_bug_meta_col_width';
 
 export default function BugSlidePanel({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
+  const [dockWidth, , isResizingDock] = usePanelDockWidth();
+  const [metaColWidth, setMetaColWidth] = useState(() => {
+    try {
+      const saved = parseInt(window.localStorage.getItem(BUG_META_WIDTH_KEY) || '', 10);
+      if (Number.isFinite(saved) && saved >= 195 && saved <= 480) return saved;
+    } catch (_) {}
+    return 275;
+  });
+  const [isMetaResizing, setIsMetaResizing] = useState(false);
+  const [isMetaHover, setIsMetaHover] = useState(false);
+  const metaColRef = useRef(null);
+  const assigneeSearchSeqRef = useRef(0);
   const {
     addNotification,
     bugAddingVersion,
@@ -90,7 +110,11 @@ export default function BugSlidePanel({ ctx }) {
     const summary = b.summary || selectedBug.summary || 'Sin título';
     const rawStatus = b.status || selectedBug.status || 'Abierto';
     const isDone = ['closed', 'cerrada', 'cerrado'].includes(String(rawStatus).toLowerCase().trim());
-    const statusNormLower = String(rawStatus || '').toLowerCase().trim();
+    const statusNormLower = String(rawStatus || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
     const isResolvedState =
       isDone ||
       b.statusCategory === 'done' ||
@@ -107,6 +131,14 @@ export default function BugSlidePanel({ ctx }) {
       statusNormLower.includes('finalizad') ||
       statusNormLower.includes('completad') ||
       statusNormLower.includes('solucionad');
+
+    // Regla estricta: el selector de Resolución solo se desbloquea cuando el bug está específicamente en estado "Resuelta" / "Resuelto" / "Resolved"
+    const isStrictlyResueltaState =
+      statusNormLower === 'resuelta' ||
+      statusNormLower === 'resuelto' ||
+      statusNormLower === 'resolved' ||
+      statusNormLower.startsWith('resuelta ') ||
+      statusNormLower.startsWith('resuelto ');
 
     // Helper to keep local state (modal + tables) in sync after any in-app bug edit
     const syncUpdatedBugToState = (fresh) => {
@@ -206,17 +238,29 @@ export default function BugSlidePanel({ ctx }) {
     };
 
     const handleSearchBugAssignee = async (queryText) => {
+      const reqId = ++assigneeSearchSeqRef.current;
       setBugAssigneeQuery(queryText);
       setBugAssigneeSearching(true);
       try {
-        const pKey = b.projectKey || (bugKey.includes('-') ? bugKey.split('-')[0] : selectedProjectId);
-        const users = await invoke('searchAssignableUsers', { projectKey: pKey, query: queryText || '' });
-        setBugAssigneeResults(Array.isArray(users) ? users : []);
+        const pKey = b.projectKey || (bugKey && bugKey.includes('-') ? bugKey.split('-')[0] : null);
+        const users = await invoke('searchAssignableUsers', {
+          issueKey: bugKey && bugKey !== 'BUG' ? bugKey : null,
+          projectKey: pKey,
+          projectId: selectedProjectId,
+          query: queryText || ''
+        });
+        if (reqId === assigneeSearchSeqRef.current) {
+          setBugAssigneeResults(Array.isArray(users) ? users : []);
+        }
       } catch (err) {
         console.error('Error searching assignable users for bug:', err);
-        setBugAssigneeResults([]);
+        if (reqId === assigneeSearchSeqRef.current) {
+          setBugAssigneeResults([]);
+        }
       } finally {
-        setBugAssigneeSearching(false);
+        if (reqId === assigneeSearchSeqRef.current) {
+          setBugAssigneeSearching(false);
+        }
       }
     };
 
@@ -465,10 +509,13 @@ export default function BugSlidePanel({ ctx }) {
             centerHeight: '90vh',
             centerMinHeight: '640px',
             centerMaxHeight: '920px',
+            dockWidthPx: dockWidth,
+            isResizing: isResizingDock,
             drawerWidth: DOCK_SPLIT_WIDTH,
-            drawerMinWidth: '420px'
+            drawerMinWidth: '380px'
           })}
         >
+          <PanelResizeHandle dockPosition={dockPosition} />
           {/* Header */}
           <div style={{
             padding: '1rem 1.5rem',
@@ -903,8 +950,76 @@ export default function BugSlidePanel({ ctx }) {
               </div>
             </div>
 
-            {/* Columna Derecha / Panel Lateral de Metadatos Editables (35%) */}
-            <div style={{ width: dockPosition === 'center' ? '340px' : '235px', flexShrink: 0, borderLeft: '1px solid #DCDFE4', backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+            {/* Línea divisora interna arrastrable entre Descripción/Evidencia y Columna Derecha de Metadatos */}
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsMetaResizing(true);
+                const startX = e.clientX;
+                const startW = metaColWidth;
+                const prevUserSelect = document.body.style.userSelect;
+                const prevCursor = document.body.style.cursor;
+                document.body.style.userSelect = 'none';
+                document.body.style.cursor = 'col-resize';
+
+                let latestW = startW;
+                const onMove = (ev) => {
+                  const delta = startX - ev.clientX;
+                  latestW = Math.max(195, Math.min(480, Math.round(startW + delta)));
+                  setMetaColWidth(latestW);
+                };
+                const onUp = () => {
+                  setIsMetaResizing(false);
+                  document.body.style.userSelect = prevUserSelect;
+                  document.body.style.cursor = prevCursor;
+                  try {
+                    window.localStorage.setItem(BUG_META_WIDTH_KEY, String(latestW));
+                  } catch (_) {}
+                  window.removeEventListener('mousemove', onMove);
+                  window.removeEventListener('mouseup', onUp);
+                };
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMetaColWidth(275);
+                try {
+                  window.localStorage.setItem(BUG_META_WIDTH_KEY, '275');
+                } catch (_) {}
+              }}
+              onMouseEnter={() => setIsMetaHover(true)}
+              onMouseLeave={() => setIsMetaHover(false)}
+              title="Arrastra para ajustar el ancho de la columna de Detalles (doble clic para restaurar)"
+              style={{
+                width: '8px',
+                flexShrink: 0,
+                cursor: 'col-resize',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: (isMetaResizing || isMetaHover) ? 'rgba(12, 102, 228, 0.08)' : '#F1F2F4',
+                borderLeft: (isMetaResizing || isMetaHover) ? '1px solid #0C66E4' : '1px solid #DCDFE4',
+                borderRight: (isMetaResizing || isMetaHover) ? '1px solid #0C66E4' : 'none',
+                transition: 'background-color 0.12s ease',
+                zIndex: 10
+              }}
+            >
+              <div
+                style={{
+                  width: '4px',
+                  height: '32px',
+                  borderRadius: '999px',
+                  backgroundColor: (isMetaResizing || isMetaHover) ? '#0C66E4' : '#B3BAC5',
+                  transition: 'background-color 0.12s ease'
+                }}
+              />
+            </div>
+
+            {/* Columna Derecha / Panel Lateral de Metadatos Editables */}
+            <div ref={metaColRef} style={{ width: `${metaColWidth}px`, flexShrink: 0, backgroundColor: '#F8FAFD', padding: '1.25rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
               <div style={{ fontSize: '12px', fontWeight: 800, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #DCDFE4', paddingBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span>Detalles &amp; Edición Rápida</span>
                 <span style={{ fontSize: '10px', color: '#0C66E4', fontWeight: 700 }}>En vivo</span>
@@ -963,7 +1078,7 @@ export default function BugSlidePanel({ ctx }) {
                     onClick={() => {
                       const nextOpen = !bugAssigneeOpen;
                       setBugAssigneeOpen(nextOpen);
-                      if (nextOpen && bugAssigneeResults.length === 0) {
+                      if (nextOpen) {
                         handleSearchBugAssignee('');
                       }
                     }}
@@ -981,25 +1096,36 @@ export default function BugSlidePanel({ ctx }) {
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
-                  {b.assignee?.avatarUrl ? (
-                    <img src={b.assignee.avatarUrl} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
-                  ) : (
-                    <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: b.assignee ? '#0C66E4' : '#626F86', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
-                      {(b.assignee?.displayName || '?').charAt(0).toUpperCase()}
+                {(() => {
+                  const assigneeDisplay = (b.assignee && typeof b.assignee === 'object')
+                    ? (b.assignee.displayName || 'Sin asignar')
+                    : (typeof b.assignee === 'string' && b.assignee.trim() && b.assignee !== 'Sin asignar' ? b.assignee.trim() : 'Sin asignar');
+                  const assigneeAvatar = (b.assignee && typeof b.assignee === 'object') ? b.assignee.avatarUrl : null;
+                  const assigneeEmail = (b.assignee && typeof b.assignee === 'object') ? b.assignee.email : null;
+                  const hasAssignee = assigneeDisplay !== 'Sin asignar';
+
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', border: '1px solid #EBECF0' }}>
+                      {assigneeAvatar ? (
+                        <img src={assigneeAvatar} alt="" style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
+                      ) : (
+                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: hasAssignee ? '#0C66E4' : '#626F86', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700 }}>
+                          {(hasAssignee ? assigneeDisplay : '?').charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                        <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {bugSavingField === 'assignee' ? 'Guardando...' : assigneeDisplay}
+                        </span>
+                        {assigneeEmail && (
+                          <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {assigneeEmail}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  )}
-                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#172B4D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {bugSavingField === 'assignee' ? 'Guardando...' : (b.assignee?.displayName || 'Sin asignar')}
-                    </span>
-                    {b.assignee?.email && (
-                      <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {b.assignee.email}
-                      </span>
-                    )}
-                  </div>
-                </div>
+                  );
+                })()}
 
                 {bugAssigneeOpen && (
                   <div style={{
@@ -1081,12 +1207,19 @@ export default function BugSlidePanel({ ctx }) {
                             {u.avatarUrl ? (
                               <img src={u.avatarUrl} alt="" style={{ width: '20px', height: '20px', borderRadius: '50%' }} />
                             ) : (
-                              <span style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#0C66E4', color: '#FFF', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 700 }}>
+                              <span style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#0C66E4', color: '#FFF', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 700, flexShrink: 0 }}>
                                 {(u.displayName || 'U').charAt(0).toUpperCase()}
                               </span>
                             )}
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
-                              {u.displayName}
+                            <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                                {u.displayName}
+                              </span>
+                              {u.email && (
+                                <span style={{ fontSize: '10px', color: '#626F86', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {u.email}
+                                </span>
+                              )}
                             </span>
                           </button>
                         ))
@@ -1541,17 +1674,53 @@ export default function BugSlidePanel({ ctx }) {
                 )}
               </div>
 
-              {/* 8. Resolución (Resolution) - En blanco si no hay resolución o si el estado no es Resuelta / En validación / Cerrada */}
+              {/* 8. Resolución (Resolution) - Bloqueado salvo cuando el estado es estrictamente Resuelta */}
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px', gap: '4px' }}>
                   <span style={{ fontSize: '11px', fontWeight: 700, color: '#626F86' }}>
                     RESOLUCIÓN
                   </span>
+                  {isStrictlyResueltaState ? (
+                    <span
+                      style={{
+                        fontSize: '9.5px',
+                        fontWeight: 700,
+                        color: '#006644',
+                        backgroundColor: '#E3FCEF',
+                        border: '1px solid #ABF5D1',
+                        padding: '1px 6px',
+                        borderRadius: '4px'
+                      }}
+                      title="El bug está en estado Resuelta: puedes seleccionar o cambiar la resolución"
+                    >
+                      🔓 Activo
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        fontSize: '9.5px',
+                        fontWeight: 600,
+                        color: '#626F86',
+                        backgroundColor: '#EBECF0',
+                        padding: '1px 6px',
+                        borderRadius: '4px'
+                      }}
+                      title="Bloqueado: solo se activa cuando el bug se coloca en estado Resuelta"
+                    >
+                      🔒 Solo en Resuelta
+                    </span>
+                  )}
                 </div>
                 <select
                   value={(isResolvedState && b.resolution && b.resolution !== 'Sin resolver' && b.resolution !== 'Unresolved') ? b.resolution : ''}
-                  disabled={!isResolvedState || bugSavingField === 'resolution'}
+                  disabled={!isStrictlyResueltaState || bugSavingField === 'resolution'}
+                  title={
+                    isStrictlyResueltaState
+                      ? 'Seleccionar motivo de resolución'
+                      : 'Este campo está bloqueado y solo se activa cuando el estado del bug es Resuelta'
+                  }
                   onChange={(e) => {
+                    if (!isStrictlyResueltaState) return;
                     const nextRes = e.target.value || null;
                     const chosenRes = resolutionOptionsList.find(r => r.name === nextRes);
                     handleUpdateBugField(
@@ -1568,15 +1737,16 @@ export default function BugSlidePanel({ ctx }) {
                     width: '100%',
                     padding: '6px 10px',
                     borderRadius: '6px',
-                    border: isResolvedState ? '1px solid #85B8FF' : '1px solid #DCDFE4',
-                    backgroundColor: isResolvedState ? '#FFFFFF' : '#F4F5F7',
+                    border: isStrictlyResueltaState ? '1px solid #85B8FF' : '1px solid #DCDFE4',
+                    backgroundColor: isStrictlyResueltaState ? '#FFFFFF' : '#F4F5F7',
                     fontSize: '12px',
                     fontWeight: 600,
-                    color: isResolvedState ? '#172B4D' : '#8993A4',
-                    cursor: !isResolvedState ? 'not-allowed' : (bugSavingField === 'resolution' ? 'wait' : 'pointer')
+                    color: isStrictlyResueltaState ? '#172B4D' : '#8993A4',
+                    opacity: isStrictlyResueltaState ? 1 : 0.85,
+                    cursor: !isStrictlyResueltaState ? 'not-allowed' : (bugSavingField === 'resolution' ? 'wait' : 'pointer')
                   }}
                 >
-                  <option value=""></option>
+                  <option value="">{isStrictlyResueltaState ? 'Seleccionar resolución...' : 'Sin resolución (bloqueado)'}</option>
                   {isResolvedState && b.resolution && b.resolution !== 'Sin resolver' && b.resolution !== 'Unresolved' && !resolutionOptionsList.some(r => r.name === b.resolution) && (
                     <option value={b.resolution}>{b.resolution}</option>
                   )}

@@ -178,6 +178,10 @@ export default function PlanningView({ ctx }) {
       (!deferredSearchQuery || tc.key?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || tc.summary?.toLowerCase().includes(deferredSearchQuery.toLowerCase()))
     );
 
+    // Normalized multi-selection of currently available (and filtered) test cases
+    const selectedTestsSet = new Set((selectedTestsForCycle || []).map(id => String(id)));
+    const validSelectedTests = availableFilteredTestCases.filter(tc => selectedTestsSet.has(String(tc.id)));
+
     // Filtered plans for Plan Selector dropdown
     const visiblePlans = testPlans.filter(p => {
       if (!planningPlanSearch.trim()) return true;
@@ -1933,15 +1937,10 @@ export default function PlanningView({ ctx }) {
                       <button
                         type="button"
                         onClick={async () => {
-                          const allAvailable = testCases.filter(tc =>
-                            (planningFolder === '' || tc.folderId === planningFolder) &&
-                            (planningPriority === '' || tc.rawFields?.priority?.name === planningPriority) &&
-                            (planningExecutionType === '' || (planningExecutionType.toLowerCase() === 'manual' ? getExecVal(tc).includes('man') : getExecVal(tc).includes('auto'))) &&
-                            !cycleTests.some(ct => ct.id === tc.id)
-                          );
-                          const testsToAdd = selectedTestsForCycle.length > 0
-                            ? testCases.filter(tc => selectedTestsForCycle.includes(tc.id))
-                            : allAvailable;
+                          const testsToAdd = validSelectedTests.length > 0
+                            ? validSelectedTests
+                            : availableFilteredTestCases;
+                          if (!selectedCycle || testsToAdd.length === 0) return;
 
                           setIsAddingAll(true);
                           setAddingProgress({ current: 0, total: testsToAdd.length });
@@ -1949,9 +1948,12 @@ export default function PlanningView({ ctx }) {
                             const cycleId = String(selectedCycle.id);
                             testsToAdd.forEach(tc => {
                               const idStr = String(tc.id);
+                              const keyStr = tc.key ? String(tc.key) : '';
                               deletedIdsRef.current.delete(idStr);
+                              if (keyStr) deletedIdsRef.current.delete(keyStr);
                               if (perCycleDeletedRef.current[cycleId]) {
                                 perCycleDeletedRef.current[cycleId].delete(idStr);
+                                if (keyStr) perCycleDeletedRef.current[cycleId].delete(keyStr);
                               }
                             });
 
@@ -1999,25 +2001,35 @@ export default function PlanningView({ ctx }) {
                             }
 
                             const locallyAdded = testsToAdd.map(tc => ({
-                              id: tc.id,
+                              id: String(tc.id),
+                              testCaseId: String(tc.id),
                               key: tc.key,
+                              testCaseKey: tc.key,
                               summary: tc.summary,
+                              folderId: tc.folderId,
                               executionType: tc.executionType || 'Manual',
                               status: 'Not Run'
                             }));
 
                             const cycleIdStr = String(cycleId);
-                            const existingBase = perCycleCacheRef.current[cycleIdStr] || [];
+                            const existingBase = perCycleCacheRef.current[cycleIdStr] || deduplicatedCycleTests || [];
                             const newArr = [...existingBase];
                             locallyAdded.forEach(lt => {
                               let finalItem = lt;
                               if (allAddedTests && allAddedTests.length > 0) {
-                                const matched = allAddedTests.find(t => String(t.id) === String(lt.id));
+                                const matched = allAddedTests.find(t =>
+                                  String(t.id) === String(lt.id) ||
+                                  (lt.key && (t.key === lt.key || t.testCaseKey === lt.key))
+                                );
                                 if (matched) {
                                   finalItem = { ...lt, ...matched };
                                 }
                               }
-                              if (!newArr.some(existing => String(existing.id) === String(lt.id))) {
+                              const alreadyExists = newArr.some(existing =>
+                                String(existing.id) === String(lt.id) ||
+                                (lt.key && (existing.key === lt.key || existing.testCaseKey === lt.key))
+                              );
+                              if (!alreadyExists) {
                                 newArr.push(finalItem);
                               }
                             });
@@ -2029,6 +2041,11 @@ export default function PlanningView({ ctx }) {
                             }
 
                             setSelectedTestsForCycle([]);
+                            addNotification({
+                              type: 'success',
+                              title: `${testsToAdd.length} caso${testsToAdd.length !== 1 ? 's' : ''} añadido${testsToAdd.length !== 1 ? 's' : ''} al ciclo`,
+                              description: `Asignados a "${selectedCycle.name || selectedCycle.summary || selectedCycle.key}".`
+                            });
 
                             setTimeout(async () => {
                               const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
@@ -2038,7 +2055,11 @@ export default function PlanningView({ ctx }) {
                             }, 2500);
                           } catch (err) {
                             console.error(err);
-                            alert('Error al añadir casos: ' + err.message);
+                            addNotification({
+                              type: 'error',
+                              title: 'Error al añadir casos al ciclo',
+                              description: err.message || String(err)
+                            });
                           }
                           setIsAddingAll(false);
                           setAddingProgress({ current: 0, total: 0 });
@@ -2064,25 +2085,118 @@ export default function PlanningView({ ctx }) {
                         <span>
                           {isAddingAll
                             ? (addingProgress.total > 0 ? `Añadiendo (${addingProgress.current}/${addingProgress.total})...` : 'Añadiendo...')
-                            : (selectedTestsForCycle.length > 0 ? `Añadir seleccionados (${selectedTestsForCycle.length})` : 'Añadir todos')}
+                            : (validSelectedTests.length > 0
+                                ? `Añadir seleccionados (${validSelectedTests.length})`
+                                : (availableFilteredTestCases.length > 0 ? `Añadir todos (${availableFilteredTestCases.length})` : 'Añadir todos'))}
                         </span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Available Test Cases Rows (with Folder Grouping) */}
+                  {/* Available Test Cases Rows (with Folder Grouping & Multi-Selection Mode) */}
                   {!isSectionCollapsed('planning-available') && (
                     <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {/* Sub-header Select All / Active Multi-Select Bar */}
+                      {availableFilteredTestCases.length > 0 && (
+                        <div style={{
+                          padding: '8px 16px',
+                          background: validSelectedTests.length > 0 ? '#EFF6FF' : 'rgba(248, 250, 252, 0.3)',
+                          borderBottom: validSelectedTests.length > 0 ? '1px solid #BFDBFE' : '1px solid #F1F5F9',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '12px',
+                          transition: 'all 0.15s ease'
+                        }}>
+                          <label style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            fontWeight: validSelectedTests.length > 0 ? 600 : 500,
+                            color: validSelectedTests.length > 0 ? '#0C66E4' : '#64748B',
+                            userSelect: 'none'
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={availableFilteredTestCases.length > 0 && validSelectedTests.length === availableFilteredTestCases.length}
+                              ref={el => {
+                                if (el) {
+                                  el.indeterminate = validSelectedTests.length > 0 && validSelectedTests.length < availableFilteredTestCases.length;
+                                }
+                              }}
+                              onChange={e => {
+                                if (e.target.checked) {
+                                  setSelectedTestsForCycle(availableFilteredTestCases.map(tc => String(tc.id)));
+                                } else {
+                                  setSelectedTestsForCycle([]);
+                                }
+                              }}
+                              style={{ borderRadius: '3px', cursor: 'pointer', margin: 0 }}
+                            />
+                            <span>
+                              {validSelectedTests.length > 0
+                                ? `${validSelectedTests.length} de ${availableFilteredTestCases.length} caso${availableFilteredTestCases.length !== 1 ? 's' : ''} seleccionado${validSelectedTests.length !== 1 ? 's' : ''}`
+                                : `Seleccionar todos (${availableFilteredTestCases.length})`}
+                            </span>
+                          </label>
+
+                          {validSelectedTests.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              {validSelectedTests.length < availableFilteredTestCases.length && (
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedTestsForCycle(availableFilteredTestCases.map(tc => String(tc.id)))}
+                                  style={{
+                                    padding: '3px 10px',
+                                    borderRadius: '4px',
+                                    border: '1px solid #93C5FD',
+                                    background: '#FFFFFF',
+                                    color: '#0C66E4',
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  Seleccionar todos ({availableFilteredTestCases.length})
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTestsForCycle([])}
+                                style={{
+                                  padding: '3px 10px',
+                                  borderRadius: '4px',
+                                  border: '1px solid #CBD5E1',
+                                  background: '#FFFFFF',
+                                  color: '#475569',
+                                  fontSize: '11px',
+                                  fontWeight: 500,
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                Limpiar selección
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {renderGroupedList(`plan-avail-${selectedCycle?.id || ''}`, groupByFolder ? availableFilteredTestCases : availableFilteredTestCases.slice(0, planningAvailVisible), test => {
-                        const isSelected = selectedTestsForCycle.includes(test.id);
+                        const testIdStr = String(test.id);
+                        const isSelected = selectedTestsSet.has(testIdStr);
                         const isAuto = getExecVal(test).includes('auto');
                         return (
                           <div
                             key={test.id}
                             onClick={() => {
-                              setSelectedTestsForCycle(prev =>
-                                prev.includes(test.id) ? prev.filter(id => id !== test.id) : [...prev, test.id]
-                              );
+                              setSelectedTestsForCycle(prev => {
+                                const prevStrs = (prev || []).map(id => String(id));
+                                return prevStrs.includes(testIdStr)
+                                  ? prevStrs.filter(id => id !== testIdStr)
+                                  : [...prevStrs, testIdStr];
+                              });
                             }}
                             style={{
                               padding: '10px 16px',

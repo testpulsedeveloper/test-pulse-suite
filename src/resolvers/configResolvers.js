@@ -132,9 +132,15 @@ export function registerConfigResolvers(resolver) {
 
     const defaultConf = {
       testCaseType: 'Test Case',
+      testCaseTypeId: null,
       testCycleType: 'Test Cycle',
+      testCycleTypeId: null,
       planIssueType: 'Test Set',
+      planIssueTypeId: null,
       testRunType: 'Test Run',
+      testRunTypeId: null,
+      defectType: 'Bug',
+      defectTypeId: null,
       requirementIssueTypes: [],
       requirementLinkType: 'ANY',
       environments: globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS,
@@ -185,9 +191,15 @@ export function registerConfigResolvers(resolver) {
 
         const merged = {
           testCaseType: config.testCaseType || 'Test Case',
+          testCaseTypeId: config.testCaseTypeId || null,
           testCycleType: config.testCycleType || 'Test Cycle',
+          testCycleTypeId: config.testCycleTypeId || null,
           planIssueType: config.planIssueType || 'Test Set',
+          planIssueTypeId: config.planIssueTypeId || null,
           testRunType: config.testRunType || 'Test Run',
+          testRunTypeId: config.testRunTypeId || null,
+          defectType: config.defectType || 'Bug',
+          defectTypeId: config.defectTypeId || null,
           requirementIssueTypes: Array.isArray(config.requirementIssueTypes) ? config.requirementIssueTypes : [],
           requirementLinkType: config.requirementLinkType || 'ANY',
           ...config,
@@ -227,12 +239,32 @@ export function registerConfigResolvers(resolver) {
         await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, sanitizedEnvs);
       } catch (e) {}
     }
+    // Auto-resolve issueType IDs when project issueTypes are available so multi-language Jira sites stay resilient
+    try {
+      const projRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`);
+      if (projRes.ok) {
+        const projData = await projRes.json();
+        const issueTypes = Array.isArray(projData.issueTypes) ? projData.issueTypes : [];
+        const findTypeId = (nameVal) => {
+          if (!nameVal) return null;
+          const target = String(nameVal).trim().toLowerCase();
+          const found = issueTypes.find(it => String(it.name || '').trim().toLowerCase() === target || String(it.id) === target);
+          return found?.id ? String(found.id) : null;
+        };
+        if (nextConfig.testCaseType && !nextConfig.testCaseTypeId) nextConfig.testCaseTypeId = findTypeId(nextConfig.testCaseType);
+        if (nextConfig.testCycleType && !nextConfig.testCycleTypeId) nextConfig.testCycleTypeId = findTypeId(nextConfig.testCycleType);
+        if (nextConfig.planIssueType && !nextConfig.planIssueTypeId) nextConfig.planIssueTypeId = findTypeId(nextConfig.planIssueType);
+        if (nextConfig.testRunType && !nextConfig.testRunTypeId) nextConfig.testRunTypeId = findTypeId(nextConfig.testRunType);
+        if (nextConfig.defectType && !nextConfig.defectTypeId) nextConfig.defectTypeId = findTypeId(nextConfig.defectType);
+      }
+    } catch (_) {}
+
     const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(nextConfig)
     });
-    return { success: response.status >= 200 && response.status < 300 };
+    return { success: response.status >= 200 && response.status < 300, config: nextConfig };
   });
 
   // === Permissions ===

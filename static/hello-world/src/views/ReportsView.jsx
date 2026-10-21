@@ -141,6 +141,11 @@ export default function ReportsView({ ctx }) {
     unlinkedBugs
   } = ctx;
 
+    const [traceabilityViewMode, setTraceabilityViewMode] = React.useState('VISUAL_FLOW'); // 'VISUAL_FLOW' | 'COMPACT_MATRIX' | 'DAG_GRAPH'
+    const [traceabilityQuickFilter, setTraceabilityQuickFilter] = React.useState('ALL'); // 'ALL' | 'BLOCKED' | 'CERTIFIED' | 'ORPHANS'
+    const [traceabilityPhaseFilter, setTraceabilityPhaseFilter] = React.useState('ALL'); // 'ALL' | '01_REFINEMENT' | '02_DEV' | '03_DESIGN' | '04_SIT_BLOCK' | '05_QA_CERT' | '06_UAT_DONE'
+    const [traceabilityOrphanDrawerOpen, setTraceabilityOrphanDrawerOpen] = React.useState(false);
+
     // Show TestPulseLoader only on initial load if no reportData is available yet
     if (reportLoading && (!reportData.cycles || reportData.cycles.length === 0)) {
       return (
@@ -157,7 +162,7 @@ export default function ReportsView({ ctx }) {
           <div style={{ fontSize: '2rem' }}>⚠️</div>
           <div style={{ fontWeight: 500 }}>El reporte tardó demasiado en cargar</div>
           <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>Intenta de nuevo con el botón de abajo</div>
-          <button className="btn-primary" onClick={loadReportData} style={{ padding: '0.5rem 1.2rem' }}>
+          <button className="btn-primary" onClick={() => loadReportData(selectedProjectId, projectConfig, false, true)} style={{ padding: '0.5rem 1.2rem' }}>
             🔄 Reintentar
           </button>
         </div>
@@ -193,15 +198,18 @@ export default function ReportsView({ ctx }) {
           const k = item.testCaseKey || item.key || item.id;
           if (k) execMap.set(String(k), item);
         });
-        // Live in-memory execution from Planning/Execution takes precedence for completeness & latest status, while preserving enriched bug details
+        // Live in-memory execution from Planning/Execution takes precedence for completeness & latest status,
+        // while respecting backend bug sanitization (so moved/deleted bugs are never resurrected from cache).
         (cached || []).forEach(item => {
           const k = item.testCaseKey || item.key || item.id;
           if (k) {
             const existing = execMap.get(String(k));
             if (existing) {
-              const mergedBugs = (item.linkedBugs || existing.linkedBugs || []).map(b => {
+              const baseBugs = Array.isArray(existing.linkedBugs) ? existing.linkedBugs : (item.linkedBugs || []);
+              const mergedBugs = baseBugs.map(b => {
+                const cb = (item.linkedBugs || []).find(x => x.key === b.key) || {};
                 const eb = (existing.linkedBugs || []).find(x => x.key === b.key) || reportData?.bugMap?.[b.key] || {};
-                return { ...eb, ...b, severity: eb.severity || b.severity, summary: eb.summary || b.summary };
+                return { ...cb, ...eb, ...b, severity: eb.severity || b.severity || cb.severity, summary: eb.summary || b.summary || cb.summary };
               });
               execMap.set(String(k), { ...existing, ...item, linkedBugs: mergedBugs });
             } else {
@@ -350,9 +358,20 @@ export default function ReportsView({ ctx }) {
       const bugHasExplicitVersion = bugVer.versions.length > 0 || bugVer.semanticVersions.length > 0;
       const cycleHasExplicitVersion = cycleVer.versions.length > 0 || cycleVer.semanticVersions.length > 0;
 
-      // Check if bug was explicitly recorded in this cycle's test executions
-      const isDirectlyExecutedInCycle = Array.isArray(cycle.execution) && cycle.execution.some(ex => 
-        Array.isArray(ex.linkedBugs) && ex.linkedBugs.some(lb => lb && (lb.key === bug.key || String(lb.id) === String(bug.id)))
+      // Check if bug was explicitly recorded in this cycle's test executions or Jira issuelinks
+      const isDirectlyExecutedInCycle = (
+        Array.isArray(bug.linkedTests) && bug.linkedTests.some(lt => lt && (
+          (lt.key && lt.key === cycle.key) ||
+          (lt.id && String(lt.id) === String(cycle.id))
+        ))
+      ) || (
+        Array.isArray(cycle.execution) && cycle.execution.some(ex => 
+          (Array.isArray(ex.linkedBugs) && ex.linkedBugs.some(lb => lb && (lb.key === bug.key || String(lb.id) === String(bug.id)))) ||
+          (Array.isArray(bug.linkedTests) && bug.linkedTests.some(lt => lt && (
+            (lt.key && (lt.key === ex.key || lt.key === ex.testCaseKey || lt.key === ex.testRunKey)) ||
+            (lt.id && (String(lt.id) === String(ex.id) || String(lt.id) === String(ex.testCaseId) || String(lt.id) === String(ex.testRunId)))
+          )))
+        )
       );
 
       // 1. If BOTH bug and cycle have semantic version numbers (e.g. Bug: 3.72.12.07 vs Cycle: 3.72.12.12)
@@ -399,9 +418,25 @@ export default function ReportsView({ ctx }) {
       filteredCycles = filteredCycles.filter(c => reportSelectedCycles.some(rcId => String(rcId) === String(c.id)));
     }
 
+    const currentProjObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
+    const currentProjKey = currentProjObj?.key || (selectedProjectId && isNaN(selectedProjectId) ? String(selectedProjectId) : null);
+
     // ── Bug & Field Extraction Helpers ──
     const isActualBug = (bug) => {
       if (!bug || !bug.key) return false;
+      // 0. Strictly verify bug belongs to current project (excludes bugs moved to another project)
+      if (currentProjKey) {
+        const upperProjKey = String(currentProjKey).trim().toUpperCase();
+        if (upperProjKey && !String(bug.key).trim().toUpperCase().startsWith(upperProjKey + '-')) {
+          return false;
+        }
+        if (bug.project) {
+          const pKey = typeof bug.project === 'object' ? (bug.project.key || bug.project.id) : String(bug.project);
+          if (pKey && String(pKey).trim().toUpperCase() !== upperProjKey && String(pKey).trim() !== String(selectedProjectId).trim()) {
+            return false;
+          }
+        }
+      }
       // 1. Exclude if key/id matches any known test case in the system
       if (testCases.some(t => String(t.id) === String(bug.id) || String(t.key) === String(bug.key))) {
         return false;
@@ -424,10 +459,13 @@ export default function ReportsView({ ctx }) {
         const isBug = validBugKeywords.some(kw => rawType.includes(kw));
         if (!isBug) return false;
       }
-      // 5. If it is only a raw stub from linkedBugs without matching real Jira issue in bugMap, unlinkedBugs, or rawFields
+      // 5. Verify bug still exists in current project's live bugMap or unlinkedBugs
       const mapBug = reportData?.bugMap?.[bug.key];
       const projBug = (unlinkedBugs || []).find(ub => ub.key === bug.key);
       if (!mapBug && !projBug && !bug.rawFields && (!bug.summary || bug.summary === 'Defecto detectado en ciclo')) {
+        return false;
+      }
+      if (reportData?._loadedAt && !reportData?._isSnapshot && !isHydratingReport && !mapBug && !projBug) {
         return false;
       }
       return true;
@@ -707,32 +745,6 @@ export default function ReportsView({ ctx }) {
                   cycles: shouldAddCycle ? new Set([cycleName]) : new Set(),
                   affectedCases: new Map()
                 });
-
-                if (isDone) {
-                  // Pass `bug` metadata as 4th argument so MTTR excludes closed intervals and On Hold pauses
-                  const bugAgeInfo = formatBugAge(
-                    bug.created || bug.rawFields?.created,
-                    bug.resolutiondate || bug.rawFields?.resolutiondate,
-                    true,
-                    bug
-                  );
-                  if (bugAgeInfo && typeof bugAgeInfo.hours === 'number' && bugAgeInfo.hours > 0) {
-                    totalResolutionHours += bugAgeInfo.hours;
-                    resolvedCount++;
-                  }
-                } else if (bug.timesSpent && Object.keys(bug.timesSpent).length > 0) {
-                  for (const [state, hours] of Object.entries(bug.timesSpent)) {
-                    if (!bugTimes[state]) bugTimes[state] = { totalHours: 0, count: 0 };
-                    bugTimes[state].totalHours += hours;
-                    bugTimes[state].count++;
-                    
-                    const stateLow = state.toLowerCase();
-                    if (stateLow === 'in progress' || stateLow === 'en curso') {
-                      totalResolutionHours += hours;
-                    }
-                  }
-                  resolvedCount++;
-                }
               } else {
                 if (shouldAddCycle) {
                   planAllBugsMap.get(bugKey).cycles.add(cycleName);
@@ -961,10 +973,6 @@ export default function ReportsView({ ctx }) {
       }
     });
 
-    // Filter and consolidate project bugs
-    const currentProjObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
-    const currentProjKey = currentProjObj?.key;
-
     // Filter project bugs by workspace project and valid bug type
     const relevantProjectBugs = unlinkedBugs.filter(b => {
       if (!isActualBug(b)) return false;
@@ -1025,6 +1033,96 @@ export default function ReportsView({ ctx }) {
         }
       });
 
+      // Also include in cycleAllBugsMap / cycleOpenBugsMap if it matches any of the currently filteredCycles
+      const matchedFilteredCycles = new Set();
+      (filteredCycles || []).forEach(fc => {
+        const fcName = fc.summary || fc.key || String(fc.id);
+        if (bugMatchesCycle(ub, fc)) {
+          matchedFilteredCycles.add(fcName);
+        }
+      });
+
+      const ubResName = resolveValidBugResolution(ub, isDone);
+      const normalizedAssignee = (typeof ub.assignee === 'object' && ub.assignee !== null)
+        ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar')
+        : (ub.assignee || 'Sin asignar');
+
+      if (matchedFilteredCycles.size > 0) {
+        if (!cycleAllBugsMap.has(ub.key)) {
+          cycleAllBugsMap.set(ub.key, {
+            key: ub.key,
+            summary: ub.summary || 'Defecto detectado en ciclo',
+            severity: finalSeverity,
+            assignee: normalizedAssignee,
+            status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
+            resolution: ubResName,
+            isDone: isDone,
+            version: versionDisplay,
+            versions: affectsVersions,
+            fixVersions: fixVersions,
+            created: ub.created || ub.rawFields?.created || null,
+            resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
+            duedate: ub.duedate || ub.rawFields?.duedate || null,
+            isReopened: Boolean(ub.isReopened),
+            reopenedAt: ub.reopenedAt || null,
+            reopenCount: ub.reopenCount || 0,
+            isOnHold: Boolean(ub.isOnHold),
+            onHoldSince: ub.onHoldSince || null,
+            onHoldBusinessHours: typeof ub.onHoldBusinessHours === 'number' ? ub.onHoldBusinessHours : null,
+            activeBusinessHours: typeof ub.activeBusinessHours === 'number' ? ub.activeBusinessHours : null,
+            resolutionBusinessHours: typeof ub.resolutionBusinessHours === 'number' ? ub.resolutionBusinessHours : null,
+            lastTerminalAt: ub.lastTerminalAt || null,
+            cycles: new Set(matchedFilteredCycles),
+            affectedCases: new Map(affectedMap)
+          });
+        } else {
+          const entry = cycleAllBugsMap.get(ub.key);
+          matchedFilteredCycles.forEach(cn => entry.cycles.add(cn));
+          affectedMap.forEach((v, k) => { if (!entry.affectedCases.has(k)) entry.affectedCases.set(k, v); });
+          if ((!entry.assignee || entry.assignee === 'Sin asignar') && normalizedAssignee !== 'Sin asignar') {
+            entry.assignee = normalizedAssignee;
+          }
+        }
+
+        if (!isDone) {
+          if (!cycleOpenBugsMap.has(ub.key)) {
+            cycleOpenBugsMap.set(ub.key, {
+              key: ub.key,
+              summary: ub.summary || 'Defecto detectado en ciclo',
+              severity: finalSeverity,
+              assignee: normalizedAssignee,
+              status: ub.status || 'Abierto',
+              resolution: ubResName,
+              isDone: false,
+              version: versionDisplay,
+              versions: affectsVersions,
+              fixVersions: fixVersions,
+              created: ub.created || ub.rawFields?.created || null,
+              resolutiondate: ub.resolutiondate || ub.rawFields?.resolutiondate || null,
+              duedate: ub.duedate || ub.rawFields?.duedate || null,
+              isReopened: Boolean(ub.isReopened),
+              reopenedAt: ub.reopenedAt || null,
+              reopenCount: ub.reopenCount || 0,
+              isOnHold: Boolean(ub.isOnHold),
+              onHoldSince: ub.onHoldSince || null,
+              onHoldBusinessHours: typeof ub.onHoldBusinessHours === 'number' ? ub.onHoldBusinessHours : null,
+              activeBusinessHours: typeof ub.activeBusinessHours === 'number' ? ub.activeBusinessHours : null,
+              resolutionBusinessHours: typeof ub.resolutionBusinessHours === 'number' ? ub.resolutionBusinessHours : null,
+              lastTerminalAt: ub.lastTerminalAt || null,
+              cycles: new Set(matchedFilteredCycles),
+              affectedCases: new Map(affectedMap)
+            });
+          } else {
+            const openEntry = cycleOpenBugsMap.get(ub.key);
+            matchedFilteredCycles.forEach(cn => openEntry.cycles.add(cn));
+            affectedMap.forEach((v, k) => { if (!openEntry.affectedCases.has(k)) openEntry.affectedCases.set(k, v); });
+            if ((!openEntry.assignee || openEntry.assignee === 'Sin asignar') && normalizedAssignee !== 'Sin asignar') {
+              openEntry.assignee = normalizedAssignee;
+            }
+          }
+        }
+      }
+
       if (allBugsMap.has(ub.key)) {
         // Bug was already registered in a cycle execution of this plan — enrich its linked test details
         const existing = allBugsMap.get(ub.key);
@@ -1038,6 +1136,9 @@ export default function ReportsView({ ctx }) {
           foundCycles.forEach(cName => {
             existing.cycles.add(cName);
           });
+        }
+        if ((!existing.assignee || existing.assignee === 'Sin asignar') && normalizedAssignee !== 'Sin asignar') {
+          existing.assignee = normalizedAssignee;
         }
         if (!existing.version || existing.version === 'Sin versión') {
           existing.version = versionDisplay;
@@ -1068,14 +1169,14 @@ export default function ReportsView({ ctx }) {
         }
       } else {
         // Bug is in the project but wasn't part of planAllBugsMap
-        // ONLY include if it matched at least one target cycle in scope
-        if (foundCycles.size > 0) {
-          const ubResName = resolveValidBugResolution(ub, isDone);
+        // Include if it matched a target cycle OR when no specific Test Plan filter is active
+        const noPlanFilterActive = !reportSelectedPlans || reportSelectedPlans.length === 0;
+        if (foundCycles.size > 0 || noPlanFilterActive) {
           allBugsMap.set(ub.key, {
             key: ub.key,
             summary: ub.summary || (isLinkedToAnyTest ? 'Defecto vinculado a prueba' : 'Defecto sin vincular'),
             severity: finalSeverity,
-            assignee: (typeof ub.assignee === 'object' && ub.assignee !== null) ? (ub.assignee.displayName || ub.assignee.name || 'Sin asignar') : (ub.assignee || 'Sin asignar'),
+            assignee: normalizedAssignee,
             status: ub.status || (isDone ? 'Cerrado' : 'Abierto'),
             resolution: ubResName,
             isDone: isDone,
@@ -1100,7 +1201,7 @@ export default function ReportsView({ ctx }) {
           });
         }
 
-        if (!isLinkedToAnyTest) {
+        if (!isLinkedToAnyTest || foundCycles.size === 0) {
           projectUnlinkedBugs.push({
             ...ub,
             version: versionDisplay,
@@ -1199,6 +1300,23 @@ export default function ReportsView({ ctx }) {
     const openCycleBugs = cycleAllBugsList.filter(b => !b.isDone).length;
     const closedCycleBugs = cycleAllBugsList.filter(b => b.isDone).length;
 
+    // Calculate MTTR strictly from closed bugs belonging to the active/selected cycle(s) (cycleAllBugsList)
+    cycleAllBugsList.forEach(bug => {
+      if (bug.isDone) {
+        // Pass `bug` metadata as 4th argument so MTTR excludes closed intervals and On Hold pauses
+        const bugAgeInfo = formatBugAge(
+          bug.created || bug.rawFields?.created,
+          bug.resolutiondate || bug.rawFields?.resolutiondate,
+          true,
+          bug
+        );
+        if (bugAgeInfo && typeof bugAgeInfo.hours === 'number' && bugAgeInfo.hours > 0) {
+          totalResolutionHours += bugAgeInfo.hours;
+          resolvedCount++;
+        }
+      }
+    });
+
     const evaluados = passed + failed + blocked;
     const ejecutados = evaluados;
     const successRate = evaluados > 0 ? ((passed / evaluados) * 100).toFixed(1) : '0.0';
@@ -1211,7 +1329,7 @@ export default function ReportsView({ ctx }) {
     const bPct = allTotal > 0 ? (blocked / allTotal) * 100 : 0;
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
-    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '0.0';
+    const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '0';
     const ctxProj = context?.extension?.project;
     const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
     
@@ -2364,7 +2482,11 @@ export default function ReportsView({ ctx }) {
       }
     };
 
-    filteredCycles.forEach(cycle => {
+    const allCyclesForTraceability = (testCycles && testCycles.length > 0)
+      ? testCycles
+      : (reportData?.cycles || []);
+
+    allCyclesForTraceability.forEach(cycle => {
       if (cycle.execution && Array.isArray(cycle.execution)) {
         const seenTcInCycle = new Set();
         const cPlanId = cycle.planId || cycle.plan?.id || cycle.plan?.key || (typeof cycle.plan === 'string' ? cycle.plan : null);
@@ -2416,6 +2538,22 @@ export default function ReportsView({ ctx }) {
       }
     });
 
+    const configuredStoryTypesLower = (projectConfig?.requirementIssueTypes || [])
+      .map(t => String(t).toLowerCase().trim())
+      .filter(t => t && !['epic', 'épica', 'epica', 'task', 'tarea', 'sub-task', 'subtarea', 'subtask'].some(w => t === w || t.includes(w)));
+
+    const isValidStoryType = (typeStr) => {
+      const t = String(typeStr || '').toLowerCase().trim();
+      if (!t) return false;
+      if (['epic', 'épica', 'epica', 'task', 'tarea', 'sub-task', 'subtarea', 'subtask', 'test', 'caso', 'ciclo', 'plan', 'ejecuc', 'bug', 'defecto', 'error', 'incidencia'].some(w => t === w || t.includes(w))) {
+        return false;
+      }
+      if (configuredStoryTypesLower.length > 0) {
+        return configuredStoryTypesLower.some(cfg => t === cfg || t.includes(cfg) || cfg.includes(t));
+      }
+      return ['story', 'historia', 'historia de usuario', 'user story'].some(w => t === w || t.includes(w));
+    };
+
     const ensureStoryEntry = (sKey, sSummary, eKey, eSummary, sWorkflowStatus = '', sWorkflowCategory = '') => {
       if (!sKey) return null;
       const sUpper = sKey.toUpperCase();
@@ -2451,6 +2589,7 @@ export default function ReportsView({ ctx }) {
 
     (traceabilityHierarchy?.stories || []).forEach(st => {
       if (!st?.key) return;
+      if (st.issuetype && !isValidStoryType(st.issuetype)) return;
       const entry = ensureStoryEntry(st.key, st.summary, st.epicKey, st.epicSummary, st.status || '', st.statusCategory || '');
       if (entry && Array.isArray(st.linkedTestCases)) {
         st.linkedTestCases.forEach(tc => {
@@ -2462,8 +2601,8 @@ export default function ReportsView({ ctx }) {
 
     Object.values(requirementsMap || {}).forEach(req => {
       if (!req?.key) return;
-      const rType = (req.issueType || '').toLowerCase();
-      if (rType === 'epic' || rType === 'épica' || rType.includes('epic') || rType.includes('épica')) {
+      const rType = (req.issueType || '').toLowerCase().trim();
+      if (rType === 'epic' || rType === 'épica' || rType === 'epica' || rType.includes('epic') || rType.includes('épica')) {
         const eUpper = req.key.toUpperCase();
         if (!consolidatedEpicsMap.has(eUpper)) {
           consolidatedEpicsMap.set(eUpper, {
@@ -2477,7 +2616,7 @@ export default function ReportsView({ ctx }) {
           if (!epCur.workflowStatus && req.status) epCur.workflowStatus = req.status;
           if (!epCur.workflowStatusCategory && req.statusCategory) epCur.workflowStatusCategory = req.statusCategory;
         }
-      } else {
+      } else if (isValidStoryType(rType)) {
         ensureStoryEntry(req.key, req.summary, req.epicKey, req.epicSummary, req.status || '', req.statusCategory || '');
       }
     });
@@ -2502,6 +2641,7 @@ export default function ReportsView({ ctx }) {
       const extracted = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
       if (extracted?.reqKey) {
         const reqFromMap = requirementsMap?.[extracted.reqKey];
+        if (reqFromMap?.issueType && !isValidStoryType(reqFromMap.issueType)) return;
         const stEntry = ensureStoryEntry(
           extracted.reqKey,
           extracted.reqSummary,
@@ -2539,9 +2679,8 @@ export default function ReportsView({ ctx }) {
       }
     });
 
-    const hasActivePlanOrCycleFilter =
-      (reportSelectedPlans && reportSelectedPlans.length > 0) ||
-      (reportSelectedCycles && reportSelectedCycles.length > 0);
+    // Filters do not apply to the Traceability submenu; always evaluate full project hierarchy
+    const hasActivePlanOrCycleFilter = false;
 
     // Status aggregation helper when a Story has multiple Test Cases executed in the same Cycle
     const aggregateCycleStatus = (statuses) => {
@@ -3230,9 +3369,20 @@ export default function ReportsView({ ctx }) {
         )}
 
         {/* ─── Main Dashboard View Container ─── */}
-        <main className="dashboard-container" style={{ flex: 1, height: '100%', overflowY: 'auto', boxSizing: 'border-box', padding: '1.5rem 2rem 6rem 2rem' }}>
+        <main
+          className="dashboard-container"
+          style={{
+            flex: 1,
+            height: '100%',
+            overflowY: 'auto',
+            boxSizing: 'border-box',
+            padding: dashboardSubView === 'traceability' ? '0.85rem 1.75rem 5rem 1.75rem' : '1.5rem 2rem 6rem 2rem',
+            gap: dashboardSubView === 'traceability' ? '0.65rem' : '1.25rem'
+          }}
+        >
           {/* Top Header & Toolbar */}
-          <div className="dashboard-top-header">
+          <div className="dashboard-top-header" style={dashboardSubView === 'traceability' && !reportData?._isSnapshot ? { display: 'none' } : undefined}>
+            {dashboardSubView !== 'traceability' && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '4px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                 {!isFolderSidebarVisible && (
@@ -3313,7 +3463,6 @@ export default function ReportsView({ ctx }) {
                 <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em', margin: 0 }}>
                   {dashboardSubView === 'runs' && 'Consola de Ejecución & Control Multi-Ciclo'}
                   {dashboardSubView === 'bugs' && 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)'}
-                  {dashboardSubView === 'traceability' && 'Reports: Matriz de Trazabilidad (Traceability)'}
                 </h1>
 
                 <span className="dashboard-live-badge">
@@ -3419,6 +3568,7 @@ export default function ReportsView({ ctx }) {
                 </button>
               </div>
             </div>
+            )}
 
             {/* Amber Banner when Snapshot mode is active */}
             {reportData?._isSnapshot && (
@@ -3467,107 +3617,6 @@ export default function ReportsView({ ctx }) {
               </div>
             )}
 
-            {/* Filter Toolbar (Only shown for Traceability; Runs and Bugs automatically synchronize with the Runs Plan/Cycle selector) */}
-            {dashboardSubView !== 'runs' && dashboardSubView !== 'bugs' && (
-              <div className="dashboard-filter-toolbar">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                  {/* 1. Plan de Pruebas */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Plan de Pruebas:</span>
-                    <details style={{ position: 'relative' }}>
-                      <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                        {reportSelectedPlans.length === 0 ? "Todos los Planes" : `${reportSelectedPlans.length} Planes seleccionados`}
-                      </summary>
-                      <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
-                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
-                           <input type="checkbox" checked={reportSelectedPlans.length === 0} onChange={() => { setReportSelectedPlans([]); setReportSelectedCycles([]); }} /> Todos los Planes
-                         </label>
-                         {testPlans.map(p => {
-                           const isSelected = reportSelectedPlans.some(pId => String(pId) === String(p.id));
-                           return (
-                             <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
-                               <input type="checkbox" checked={isSelected} onChange={(e) => {
-                                 let newVals = isSelected 
-                                   ? reportSelectedPlans.filter(v => String(v) !== String(p.id))
-                                   : [...reportSelectedPlans, String(p.id)];
-                                 setReportSelectedPlans(newVals);
-                                 setReportSelectedCycles([]);
-                               }} />
-                               {p.summary}
-                             </label>
-                           );
-                         })}
-                      </div>
-                    </details>
-                  </div>
-
-                  {/* 2. Ciclo de Pruebas */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ciclo de Pruebas:</span>
-                    <details style={{ position: 'relative' }}>
-                      <summary style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', cursor: 'pointer', minWidth: '180px', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                        {reportSelectedCycles.length === 0 ? "Todos los Ciclos" : `${reportSelectedCycles.length} Ciclos seleccionados`}
-                      </summary>
-                      <div style={{ position: 'absolute', top: '100%', left: 0, background: '#FFFFFF', border: '1px solid var(--jira-border, #DCDFE4)', zIndex: 100, padding: '0.6rem', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '250px', overflowY: 'auto', minWidth: '220px', boxShadow: '0 4px 12px rgba(9,30,66,0.15)' }}>
-                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
-                           <input type="checkbox" checked={reportSelectedCycles.length === 0} onChange={() => { setReportSelectedCycles([]); }} /> Todos los Ciclos
-                         </label>
-                         {(() => {
-                           const allCyclesList = (testCycles && testCycles.length > 0) ? testCycles : (reportData?.cycles || []);
-                           const filteredForDropdown = reportSelectedPlans.length > 0
-                             ? allCyclesList.filter(c => reportSelectedPlans.some(pId => String(pId) === String(c.planId)))
-                             : allCyclesList;
-                           return filteredForDropdown.map(c => {
-                             const isSelected = reportSelectedCycles.some(rcId => String(rcId) === String(c.id));
-                             return (
-                               <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '12px' }}>
-                                 <input type="checkbox" checked={isSelected} onChange={(e) => {
-                                   let newVals = isSelected
-                                     ? reportSelectedCycles.filter(v => String(v) !== String(c.id))
-                                     : [...reportSelectedCycles, String(c.id)];
-                                   setReportSelectedCycles(newVals);
-                                 }} />
-                                 {c.summary}
-                               </label>
-                             );
-                           });
-                         })()}
-                      </div>
-                    </details>
-                  </div>
-
-                  {/* 4. Ambiente */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)' }}>Ambiente:</span>
-                    <span style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--jira-border, #DCDFE4)', background: '#FAFBFC', fontSize: '12px', fontWeight: 600, color: 'var(--jira-dark, #172B4D)' }}>
-                      {(() => {
-                        const cyclesSource = Array.isArray(filteredCycles) && filteredCycles.length > 0
-                          ? filteredCycles
-                          : (Array.isArray(testCycles) ? testCycles : []);
-                        const envSet = new Set(
-                          cyclesSource
-                            .map(c => c.schedule?.environment || c.environment)
-                            .filter(Boolean)
-                        );
-                        return envSet.size > 0 ? Array.from(envSet).join(', ') : (availableEnvironments[0]?.name || 'QA');
-                      })()}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Sincronización */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--jira-subtle, #626F86)' }}>
-                  <span>🕒</span>
-                  <span>
-                    {reportData._loadedAt
-                      ? (Math.floor((Date.now() - reportData._loadedAt) / 60000) < 1
-                          ? 'Sincronizado hace un momento'
-                          : `Sincronizado hace ${Math.floor((Date.now() - reportData._loadedAt) / 60000)} min`)
-                      : 'Sincronizado'}
-                  </span>
-                </div>
-              </div>
-            )}
           </div>
 
           {/* ═══════════════════════════════════════════════════════ */}
@@ -5947,32 +5996,276 @@ export default function ReportsView({ ctx }) {
           )}
 
           {/* ═══════════════════════════════════════════════════════ */}
-          {/* ─── SUBVIEW 3: TRACEABILITY ─── */}
+          {/* ─── SUBVIEW 3: TRACEABILITY (Stitch Fluid Matrix) ─── */}
           {/* ═══════════════════════════════════════════════════════ */}
           {dashboardSubView === 'traceability' && (() => {
             const totalEpicsCount = consolidatedEpicsMap.size;
             const totalStoriesCount = consolidatedStoriesMap.size;
-            const coveredStoriesCount = Array.from(consolidatedStoriesMap.values()).filter(
-              (s) => (s.tcRefSet && s.tcRefSet.size > 0) || traceabilityRows.some((r) => r.requirementKey === s.key && r.cycleId !== null)
-            ).length;
-            const storiesCoveragePct = totalStoriesCount > 0 ? Math.round((coveredStoriesCount / totalStoriesCount) * 100) : 0;
-            const orphanStoriesCount = Array.from(consolidatedStoriesMap.values()).filter((s) => !s.epicKey).length;
-            const orphanStoriesPct = totalStoriesCount > 0 ? Math.round((orphanStoriesCount / totalStoriesCount) * 100) : 0;
-            const rowsWithIssuesCount = traceabilityRows.filter(
-              (r) => r.status === 'FAILED' || r.status === 'BLOCKED' || (r.bugs && r.bugs.length > 0)
-            ).length;
+            const currentProjectObj = (projects || []).find((p) => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
+            const projectBadgeLabel = currentProjectObj
+              ? `${currentProjectObj.key} · ${currentProjectObj.name || 'Proyecto Activo'}`
+              : `${totalEpicsCount} Épicas · Proyecto Activo`;
 
-            // Group filteredTraceabilityRows hierarchically by Epic
+            // Build enriched Story objects across the entire project so KPIs & SDLC phases are 100% accurate
+            const rowsByStoryKey = new Map();
+            traceabilityRows.forEach((r) => {
+              if (!r.requirementKey) return;
+              const k = r.requirementKey.toUpperCase();
+              if (!rowsByStoryKey.has(k)) rowsByStoryKey.set(k, []);
+              rowsByStoryKey.get(k).push(r);
+            });
+
+            const isBugOpenHelper = (b) => {
+              if (!b) return false;
+              if (typeof b.isDone === 'boolean') return !b.isDone;
+              const st = String(b.status || '').toLowerCase();
+              return !(
+                st.includes('done') ||
+                st.includes('cerrad') ||
+                st.includes('resuelt') ||
+                st.includes('finaliz') ||
+                st.includes('complet') ||
+                st.includes('closed') ||
+                st.includes('resolved')
+              );
+            };
+
+            const enrichedStoriesMap = new Map();
+            consolidatedStoriesMap.forEach((st, stUpper) => {
+              const stRows = rowsByStoryKey.get(stUpper) || [];
+              const cycles = [];
+              const bugsMap = new Map();
+              let maxLinkedTc = st.tcRefSet ? st.tcRefSet.size : 0;
+
+              stRows.forEach((r) => {
+                if ((r.linkedTcCount || 0) > maxLinkedTc) maxLinkedTc = r.linkedTcCount;
+                if (r.cycleId !== null) {
+                  cycles.push({
+                    cycleId: r.cycleId,
+                    cycleName: r.cycleName,
+                    planId: r.planId,
+                    planName: r.planName,
+                    planKey: r.planKey,
+                    status: String(r.status || 'NOT_RUN').toUpperCase(),
+                    executedTcCount: r.executedTcCount || 0,
+                    bugs: r.bugs || []
+                  });
+                }
+                (r.bugs || []).forEach((b) => {
+                  if (b && b.key && !bugsMap.has(b.key)) bugsMap.set(b.key, b);
+                });
+              });
+
+              const allBugs = Array.from(bugsMap.values());
+              const openBugs = allBugs.filter(isBugOpenHelper);
+              const cycleStatuses = cycles.map((c) => c.status);
+
+              let aggregatedStatus = 'NOT_RUN';
+              if (cycleStatuses.length > 0) {
+                if (cycleStatuses.includes('FAILED')) aggregatedStatus = 'FAILED';
+                else if (cycleStatuses.includes('BLOCKED')) aggregatedStatus = 'BLOCKED';
+                else if (cycleStatuses.includes('IN_PROGRESS')) aggregatedStatus = 'IN_PROGRESS';
+                else if (cycleStatuses.every((s) => s === 'PASSED')) aggregatedStatus = 'PASSED';
+                else if (cycleStatuses.includes('PASSED')) aggregatedStatus = 'IN_PROGRESS';
+              }
+
+              const wfStatus = (st.workflowStatus || 'Backlog').trim();
+              const wfCat = (st.workflowStatusCategory || '').toLowerCase().trim();
+              const wfLower = wfStatus.toLowerCase();
+
+              const isBacklogOrToDo =
+                !st.workflowStatus ||
+                wfCat === 'new' ||
+                wfLower === 'backlog' ||
+                wfLower.includes('backlog') ||
+                wfLower === 'por hacer' ||
+                wfLower === 'to do' ||
+                wfLower === 'todo' ||
+                wfLower === 'abierto' ||
+                wfLower === 'open' ||
+                wfLower === 'nuevo' ||
+                wfLower === 'new' ||
+                wfLower.includes('refinamiento') ||
+                wfLower.includes('pendiente');
+
+              const isCovered = maxLinkedTc > 0 || cycles.length > 0;
+              const hasBlocker =
+                aggregatedStatus === 'FAILED' ||
+                aggregatedStatus === 'BLOCKED' ||
+                openBugs.length > 0 ||
+                wfLower.includes('bloque') ||
+                wfLower.includes('imped');
+              const isCertified = aggregatedStatus === 'PASSED' && !hasBlocker;
+
+              let sdlcPhase = '01_REFINEMENT';
+              if (wfLower.includes('bloque') || wfLower.includes('imped')) {
+                sdlcPhase = '04_SIT_BLOCK';
+              } else if (isBacklogOrToDo) {
+                sdlcPhase = '01_REFINEMENT';
+              } else if (
+                wfCat === 'done' ||
+                wfLower.includes('finaliz') ||
+                wfLower.includes('cerrad') ||
+                wfLower.includes('done') ||
+                wfLower.includes('complet') ||
+                wfLower.includes('producc') ||
+                wfLower.includes('liber') ||
+                wfLower.includes('resuelt')
+              ) {
+                sdlcPhase = '06_UAT_DONE';
+              } else if (hasBlocker) {
+                sdlcPhase = '04_SIT_BLOCK';
+              } else if (
+                wfLower.includes('qa') ||
+                wfLower.includes('prueb') ||
+                wfLower.includes('test') ||
+                wfLower.includes('validac') ||
+                wfLower.includes('certif') ||
+                wfLower.includes('uat')
+              ) {
+                sdlcPhase = '05_QA_CERT';
+              } else if (
+                wfLower.includes('diseñ') ||
+                wfLower.includes('disen') ||
+                wfLower.includes('design') ||
+                wfLower.includes('analisis') ||
+                wfLower.includes('análisis')
+              ) {
+                sdlcPhase = '03_DESIGN';
+              } else if (
+                wfCat === 'indeterminate' ||
+                wfLower.includes('curso') ||
+                wfLower.includes('progres') ||
+                wfLower.includes('desarroll') ||
+                wfLower.includes('dev') ||
+                wfLower.includes('revis') ||
+                wfLower.includes('review')
+              ) {
+                sdlcPhase = '02_DEV';
+              }
+
+              enrichedStoriesMap.set(stUpper, {
+                key: st.key,
+                summary: st.summary || '',
+                epicKey: st.epicKey || null,
+                epicSummary: st.epicSummary || '',
+                workflowStatus: wfStatus,
+                workflowStatusCategory: wfCat,
+                linkedTcCount: maxLinkedTc,
+                cycles,
+                bugs: allBugs,
+                openBugs,
+                aggregatedStatus,
+                isCovered,
+                hasBlocker,
+                isCertified,
+                sdlcPhase
+              });
+            });
+
+            const allEnrichedStories = Array.from(enrichedStoriesMap.values());
+            const coveredStoriesCount = allEnrichedStories.filter((s) => s.isCovered).length;
+            const storiesCoveragePct = totalStoriesCount > 0 ? Math.round((coveredStoriesCount / totalStoriesCount) * 100) : 0;
+
+            const orphanStoriesList = allEnrichedStories.filter((s) => !s.epicKey);
+            const orphanStoriesCount = orphanStoriesList.length;
+            const orphanStoriesPct = totalStoriesCount > 0 ? Math.round((orphanStoriesCount / totalStoriesCount) * 100) : 0;
+
+            const blockedStoriesList = allEnrichedStories.filter((s) => s.hasBlocker);
+            const certifiedStoriesList = allEnrichedStories.filter((s) => s.isCertified);
+
+            // Collect all unique bugs across traceability
+            const allTraceBugsMap = new Map();
+            allEnrichedStories.forEach((s) => {
+              s.bugs.forEach((b) => {
+                if (b && b.key && !allTraceBugsMap.has(b.key)) {
+                  allTraceBugsMap.set(b.key, { ...b, affectedStoryKey: s.key, affectedEpicKey: s.epicKey });
+                }
+              });
+            });
+            const allTraceBugs = Array.from(allTraceBugsMap.values());
+            const openTraceBugs = allTraceBugs.filter(isBugOpenHelper);
+            const topBlockerBug = openTraceBugs[0] || allTraceBugs[0] || null;
+
+            // SDLC 6-Phase counts
+            const phase01List = allEnrichedStories.filter((s) => s.sdlcPhase === '01_REFINEMENT');
+            const phase02List = allEnrichedStories.filter((s) => s.sdlcPhase === '02_DEV');
+            const phase03List = allEnrichedStories.filter((s) => s.sdlcPhase === '03_DESIGN');
+            const phase04List = allEnrichedStories.filter((s) => s.sdlcPhase === '04_SIT_BLOCK');
+            const phase05List = allEnrichedStories.filter((s) => s.sdlcPhase === '05_QA_CERT');
+            const phase06List = allEnrichedStories.filter((s) => s.sdlcPhase === '06_UAT_DONE');
+
+            const qaAndDoneCount = phase05List.length + phase06List.length;
+            const sitAndDesignCount = phase03List.length + phase04List.length;
+            const devAndRefinementCount = phase01List.length + phase02List.length;
+            const executedStoriesTotal = allEnrichedStories.filter((s) => s.cycles.length > 0).length;
+            const qaPassRatePct = executedStoriesTotal > 0
+              ? Math.round((certifiedStoriesList.length / executedStoriesTotal) * 100)
+              : storiesCoveragePct;
+
+            // Semantic Epic suggestion helper for Orphan Stories Audit Drawer
+            const epicsArray = Array.from(consolidatedEpicsMap.values());
+            const suggestEpicForOrphan = (storyObj) => {
+              if (!epicsArray.length) return null;
+              const sWords = String(storyObj.summary || '')
+                .toLowerCase()
+                .replace(/[^a-záéíóúñ0-9\s]/gi, ' ')
+                .split(/\s+/)
+                .filter((w) => w.length >= 4);
+              let bestEpic = epicsArray[0];
+              let bestScore = 0;
+              epicsArray.forEach((ep) => {
+                const epText = `${ep.key} ${ep.summary || ''}`.toLowerCase();
+                let score = 0;
+                sWords.forEach((w) => {
+                  if (epText.includes(w)) score += 1;
+                });
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestEpic = ep;
+                }
+              });
+              return { epic: bestEpic, matchedKeywords: bestScore };
+            };
+
+            // Filter traceabilityRows by Search + Phase Filter + Quick Filter Pill
+            const activeFilteredRows = filteredTraceabilityRows.filter((row) => {
+              const stUpper = row.requirementKey ? row.requirementKey.toUpperCase() : null;
+              const enriched = stUpper ? enrichedStoriesMap.get(stUpper) : null;
+
+              if (traceabilityPhaseFilter !== 'ALL') {
+                if (!enriched || enriched.sdlcPhase !== traceabilityPhaseFilter) return false;
+              }
+
+              if (traceabilityQuickFilter === 'BLOCKED') {
+                const rowHasIssue =
+                  row.status === 'FAILED' ||
+                  row.status === 'BLOCKED' ||
+                  (row.bugs && row.bugs.length > 0) ||
+                  (enriched && enriched.hasBlocker);
+                if (!rowHasIssue) return false;
+              } else if (traceabilityQuickFilter === 'CERTIFIED') {
+                if (!enriched || !enriched.isCertified) return false;
+              } else if (traceabilityQuickFilter === 'ORPHANS') {
+                if (row.epicKey) return false;
+              }
+
+              return true;
+            });
+
+            // Group activeFilteredRows hierarchically by Epic
             const epicGroupsMap = new Map();
-            filteredTraceabilityRows.forEach((row) => {
+            activeFilteredRows.forEach((row) => {
               const groupKey = row.epicKey || '__UNLINKED_EPIC__';
               if (!epicGroupsMap.has(groupKey)) {
+                const epMeta = row.epicKey ? consolidatedEpicsMap.get(row.epicKey.toUpperCase()) : null;
                 epicGroupsMap.set(groupKey, {
                   groupKey,
                   epicKey: row.epicKey || null,
                   epicSummary: row.epicKey
-                    ? (row.epicSummary || '')
-                    : '⚠️ Incumplimiento de proceso: Historias de usuario sin Épica padre vinculada en Jira',
+                    ? (row.epicSummary || epMeta?.summary || '')
+                    : 'Incumplimiento de proceso: Historias de usuario sin Épica padre vinculada en Jira',
+                  epicWorkflowStatus: row.epicWorkflowStatus || epMeta?.workflowStatus || '',
                   rows: [],
                   storyRows: [],
                   storiesMap: new Map(),
@@ -5989,31 +6282,49 @@ export default function ReportsView({ ctx }) {
 
               if (row.requirementKey) {
                 grp.storyRows.push(row);
-                if (!grp.storiesMap.has(row.requirementKey)) {
-                  grp.storiesMap.set(row.requirementKey, {
+                const stUpper = row.requirementKey.toUpperCase();
+                if (!grp.storiesMap.has(stUpper)) {
+                  const enriched = enrichedStoriesMap.get(stUpper);
+                  grp.storiesMap.set(stUpper, {
                     key: row.requirementKey,
-                    summary: row.requirementSummary || '',
-                    linkedTcCount: row.linkedTcCount || 0,
+                    summary: row.requirementSummary || enriched?.summary || '',
+                    workflowStatus: row.requirementWorkflowStatus || enriched?.workflowStatus || '',
+                    workflowStatusCategory: row.requirementWorkflowStatusCategory || enriched?.workflowStatusCategory || '',
+                    linkedTcCount: enriched ? enriched.linkedTcCount : (row.linkedTcCount || 0),
                     executedTcCount: 0,
                     hasCycle: false,
-                    statuses: []
+                    statuses: [],
+                    cycles: [],
+                    bugsMap: new Map(),
+                    sdlcPhase: enriched?.sdlcPhase || '01_REFINEMENT'
                   });
                 }
-                const stEntry = grp.storiesMap.get(row.requirementKey);
+                const stEntry = grp.storiesMap.get(stUpper);
                 if ((row.linkedTcCount || 0) > stEntry.linkedTcCount) {
                   stEntry.linkedTcCount = row.linkedTcCount;
                 }
                 if (row.cycleId !== null) {
                   stEntry.hasCycle = true;
                   stEntry.executedTcCount += (row.executedTcCount || 0);
+                  stEntry.cycles.push({
+                    cycleId: row.cycleId,
+                    cycleName: row.cycleName,
+                    planName: row.planName,
+                    planKey: row.planKey,
+                    status: String(row.status || 'NOT_RUN').toUpperCase(),
+                    executedTcCount: row.executedTcCount || 0
+                  });
                 }
                 stEntry.statuses.push(String(row.status || 'NOT_RUN').toUpperCase());
+                (row.bugs || []).forEach((b) => {
+                  if (b && b.key) stEntry.bugsMap.set(b.key, b);
+                });
               }
 
               if (row.planKey || (row.planName && row.planName !== 'Sin plan asignado' && row.planName !== 'Sin casos vinculados')) {
                 grp.plansMap.set(row.planKey || row.planName, row.planName);
               }
-              if (row.cycleId !== null && row.cycleName) {
+              if (row.cycleId !== null && row.cycleName && row.cycleName !== 'Sin ciclo de ejecución' && row.cycleName !== 'Pendiente de cobertura' && row.cycleName !== 'Sin historias vinculadas') {
                 grp.cyclesSet.add(row.cycleName);
               }
               if (Array.isArray(row.bugs)) {
@@ -6024,7 +6335,22 @@ export default function ReportsView({ ctx }) {
             });
 
             const epicGroups = Array.from(epicGroupsMap.values()).map((grp) => {
-              const storiesArr = Array.from(grp.storiesMap.values());
+              const storiesArr = Array.from(grp.storiesMap.values()).map((s) => {
+                const sBugs = Array.from(s.bugsMap.values());
+                let stStatus = 'NOT_RUN';
+                if (s.statuses.length > 0) {
+                  if (s.statuses.includes('FAILED')) stStatus = 'FAILED';
+                  else if (s.statuses.includes('BLOCKED')) stStatus = 'BLOCKED';
+                  else if (s.statuses.includes('IN_PROGRESS')) stStatus = 'IN_PROGRESS';
+                  else if (s.statuses.every((st) => st === 'PASSED')) stStatus = 'PASSED';
+                  else if (s.statuses.includes('PASSED')) stStatus = 'IN_PROGRESS';
+                }
+                return {
+                  ...s,
+                  status: stStatus,
+                  bugs: sBugs
+                };
+              });
               const totalStories = storiesArr.length;
               const coveredStories = storiesArr.filter((s) => s.linkedTcCount > 0 || s.hasCycle).length;
               const executedStories = storiesArr.filter((s) =>
@@ -6032,7 +6358,6 @@ export default function ReportsView({ ctx }) {
               ).length;
               const coveragePct = totalStories > 0 ? Math.round((coveredStories / totalStories) * 100) : 0;
 
-              // Aggregate Epic status across all its story rows
               const allStatuses = grp.storyRows.map((r) => String(r.status || 'NOT_RUN').toUpperCase());
               let epicStatus = 'NOT_RUN';
               if (allStatuses.length > 0) {
@@ -6045,6 +6370,7 @@ export default function ReportsView({ ctx }) {
 
               return {
                 ...grp,
+                storiesList: storiesArr,
                 totalStories,
                 coveredStories,
                 executedStories,
@@ -6056,19 +6382,22 @@ export default function ReportsView({ ctx }) {
               };
             });
 
-            const isSearching = Boolean(dashboardTraceabilitySearch && dashboardTraceabilitySearch.trim().length > 0);
-            const isGroupExpanded = (groupKey) => {
-              if (isSearching) return true;
+            const hasActiveFilter =
+              Boolean(dashboardTraceabilitySearch && dashboardTraceabilitySearch.trim().length > 0) ||
+              traceabilityPhaseFilter !== 'ALL' ||
+              traceabilityQuickFilter !== 'ALL';
+
+            const isGroupExpanded = (groupKey, index = 0) => {
+              if (hasActiveFilter) return true;
               if (Object.prototype.hasOwnProperty.call(expandedTraceabilityEpics, groupKey)) {
                 return Boolean(expandedTraceabilityEpics[groupKey]);
               }
-              // Auto-expand orphan stories group by default so process non-compliance is immediately visible
-              return groupKey === '__UNLINKED_EPIC__';
+              return groupKey === '__UNLINKED_EPIC__' || index === 0;
             };
-            const toggleEpicExpand = (groupKey) => {
+            const toggleEpicExpand = (groupKey, index = 0) => {
               setExpandedTraceabilityEpics((prev) => ({
                 ...prev,
-                [groupKey]: !isGroupExpanded(groupKey)
+                [groupKey]: !isGroupExpanded(groupKey, index)
               }));
             };
             const expandAllEpics = () => {
@@ -6082,723 +6411,1682 @@ export default function ReportsView({ ctx }) {
               setExpandedTraceabilityEpics(next);
             };
 
+            const getWorkflowColors = (wfStatus, wfCat) => {
+              const wfLower = String(wfStatus || '').toLowerCase();
+              const catLower = String(wfCat || '').toLowerCase();
+              if (
+                catLower === 'done' ||
+                wfLower.includes('finaliz') ||
+                wfLower.includes('cerrad') ||
+                wfLower.includes('done') ||
+                wfLower.includes('complet') ||
+                wfLower.includes('resuelt') ||
+                wfLower.includes('aprob') ||
+                wfLower.includes('producc') ||
+                wfLower.includes('liber')
+              ) {
+                return { color: '#006644', bg: '#E3FCEF', border: '#ABF5D1' };
+              }
+              if (
+                wfLower.includes('bloque') ||
+                wfLower.includes('imped') ||
+                wfLower.includes('rechaz') ||
+                wfLower.includes('cancel')
+              ) {
+                return { color: '#BF2600', bg: '#FFEBE6', border: '#FFBDAD' };
+              }
+              if (
+                catLower === 'indeterminate' ||
+                wfLower.includes('curso') ||
+                wfLower.includes('progres') ||
+                wfLower.includes('prueb') ||
+                wfLower.includes('qa') ||
+                wfLower.includes('test') ||
+                wfLower.includes('revis') ||
+                wfLower.includes('review') ||
+                wfLower.includes('desarroll') ||
+                wfLower.includes('validac') ||
+                wfLower.includes('uat')
+              ) {
+                return { color: '#0052CC', bg: '#E9F2FF', border: '#CCE0FF' };
+              }
+              return { color: '#475569', bg: '#F1F5F9', border: '#CBD5E1' };
+            };
+
+            const renderStitchStatusPill = (statusStr) => {
+              const st = String(statusStr || 'NOT_RUN').toUpperCase();
+              if (st === 'PASSED') {
+                return (
+                  <span style={{ padding: '3px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, background: '#E3FCEF', color: '#006644', border: '1px solid #ABF5D1', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                    PASSED
+                  </span>
+                );
+              }
+              if (st === 'FAILED') {
+                return (
+                  <span style={{ padding: '3px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, background: '#FFEBE6', color: '#BF2600', border: '1px solid #FFBDAD', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                    FAILED
+                  </span>
+                );
+              }
+              if (st === 'BLOCKED') {
+                return (
+                  <span style={{ padding: '3px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, background: '#FFF7D6', color: '#974F0C', border: '1px solid #F5CD47', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                    BLOCKED
+                  </span>
+                );
+              }
+              if (st === 'IN_PROGRESS') {
+                return (
+                  <span style={{ padding: '3px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, background: '#E9F2FF', color: '#0052CC', border: '1px solid #CCE0FF', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                    IN PROGRESS
+                  </span>
+                );
+              }
+              return (
+                <span style={{ padding: '3px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 700, background: '#F1F5F9', color: '#64748B', border: '1px solid #CBD5E1', letterSpacing: '0.03em', whiteSpace: 'nowrap' }}>
+                  NOT RUN
+                </span>
+              );
+            };
+
+            const sdlcPhasesConfig = [
+              {
+                id: '01_REFINEMENT',
+                step: '01 REFINEMENT',
+                count: phase01List.length,
+                badgeText: phase01List.length > 0 ? 'En Backlog' : '✓ Al día',
+                badgeColor: '#006644',
+                stepColor: '#64748B',
+                hasBlocker: false
+              },
+              {
+                id: '02_DEV',
+                step: '02 EN DEV',
+                count: phase02List.length,
+                badgeText: `${phase02List.filter((s) => s.isCovered).length} con casos`,
+                badgeColor: '#0052CC',
+                stepColor: '#64748B',
+                hasBlocker: false
+              },
+              {
+                id: '03_DESIGN',
+                step: '03 DISEÑO / UNITARIAS',
+                count: phase03List.length,
+                badgeText: '✓ Cubiertas',
+                badgeColor: '#006644',
+                stepColor: '#0052CC',
+                hasBlocker: false
+              },
+              {
+                id: '04_SIT_BLOCK',
+                step: '04 PRUEBAS SIT',
+                count: phase04List.length,
+                badgeText: phase04List.length > 0 ? `${phase04List.length} Bloqueos` : '✓ 0 Bloqueos',
+                badgeColor: phase04List.length > 0 ? '#BF2600' : '#006644',
+                stepColor: phase04List.length > 0 ? '#BF2600' : '#64748B',
+                hasBlocker: phase04List.length > 0
+              },
+              {
+                id: '05_QA_CERT',
+                step: '05 QA CERTIFICACIÓN',
+                count: phase05List.length,
+                badgeText: `${qaPassRatePct}% Aprobado`,
+                badgeColor: '#006644',
+                stepColor: '#059669',
+                hasBlocker: false
+              },
+              {
+                id: '06_UAT_DONE',
+                step: '06 UAT / DONE',
+                count: phase06List.length,
+                badgeText: phase06List.length > 0 ? '✓ Certificadas' : 'Pendientes',
+                badgeColor: phase06List.length > 0 ? '#006644' : '#64748B',
+                stepColor: '#64748B',
+                hasBlocker: false
+              }
+            ];
+
+            const qaSegPct = totalStoriesCount > 0 ? Math.round((qaAndDoneCount / totalStoriesCount) * 100) : 0;
+            const sitSegPct = totalStoriesCount > 0 ? Math.round((sitAndDesignCount / totalStoriesCount) * 100) : 0;
+            const devSegPct = Math.max(0, 100 - qaSegPct - sitSegPct);
+
             return (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                {/* Traceability KPI Scorecard */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '1rem' }}>
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#6554C0', fontWeight: 700 }}>⚡ ÉPICAS E HISTORIAS</span>
-                      <span className="dashboard-kpi-pill blue">{totalEpicsCount} Épicas</span>
+              <div className="tp-trace-root">
+                {/* ─── COMPACT PAGE HEADER & QUICK ACTIONS ─── */}
+                <div className="tp-trace-hero">
+                  <div className="tp-trace-title-row">
+                    {!isFolderSidebarVisible && (
+                      <>
+                        <button
+                          onClick={toggleFolderSidebar}
+                          className="btn-secondary"
+                          title="Mostrar panel lateral de Reports"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            fontSize: '0.75rem',
+                            padding: '0.28rem 0.55rem',
+                            borderRadius: '6px'
+                          }}
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                            <line x1="9" y1="3" x2="9" y2="21" />
+                            <path d="M13 9l3 3-3 3" />
+                          </svg>
+                          <span>Reports</span>
+                        </button>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', background: '#F1F2F4', padding: '2px', borderRadius: '6px', gap: '2px' }}>
+                          <button
+                            onClick={() => setDashboardSubView('runs')}
+                            style={{
+                              background: 'transparent',
+                              color: '#626F86',
+                              fontWeight: 500,
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 7px',
+                              fontSize: '11px',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            📊 Runs
+                          </button>
+                          <button
+                            onClick={() => setDashboardSubView('bugs')}
+                            style={{
+                              background: 'transparent',
+                              color: '#626F86',
+                              fontWeight: 500,
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 7px',
+                              fontSize: '11px',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            🐞 Bugs
+                          </button>
+                          <button
+                            onClick={() => setDashboardSubView('traceability')}
+                            style={{
+                              background: '#FFFFFF',
+                              color: '#0C66E4',
+                              fontWeight: 700,
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 7px',
+                              fontSize: '11px',
+                              cursor: 'pointer',
+                              boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                            }}
+                          >
+                            🔗 Traceability
+                          </button>
+                        </div>
+                      </>
+                    )}
+                    <h1 className="tp-trace-title">Matriz de Trazabilidad</h1>
+                    <span className="tp-trace-sprint-pill">{projectBadgeLabel}</span>
+                    <span className="dashboard-live-badge">
+                      <span className="dashboard-live-dot" />
+                      ● {isHydratingReport
+                          ? `Sincronizando histórico (${reportData?.cycles?.length || 0}/${reportData?.totalCycles || '...'})`
+                          : isRefreshingReport
+                            ? 'Sincronizando...'
+                            : `En vivo · ${reportData._loadedAt ? new Date(reportData._loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Auto-sync silencioso'}`}
+                    </span>
+                    {circuitBreakerActive && (
+                      <span style={{ fontSize: '11px', color: '#FF8B00', fontWeight: 600 }}>
+                        ⏸ Rate limit activo (3 min)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="tp-trace-hero-actions">
+                    <button type="button" onClick={expandAllEpics} className="tp-trace-btn-action" title="Expandir todas las épicas">
+                      <span style={{ fontSize: '12px', color: '#0052CC' }}>▾</span> Expandir
+                    </button>
+                    <button type="button" onClick={collapseAllEpics} className="tp-trace-btn-action" title="Colapsar todas las épicas">
+                      <span style={{ fontSize: '12px', color: '#475569' }}>▴</span> Colapsar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTraceabilityOrphanDrawerOpen(true)}
+                      className="tp-trace-btn-orphans"
+                      title="Abrir panel de auditoría de historias sin Épica"
+                    >
+                      <span>⚠️</span>
+                      <span>{orphanStoriesCount} {orphanStoriesCount === 1 ? 'Huérfana' : 'Huérfanas'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* ─── 1. BENTO EXECUTIVE KPI CARDS ─── */}
+                <div className="tp-trace-bento-grid">
+                  {/* Card 1: Cobertura Global */}
+                  <div className="tp-trace-bento-card">
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
+                      <div>
+                        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0052CC', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          🎯 COBERTURA GLOBAL
+                        </span>
+                        <div style={{ marginTop: '8px', display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                          <span style={{ fontSize: '30px', fontWeight: 800, color: '#0F172A', lineHeight: 1 }}>{storiesCoveragePct}%</span>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#006644' }}>certificada</span>
+                        </div>
+                        <p style={{ margin: '4px 0 0 0', fontSize: '11px', color: '#64748B' }}>
+                          {coveredStoriesCount} de {totalStoriesCount} historias cubiertas
+                        </p>
+                      </div>
+                      <div
+                        style={{
+                          width: '54px',
+                          height: '54px',
+                          borderRadius: '9999px',
+                          border: `4px solid ${storiesCoveragePct >= 80 ? '#ABF5D1' : '#CCE0FF'}`,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: '#F8FAFC',
+                          flexShrink: 0
+                        }}
+                      >
+                        <span style={{ fontSize: '11px', fontWeight: 800, color: storiesCoveragePct >= 80 ? '#006644' : '#0052CC' }}>
+                          {storiesCoveragePct}%
+                        </span>
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value" style={{ color: '#6554C0' }}>
-                      {totalStoriesCount}
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>{totalEpicsCount} Épicas · {totalStoriesCount} Historias en el proyecto</span>
+                    <div style={{ marginTop: '14px', width: '100%', background: '#F1F5F9', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
+                      <div
+                        style={{
+                          width: `${storiesCoveragePct}%`,
+                          height: '100%',
+                          background: 'linear-gradient(90deg, #0052CC 0%, #10B981 100%)',
+                          borderRadius: '9999px',
+                          transition: 'width 0.3s ease'
+                        }}
+                      />
                     </div>
                   </div>
 
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#0C66E4', fontWeight: 700 }}>🎯 COBERTURA DE HISTORIAS</span>
-                      <span className="dashboard-kpi-pill green">{storiesCoveragePct}%</span>
+                  {/* Card 2: Flujo SDLC Activo */}
+                  <div className="tp-trace-bento-card">
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#5243AA', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          🔄 FLUJO SDLC ACTIVO
+                        </span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '4px', background: '#EAE6FF', color: '#403294' }}>
+                          {qaPassRatePct}% Paso en QA
+                        </span>
+                      </div>
+                      <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                          <span style={{ color: '#475569', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#10B981', display: 'inline-block' }} />
+                            En Certificación QA / Done
+                          </span>
+                          <span style={{ fontWeight: 700, color: '#1E293B' }}>{qaAndDoneCount} historias</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                          <span style={{ color: '#475569', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#3B82F6', display: 'inline-block' }} />
+                            En Pruebas SIT / Diseño
+                          </span>
+                          <span style={{ fontWeight: 700, color: '#1E293B' }}>{sitAndDesignCount} historias</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                          <span style={{ color: '#475569', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '9999px', background: '#F59E0B', display: 'inline-block' }} />
+                            En Desarrollo / Backlog
+                          </span>
+                          <span style={{ fontWeight: 700, color: '#1E293B' }}>{devAndRefinementCount} historias</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value" style={{ color: '#0C66E4' }}>
-                      {storiesCoveragePct}%
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>{coveredStoriesCount} de {totalStoriesCount} historias vinculadas a pruebas</span>
+                    <div style={{ marginTop: '12px', display: 'flex', height: '6px', width: '100%', borderRadius: '9999px', overflow: 'hidden', background: '#F1F5F9' }}>
+                      <div style={{ width: `${qaSegPct}%`, background: '#10B981', height: '100%' }} />
+                      <div style={{ width: `${sitSegPct}%`, background: '#3B82F6', height: '100%' }} />
+                      <div style={{ width: `${devSegPct}%`, background: '#F59E0B', height: '100%' }} />
                     </div>
                   </div>
 
+                  {/* Card 3: Grafo & Dependencias (Bloqueos) */}
+                  <div className="tp-trace-bento-card">
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#DE350B', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          🕸️ GRAFO &amp; DEPENDENCIAS
+                        </span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '4px', background: '#FFEBE6', color: '#BF2600', border: '1px solid #FFBDAD' }}>
+                          {openTraceBugs.length} Defectos Activos
+                        </span>
+                      </div>
+                      <div style={{ marginTop: '8px', display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                        <span style={{ fontSize: '24px', fontWeight: 800, color: blockedStoriesList.length > 0 ? '#DE350B' : '#006644' }}>
+                          {blockedStoriesList.length} {blockedStoriesList.length === 1 ? 'Bloqueo' : 'Bloqueos'}
+                        </span>
+                        <span style={{ fontSize: '11px', color: '#64748B' }}>en cadena crítica</span>
+                      </div>
+                    </div>
+                    {topBlockerBug ? (
+                      <div
+                        onClick={() => setSelectedBug(topBlockerBug)}
+                        style={{
+                          marginTop: '10px',
+                          padding: '6px 10px',
+                          borderRadius: '6px',
+                          background: '#FFF5F5',
+                          border: '1px solid #FED7D7',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          cursor: 'pointer'
+                        }}
+                        title={`Clic para inspeccionar defecto ${topBlockerBug.key}`}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', minWidth: 0 }}>
+                          <span className="live-dot" style={{ background: '#EF4444', width: '7px', height: '7px', flexShrink: 0 }} />
+                          <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#9B1C1C', flexShrink: 0 }}>{topBlockerBug.key}</span>
+                          <span style={{ color: '#7F1D1D', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            frena {topBlockerBug.affectedStoryKey || 'certificación'}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: '12px', color: '#DC2626', fontWeight: 700, flexShrink: 0 }}>→</span>
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          marginTop: '10px',
+                          padding: '6px 10px',
+                          borderRadius: '6px',
+                          background: '#F0FDF4',
+                          border: '1px solid #BBF7D0',
+                          fontSize: '11px',
+                          color: '#166534',
+                          fontWeight: 600
+                        }}
+                      >
+                        ✓ Sin defectos bloqueantes en la cadena actual
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Card 4: Calidad de Backlog (Huérfanas) */}
                   <div
-                    className="dashboard-kpi-card"
+                    className="tp-trace-bento-card"
                     style={
                       orphanStoriesCount > 0
-                        ? { border: '1px solid #FFD5D2', background: 'linear-gradient(180deg, #FFFDFC 0%, #FFF7F5 100%)' }
+                        ? { border: '1px solid #FECDD3', background: 'linear-gradient(135deg, #FFFFFF 0%, #FFF5F5 100%)' }
                         : undefined
                     }
                   >
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: orphanStoriesCount > 0 ? '#DE350B' : '#1F845A', fontWeight: 700 }}>
-                        🚨 HISTORIAS HUÉRFANAS
-                      </span>
-                      <span className={`dashboard-kpi-pill ${orphanStoriesCount > 0 ? 'red' : 'green'}`}>
-                        {orphanStoriesCount > 0 ? `⚠️ ${orphanStoriesPct}% Sin Épica` : '✓ Proceso OK'}
-                      </span>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: orphanStoriesCount > 0 ? '#BF2600' : '#006644', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          ⚠️ CALIDAD DE BACKLOG
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setTraceabilityOrphanDrawerOpen(true)}
+                          style={{
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            background: orphanStoriesCount > 0 ? '#BF2600' : '#006644',
+                            color: '#FFFFFF',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontFamily: 'inherit'
+                          }}
+                        >
+                          Auditar →
+                        </button>
+                      </div>
+                      <div style={{ marginTop: '8px', display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                        <span style={{ fontSize: '24px', fontWeight: 800, color: orphanStoriesCount > 0 ? '#BF2600' : '#006644' }}>
+                          {orphanStoriesCount} {orphanStoriesCount === 1 ? 'Huérfana' : 'Huérfanas'}
+                        </span>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: orphanStoriesCount > 0 ? '#DE350B' : '#006644' }}>
+                          {orphanStoriesPct}% sin Épica
+                        </span>
+                      </div>
                     </div>
-                    <div className="dashboard-kpi-value" style={{ color: orphanStoriesCount > 0 ? '#DE350B' : '#1F845A' }}>
-                      {orphanStoriesCount}
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>
+                    <div
+                      onClick={() => setTraceabilityOrphanDrawerOpen(true)}
+                      style={{
+                        marginTop: '10px',
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        background: 'rgba(255, 255, 255, 0.85)',
+                        border: orphanStoriesCount > 0 ? '1px solid #FFBDAD' : '1px solid #BBF7D0',
+                        fontSize: '11px',
+                        color: '#334155',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <span>💡</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {orphanStoriesCount > 0
-                          ? `${orphanStoriesCount} de ${totalStoriesCount} historias sin Épica padre (incumplimiento)`
-                          : 'Todas las historias tienen Épica padre vinculada'}
+                          ? `IA sugiere vincular ${orphanStoriesCount} historia(s) a épicas existentes.`
+                          : '100% de las historias cumplen con Épica padre.'}
                       </span>
-                    </div>
-                  </div>
-
-                  <div className="dashboard-kpi-card">
-                    <div className="dashboard-kpi-header">
-                      <span style={{ color: '#DE350B', fontWeight: 700 }}>⚠️ HISTORIAS CON INCIDENCIA</span>
-                      <span className="dashboard-kpi-pill red">{rowsWithIssuesCount} Registros</span>
-                    </div>
-                    <div className="dashboard-kpi-value" style={{ color: '#DE350B' }}>
-                      {rowsWithIssuesCount}
-                    </div>
-                    <div className="dashboard-kpi-footer">
-                      <span>{failed} Fallados · {blocked} Bloqueados en ciclos</span>
                     </div>
                   </div>
                 </div>
 
-                {/* Traceability Matrix Card */}
-                <div className="dashboard-card" style={{ overflowX: 'auto' }}>
-                  <div className="dashboard-card-header" style={{ flexWrap: 'wrap', gap: '10px' }}>
-                    <div>
-                      <div className="dashboard-card-title">
-                        <span style={{ color: '#0C66E4' }}>🔗</span>
-                        <span>Matriz Jerárquica de Trazabilidad y Cobertura</span>
-                      </div>
-                      <div style={{ fontSize: '11px', color: 'var(--jira-subtle, #626F86)', marginTop: '2px' }}>
-                        Haz clic en una Épica para desplegar sus Historias de Usuario, porcentaje de cobertura, Plan, Ciclo, Estado y Defectos
-                      </div>
+                {/* ─── 2. PIPELINE SDLC & AVANCE DE FASE (Interactive 6-Step Pill Track) ─── */}
+                <div className="tp-trace-sdlc-card">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ color: '#0052CC', fontSize: '14px' }}>📊</span>
+                      <h2 style={{ margin: 0, fontSize: '12px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#334155' }}>
+                        Pipeline SDLC &amp; Avance de Fase
+                      </h2>
+                      <span style={{ fontSize: '11px', color: '#94A3B8' }}>(Clic para filtrar matriz por etapa)</span>
+                    </div>
+                    {traceabilityPhaseFilter !== 'ALL' && (
+                      <button
+                        type="button"
+                        onClick={() => setTraceabilityPhaseFilter('ALL')}
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          color: '#0052CC',
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                          textDecoration: 'underline',
+                          fontFamily: 'inherit'
+                        }}
+                      >
+                        Ver todas las fases
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="tp-trace-sdlc-grid">
+                    {sdlcPhasesConfig.map((phase) => {
+                      const isPhaseActive = traceabilityPhaseFilter === phase.id;
+                      return (
+                        <button
+                          key={phase.id}
+                          type="button"
+                          onClick={() => setTraceabilityPhaseFilter((prev) => (prev === phase.id ? 'ALL' : phase.id))}
+                          className={`tp-trace-phase-pill ${isPhaseActive ? 'active' : ''} ${phase.hasBlocker ? 'has-blocker' : ''}`}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                            <span style={{ fontSize: '10px', fontWeight: 800, color: phase.stepColor, letterSpacing: '0.02em' }}>
+                              {phase.step}
+                            </span>
+                            <span style={{ width: '7px', height: '7px', borderRadius: '9999px', background: isPhaseActive ? '#0052CC' : (phase.hasBlocker ? '#EF4444' : '#CBD5E1') }} />
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', width: '100%', marginTop: '2px' }}>
+                            <span style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A' }}>
+                              {phase.count} <span style={{ fontSize: '11px', fontWeight: 500, color: '#64748B' }}>Historias</span>
+                            </span>
+                            <span style={{ fontSize: '10px', fontWeight: 700, color: phase.badgeColor }}>
+                              {phase.badgeText}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* ─── 3. TOOLBAR: VIEW MODE SWITCHER, QUICK FILTERS & SEARCH ─── */}
+                <div className="tp-trace-toolbar">
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+                    {/* View Mode Switcher */}
+                    <div className="tp-trace-mode-switcher">
+                      <button
+                        type="button"
+                        onClick={() => setTraceabilityViewMode('VISUAL_FLOW')}
+                        className={`tp-trace-mode-btn ${traceabilityViewMode === 'VISUAL_FLOW' ? 'active' : ''}`}
+                      >
+                        <span style={{ color: traceabilityViewMode === 'VISUAL_FLOW' ? '#0052CC' : 'inherit' }}>▤</span>
+                        <span>Vista Flujo Visual</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTraceabilityViewMode('COMPACT_MATRIX')}
+                        className={`tp-trace-mode-btn ${traceabilityViewMode === 'COMPACT_MATRIX' ? 'active' : ''}`}
+                      >
+                        <span style={{ color: traceabilityViewMode === 'COMPACT_MATRIX' ? '#0052CC' : 'inherit' }}>☰</span>
+                        <span>Matriz Compacta</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTraceabilityViewMode('DAG_GRAPH')}
+                        className={`tp-trace-mode-btn ${traceabilityViewMode === 'DAG_GRAPH' ? 'active' : ''}`}
+                      >
+                        <span style={{ color: traceabilityViewMode === 'DAG_GRAPH' ? '#0052CC' : 'inherit' }}>🕸️</span>
+                        <span>Grafo DAG</span>
+                      </button>
                     </div>
 
-                    {/* Controls: Expand/Collapse + Search filter */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <div style={{ width: '1px', height: '22px', background: '#CBD5E1' }} />
+
+                    {/* Quick Filter Pills */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <button
                         type="button"
-                        onClick={expandAllEpics}
-                        style={{
-                          padding: '5px 10px',
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          color: '#0C66E4',
-                          background: '#E9F2FF',
-                          border: '1px solid #CCE0FF',
-                          borderRadius: '6px',
-                          cursor: 'pointer'
-                        }}
+                        onClick={() => setTraceabilityQuickFilter('ALL')}
+                        className={`tp-trace-filter-pill ${traceabilityQuickFilter === 'ALL' ? 'active' : ''}`}
                       >
-                        ▼ Expandir Épicas
+                        Todas ({totalStoriesCount})
                       </button>
                       <button
                         type="button"
-                        onClick={collapseAllEpics}
-                        style={{
-                          padding: '5px 10px',
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          color: '#44546F',
-                          background: '#F1F2F4',
-                          border: '1px solid #DCDFE4',
-                          borderRadius: '6px',
-                          cursor: 'pointer'
-                        }}
+                        onClick={() => setTraceabilityQuickFilter((prev) => (prev === 'BLOCKED' ? 'ALL' : 'BLOCKED'))}
+                        className={`tp-trace-filter-pill danger ${traceabilityQuickFilter === 'BLOCKED' ? 'active' : ''}`}
                       >
-                        ▶ Colapsar Épicas
+                        🔥 Con Bloqueos ({blockedStoriesList.length})
                       </button>
-                      <input
-                        type="text"
-                        placeholder="Buscar por épica, historia, plan, ciclo o bug..."
-                        value={dashboardTraceabilitySearch}
-                        onChange={(e) => setDashboardTraceabilitySearch(e.target.value)}
-                        style={{
-                          padding: '6px 12px',
-                          fontSize: '12px',
-                          border: '1px solid var(--jira-border, #DCDFE4)',
-                          borderRadius: '6px',
-                          width: '260px'
-                        }}
-                      />
-                      {dashboardTraceabilitySearch && (
+                      <button
+                        type="button"
+                        onClick={() => setTraceabilityQuickFilter((prev) => (prev === 'CERTIFIED' ? 'ALL' : 'CERTIFIED'))}
+                        className={`tp-trace-filter-pill ${traceabilityQuickFilter === 'CERTIFIED' ? 'active' : ''}`}
+                      >
+                        ✓ Certificadas ({certifiedStoriesList.length})
+                      </button>
+                      {orphanStoriesCount > 0 && (
                         <button
-                          onClick={() => setDashboardTraceabilitySearch('')}
-                          style={{ padding: '4px 8px', fontSize: '11px', background: '#F1F2F4', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                          type="button"
+                          onClick={() => setTraceabilityQuickFilter((prev) => (prev === 'ORPHANS' ? 'ALL' : 'ORPHANS'))}
+                          className={`tp-trace-filter-pill danger ${traceabilityQuickFilter === 'ORPHANS' ? 'active' : ''}`}
                         >
-                          Limpiar
+                          ⚠️ Huérfanas ({orphanStoriesCount})
                         </button>
                       )}
                     </div>
                   </div>
 
-                  {epicGroups.length > 0 ? (
-                    <table className="dashboard-defects-table">
-                      <thead>
-                        <tr>
-                          <th style={{ minWidth: '300px' }}>Jerarquía (Épica ➔ Historias de Usuario)</th>
-                          <th style={{ minWidth: '175px' }}>Cobertura de Pruebas</th>
-                          <th>Plan de Pruebas</th>
-                          <th>Ciclo de Pruebas</th>
-                          <th>Estado Ejecución</th>
-                          <th>Defectos Vinculados</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {epicGroups.map((grp) => {
-                          const isExpanded = isGroupExpanded(grp.groupKey);
-                          const isOrphanGroup = !grp.epicKey;
-                          const barColor =
-                            grp.coveragePct === 100
-                              ? '#1F845A'
-                              : grp.coveragePct > 0
-                                ? '#0C66E4'
-                                : '#8590A2';
+                  {/* Search Input */}
+                  <div style={{ position: 'relative', width: '320px', maxWidth: '100%' }}>
+                    <span style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', fontSize: '13px', color: '#94A3B8', pointerEvents: 'none' }}>
+                      🔍
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Filtrar por ID, Épica, Historia o Defecto..."
+                      value={dashboardTraceabilitySearch}
+                      onChange={(e) => setDashboardTraceabilitySearch(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '7px 30px 7px 32px',
+                        fontSize: '12px',
+                        background: '#FFFFFF',
+                        border: '1px solid #CBD5E1',
+                        borderRadius: '8px',
+                        color: '#0F172A',
+                        boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
+                        boxSizing: 'border-box',
+                        outline: 'none'
+                      }}
+                    />
+                    {dashboardTraceabilitySearch && (
+                      <button
+                        type="button"
+                        onClick={() => setDashboardTraceabilitySearch('')}
+                        style={{
+                          position: 'absolute',
+                          right: '8px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          border: 'none',
+                          background: 'transparent',
+                          color: '#64748B',
+                          cursor: 'pointer',
+                          fontSize: '12px',
+                          padding: '2px 4px'
+                        }}
+                        title="Limpiar búsqueda"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
 
-                          return (
-                            <React.Fragment key={grp.groupKey}>
-                              {/* ── FILA PADRE: ÉPICA (O GRUPO DE HISTORIAS HUÉRFANAS) ── */}
-                              <tr
-                                onClick={() => toggleEpicExpand(grp.groupKey)}
-                                style={{
-                                  background: isOrphanGroup
-                                    ? (isExpanded ? '#FFF4E5' : '#FFF8EE')
-                                    : (isExpanded ? '#F7F8F9' : '#FFFFFF'),
-                                  cursor: 'pointer',
-                                  borderTop: isOrphanGroup ? '2px solid #FFAB00' : '2px solid #EAECEF',
-                                  borderLeft: isOrphanGroup ? '4px solid #DE350B' : undefined,
-                                  transition: 'background 0.15s ease'
-                                }}
-                              >
-                                {/* 1. Épica Header */}
-                                <td style={{ maxWidth: '360px', padding: '10px 12px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                {/* ─── 4A. MAIN WORKBENCH: VISTA FLUJO VISUAL (Default Stitch Cards) ─── */}
+                {traceabilityViewMode === 'VISUAL_FLOW' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    {epicGroups.length > 0 ? (
+                      epicGroups.map((grp, grpIdx) => {
+                        const isExpanded = isGroupExpanded(grp.groupKey, grpIdx);
+                        const isOrphanGroup = !grp.epicKey;
+                        const epWfColors = getWorkflowColors(grp.epicWorkflowStatus, '');
+                        const barColor =
+                          grp.coveragePct === 100
+                            ? '#10B981'
+                            : grp.coveragePct >= 50
+                              ? '#0052CC'
+                              : grp.coveragePct > 0
+                                ? '#F59E0B'
+                                : '#94A3B8';
+
+                        return (
+                          <div
+                            key={grp.groupKey}
+                            className="tp-trace-epic-card"
+                            style={isOrphanGroup ? { border: '1px solid #FCA5A5' } : undefined}
+                          >
+                            {/* Epic Card Header */}
+                            <div
+                              className="tp-trace-epic-header"
+                              onClick={() => toggleEpicExpand(grp.groupKey, grpIdx)}
+                              style={
+                                isOrphanGroup
+                                  ? { background: isExpanded ? '#FFF5F5' : '#FFF8F6', borderBottom: isExpanded ? '1px solid #FED7D7' : 'none' }
+                                  : { borderBottom: isExpanded ? '1px solid #E2E8F0' : 'none' }
+                              }
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: '1 1 420px' }}>
+                                <span
+                                  style={{
+                                    width: '24px',
+                                    height: '24px',
+                                    borderRadius: '6px',
+                                    background: '#FFFFFF',
+                                    border: '1px solid #CBD5E1',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    color: '#475569',
+                                    fontSize: '11px',
+                                    fontWeight: 800,
+                                    flexShrink: 0,
+                                    transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                                    transition: 'transform 0.18s ease'
+                                  }}
+                                >
+                                  ▼
+                                </span>
+
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    {grp.epicKey ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
+                                        }}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          padding: '2px 8px',
+                                          borderRadius: '5px',
+                                          fontSize: '11px',
+                                          fontWeight: 800,
+                                          background: '#EAE6FF',
+                                          color: '#403294',
+                                          border: '1px solid #C0B6F2',
+                                          cursor: 'pointer',
+                                          fontFamily: 'monospace'
+                                        }}
+                                        title={`Inspeccionar Épica ${grp.epicKey}`}
+                                      >
+                                        ⚡ {grp.epicKey}
+                                      </button>
+                                    ) : (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          padding: '2px 8px',
+                                          borderRadius: '5px',
+                                          fontSize: '11px',
+                                          fontWeight: 800,
+                                          background: '#FFEBE6',
+                                          color: '#BF2600',
+                                          border: '1px solid #FFBDAD'
+                                        }}
+                                      >
+                                        ⚠️ SIN ÉPICA · HISTORIAS HUÉRFANAS
+                                      </span>
+                                    )}
+
+                                    {grp.epicWorkflowStatus && (
+                                      <span
+                                        style={{
+                                          padding: '2px 8px',
+                                          borderRadius: '4px',
+                                          fontSize: '10px',
+                                          fontWeight: 700,
+                                          textTransform: 'uppercase',
+                                          background: epWfColors.bg,
+                                          color: epWfColors.color,
+                                          border: `1px solid ${epWfColors.border}`
+                                        }}
+                                      >
+                                        {grp.epicWorkflowStatus}
+                                      </span>
+                                    )}
+
                                     <span
                                       style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'center',
-                                        width: '20px',
-                                        height: '20px',
-                                        borderRadius: '4px',
-                                        background: isOrphanGroup
-                                          ? '#FFEBE6'
-                                          : (isExpanded ? '#EAE6FF' : '#F1F2F4'),
-                                        color: isOrphanGroup
-                                          ? '#DE350B'
-                                          : (isExpanded ? '#6554C0' : '#44546F'),
-                                        fontSize: '10px',
-                                        fontWeight: 800,
-                                        flexShrink: 0,
-                                        marginTop: '1px'
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        color: '#475569',
+                                        background: '#E2E8F0',
+                                        padding: '2px 8px',
+                                        borderRadius: '9999px'
                                       }}
                                     >
-                                      {isExpanded ? '▼' : '▶'}
+                                      {grp.totalStories} {grp.totalStories === 1 ? 'Historia' : 'Historias'}
                                     </span>
 
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                                        {grp.epicKey ? (
-                                          <button
-                                            type="button"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              e.preventDefault();
-                                              openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
-                                            }}
-                                            className="ads-lozenge ads-lozenge-subtle"
-                                            style={{
-                                              display: 'inline-flex',
-                                              alignItems: 'center',
-                                              gap: '4px',
-                                              fontWeight: 700,
-                                              color: '#6554C0',
-                                              background: '#EAE6FF',
-                                              padding: '2px 8px',
-                                              borderRadius: '4px',
-                                              border: '1px solid #DFD8FD',
-                                              textDecoration: 'none',
-                                              cursor: 'pointer',
-                                              whiteSpace: 'nowrap',
-                                              fontFamily: 'inherit'
-                                            }}
-                                            title={`Ver detalle de la Épica ${grp.epicKey} en Test Pulse`}
-                                          >
-                                            ⚡ {grp.epicKey}
-                                          </button>
-                                        ) : (
-                                          <span
-                                            style={{
-                                              display: 'inline-flex',
-                                              alignItems: 'center',
-                                              gap: '4px',
-                                              fontWeight: 800,
-                                              color: '#AE2E24',
-                                              background: '#FFEBE6',
-                                              border: '1px solid #FFD5D2',
-                                              padding: '2px 8px',
-                                              borderRadius: '4px',
-                                              fontSize: '11px',
-                                              whiteSpace: 'nowrap'
-                                            }}
-                                            title="Incumplimiento de proceso: Estas historias de usuario no están vinculadas a ninguna Épica"
-                                          >
-                                            ⚠️ SIN ÉPICA · HISTORIAS HUÉRFANAS
-                                          </span>
-                                        )}
-
-                                        <span
-                                          style={{
-                                            fontSize: '10px',
-                                            fontWeight: 700,
-                                            color: isOrphanGroup ? '#AE2E24' : '#0055CC',
-                                            background: isOrphanGroup ? '#FFEBE6' : '#E9F2FF',
-                                            border: isOrphanGroup ? '1px solid #FFD5D2' : undefined,
-                                            padding: '1px 7px',
-                                            borderRadius: '10px',
-                                            whiteSpace: 'nowrap'
-                                          }}
-                                        >
-                                          {grp.totalStories} {grp.totalStories === 1 ? 'Historia Huérfana' : (isOrphanGroup ? 'Historias Huérfanas' : 'Historias')}
-                                        </span>
-                                      </div>
-
-                                      {grp.epicSummary && (
-                                        <span
-                                          onClick={(e) => {
-                                            if (grp.epicKey) {
-                                              e.stopPropagation();
-                                              openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
-                                            }
-                                          }}
-                                          style={{
-                                            fontSize: '12px',
-                                            color: isOrphanGroup ? '#AE2E24' : 'var(--jira-dark, #172B4D)',
-                                            fontWeight: 700,
-                                            lineHeight: 1.35,
-                                            cursor: grp.epicKey ? 'pointer' : 'inherit'
-                                          }}
-                                          title={grp.epicKey ? `Clic para ver detalle de ${grp.epicKey}: ${grp.epicSummary}` : grp.epicSummary}
-                                        >
-                                          {grp.epicSummary}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </td>
-
-                                {/* 2. Cobertura de la Épica */}
-                                <td style={{ minWidth: '175px' }}>
-                                  {grp.totalStories > 0 ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
-                                        <span style={{ fontWeight: 700, color: barColor }}>
-                                          {grp.coveragePct}% Cobertura
-                                        </span>
-                                        <span style={{ color: '#626F86', fontSize: '10px' }}>
-                                          {grp.coveredStories}/{grp.totalStories} hist.
-                                        </span>
-                                      </div>
-                                      <div
+                                    {grp.uniqueBugs.length > 0 && (
+                                      <span
                                         style={{
-                                          width: '100%',
-                                          height: '6px',
-                                          background: '#EAECEF',
-                                          borderRadius: '999px',
-                                          overflow: 'hidden'
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          fontSize: '11px',
+                                          fontWeight: 700,
+                                          color: '#BF2600',
+                                          background: '#FFEBE6',
+                                          border: '1px solid #FFBDAD',
+                                          padding: '2px 8px',
+                                          borderRadius: '9999px'
                                         }}
                                       >
-                                        <div
-                                          style={{
-                                            width: `${grp.coveragePct}%`,
-                                            height: '100%',
-                                            background: barColor,
-                                            borderRadius: '999px',
-                                            transition: 'width 0.25s ease'
-                                          }}
-                                        />
-                                      </div>
-                                      <span style={{ fontSize: '10px', color: '#626F86' }}>
-                                        {grp.executedStories} de {grp.totalStories} con ejecución en ciclo
+                                        🔥 {grp.uniqueBugs.length} {grp.uniqueBugs.length === 1 ? 'Bloqueo' : 'Bloqueos'}
                                       </span>
-                                    </div>
-                                  ) : (
-                                    <span style={{ fontSize: '11px', color: '#626F86', fontStyle: 'italic' }}>
-                                      0% · Sin historias ligadas
+                                    )}
+                                  </div>
+
+                                  <div style={{ marginTop: '5px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span
+                                      onClick={(e) => {
+                                        if (grp.epicKey) {
+                                          e.stopPropagation();
+                                          openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
+                                        }
+                                      }}
+                                      style={{
+                                        fontSize: '14px',
+                                        fontWeight: 700,
+                                        color: isOrphanGroup ? '#9B1C1C' : '#0F172A',
+                                        cursor: grp.epicKey ? 'pointer' : 'default'
+                                      }}
+                                    >
+                                      {grp.epicSummary || grp.epicKey}
                                     </span>
-                                  )}
-                                </td>
+                                    <span style={{ fontSize: '11px', color: '#94A3B8' }}>
+                                      · Plan: {grp.uniquePlans.length > 0 ? grp.uniquePlans.slice(0, 2).join(', ') : 'Sin plan asignado'}
+                                      {grp.uniqueCycles.length > 0 ? ` (${grp.uniqueCycles.slice(0, 2).join(', ')})` : ''}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
 
-                                {/* 3. Planes de la Épica */}
-                                <td style={{ whiteSpace: 'nowrap' }}>
-                                  {grp.uniquePlans.length > 0 ? (
-                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                      {grp.uniquePlans.slice(0, 2).map((pName, i) => (
-                                        <span
-                                          key={i}
-                                          style={{
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            gap: '4px',
-                                            fontWeight: 700,
-                                            color: '#1D7F54',
-                                            background: '#E3FCEF',
-                                            padding: '2px 8px',
-                                            borderRadius: '4px',
-                                            fontSize: '11px'
-                                          }}
-                                        >
-                                          📋 {pName}
+                              {/* Right Coverage & Consolidated Status */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
+                                <div style={{ width: '185px' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px' }}>
+                                    <span style={{ fontWeight: 700, color: barColor }}>{grp.coveragePct}% Cobertura</span>
+                                    <span style={{ color: '#64748B' }}>{grp.coveredStories} / {grp.totalStories} historias ligadas</span>
+                                  </div>
+                                  <div style={{ width: '100%', background: '#E2E8F0', height: '7px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                    <div
+                                      style={{
+                                        width: `${grp.coveragePct}%`,
+                                        height: '100%',
+                                        background: barColor,
+                                        borderRadius: '9999px',
+                                        transition: 'width 0.25s ease'
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
+                                  {renderStitchStatusPill(grp.epicStatus)}
+                                  {grp.epicKey && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary)}
+                                      style={{
+                                        padding: '5px 8px',
+                                        borderRadius: '6px',
+                                        border: '1px solid #E2E8F0',
+                                        background: '#FFFFFF',
+                                        color: '#64748B',
+                                        cursor: 'pointer',
+                                        fontSize: '12px'
+                                      }}
+                                      title={`Ver trazabilidad completa de ${grp.epicKey}`}
+                                    >
+                                      ↗
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Expanded Body: Dependency Chain + Story Cards */}
+                            {isExpanded && (
+                              <div style={{ padding: '16px 20px', background: '#FFFFFF', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                {/* Cadena Épica Bar */}
+                                <div
+                                  style={{
+                                    padding: '8px 12px',
+                                    borderRadius: '8px',
+                                    background: '#F8FAFC',
+                                    border: '1px solid #E2E8F0',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    flexWrap: 'wrap',
+                                    gap: '8px',
+                                    fontSize: '11px'
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 700, color: '#475569' }}>🔗 Cadena Épica:</span>
+                                    <span style={{ padding: '2px 8px', borderRadius: '4px', background: isOrphanGroup ? '#FFEBE6' : '#EAE6FF', color: isOrphanGroup ? '#BF2600' : '#403294', fontWeight: 700, border: isOrphanGroup ? '1px solid #FFBDAD' : '1px solid #C0B6F2' }}>
+                                      {grp.epicKey ? `${grp.epicKey} (Actual)` : 'Sin Épica Padre'}
+                                    </span>
+                                    <span style={{ color: '#94A3B8' }}>→</span>
+                                    <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#FFFFFF', border: '1px solid #CBD5E1', color: '#334155', fontWeight: 600 }}>
+                                      📖 {grp.totalStories} Historias ({grp.coveredStories} con casos)
+                                    </span>
+                                    <span style={{ color: '#94A3B8' }}>→</span>
+                                    <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#E3FCEF', border: '1px solid #ABF5D1', color: '#006644', fontWeight: 600 }}>
+                                      📋 {grp.uniquePlans.length > 0 ? grp.uniquePlans.join(', ') : 'Sin Plan'}
+                                    </span>
+                                    {grp.uniqueBugs.length > 0 && (
+                                      <>
+                                        <span style={{ color: '#94A3B8' }}>→</span>
+                                        <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#FFEBE6', border: '1px solid #FFBDAD', color: '#BF2600', fontWeight: 700 }}>
+                                          ⛔ {grp.uniqueBugs.length} Defecto(s) en cadena
                                         </span>
-                                      ))}
-                                      {grp.uniquePlans.length > 2 && (
-                                        <span style={{ fontSize: '11px', color: '#626F86', fontWeight: 600 }}>
-                                          +{grp.uniquePlans.length - 2} más
-                                        </span>
-                                      )}
-                                    </div>
-                                  ) : (
-                                    <span style={{ fontSize: '11px', color: '#626F86' }}>Sin plan asignado</span>
-                                  )}
-                                </td>
+                                      </>
+                                    )}
+                                  </div>
+                                  <span style={{ color: '#64748B' }}>
+                                    {grp.executedStories} de {grp.totalStories} historias ejecutadas en ciclo
+                                  </span>
+                                </div>
 
-                                {/* 4. Ciclos de la Épica */}
-                                <td style={{ whiteSpace: 'nowrap', fontSize: '11px', color: '#44546F', fontWeight: 600 }}>
-                                  {grp.uniqueCycles.length > 0
-                                    ? `🔄 ${grp.uniqueCycles.join(', ')}`
-                                    : 'Sin ciclo asignado'}
-                                </td>
-
-                                {/* 5. Estado Consolidado de la Épica */}
-                                <td style={{ whiteSpace: 'nowrap' }}>
-                                  <AtlaskitStatusLozenge status={grp.epicStatus} />
-                                </td>
-
-                                {/* 6. Defectos Consolidados de la Épica */}
-                                <td onClick={(e) => e.stopPropagation()}>
-                                  {grp.uniqueBugs.length > 0 ? (
-                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                      {grp.uniqueBugs.map((b, idx) => (
-                                        <button
-                                          key={idx}
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            e.preventDefault();
-                                            setSelectedBug(b);
-                                          }}
-                                          style={{
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            gap: '3px',
-                                            fontSize: '11px',
-                                            fontWeight: 700,
-                                            color: '#DE350B',
-                                            background: '#FFEBE6',
-                                            padding: '2px 6px',
-                                            borderRadius: '4px',
-                                            border: '1px solid #FFD5D2',
-                                            textDecoration: 'none',
-                                            cursor: 'pointer',
-                                            fontFamily: 'inherit'
-                                          }}
-                                          title={`Ver detalle del defecto ${b.key} en Test Pulse`}
-                                        >
-                                          <span style={{ fontSize: '9px' }}>🐞</span> {b.key}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  ) : (
-                                    <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
-                                  )}
-                                </td>
-                              </tr>
-
-                              {/* ── FILAS HIJAS: HISTORIAS DE USUARIO DE ESTA ÉPICA ── */}
-                              {isExpanded && (
-                                grp.storyRows.length > 0 ? (
-                                  grp.storyRows.map((row) => {
-                                    const isCovered = (row.linkedTcCount || 0) > 0 || row.cycleId !== null;
-                                    const wfStatus = (row.requirementWorkflowStatus || '').trim();
-                                    const wfCat = (row.requirementWorkflowStatusCategory || '').toLowerCase().trim();
-                                    const wfLower = wfStatus.toLowerCase();
-
-                                    let wfColors = {
-                                      color: '#44546F',
-                                      bg: '#F1F2F4',
-                                      border: '#DCDFE4'
-                                    };
-                                    if (
-                                      wfCat === 'done' ||
-                                      wfLower.includes('finaliz') ||
-                                      wfLower.includes('cerrad') ||
-                                      wfLower.includes('done') ||
-                                      wfLower.includes('complet') ||
-                                      wfLower.includes('resuelt') ||
-                                      wfLower.includes('aprob') ||
-                                      wfLower.includes('producc') ||
-                                      wfLower.includes('liber')
-                                    ) {
-                                      wfColors = { color: '#1F845A', bg: '#DCFFF1', border: '#BAF3DB' };
-                                    } else if (
-                                      wfLower.includes('bloque') ||
-                                      wfLower.includes('imped') ||
-                                      wfLower.includes('rechaz') ||
-                                      wfLower.includes('cancel')
-                                    ) {
-                                      wfColors = { color: '#AE2E24', bg: '#FFECEB', border: '#FFD5D2' };
-                                    } else if (
-                                      wfCat === 'indeterminate' ||
-                                      wfLower.includes('curso') ||
-                                      wfLower.includes('progres') ||
-                                      wfLower.includes('prueb') ||
-                                      wfLower.includes('qa') ||
-                                      wfLower.includes('test') ||
-                                      wfLower.includes('revis') ||
-                                      wfLower.includes('review') ||
-                                      wfLower.includes('desarroll') ||
-                                      wfLower.includes('validac') ||
-                                      wfLower.includes('uat')
-                                    ) {
-                                      wfColors = { color: '#0055CC', bg: '#E9F2FF', border: '#CCE0FF' };
-                                    }
+                                {/* Story Cards */}
+                                {grp.storiesList.length > 0 ? (
+                                  grp.storiesList.map((story) => {
+                                    const stWfColors = getWorkflowColors(story.workflowStatus, story.workflowStatusCategory);
+                                    const hasStoryBlocker =
+                                      story.status === 'FAILED' ||
+                                      story.status === 'BLOCKED' ||
+                                      (story.bugs && story.bugs.length > 0);
+                                    const isNotRun = story.status === 'NOT_RUN' && !hasStoryBlocker;
 
                                     return (
-                                      <tr
-                                        key={row.id}
-                                        style={{
-                                          background: isOrphanGroup ? '#FFFDF9' : '#FAFBFC',
-                                          borderLeft: isOrphanGroup ? '3px solid #DE350B' : '3px solid #6554C0'
-                                        }}
+                                      <div
+                                        key={story.key}
+                                        className={`tp-trace-story-card ${hasStoryBlocker ? 'has-blocker' : ''} ${isNotRun ? 'is-not-run' : ''}`}
                                       >
-                                        {/* 1. Historia de Usuario indentada + Estado del Flujo Jira al lado del ID */}
-                                        <td style={{ maxWidth: '380px', paddingLeft: '36px' }}>
-                                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
-                                            <span style={{ color: isOrphanGroup ? '#DE350B' : '#8590A2', fontWeight: 700, fontSize: '12px', marginTop: '1px' }}>
-                                              ↳
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', minWidth: 0, flex: '1 1 400px' }}>
+                                            {/* Status Circle Icon */}
+                                            <span
+                                              style={{
+                                                width: '24px',
+                                                height: '24px',
+                                                borderRadius: '9999px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                fontSize: '12px',
+                                                fontWeight: 800,
+                                                flexShrink: 0,
+                                                marginTop: '2px',
+                                                background: hasStoryBlocker
+                                                  ? '#FFEBE6'
+                                                  : story.status === 'PASSED'
+                                                    ? '#E3FCEF'
+                                                    : story.status === 'IN_PROGRESS'
+                                                      ? '#E9F2FF'
+                                                      : '#F1F5F9',
+                                                color: hasStoryBlocker
+                                                  ? '#BF2600'
+                                                  : story.status === 'PASSED'
+                                                    ? '#006644'
+                                                    : story.status === 'IN_PROGRESS'
+                                                      ? '#0052CC'
+                                                      : '#64748B'
+                                              }}
+                                            >
+                                              {hasStoryBlocker ? '!' : story.status === 'PASSED' ? '✓' : story.status === 'IN_PROGRESS' ? '↻' : '○'}
                                             </span>
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+
+                                            <div style={{ minWidth: 0 }}>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                                                 <button
                                                   type="button"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    e.preventDefault();
-                                                    openTraceabilityItemModal('story', row.requirementKey, row.requirementSummary);
-                                                  }}
-                                                  className="ads-lozenge ads-lozenge-subtle"
+                                                  onClick={() => openTraceabilityItemModal('story', story.key, story.summary)}
                                                   style={{
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px',
-                                                    fontWeight: 700,
-                                                    color: '#0065FF',
-                                                    background: '#DEEBFF',
-                                                    padding: '2px 8px',
+                                                    fontFamily: 'monospace',
+                                                    fontSize: '12px',
+                                                    fontWeight: 800,
+                                                    color: '#0052CC',
+                                                    background: '#E9F2FF',
+                                                    border: '1px solid #CCE0FF',
+                                                    padding: '1px 7px',
                                                     borderRadius: '4px',
-                                                    border: '1px solid #B3D4FF',
-                                                    textDecoration: 'none',
-                                                    cursor: 'pointer',
-                                                    width: 'fit-content',
-                                                    whiteSpace: 'nowrap',
-                                                    fontFamily: 'inherit'
+                                                    cursor: 'pointer'
                                                   }}
-                                                  title={`Ver detalle de la Historia ${row.requirementKey} en Test Pulse`}
+                                                  title={`Ver detalle de la Historia ${story.key}`}
                                                 >
-                                                  📖 {row.requirementKey}
+                                                  {story.key}
                                                 </button>
-                                                {wfStatus && (
+                                                <span
+                                                  onClick={() => openTraceabilityItemModal('story', story.key, story.summary)}
+                                                  style={{
+                                                    fontSize: '13px',
+                                                    fontWeight: 700,
+                                                    color: '#0F172A',
+                                                    cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  {story.summary || 'Historia de usuario sin título'}
+                                                </span>
+                                                {story.workflowStatus && (
                                                   <span
                                                     style={{
-                                                      display: 'inline-flex',
-                                                      alignItems: 'center',
+                                                      padding: '2px 7px',
+                                                      borderRadius: '4px',
                                                       fontSize: '10px',
                                                       fontWeight: 700,
                                                       textTransform: 'uppercase',
-                                                      letterSpacing: '0.02em',
-                                                      color: wfColors.color,
-                                                      background: wfColors.bg,
-                                                      border: `1px solid ${wfColors.border}`,
-                                                      padding: '1px 7px',
-                                                      borderRadius: '4px',
-                                                      whiteSpace: 'nowrap'
+                                                      background: stWfColors.bg,
+                                                      color: stWfColors.color,
+                                                      border: `1px solid ${stWfColors.border}`
                                                     }}
-                                                    title={`Estado en flujo de Jira: ${wfStatus}`}
                                                   >
-                                                    {wfStatus}
+                                                    {story.workflowStatus}
                                                   </span>
                                                 )}
                                                 {isOrphanGroup && (
                                                   <span
                                                     style={{
-                                                      display: 'inline-flex',
-                                                      alignItems: 'center',
-                                                      gap: '3px',
+                                                      padding: '2px 7px',
+                                                      borderRadius: '4px',
                                                       fontSize: '10px',
                                                       fontWeight: 700,
-                                                      color: '#AE2E24',
                                                       background: '#FFEBE6',
-                                                      border: '1px solid #FFD5D2',
-                                                      padding: '1px 6px',
-                                                      borderRadius: '4px',
-                                                      whiteSpace: 'nowrap'
+                                                      color: '#BF2600',
+                                                      border: '1px solid #FFBDAD'
                                                     }}
-                                                    title="Incumplimiento de proceso: Esta historia no tiene una Épica padre asignada en Jira"
                                                   >
-                                                    ⚠️ Huérfana (Sin Épica)
+                                                    ⚠️ Sin Épica
                                                   </span>
                                                 )}
                                               </div>
-                                              {row.requirementSummary && (
-                                                <span
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openTraceabilityItemModal('story', row.requirementKey, row.requirementSummary);
-                                                  }}
-                                                  style={{
-                                                    fontSize: '11px',
-                                                    color: 'var(--jira-dark, #172B4D)',
-                                                    fontWeight: 500,
-                                                    lineHeight: 1.3,
-                                                    cursor: 'pointer'
-                                                  }}
-                                                  title={`Clic para ver detalle de ${row.requirementKey}: ${row.requirementSummary}`}
-                                                >
-                                                  {row.requirementSummary}
+
+                                              <div style={{ marginTop: '5px', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', color: '#64748B', flexWrap: 'wrap' }}>
+                                                <span>
+                                                  Cobertura:{' '}
+                                                  <strong style={{ color: story.linkedTcCount > 0 ? '#006644' : '#974F0C' }}>
+                                                    {story.linkedTcCount} {story.linkedTcCount === 1 ? 'Caso' : 'Casos'} ({story.linkedTcCount > 0 ? '100%' : '0%'})
+                                                  </strong>
                                                 </span>
-                                              )}
+                                                <span>·</span>
+                                                <span>
+                                                  Defectos:{' '}
+                                                  <strong style={{ color: story.bugs.length > 0 ? '#BF2600' : '#334155' }}>
+                                                    {story.bugs.length > 0 ? `🔥 ${story.bugs.length} vinculado(s)` : '0 abiertos'}
+                                                  </strong>
+                                                </span>
+                                                {story.cycles.length > 0 && (
+                                                  <>
+                                                    <span>·</span>
+                                                    <span>
+                                                      Ciclos: <strong style={{ color: '#334155' }}>{story.cycles.map((c) => c.cycleName).join(', ')}</strong>
+                                                    </span>
+                                                  </>
+                                                )}
+                                              </div>
                                             </div>
                                           </div>
-                                        </td>
 
-                                        {/* 2. Cobertura individual de la Historia */}
-                                        <td style={{ whiteSpace: 'nowrap' }}>
-                                          {isCovered ? (
-                                            <span
-                                              style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '4px',
-                                                fontSize: '11px',
-                                                fontWeight: 700,
-                                                color: '#1F845A',
-                                                background: '#DCFFF1',
-                                                padding: '2px 8px',
-                                                borderRadius: '999px'
-                                              }}
-                                              title="Historia cubierta mediante casos de prueba vinculados"
-                                            >
-                                              ✓ Cubierta ({row.linkedTcCount || row.executedTcCount || 1} {(row.linkedTcCount || row.executedTcCount || 1) === 1 ? 'caso' : 'casos'})
-                                            </span>
-                                          ) : (
-                                            <span
-                                              style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '4px',
-                                                fontSize: '11px',
-                                                fontWeight: 600,
-                                                color: '#974F0C',
-                                                background: '#FFF7D6',
-                                                padding: '2px 8px',
-                                                borderRadius: '999px'
-                                              }}
-                                              title="Esta historia aún no tiene casos de prueba vinculados"
-                                            >
-                                              ⚠️ Sin cobertura (0 casos)
-                                            </span>
-                                          )}
-                                        </td>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            {renderStitchStatusPill(story.status)}
+                                          </div>
+                                        </div>
 
-                                        {/* 3. Plan de Pruebas */}
-                                        <td style={{ whiteSpace: 'nowrap' }}>
-                                          <span
-                                            className="ads-lozenge ads-lozenge-subtle"
+                                        {/* Blocker Defect Alert Banner */}
+                                        {story.bugs.length > 0 && (
+                                          <div
                                             style={{
-                                              display: 'inline-flex',
+                                              marginTop: '10px',
+                                              padding: '8px 12px',
+                                              borderRadius: '8px',
+                                              background: '#FFF5F5',
+                                              border: '1px solid #FEB2B2',
+                                              display: 'flex',
+                                              flexWrap: 'wrap',
                                               alignItems: 'center',
-                                              gap: '4px',
-                                              fontWeight: 700,
-                                              color: row.planKey ? '#1D7F54' : '#626F86',
-                                              background: row.planKey ? '#E3FCEF' : '#F1F2F4',
-                                              padding: '2px 8px',
-                                              borderRadius: '4px',
-                                              fontSize: '11px',
-                                              width: 'fit-content'
+                                              justifyContent: 'space-between',
+                                              gap: '8px',
+                                              fontSize: '11px'
                                             }}
-                                            title={row.planName}
                                           >
-                                            📋 {row.planName}
-                                          </span>
-                                        </td>
-
-                                        {/* 4. Ciclo de Pruebas */}
-                                        <td style={{ whiteSpace: 'nowrap', fontSize: '12px', color: 'var(--jira-dark, #172B4D)', fontWeight: 600 }}>
-                                          🔄 {row.cycleName}
-                                        </td>
-
-                                        {/* 5. Estado Ejecución */}
-                                        <td style={{ whiteSpace: 'nowrap' }}>
-                                          <AtlaskitStatusLozenge status={row.status} />
-                                        </td>
-
-                                        {/* 6. Defectos Vinculados */}
-                                        <td>
-                                          {row.bugs.length > 0 ? (
-                                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                              {row.bugs.map((b, idx) => (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#9B1C1C', minWidth: 0 }}>
+                                              <span>⛔</span>
+                                              <span>
+                                                <strong>Incidencia de Defecto:</strong>{' '}
+                                                {story.bugs.map((b) => `${b.key}${b.summary ? ` (${b.summary})` : ''}`).join(' · ')}
+                                              </span>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                              {story.bugs.map((b) => (
                                                 <button
-                                                  key={idx}
+                                                  key={b.key}
                                                   type="button"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    e.preventDefault();
-                                                    setSelectedBug(b);
-                                                  }}
+                                                  onClick={() => setSelectedBug(b)}
                                                   style={{
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                    gap: '3px',
                                                     fontSize: '11px',
                                                     fontWeight: 700,
-                                                    color: '#DE350B',
-                                                    background: '#FFEBE6',
-                                                    padding: '2px 6px',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid #FFD5D2',
-                                                    textDecoration: 'none',
+                                                    color: '#BF2600',
+                                                    background: '#FFFFFF',
+                                                    padding: '3px 10px',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid #FCA5A5',
                                                     cursor: 'pointer',
                                                     fontFamily: 'inherit'
                                                   }}
-                                                  title={`Ver detalle del defecto ${b.key} en Test Pulse`}
                                                 >
-                                                  <span style={{ fontSize: '9px' }}>🐞</span> {b.key}
+                                                  🐞 Ver Defecto {b.key}
+                                                </button>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* Story Dependency Flow Bar */}
+                                        <div
+                                          style={{
+                                            marginTop: '10px',
+                                            paddingTop: '8px',
+                                            borderTop: '1px solid #F1F5F9',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            flexWrap: 'wrap',
+                                            fontSize: '11px'
+                                          }}
+                                        >
+                                          <span style={{ fontWeight: 700, color: '#64748B' }}>📊 Flujo:</span>
+                                          <span style={{ padding: '2px 7px', borderRadius: '4px', background: '#F1F5F9', color: '#475569', fontFamily: 'monospace' }}>
+                                            {grp.epicKey || 'SIN-ÉPICA'} ({grp.epicKey ? 'Épica' : 'Huérfana'})
+                                          </span>
+                                          <span style={{ color: '#94A3B8' }}>➔</span>
+                                          <span style={{ padding: '2px 7px', borderRadius: '4px', background: '#E9F2FF', color: '#0052CC', fontWeight: 700, fontFamily: 'monospace' }}>
+                                            {story.key} ({story.linkedTcCount} {story.linkedTcCount === 1 ? 'Caso' : 'Casos'})
+                                          </span>
+                                          <span style={{ color: '#94A3B8' }}>➔</span>
+                                          {story.cycles.length > 0 ? (
+                                            story.cycles.map((c, cIdx) => (
+                                              <span
+                                                key={`${c.cycleId}-${cIdx}`}
+                                                style={{
+                                                  padding: '2px 8px',
+                                                  borderRadius: '4px',
+                                                  background: c.status === 'PASSED' ? '#E3FCEF' : c.status === 'FAILED' ? '#FFEBE6' : '#F1F5F9',
+                                                  color: c.status === 'PASSED' ? '#006644' : c.status === 'FAILED' ? '#BF2600' : '#475569',
+                                                  fontWeight: 600
+                                                }}
+                                              >
+                                                📋 {c.planName} · 🔄 {c.cycleName} ({c.status})
+                                              </span>
+                                            ))
+                                          ) : (
+                                            <span style={{ padding: '2px 8px', borderRadius: '4px', background: '#FFFBEB', color: '#B45309', border: '1px solid #FDE68A', fontWeight: 600 }}>
+                                              ⏳ Pendiente de ejecución en ciclo
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                ) : (
+                                  <div style={{ padding: '16px', textAlign: 'center', fontSize: '12px', color: '#64748B', fontStyle: 'italic' }}>
+                                    Esta épica aún no tiene Historias de Usuario vinculadas en Jira.
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="dashboard-card" style={{ textAlign: 'center', color: '#64748B', padding: '3rem', fontSize: '13px' }}>
+                        {traceabilityHierarchyLoading
+                          ? '⏳ Cargando épicas e historias de usuario del proyecto...'
+                          : hasActiveFilter
+                            ? '🔍 No se encontraron historias ni épicas con los filtros seleccionados.'
+                            : 'No se encontraron épicas ni historias de usuario en este proyecto.'}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ─── 4B. MAIN WORKBENCH: MATRIZ COMPACTA (High-Density Table View) ─── */}
+                {traceabilityViewMode === 'COMPACT_MATRIX' && (
+                  <div className="dashboard-card" style={{ overflowX: 'auto' }}>
+                    {epicGroups.length > 0 ? (
+                      <table className="dashboard-defects-table">
+                        <thead>
+                          <tr>
+                            <th style={{ minWidth: '300px' }}>Jerarquía (Épica ➔ Historias de Usuario)</th>
+                            <th style={{ minWidth: '175px' }}>Cobertura de Pruebas</th>
+                            <th>Plan de Pruebas</th>
+                            <th>Ciclo de Pruebas</th>
+                            <th>Estado Ejecución</th>
+                            <th>Defectos Vinculados</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {epicGroups.map((grp, grpIdx) => {
+                            const isExpanded = isGroupExpanded(grp.groupKey, grpIdx);
+                            const isOrphanGroup = !grp.epicKey;
+                            const barColor =
+                              grp.coveragePct === 100
+                                ? '#1F845A'
+                                : grp.coveragePct > 0
+                                  ? '#0C66E4'
+                                  : '#8590A2';
+
+                            return (
+                              <React.Fragment key={grp.groupKey}>
+                                <tr
+                                  onClick={() => toggleEpicExpand(grp.groupKey, grpIdx)}
+                                  style={{
+                                    background: isOrphanGroup
+                                      ? (isExpanded ? '#FFF4E5' : '#FFF8EE')
+                                      : (isExpanded ? '#F7F8F9' : '#FFFFFF'),
+                                    cursor: 'pointer',
+                                    borderTop: isOrphanGroup ? '2px solid #FFAB00' : '2px solid #EAECEF',
+                                    borderLeft: isOrphanGroup ? '4px solid #DE350B' : undefined
+                                  }}
+                                >
+                                  <td style={{ maxWidth: '360px', padding: '10px 12px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          width: '20px',
+                                          height: '20px',
+                                          borderRadius: '4px',
+                                          background: isOrphanGroup ? '#FFEBE6' : (isExpanded ? '#EAE6FF' : '#F1F2F4'),
+                                          color: isOrphanGroup ? '#DE350B' : (isExpanded ? '#6554C0' : '#44546F'),
+                                          fontSize: '10px',
+                                          fontWeight: 800,
+                                          flexShrink: 0,
+                                          marginTop: '1px'
+                                        }}
+                                      >
+                                        {isExpanded ? '▼' : '▶'}
+                                      </span>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                          {grp.epicKey ? (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary);
+                                              }}
+                                              className="ads-lozenge ads-lozenge-subtle"
+                                              style={{
+                                                fontWeight: 700,
+                                                color: '#6554C0',
+                                                background: '#EAE6FF',
+                                                padding: '2px 8px',
+                                                borderRadius: '4px',
+                                                border: '1px solid #DFD8FD',
+                                                cursor: 'pointer',
+                                                fontFamily: 'inherit'
+                                              }}
+                                            >
+                                              ⚡ {grp.epicKey}
+                                            </button>
+                                          ) : (
+                                            <span
+                                              style={{
+                                                fontWeight: 800,
+                                                color: '#AE2E24',
+                                                background: '#FFEBE6',
+                                                border: '1px solid #FFD5D2',
+                                                padding: '2px 8px',
+                                                borderRadius: '4px',
+                                                fontSize: '11px'
+                                              }}
+                                            >
+                                              ⚠️ SIN ÉPICA · HISTORIAS HUÉRFANAS
+                                            </span>
+                                          )}
+                                          <span style={{ fontSize: '10px', fontWeight: 700, color: '#0055CC', background: '#E9F2FF', padding: '1px 7px', borderRadius: '10px' }}>
+                                            {grp.totalStories} Historias
+                                          </span>
+                                          {grp.epicKey && grp.epicWorkflowStatus && (
+                                            <span style={{ fontSize: '10px', fontWeight: 800, textTransform: 'uppercase', color: '#475569', background: '#F1F5F9', border: '1px solid #CBD5E1', padding: '1px 6px', borderRadius: '4px' }}>
+                                              {grp.epicWorkflowStatus}
+                                            </span>
+                                          )}
+                                        </div>
+                                        {grp.epicSummary && (
+                                          <span style={{ fontSize: '12px', color: '#172B4D', fontWeight: 700 }}>
+                                            {grp.epicSummary}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
+                                        <span style={{ fontWeight: 700, color: barColor }}>{grp.coveragePct}% Cobertura</span>
+                                        <span style={{ color: '#626F86', fontSize: '10px' }}>{grp.coveredStories}/{grp.totalStories}</span>
+                                      </div>
+                                      <div style={{ width: '100%', height: '6px', background: '#EAECEF', borderRadius: '999px', overflow: 'hidden' }}>
+                                        <div style={{ width: `${grp.coveragePct}%`, height: '100%', background: barColor, borderRadius: '999px' }} />
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td style={{ whiteSpace: 'nowrap', fontSize: '11px', fontWeight: 600, color: '#1D7F54' }}>
+                                    {grp.uniquePlans.length > 0 ? `📋 ${grp.uniquePlans.join(', ')}` : 'Sin plan'}
+                                  </td>
+                                  <td style={{ whiteSpace: 'nowrap', fontSize: '11px', fontWeight: 600, color: '#44546F' }}>
+                                    {grp.uniqueCycles.length > 0 ? `🔄 ${grp.uniqueCycles.join(', ')}` : 'Sin ciclo'}
+                                  </td>
+                                  <td style={{ whiteSpace: 'nowrap' }}>
+                                    <AtlaskitStatusLozenge status={grp.epicStatus} />
+                                  </td>
+                                  <td onClick={(e) => e.stopPropagation()}>
+                                    {grp.uniqueBugs.length > 0 ? (
+                                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                        {grp.uniqueBugs.map((b) => (
+                                          <button
+                                            key={b.key}
+                                            type="button"
+                                            onClick={() => setSelectedBug(b)}
+                                            style={{ fontSize: '11px', fontWeight: 700, color: '#DE350B', background: '#FFEBE6', padding: '2px 6px', borderRadius: '4px', border: '1px solid #FFD5D2', cursor: 'pointer' }}
+                                          >
+                                            🐞 {b.key}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <span style={{ color: '#626F86', fontSize: '11px' }}>0 bugs</span>
+                                    )}
+                                  </td>
+                                </tr>
+                                {isExpanded &&
+                                  grp.storyRows.map((row) => {
+                                    const isCovered = (row.linkedTcCount || 0) > 0 || row.cycleId !== null;
+                                    const wfColors = getWorkflowColors(row.requirementWorkflowStatus, row.requirementWorkflowStatusCategory);
+                                    return (
+                                      <tr key={row.id} style={{ background: '#FAFBFC', borderLeft: isOrphanGroup ? '3px solid #DE350B' : '3px solid #6554C0' }}>
+                                        <td style={{ maxWidth: '380px', paddingLeft: '36px' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                            <span style={{ color: '#8590A2', fontWeight: 700 }}>↳</span>
+                                            <button
+                                              type="button"
+                                              onClick={() => openTraceabilityItemModal('story', row.requirementKey, row.requirementSummary)}
+                                              style={{ fontWeight: 700, color: '#0065FF', background: '#DEEBFF', padding: '2px 8px', borderRadius: '4px', border: '1px solid #B3D4FF', cursor: 'pointer', fontSize: '11px' }}
+                                            >
+                                              📖 {row.requirementKey}
+                                            </button>
+                                            <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', color: wfColors.color, background: wfColors.bg, border: `1px solid ${wfColors.border}`, padding: '1px 6px', borderRadius: '4px' }}>
+                                              {row.requirementWorkflowStatus || 'Backlog'}
+                                            </span>
+                                            <span style={{ fontSize: '11px', color: '#172B4D', fontWeight: 500 }}>{row.requirementSummary}</span>
+                                          </div>
+                                        </td>
+                                        <td>
+                                          <span style={{ fontSize: '11px', fontWeight: 700, color: isCovered ? '#1F845A' : '#974F0C', background: isCovered ? '#DCFFF1' : '#FFF7D6', padding: '2px 8px', borderRadius: '999px' }}>
+                                            {isCovered ? `✓ Cubierta (${row.linkedTcCount || 1} casos)` : '⚠️ Sin cobertura'}
+                                          </span>
+                                        </td>
+                                        <td style={{ fontSize: '11px', fontWeight: 600 }}>📋 {row.planName}</td>
+                                        <td style={{ fontSize: '11px', fontWeight: 600 }}>🔄 {row.cycleName}</td>
+                                        <td><AtlaskitStatusLozenge status={row.status} /></td>
+                                        <td>
+                                          {row.bugs.length > 0 ? (
+                                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                              {row.bugs.map((b) => (
+                                                <button
+                                                  key={b.key}
+                                                  type="button"
+                                                  onClick={() => setSelectedBug(b)}
+                                                  style={{ fontSize: '11px', fontWeight: 700, color: '#DE350B', background: '#FFEBE6', padding: '2px 6px', borderRadius: '4px', border: '1px solid #FFD5D2', cursor: 'pointer' }}
+                                                >
+                                                  🐞 {b.key}
                                                 </button>
                                               ))}
                                             </div>
                                           ) : (
-                                            <span style={{ color: 'var(--jira-subtle)', fontSize: '11px' }}>0 bugs</span>
+                                            <span style={{ color: '#626F86', fontSize: '11px' }}>0 bugs</span>
                                           )}
                                         </td>
                                       </tr>
                                     );
-                                  })
-                                ) : (
-                                  <tr style={{ background: '#FAFBFC', borderLeft: '3px solid #6554C0' }}>
-                                    <td colSpan={6} style={{ paddingLeft: '38px', fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>
-                                      ↳ Esta épica aún no tiene Historias de Usuario vinculadas en Jira.
-                                    </td>
-                                  </tr>
-                                )
-                              )}
-                            </React.Fragment>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <div style={{ textAlign: 'center', color: 'var(--jira-subtle)', padding: '3rem', fontSize: '13px' }}>
-                      {traceabilityHierarchyLoading
-                        ? '⏳ Cargando épicas e historias de usuario del proyecto...'
-                        : dashboardTraceabilitySearch
-                          ? '🔍 No se encontraron registros de trazabilidad con ese criterio de búsqueda.'
-                          : 'No se encontraron épicas ni historias de usuario en este proyecto.'}
+                                  })}
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div style={{ textAlign: 'center', color: '#64748B', padding: '3rem', fontSize: '13px' }}>
+                        No se encontraron registros para los filtros actuales.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ─── 4C. MAIN WORKBENCH: GRAFO DAG (Visual Dependency Graph View) ─── */}
+                {traceabilityViewMode === 'DAG_GRAPH' && (
+                  <div className="tp-trace-sdlc-card" style={{ padding: '20px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 800, color: '#0F172A' }}>
+                          🕸️ Grafo Dirigido de Dependencias (Épica → Historia → Ciclo → Defectos)
+                        </h3>
+                        <p style={{ margin: '2px 0 0 0', fontSize: '11px', color: '#64748B' }}>
+                          Haz clic en cualquier nodo del grafo para abrir su panel lateral de trazabilidad o defecto.
+                        </p>
+                      </div>
                     </div>
-                  )}
-                </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                      {epicGroups.map((grp) => (
+                        <div
+                          key={grp.groupKey}
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: '240px 28px 1fr',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '14px',
+                            borderRadius: '10px',
+                            background: '#F8FAFC',
+                            border: '1px solid #E2E8F0'
+                          }}
+                        >
+                          {/* Epic Node */}
+                          <div
+                            onClick={() => grp.epicKey && openTraceabilityItemModal('epic', grp.epicKey, grp.epicSummary)}
+                            style={{
+                              padding: '10px 12px',
+                              borderRadius: '8px',
+                              background: grp.epicKey ? '#EAE6FF' : '#FFEBE6',
+                              border: grp.epicKey ? '1px solid #C0B6F2' : '1px solid #FFBDAD',
+                              cursor: grp.epicKey ? 'pointer' : 'default'
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                              <span style={{ fontSize: '11px', fontWeight: 800, color: grp.epicKey ? '#403294' : '#BF2600', fontFamily: 'monospace' }}>
+                                ⚡ {grp.epicKey || 'HUÉRFANAS'}
+                              </span>
+                              {grp.epicKey && (
+                                <span style={{ fontSize: '9px', fontWeight: 800, textTransform: 'uppercase', color: '#403294', background: '#FFFFFF', padding: '1px 5px', borderRadius: '4px' }}>
+                                  {grp.epicWorkflowStatus || 'Backlog'}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: '12px', fontWeight: 700, color: '#0F172A', marginTop: '3px' }}>
+                              {grp.epicSummary}
+                            </div>
+                            <div style={{ fontSize: '10px', color: '#475569', marginTop: '4px' }}>
+                              {grp.coveragePct}% Cobertura · {grp.totalStories} Historias
+                            </div>
+                          </div>
+
+                          <div style={{ textAlign: 'center', color: '#94A3B8', fontWeight: 800, fontSize: '16px' }}>➔</div>
+
+                          {/* Story & Cycle Nodes */}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                            {grp.storiesList.map((st) => {
+                              const hasErr = st.status === 'FAILED' || st.status === 'BLOCKED' || st.bugs.length > 0;
+                              return (
+                                <div
+                                  key={st.key}
+                                  onClick={() => openTraceabilityItemModal('story', st.key, st.summary)}
+                                  style={{
+                                    padding: '8px 12px',
+                                    borderRadius: '8px',
+                                    background: '#FFFFFF',
+                                    border: hasErr ? '2px solid #FCA5A5' : st.status === 'PASSED' ? '1px solid #ABF5D1' : '1px solid #CBD5E1',
+                                    cursor: 'pointer',
+                                    minWidth: '210px',
+                                    maxWidth: '290px',
+                                    boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                                    <span style={{ fontFamily: 'monospace', fontSize: '11px', fontWeight: 800, color: '#0052CC' }}>
+                                      📖 {st.key}
+                                    </span>
+                                    <span style={{ fontSize: '9px', fontWeight: 800, textTransform: 'uppercase', color: '#475569', background: '#F1F5F9', border: '1px solid #CBD5E1', padding: '1px 5px', borderRadius: '4px' }}>
+                                      {st.workflowStatus || 'Backlog'}
+                                    </span>
+                                  </div>
+                                  <div style={{ fontSize: '11px', fontWeight: 600, color: '#0F172A', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {st.summary}
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#64748B', marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <span>🧪 {st.linkedTcCount} casos</span>
+                                    {st.bugs.length > 0 && (
+                                      <span style={{ color: '#BF2600', fontWeight: 700 }}>
+                                        🐞 {st.bugs.map((b) => b.key).join(', ')}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── 5. FLOATING DRAWER: AUDITORÍA DE HISTORIAS HUÉRFANAS ─── */}
+                {traceabilityOrphanDrawerOpen && (
+                  <div
+                    className="tp-trace-orphan-drawer-backdrop"
+                    onClick={() => setTraceabilityOrphanDrawerOpen(false)}
+                  >
+                    <aside
+                      className="tp-trace-orphan-drawer"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Drawer Header */}
+                      <div style={{ padding: '16px 20px', background: '#FFF5F5', borderBottom: '1px solid #FED7D7', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <div style={{ width: '34px', height: '34px', borderRadius: '8px', background: '#FEE2E2', color: '#DC2626', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '16px' }}>
+                            ⚠️
+                          </div>
+                          <div>
+                            <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 800, color: '#0F172A' }}>
+                              Auditoría de Historias Huérfanas
+                            </h3>
+                            <p style={{ margin: '2px 0 0 0', fontSize: '11px', color: '#DC2626', fontWeight: 600 }}>
+                              {orphanStoriesCount} {orphanStoriesCount === 1 ? 'historia sin Épica padre vinculada' : 'historias sin Épica padre vinculada'}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setTraceabilityOrphanDrawerOpen(false)}
+                          style={{ padding: '6px 10px', borderRadius: '6px', border: 'none', background: 'transparent', color: '#64748B', cursor: 'pointer', fontSize: '14px', fontWeight: 700 }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {/* AI Suggestion Banner */}
+                      <div style={{ padding: '10px 20px', background: '#FFFBEB', borderBottom: '1px solid #FDE68A', fontSize: '11px', color: '#92400E', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '15px' }}>🤖</span>
+                        <span>
+                          <strong>Asistente de Trazabilidad:</strong> Hemos analizado las historias sin Épica frente a las {totalEpicsCount} épicas del proyecto para sugerir su vinculación en Jira.
+                        </span>
+                      </div>
+
+                      {/* Orphan Stories List */}
+                      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        {orphanStoriesList.length > 0 ? (
+                          orphanStoriesList.map((orph) => {
+                            const suggestion = suggestEpicForOrphan(orph);
+                            return (
+                              <div
+                                key={orph.key}
+                                style={{
+                                  padding: '14px',
+                                  borderRadius: '10px',
+                                  border: '1px solid #E2E8F0',
+                                  background: '#FFFFFF',
+                                  boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                                }}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                  <span style={{ fontFamily: 'monospace', fontSize: '12px', fontWeight: 800, color: '#0052CC' }}>
+                                    {orph.key}
+                                  </span>
+                                  <span style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '4px', background: '#FFEBE6', color: '#BF2600', fontWeight: 700 }}>
+                                    Sin Épica
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: '12px', fontWeight: 700, color: '#0F172A', marginBottom: '6px' }}>
+                                  {orph.summary || 'Sin resumen'}
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#64748B', marginBottom: '10px' }}>
+                                  Estado: <strong>{orph.workflowStatus || 'Por hacer'}</strong> · Cobertura: <strong>{orph.linkedTcCount} casos</strong>
+                                </div>
+
+                                {suggestion && suggestion.epic && (
+                                  <div style={{ padding: '8px 10px', borderRadius: '6px', background: '#F8FAFC', border: '1px solid #E2E8F0', marginBottom: '10px' }}>
+                                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: '3px' }}>
+                                      ✨ Épica sugerida en el proyecto:
+                                    </div>
+                                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#403294' }}>
+                                      ⚡ {suggestion.epic.key} — {suggestion.epic.summary}
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setTraceabilityOrphanDrawerOpen(false);
+                                      openTraceabilityItemModal('story', orph.key, orph.summary);
+                                    }}
+                                    style={{
+                                      flex: 1,
+                                      padding: '6px 10px',
+                                      borderRadius: '6px',
+                                      background: '#0052CC',
+                                      color: '#FFFFFF',
+                                      border: 'none',
+                                      fontSize: '11px',
+                                      fontWeight: 700,
+                                      cursor: 'pointer',
+                                      fontFamily: 'inherit'
+                                    }}
+                                  >
+                                    Ver Detalle en Test Pulse
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => router.open(`/browse/${orph.key}`)}
+                                    style={{
+                                      padding: '6px 10px',
+                                      borderRadius: '6px',
+                                      background: '#F1F5F9',
+                                      color: '#334155',
+                                      border: '1px solid #CBD5E1',
+                                      fontSize: '11px',
+                                      fontWeight: 700,
+                                      cursor: 'pointer',
+                                      fontFamily: 'inherit'
+                                    }}
+                                  >
+                                    Abrir en Jira ↗
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <div style={{ textAlign: 'center', padding: '2rem', color: '#006644', fontSize: '13px', fontWeight: 600 }}>
+                            🎉 ¡Excelente! Todas las historias de usuario del proyecto cuentan con su Épica padre vinculada.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Drawer Footer */}
+                      <div style={{ padding: '14px 20px', background: '#F8FAFC', borderTop: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTraceabilityQuickFilter('ORPHANS');
+                            setTraceabilityPhaseFilter('ALL');
+                            setTraceabilityOrphanDrawerOpen(false);
+                          }}
+                          style={{
+                            flex: 1,
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            background: '#0F172A',
+                            color: '#FFFFFF',
+                            border: 'none',
+                            fontSize: '12px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit'
+                          }}
+                        >
+                          Filtrar Huérfanas en Matriz ({orphanStoriesCount})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTraceabilityOrphanDrawerOpen(false)}
+                          style={{
+                            padding: '8px 14px',
+                            borderRadius: '8px',
+                            background: '#FFFFFF',
+                            color: '#334155',
+                            border: '1px solid #CBD5E1',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit'
+                          }}
+                        >
+                          Cerrar
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
+                )}
               </div>
             );
           })()}

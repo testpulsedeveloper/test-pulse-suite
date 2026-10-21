@@ -7,16 +7,67 @@ import React, { useState, useEffect } from 'react';
 const DOCK_STORAGE_KEY = 'tp_panel_dock_position';
 
 /**
- * Evento personalizado de ventana para sincronizar en tiempo real todos los paneles
- * abiertos cuando el usuario cambia la posición preferida (Izquierda, Centro o Derecha).
+ * Clave de almacenamiento local para recordar el ancho personalizado (en píxeles)
+ * del panel lateral cuando está acoplado a la izquierda o a la derecha.
  */
-const DOCK_SYNC_EVENT = 'tp-panel-dock-change';
+const DOCK_WIDTH_STORAGE_KEY = 'tp_panel_dock_width';
 
 /**
- * Ancho estándar del panel acoplado en modo Split-View integrado (Izquierda / Derecha).
- * Permite calcular simétricamente el espacio restante de la mesa de trabajo principal.
+ * Eventos personalizados de ventana para sincronizar en tiempo real todos los paneles
+ * abiertos y el contenedor principal cuando el usuario cambia la posición o arrastra la línea divisora.
  */
-export const DOCK_SPLIT_WIDTH = 'min(740px, 48vw)';
+const DOCK_SYNC_EVENT = 'tp-panel-dock-change';
+const DOCK_WIDTH_SYNC_EVENT = 'tp-panel-dock-width-change';
+
+/**
+ * Límites y valor por defecto del ancho del panel lateral acoplado (en píxeles).
+ */
+export const DEFAULT_DOCK_WIDTH_PX = 720;
+export const MIN_DOCK_WIDTH_PX = 380;
+export const MAX_DOCK_WIDTH_VW_RATIO = 0.78;
+
+/**
+ * Ancho estándar de respaldo del panel acoplado en modo Split-View integrado (Izquierda / Derecha).
+ */
+export const DOCK_SPLIT_WIDTH = 'min(720px, 78vw)';
+
+/**
+ * Calcula el ancho máximo permitido en píxeles según el tamaño actual de la ventana,
+ * asegurando que siempre quede al menos 300px visibles para la mesa de trabajo principal.
+ */
+export function clampDockWidth(px) {
+  const num = Number(px);
+  if (!Number.isFinite(num)) return DEFAULT_DOCK_WIDTH_PX;
+  const vw = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 1440;
+  const maxPx = Math.max(MIN_DOCK_WIDTH_PX + 80, Math.min(1400, Math.floor(vw * MAX_DOCK_WIDTH_VW_RATIO), vw - 280));
+  return Math.max(MIN_DOCK_WIDTH_PX, Math.min(maxPx, Math.round(num)));
+}
+
+/**
+ * Lee de forma segura el ancho personalizado guardado en localStorage.
+ */
+export function getSavedDockWidth() {
+  try {
+    const raw = window.localStorage.getItem(DOCK_WIDTH_STORAGE_KEY);
+    if (raw) {
+      const parsed = parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed >= MIN_DOCK_WIDTH_PX) {
+        return clampDockWidth(parsed);
+      }
+    }
+  } catch (_) {
+    // En caso de restricción de iframe/cookies, usamos el ancho por defecto.
+  }
+  return DEFAULT_DOCK_WIDTH_PX;
+}
+
+/**
+ * Devuelve la expresión CSS segura para el ancho del panel acoplado y el margen del workspace.
+ */
+export function getDockSplitCssWidth(widthPx) {
+  const safePx = clampDockWidth(widthPx || getSavedDockWidth());
+  return `min(${safePx}px, 78vw)`;
+}
 
 /**
  * Lee de forma segura la posición guardada en localStorage.
@@ -64,6 +115,51 @@ export function usePanelDockPosition() {
   };
 
   return [dockPosition, setDockPosition];
+}
+
+/**
+ * Hook personalizado que gestiona y sincroniza en tiempo real el ancho del panel lateral
+ * (en píxeles) y el estado de arrastre activo (`isResizing`) en toda la aplicación.
+ */
+export function usePanelDockWidth() {
+  const [dockWidth, setDockWidthState] = useState(() => getSavedDockWidth());
+  const [isResizing, setIsResizingState] = useState(false);
+
+  useEffect(() => {
+    const handleSync = (event) => {
+      if (event?.detail?.width !== undefined) {
+        setDockWidthState(clampDockWidth(event.detail.width));
+      } else {
+        setDockWidthState(getSavedDockWidth());
+      }
+      if (typeof event?.detail?.isResizing === 'boolean') {
+        setIsResizingState(event.detail.isResizing);
+      }
+    };
+    window.addEventListener(DOCK_WIDTH_SYNC_EVENT, handleSync);
+    return () => window.removeEventListener(DOCK_WIDTH_SYNC_EVENT, handleSync);
+  }, []);
+
+  const setDockWidth = (nextWidth, options = {}) => {
+    const clamped = clampDockWidth(nextWidth);
+    const activeResize = Boolean(options.isResizing);
+    setDockWidthState(clamped);
+    setIsResizingState(activeResize);
+    try {
+      if (options.persist !== false) {
+        window.localStorage.setItem(DOCK_WIDTH_STORAGE_KEY, String(clamped));
+      }
+      window.dispatchEvent(
+        new CustomEvent(DOCK_WIDTH_SYNC_EVENT, {
+          detail: { width: clamped, isResizing: activeResize }
+        })
+      );
+    } catch (_) {
+      // Ignorar errores de almacenamiento en navegadores con bloqueo estricto.
+    }
+  };
+
+  return [dockWidth, setDockWidth, isResizing];
 }
 
 /**
@@ -123,12 +219,15 @@ export function getDockContainerStyle(dockPosition, options = {}) {
   const centerHeight = options.centerHeight || '90vh';
   const centerMinHeight = options.centerMinHeight || '620px';
   const centerMaxHeight = options.centerMaxHeight || '920px';
-  const drawerWidth = options.drawerWidth || DOCK_SPLIT_WIDTH;
-  const drawerMinWidth = options.drawerMinWidth || '420px';
+  const activeWidthPx = options.dockWidthPx || getSavedDockWidth();
+  const drawerWidth = getDockSplitCssWidth(activeWidthPx);
+  const drawerMinWidth = `${MIN_DOCK_WIDTH_PX}px`;
   const bg = options.backgroundColor || '#FFFFFF';
+  const isResizing = Boolean(options.isResizing);
 
   if (isCenter) {
     return {
+      position: 'relative',
       pointerEvents: 'auto',
       backgroundColor: bg,
       borderRadius: '10px',
@@ -147,6 +246,7 @@ export function getDockContainerStyle(dockPosition, options = {}) {
   }
 
   return {
+    position: 'relative',
     pointerEvents: 'auto',
     backgroundColor: bg,
     borderRadius: '0px',
@@ -159,15 +259,144 @@ export function getDockContainerStyle(dockPosition, options = {}) {
       : '-6px 0 18px -4px rgba(9, 30, 66, 0.10)',
     width: drawerWidth,
     minWidth: drawerMinWidth,
-    maxWidth: '52vw',
+    maxWidth: '78vw',
     height: 'calc(100vh - 56px)',
     minHeight: 'calc(100vh - 56px)',
     maxHeight: 'calc(100vh - 56px)',
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
-    transition: 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s ease'
+    transition: isResizing
+      ? 'none'
+      : 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s ease'
   };
+}
+
+/**
+ * Barra divisora interactiva (Splitter / Resizer) para el borde interior del panel lateral acoplado.
+ * Permite arrastrar hacia la izquierda o derecha para agrandar o achicar el panel lateral,
+ * guardando automáticamente la preferencia del usuario en localStorage.
+ */
+export function PanelResizeHandle({ dockPosition }) {
+  const [dockWidth, setDockWidth, isResizing] = usePanelDockWidth();
+  const [isHovered, setIsHovered] = useState(false);
+
+  if (dockPosition !== 'left' && dockPosition !== 'right') {
+    return null;
+  }
+
+  const isLeftDock = dockPosition === 'left';
+
+  const handleMouseDown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    let latestWidth = dockWidth;
+    setDockWidth(latestWidth, { isResizing: true, persist: false });
+
+    const prevUserSelect = document.body.style.userSelect;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const handleMouseMove = (moveEvt) => {
+      const vw = window.innerWidth || 1440;
+      const rawNext = isLeftDock ? moveEvt.clientX : (vw - moveEvt.clientX);
+      latestWidth = clampDockWidth(rawNext);
+      setDockWidth(latestWidth, { isResizing: true, persist: true });
+    };
+
+    const handleMouseUp = () => {
+      document.body.style.userSelect = prevUserSelect;
+      document.body.style.cursor = prevCursor;
+      setDockWidth(latestWidth, { isResizing: false, persist: true });
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleDoubleClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDockWidth(DEFAULT_DOCK_WIDTH_PX, { isResizing: false, persist: true });
+  };
+
+  const activeHighlight = isResizing || isHovered;
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      onDoubleClick={handleDoubleClick}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      title="Arrastra la línea divisora para ajustar el tamaño del panel lateral (doble clic para restaurar tamaño original)"
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        [isLeftDock ? 'right' : 'left']: 0,
+        width: '10px',
+        cursor: 'col-resize',
+        zIndex: 60,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: activeHighlight ? 'rgba(225, 0, 122, 0.08)' : 'transparent',
+        borderLeft: !isLeftDock && activeHighlight ? '2px solid #E1007A' : 'none',
+        borderRight: isLeftDock && activeHighlight ? '2px solid #E1007A' : 'none',
+        transition: 'background-color 0.12s ease'
+      }}
+    >
+      {/* Pastilla visual central de agarre (Grip Pill) */}
+      <div
+        style={{
+          width: '6px',
+          height: '44px',
+          borderRadius: '999px',
+          backgroundColor: activeHighlight ? '#E1007A' : '#B3BAC5',
+          boxShadow: activeHighlight ? '0 0 0 3px rgba(225, 0, 122, 0.18)' : '0 1px 2px rgba(9,30,66,0.12)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '3px',
+          opacity: activeHighlight ? 1 : 0.75,
+          transition: 'all 0.12s ease',
+          pointerEvents: 'none'
+        }}
+      >
+        <span style={{ width: '2px', height: '2px', borderRadius: '50%', backgroundColor: '#FFFFFF' }} />
+        <span style={{ width: '2px', height: '2px', borderRadius: '50%', backgroundColor: '#FFFFFF' }} />
+        <span style={{ width: '2px', height: '2px', borderRadius: '50%', backgroundColor: '#FFFFFF' }} />
+      </div>
+
+      {/* Indicador flotante de ancho en píxeles mientras se arrastra */}
+      {isResizing && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '68px',
+            [isLeftDock ? 'left' : 'right']: `${ Math.max(24, dockWidth - 75) }px`,
+            backgroundColor: '#172B4D',
+            color: '#FFFFFF',
+            fontSize: '10.5px',
+            fontWeight: 700,
+            padding: '3px 8px',
+            borderRadius: '999px',
+            boxShadow: '0 4px 12px rgba(9,30,66,0.28)',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            zIndex: 9999
+          }}
+        >
+          ↔ {dockWidth} px
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

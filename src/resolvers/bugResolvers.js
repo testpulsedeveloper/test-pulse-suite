@@ -12,6 +12,7 @@
 import api, { route } from '@forge/api';
 import { getBusinessMilliseconds, analyzeBugChangelog } from '../utils/slaHelpers.js';
 import { invalidateProjectReportCache } from '../utils/reportSnapshotCache.js';
+import { DEFAULT_CUSTOM_FIELDS, resolveCustomFields } from '../utils/customFieldConfig.js';
 
 // Helper to extract plain editable text from Jira's Environment field (which may be ADF or HTML/string)
 function extractPlainTextFromEnv(rawEnv, renderedEnv) {
@@ -271,8 +272,12 @@ export function registerBugResolvers(resolver) {
         }
       }
 
+      const cf = resolveCustomFields(payload?.config);
+      const defaultSevField = cf.bugSeverity || DEFAULT_CUSTOM_FIELDS.bugSeverity;
+      const defaultEstDateField = cf.bugEstimatedDate || DEFAULT_CUSTOM_FIELDS.bugEstimatedDate;
+
       // Discover *Severity custom field ID & allowed options (strictly *Severity, NOT priority)
-      let severityFieldId = 'customfield_10238';
+      let severityFieldId = defaultSevField;
       for (const [fKey, fMeta] of Object.entries(editFields)) {
         const mName = String(fMeta?.name || '').trim();
         if (/^\*?severity$/i.test(mName) || /^\*?severidad$/i.test(mName) || mName.toLowerCase().includes('severity') || mName.toLowerCase().includes('severidad')) {
@@ -280,7 +285,7 @@ export function registerBugResolvers(resolver) {
           break;
         }
       }
-      if (severityFieldId === 'customfield_10238' && !f.customfield_10238 && !editFields.customfield_10238) {
+      if (severityFieldId === defaultSevField && !f[defaultSevField] && !editFields[defaultSevField]) {
         for (const [fKey, fLabel] of Object.entries(fieldNamesMap)) {
           const mName = String(fLabel || '').trim();
           if (/^\*?severity$/i.test(mName) || /^\*?severidad$/i.test(mName) || mName.toLowerCase().includes('severity') || mName.toLowerCase().includes('severidad')) {
@@ -290,7 +295,7 @@ export function registerBugResolvers(resolver) {
         }
       }
 
-      const sevAllowedRaw = editFields[severityFieldId]?.allowedValues || editFields.customfield_10238?.allowedValues || [];
+      const sevAllowedRaw = editFields[severityFieldId]?.allowedValues || editFields[defaultSevField]?.allowedValues || editFields[DEFAULT_CUSTOM_FIELDS.bugSeverity]?.allowedValues || [];
       const severityOptions = sevAllowedRaw.length > 0
         ? sevAllowedRaw.map(opt => ({
             id: opt.id ? String(opt.id) : '',
@@ -317,6 +322,9 @@ export function registerBugResolvers(resolver) {
         );
       };
       const estDateCandidateIds = [];
+      if (defaultEstDateField && !estDateCandidateIds.includes(defaultEstDateField)) {
+        estDateCandidateIds.push(defaultEstDateField);
+      }
       for (const [fKey, fMeta] of Object.entries(editFields)) {
         if (fKey === 'duedate') continue;
         if (isEstDateFieldName(fMeta?.name)) {
@@ -329,12 +337,12 @@ export function registerBugResolvers(resolver) {
           if (!estDateCandidateIds.includes(fKey)) estDateCandidateIds.push(fKey);
         }
       }
-      if (!estDateCandidateIds.includes('customfield_10763')) {
-        estDateCandidateIds.push('customfield_10763');
+      if (!estDateCandidateIds.includes(DEFAULT_CUSTOM_FIELDS.bugEstimatedDate)) {
+        estDateCandidateIds.push(DEFAULT_CUSTOM_FIELDS.bugEstimatedDate);
       }
       // Prefer a candidate field that currently holds a value, otherwise the first editable/discovered candidate
       const populatedEstFieldId = estDateCandidateIds.find(id => f[id] !== undefined && f[id] !== null && f[id] !== '');
-      const estDateFieldId = populatedEstFieldId || estDateCandidateIds[0] || 'customfield_10763';
+      const estDateFieldId = populatedEstFieldId || estDateCandidateIds[0] || defaultEstDateField;
 
       // Available project versions for fixVersions / versions
       const editFixVerAllowed = editFields.fixVersions?.allowedValues || [];
@@ -450,7 +458,7 @@ export function registerBugResolvers(resolver) {
         ? (typeof rawEstDateVal === 'object' ? (rawEstDateVal.value || rawEstDateVal.name || String(rawEstDateVal)) : String(rawEstDateVal))
         : null;
 
-      const rawSevObj = f[severityFieldId] || f.customfield_10238 || null;
+      const rawSevObj = f[severityFieldId] || f[defaultSevField] || f[DEFAULT_CUSTOM_FIELDS.bugSeverity] || null;
       const sevDisplay = rawSevObj
         ? (typeof rawSevObj === 'object' ? (rawSevObj.value || rawSevObj.name || rawSevObj.label || 'Sin definir') : String(rawSevObj))
         : 'Sin definir';
@@ -522,6 +530,7 @@ export function registerBugResolvers(resolver) {
     const runBugUpdate = async () => {
     try {
       const { issueIdOrKey, field, value, extra = {} } = payload || {};
+      const cf = resolveCustomFields(payload?.config);
       if (!issueIdOrKey || !field) {
         return { error: 'Parámetros incompletos (issueIdOrKey, field).' };
       }
@@ -590,7 +599,7 @@ export function registerBugResolvers(resolver) {
 
       // 3. Severidad (*Severity custom field, e.g. customfield_10238)
       if (field === 'severity') {
-        const sevFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || 'customfield_10238';
+        const sevFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || cf.bugSeverity || DEFAULT_CUSTOM_FIELDS.bugSeverity;
         const optId = payload.optionId || extra.optionId || null;
         let payloadVal = null;
         if (value) {
@@ -660,12 +669,12 @@ export function registerBugResolvers(resolver) {
 
       // 5. Fecha Estimada (custom field, e.g. customfield_10763, NOT duedate)
       if (field === 'estimatedDate') {
-        const primaryFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || 'customfield_10763';
+        const primaryFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || cf.bugEstimatedDate || DEFAULT_CUSTOM_FIELDS.bugEstimatedDate;
         const candidateIdsFromPayload = Array.isArray(payload.candidateFieldIds) ? payload.candidateFieldIds : [];
         const cleanDate = value && String(value).trim() ? String(value).trim().slice(0, 10) : null;
 
         const candidateFieldIds = [];
-        for (const cid of [primaryFieldId, ...candidateIdsFromPayload, 'customfield_10763']) {
+        for (const cid of [primaryFieldId, ...candidateIdsFromPayload, cf.bugEstimatedDate, DEFAULT_CUSTOM_FIELDS.bugEstimatedDate]) {
           if (cid && cid !== 'duedate' && !candidateFieldIds.includes(cid)) {
             candidateFieldIds.push(cid);
           }

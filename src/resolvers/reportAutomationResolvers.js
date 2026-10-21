@@ -1,13 +1,111 @@
 /**
  * @file reportAutomationResolvers.js
  * @description Backend resolvers and scheduled trigger handler for Executive Report
- * Automation via Jira Automation incoming webhooks.
+ * Automation (100% Native Jira — Opción A: Runs on Atlassian).
  *
  * Allows project administrators to configure scheduled or manual dispatches of the
- * Executive Quality Report to a Jira Automation webhook in America/Mexico_City timezone.
+ * Executive Quality Report natively inside Jira Cloud (Project Properties & Issue Comments)
+ * in America/Mexico_City timezone, with zero external egress (`fetch` removed).
  */
 
-import api, { route, fetch } from '@forge/api';
+import api, { route } from '@forge/api';
+
+/**
+ * Publishes the executive report 100% natively inside Jira Cloud (Opción A - Runs on Atlassian):
+ * 1. Persists the executive report snapshot to `/rest/api/3/project/{projectId}/properties/testpulse-executive-report`
+ *    so native Jira Automation rules can read `{{project.properties."testpulse-executive-report".emailSubject}}`,
+ *    `{{project.properties."testpulse-executive-report".recipients}}`, and summary metrics.
+ * 2. If `targetChannel` is a Jira Issue Key (e.g., `QA-100`), posts an ADF executive summary
+ *    comment on that issue so a native Jira Automation rule ("When: Issue commented") can
+ *    immediately send the email without any external webhook egress.
+ */
+export async function publishNativeJiraExecutiveReport(projectId, bodyPayload, targetChannel = '') {
+  const compactSnapshot = {
+    timestamp: bodyPayload.timestamp || new Date().toISOString(),
+    source: bodyPayload.source || 'Test Pulse Suite v4.7.0 (Runs on Atlassian)',
+    projectId: String(projectId || bodyPayload.projectId || ''),
+    projectName: bodyPayload.projectName || 'Proyecto',
+    projectKey: bodyPayload.projectKey || '',
+    recipients: bodyPayload.recipients || '',
+    emailSubject: bodyPayload.emailSubject || '',
+    plainText: (bodyPayload.plainText || '').slice(0, 4000),
+    summary: bodyPayload.summary || {},
+    stats: bodyPayload.stats || {},
+    mode: 'NATIVE_JIRA_RUNS_ON_ATLASSIAN'
+  };
+
+  let propStatus = 200;
+  let propOk = true;
+  if (projectId) {
+    const propRes = await api.asApp().requestJira(
+      route`/rest/api/3/project/${projectId}/properties/testpulse-executive-report`,
+      {
+        method: 'PUT',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(compactSnapshot)
+      }
+    );
+    propStatus = propRes.status || 200;
+    propOk = Boolean(propRes.ok || (propStatus >= 200 && propStatus < 300));
+  }
+
+  const trimmedTarget = String(targetChannel || '').trim().toUpperCase();
+  const isIssueKey = /^[A-Z][A-Z0-9_]*-\d+$/.test(trimmedTarget);
+  let commentStatus = null;
+
+  if (isIssueKey) {
+    const adfComment = {
+      body: {
+        type: 'doc',
+        version: 1,
+        content: [
+          {
+            type: 'heading',
+            attrs: { level: 3 },
+            content: [{ type: 'text', text: `📊 ${bodyPayload.emailSubject || 'Reporte Ejecutivo Test Pulse Suite'}` }]
+          },
+          {
+            type: 'paragraph',
+            content: [
+              { type: 'text', text: 'Destinatarios configurados: ', marks: [{ type: 'strong' }] },
+              { type: 'text', text: bodyPayload.recipients || 'Configurados en Jira Automation' }
+            ]
+          },
+          {
+            type: 'paragraph',
+            content: [
+              { type: 'text', text: bodyPayload.plainText || `Reporte publicado para ${bodyPayload.projectName || projectId}.` }
+            ]
+          }
+        ]
+      }
+    };
+    try {
+      const cRes = await api.asApp().requestJira(
+        route`/rest/api/3/issue/${trimmedTarget}/comment`,
+        {
+          method: 'POST',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(adfComment)
+        }
+      );
+      commentStatus = cRes.status;
+    } catch (e) {
+      console.warn('[ReportAutomation] Optional issue comment warning:', e?.message);
+    }
+  }
+
+  return {
+    ok: propOk,
+    status: propStatus,
+    statusText: propOk ? 'OK (100% Nativo en Jira • Runs on Atlassian)' : 'Error',
+    mode: isIssueKey ? `NATIVE_JIRA_ISSUE_COMMENT (${trimmedTarget})` : 'NATIVE_JIRA_PROJECT_PROPERTY',
+    commentStatus
+  };
+}
 
 /**
  * Registers report automation resolvers (`getReportAutomationConfig`,
@@ -25,21 +123,23 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
       const config = await getAppStorage(`report_automation_config_${projectId}`);
       const lastDispatch = await getAppStorage(`report_automation_last_dispatch_${projectId}`);
 
+      const defaultConfig = {
+        enabled: false,
+        webhookUrl: 'NATIVE_JIRA',
+        recipients: '',
+        frequency: 'weekdays', // 'daily', 'weekdays', 'weekly'
+        weeklyDay: '5',        // 5 = Friday
+        hour: '18',            // 18:00
+        minute: '00',
+        timezone: 'America/Mexico_City',
+        scopePlan: 'all',      // 'all', 'latest', or specific planId
+        scopeCycle: 'all',     // 'all', 'latest', or specific cycleId
+        sendOnCycleCompleted: false
+      };
+
       return {
         success: true,
-        config: config || {
-          enabled: false,
-          webhookUrl: '',
-          recipients: '',
-          frequency: 'weekdays', // 'daily', 'weekdays', 'weekly'
-          weeklyDay: '5',        // 5 = Friday
-          hour: '18',            // 18:00
-          minute: '00',
-          timezone: 'America/Mexico_City',
-          scopePlan: 'all',      // 'all', 'latest', or specific planId
-          scopeCycle: 'all',     // 'all', 'latest', or specific cycleId
-          sendOnCycleCompleted: false
-        },
+        config: config ? { ...defaultConfig, ...config, webhookUrl: config.webhookUrl || 'NATIVE_JIRA' } : defaultConfig,
         lastDispatch: lastDispatch || null
       };
     } catch (err) {
@@ -55,21 +155,26 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
       if (!projectId) return { success: false, error: 'ProjectId es requerido' };
       if (!config) return { success: false, error: 'Configuración es requerida' };
 
-      await setAppStorage(`report_automation_config_${projectId}`, config);
+      const normalizedConfig = {
+        ...config,
+        webhookUrl: String(config.webhookUrl || 'NATIVE_JIRA').trim() || 'NATIVE_JIRA'
+      };
+
+      await setAppStorage(`report_automation_config_${projectId}`, normalizedConfig);
 
       // Update active projects registry
       let activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
       if (!Array.isArray(activeProjects)) activeProjects = [];
 
-      if (config.enabled && !activeProjects.includes(projectId)) {
+      if (normalizedConfig.enabled && !activeProjects.includes(projectId)) {
         activeProjects.push(projectId);
         await setAppStorage('report_automation_active_projects', activeProjects);
-      } else if (!config.enabled && activeProjects.includes(projectId)) {
+      } else if (!normalizedConfig.enabled && activeProjects.includes(projectId)) {
         activeProjects = activeProjects.filter(id => String(id) !== String(projectId));
         await setAppStorage('report_automation_active_projects', activeProjects);
       }
 
-      return { success: true, config };
+      return { success: true, config: normalizedConfig };
     } catch (err) {
       console.error('[saveReportAutomationConfig] Error:', err);
       return { success: false, error: err.message };
@@ -79,11 +184,11 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
   resolver.define('triggerManualReportDispatch', async ({ payload, context }) => {
     try {
       const projectId = String(payload?.projectId || context?.extension?.project?.id || '');
-      const webhookUrl = payload?.webhookUrl;
+      const targetChannel = String(payload?.webhookUrl || 'NATIVE_JIRA').trim() || 'NATIVE_JIRA';
       const reportData = payload?.reportData;
 
-      if (!webhookUrl || !webhookUrl.startsWith('http')) {
-        return { success: false, error: 'URL de Webhook inválida o no especificada' };
+      if (!projectId) {
+        return { success: false, error: 'ProjectId es requerido para publicar el reporte en Jira' };
       }
 
       let activeReportData = reportData;
@@ -93,15 +198,15 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         const testHtml = `
         <div style="max-width: 700px; margin: 0 auto; font-family: sans-serif; border: 1px solid #DFE1E6; border-radius: 8px; overflow: hidden;">
           <div style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); color: #fff; padding: 18px 24px;">
-            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #FFE0F0;">TEST PULSE SUITE • PRUEBA DE CONEXIÓN</div>
-            <h2 style="margin: 4px 0 0 0; font-size: 20px; color: #ffffff;">Reporte Ejecutivo (Prueba)</h2>
+            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #FFE0F0;">TEST PULSE SUITE • PUBLICACIÓN NATIVA JIRA</div>
+            <h2 style="margin: 4px 0 0 0; font-size: 20px; color: #ffffff;">Reporte Ejecutivo (100% Nativo en Jira)</h2>
           </div>
           <div style="padding: 20px 24px; color: #172B4D;">
-            <p>Este es un correo de prueba de <strong>Test Pulse Suite</strong> enviado mediante <strong>Jira Automation</strong>.</p>
+            <p>Este reporte ejecutivo de <strong>Test Pulse Suite</strong> fue publicado de forma <strong>100% nativa en Jira Cloud</strong> (<em>Runs on Atlassian</em>).</p>
             <p><strong>Proyecto:</strong> ${projName}</p>
             <p><strong>Fecha y Hora:</strong> ${nowFormatted} (CDMX)</p>
             <div style="background: #E3FCEF; border: 1px solid #ABF5D1; color: #006644; padding: 12px 16px; border-radius: 6px; font-weight: 600; margin-top: 14px;">
-              🟢 La integración con el webhook entrante de Jira Automation está operando correctamente.
+              🟢 El reporte se guardó en la propiedad nativa del proyecto (testpulse-executive-report) sin salida de red externa.
             </div>
           </div>
         </div>
@@ -110,17 +215,17 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
           projectName: projName,
           projectKey: activeReportData?.projectKey || '',
           recipients: activeReportData?.recipients || '',
-          emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`,
+          emailSubject: `[Reporte Ejecutivo] Test Pulse Suite - ${projName} (${nowFormatted})`,
           htmlReport: testHtml,
-          plainText: `Test Pulse Suite - Prueba de Conexión para ${projName} (${nowFormatted})`,
-          summary: { type: 'TEST_DISPATCH' },
+          plainText: `Test Pulse Suite - Reporte Ejecutivo Nativo para ${projName} (${nowFormatted})`,
+          summary: { type: 'NATIVE_JIRA_DISPATCH' },
           stats: {}
         };
       }
 
       const bodyPayload = {
         timestamp: new Date().toISOString(),
-        source: 'Test Pulse Suite v4.1.0',
+        source: 'Test Pulse Suite v4.7.0 (Runs on Atlassian)',
         projectId: projectId || 'N/A',
         projectName: activeReportData.projectName || 'Proyecto',
         projectKey: activeReportData.projectKey || '',
@@ -132,28 +237,16 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         stats: activeReportData.stats || {}
       };
 
-      const webhookRes = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(bodyPayload)
-      });
-
-      const isSuccess = webhookRes.ok || (webhookRes.status >= 200 && webhookRes.status < 300);
-      let resText = '';
-      try {
-        resText = await webhookRes.text();
-      } catch (_) {}
+      const nativeRes = await publishNativeJiraExecutiveReport(projectId, bodyPayload, targetChannel);
+      const isSuccess = nativeRes.ok;
 
       const dispatchLog = {
         timestamp: new Date().toISOString(),
         status: isSuccess ? 'SUCCESS' : 'ERROR',
-        statusCode: webhookRes.status,
-        statusText: webhookRes.statusText || (isSuccess ? 'OK' : 'Error'),
-        responseSummary: resText ? resText.substring(0, 300) : '',
-        recipients: reportData?.recipients || 'Configurados en regla de Jira',
+        statusCode: nativeRes.status,
+        statusText: nativeRes.statusText,
+        responseSummary: `Publicado 100% nativo en Jira (${nativeRes.mode}) • Runs on Atlassian`,
+        recipients: reportData?.recipients || 'Configurados en Jira Automation (100% Nativo)',
         emailSubject: bodyPayload.emailSubject
       };
 
@@ -164,16 +257,16 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
       if (!isSuccess) {
         return {
           success: false,
-          statusCode: webhookRes.status,
-          error: `Jira Automation respondió con código ${webhookRes.status} (${webhookRes.statusText || 'Error'}). ${resText || ''}`,
+          statusCode: nativeRes.status,
+          error: `Jira respondió con código ${nativeRes.status} al guardar la propiedad del proyecto.`,
           lastDispatch: dispatchLog
         };
       }
 
       return {
         success: true,
-        statusCode: webhookRes.status,
-        message: 'Reporte ejecutivo enviado exitosamente a Jira Automation',
+        statusCode: nativeRes.status,
+        message: 'Reporte ejecutivo publicado 100% nativamente en Jira Cloud',
         lastDispatch: dispatchLog
       };
     } catch (err) {
@@ -192,7 +285,7 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
 export function createScheduledReportHandler({ getAppStorage, setAppStorage }) {
   return async function scheduledReportHandler() {
     try {
-      console.log('[scheduledReportHandler] Running scheduled report check...');
+      console.log('[scheduledReportHandler] Running scheduled report check (100% Native Jira)...');
       const activeProjects = (await getAppStorage('report_automation_active_projects')) || [];
       if (!Array.isArray(activeProjects) || activeProjects.length === 0) {
         console.log('[scheduledReportHandler] No active report automation projects found.');
@@ -209,7 +302,7 @@ export function createScheduledReportHandler({ getAppStorage, setAppStorage }) {
       for (const projectId of activeProjects) {
         try {
           const config = await getAppStorage(`report_automation_config_${projectId}`);
-          if (!config || !config.enabled || !config.webhookUrl) continue;
+          if (!config || !config.enabled) continue;
 
           const targetHour = parseInt(config.hour || '18', 10);
           if (currentHour !== targetHour) continue;
@@ -254,34 +347,32 @@ export function createScheduledReportHandler({ getAppStorage, setAppStorage }) {
             minute: '2-digit'
           });
 
-          // Trigger webhook for Jira Automation
           const bodyPayload = {
             timestamp: now.toISOString(),
-            source: 'Test Pulse Suite Scheduled Trigger',
+            source: 'Test Pulse Suite Scheduled Trigger (Runs on Atlassian)',
             projectId,
             projectName,
             projectKey,
             recipients: config.recipients || '',
             emailSubject: `[Reporte Ejecutivo Programado] ${projectName} - ${dateFormatted}`,
+            plainText: `Reporte Ejecutivo Programado de Test Pulse Suite para ${projectName} (${dateFormatted} CDMX).`,
             dateFormatted,
             scheduledHour: `${config.hour}:00 CDMX`
           };
 
-          const res = await fetch(config.webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyPayload)
-          });
+          const targetChannel = String(config.webhookUrl || 'NATIVE_JIRA').trim() || 'NATIVE_JIRA';
+          const nativeRes = await publishNativeJiraExecutiveReport(projectId, bodyPayload, targetChannel);
 
           await setAppStorage(`report_automation_last_dispatch_${projectId}`, {
             timestamp: now.toISOString(),
-            status: res.ok ? 'SUCCESS' : 'ERROR',
-            statusCode: res.status,
-            statusText: res.statusText || (res.ok ? 'OK' : 'Error'),
+            status: nativeRes.ok ? 'SUCCESS' : 'ERROR',
+            statusCode: nativeRes.status,
+            statusText: nativeRes.statusText,
+            responseSummary: `Envío Automático Programado (${nativeRes.mode})`,
             recipients: config.recipients || 'Configurados en regla de Jira',
             emailSubject: bodyPayload.emailSubject
           });
-          console.log(`[scheduledReportHandler] Project ${projectId} dispatched with status ${res.status}`);
+          console.log(`[scheduledReportHandler] Project ${projectId} published natively with status ${nativeRes.status}`);
         } catch (projErr) {
           console.error(`[scheduledReportHandler] Error processing project ${projectId}:`, projErr);
         }

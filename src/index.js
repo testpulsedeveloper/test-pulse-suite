@@ -1,5 +1,5 @@
 import Resolver from '@forge/resolver';
-import api, { route, fetch, webTrigger } from '@forge/api';
+import api, { route, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
@@ -17,7 +17,11 @@ import {
   getTestCaseJqlFields,
   getRunCandidateJqlFields,
   getRequirementJqlFields,
-  extractExecutionTypeFromFields
+  getBugJqlFields,
+  extractExecutionTypeFromFields,
+  extractBugSeverityFromFields,
+  extractBugEstimatedDateFromFields,
+  computePercentiles
 } from './utils/customFieldConfig.js';
 import { registerFolderResolvers } from './resolvers/folderResolvers.js';
 import { registerConfigResolvers } from './resolvers/configResolvers.js';
@@ -98,12 +102,14 @@ async function getCachedIsProjectAdmin(projectId, context) {
   return false;
 }
 
-// ── Perf instrumentation (Fase 0) ──
+// ── Perf instrumentation (Fase 0 + Fase 3 p50/p95/maxMs) ──
 // Counts real Jira REST calls (and 429s) made during each resolver invocation. Output in `forge logs`:
-//   [perf] resolver=getExecutionReport jiraCalls=14 r429=0 ms=3120
+//   [perf] resolver=getExecutionReport jiraCalls=14 r429=0 ms=3120 p50=2850 p95=3120 maxMs=3120
 // AsyncLocalStorage keeps counts correct even if invocations overlap within one instance.
 // Fails open: if patching the api object isn't possible, the app keeps working uninstrumented.
 const __perfALS = new AsyncLocalStorage();
+const __perfSamplesByResolver = new Map();
+const PERF_SAMPLE_LIMIT = 200;
 try {
   for (const m of ['asUser', 'asApp']) {
     const orig = api[m];
@@ -153,18 +159,34 @@ try {
   console.warn('[perf] instrumentation disabled:', e?.message);
 }
 
+// Primary storage via @forge/kvs with transparent dual-read migration from legacy /rest/api/3/app/properties
 const getAppStorage = async (key) => {
+  try {
+    const kvsVal = await storage.get(`app_prop_${key}`);
+    if (kvsVal !== undefined && kvsVal !== null) {
+      return kvsVal?.data !== undefined ? kvsVal.data : kvsVal;
+    }
+  } catch (_) {}
   try {
     const res = await api.asApp().requestJira(route`/rest/api/3/app/properties/${key}`);
     if (!res.ok) return null;
     const data = await res.json();
-    return data.value?.data ?? data.value ?? null;
+    const resolved = data.value?.data ?? data.value ?? null;
+    if (resolved !== null && resolved !== undefined) {
+      await storage.set(`app_prop_${key}`, { data: resolved }).catch(() => {});
+    }
+    return resolved;
   } catch (_) {
     return null;
   }
 };
 
 const setAppStorage = async (key, val) => {
+  let kvsOk = false;
+  try {
+    await storage.set(`app_prop_${key}`, { data: val });
+    kvsOk = true;
+  } catch (_) {}
   try {
     await api.asApp().requestJira(route`/rest/api/3/app/properties/${key}`, {
       method: 'PUT',
@@ -173,7 +195,7 @@ const setAppStorage = async (key, val) => {
     });
     return true;
   } catch (_) {
-    return false;
+    return kvsOk;
   }
 };
 
@@ -277,7 +299,7 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
 
 const resolver = new Resolver();
 
-// Wrap every resolver: run it inside a perf context and log one compact line when it finishes.
+// Wrap every resolver: run it inside a perf context and log one compact line with p50/p95/maxMs when it finishes.
 {
   const __origDefine = resolver.define.bind(resolver);
   resolver.define = (name, fn) => __origDefine(name, async (req) => {
@@ -286,7 +308,16 @@ const resolver = new Resolver();
     try {
       return await __perfALS.run(store, () => fn(req));
     } finally {
-      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${Date.now() - t0}`);
+      const elapsed = Date.now() - t0;
+      let samples = __perfSamplesByResolver.get(name);
+      if (!samples) {
+        samples = [];
+        __perfSamplesByResolver.set(name, samples);
+      }
+      samples.push(elapsed);
+      if (samples.length > PERF_SAMPLE_LIMIT) samples.shift();
+      const { p50, p95, maxMs } = computePercentiles(samples);
+      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}`);
     }
   });
 }
@@ -304,15 +335,18 @@ function filterValidIssueTypes(candidates, projectIssueTypes, primaryType) {
   ));
   if (Array.isArray(projectIssueTypes) && projectIssueTypes.length > 0) {
     const projectTypeMap = new Map();
+    const projectTypeById = new Map();
     for (const pt of projectIssueTypes) {
       const name = typeof pt === 'string' ? pt : pt?.name;
+      const id = typeof pt === 'object' && pt?.id ? String(pt.id).trim() : null;
       if (name && typeof name === 'string') {
         projectTypeMap.set(name.trim().toLowerCase(), name.trim());
+        if (id) projectTypeById.set(id, name.trim());
       }
     }
     const matched = [];
     for (const cand of cleanCandidates) {
-      const exact = projectTypeMap.get(cand.toLowerCase());
+      const exact = projectTypeById.get(cand) || projectTypeMap.get(cand.toLowerCase());
       if (exact && !matched.includes(exact)) {
         matched.push(exact);
       }
@@ -784,14 +818,61 @@ resolver.define('getTestCases', async ({ payload, context }) => {
 resolver.define('getRequirements', async ({ payload, context }) => {
   try {
     const projectId = payload?.projectId || context?.extension?.project?.id;
-    let requirementTypes = payload?.config?.requirementIssueTypes || [];
+    let effectiveConfig = payload?.config || {};
+    if (projectId && (!effectiveConfig.requirementIssueTypes || effectiveConfig.requirementIssueTypes.length === 0)) {
+      try {
+        const cfgResp = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+        if (cfgResp.ok) {
+          const cfgData = await cfgResp.json();
+          if (cfgData?.value) {
+            effectiveConfig = { ...cfgData.value, ...effectiveConfig };
+          }
+        }
+      } catch (_) {}
+    }
+
+    let requirementTypes = (effectiveConfig?.requirementIssueTypes || []).filter(Boolean);
     const issueKeys = Array.isArray(payload?.issueKeys)
       ? Array.from(new Set(payload.issueKeys.filter(k => typeof k === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(k.trim())).map(k => k.trim().toUpperCase())))
       : [];
 
+    const nonStoryWords = [
+      'task', 'tarea', 'sub-task', 'subtarea', 'subtask',
+      'test case', 'testcase', 'caso de prueba', 'casos de prueba',
+      'test cycle', 'testcycle', 'ciclo de prueba', 'ciclo de pruebas', 'ciclo',
+      'test plan', 'testplan', 'plan de prueba', 'plan de pruebas', 'test set', 'testset',
+      'test run', 'testrun', 'ejecución', 'ejecucion',
+      'bug', 'defecto', 'error', 'incidencia',
+      (effectiveConfig?.testCaseType || '').toLowerCase().trim(),
+      (effectiveConfig?.testCycleType || '').toLowerCase().trim(),
+      (effectiveConfig?.planIssueType || '').toLowerCase().trim(),
+      (effectiveConfig?.testRunType || '').toLowerCase().trim()
+    ].filter(Boolean);
+
+    const isEpicIssueType = (typeName, hierarchyLevel) => {
+      if (hierarchyLevel === 1) return true;
+      const lower = String(typeName || '').toLowerCase().trim();
+      return lower === 'epic' || lower === 'épica' || lower === 'epica' || lower.includes('epic') || lower.includes('épica');
+    };
+
+    const configuredStoryTypesLower = requirementTypes
+      .map(t => String(t).toLowerCase().trim())
+      .filter(t => t && !isEpicIssueType(t) && !nonStoryWords.some(w => t === w || t.includes(w)));
+
+    const isValidStoryIssueType = (typeName, isSubtask = false, hierarchyLevel = 0) => {
+      if (!typeName || isSubtask || hierarchyLevel === 1 || hierarchyLevel === -1) return false;
+      const lower = String(typeName).toLowerCase().trim();
+      if (isEpicIssueType(lower, hierarchyLevel)) return false;
+      if (nonStoryWords.some(w => lower === w || lower.includes(w))) return false;
+      if (configuredStoryTypesLower.length > 0) {
+        return configuredStoryTypesLower.some(cfg => lower === cfg || lower.includes(cfg) || cfg.includes(lower));
+      }
+      return ['story', 'historia', 'historia de usuario', 'user story'].some(w => lower === w || lower.includes(w));
+    };
+
     let allIssues = [];
-    const cf = resolveCustomFields(payload?.config);
-    const fields = getRequirementJqlFields(payload?.config);
+    const cf = resolveCustomFields(effectiveConfig);
+    const fields = getRequirementJqlFields(effectiveConfig);
 
     if (issueKeys.length > 0) {
       for (let i = 0; i < Math.min(issueKeys.length, 500); i += 100) {
@@ -804,14 +885,25 @@ resolver.define('getRequirements', async ({ payload, context }) => {
         }
       }
     } else {
-      if (!requirementTypes || requirementTypes.length === 0) {
-        requirementTypes = ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea', 'Epic', 'Épica'];
-      }
+      const validReqTypes = requirementTypes.filter(t => {
+        const l = String(t).toLowerCase().trim();
+        return isEpicIssueType(l) || isValidStoryIssueType(l);
+      });
+      const queryTypes = validReqTypes.length > 0
+        ? validReqTypes
+        : ['Story', 'Historia', 'Historia de usuario', 'User Story', 'Epic', 'Épica'];
       const projectJql = projectId ? `project = "${projectId}" AND ` : '';
-      const typeList = requirementTypes.map(t => `"${t}"`).join(', ');
+      const typeList = queryTypes.map(t => `"${t}"`).join(', ');
       const jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
       allIssues = await fetchAllIssues(jql, fields, null, null, 5);
     }
+
+    // Filter strictly to Epics and Stories (never return Tasks, Test Cases, Bugs, etc.)
+    allIssues = (allIssues || []).filter(iss => {
+      const iType = iss?.fields?.issuetype;
+      const tName = iType?.name || '';
+      return isEpicIssueType(tName, iType?.hierarchyLevel) || isValidStoryIssueType(tName, iType?.subtask, iType?.hierarchyLevel);
+    });
 
     // Resolve any Epic keys from configured epicLink / customfield_10014 or parent where summary is missing
     const knownSummaries = {};
@@ -882,10 +974,24 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
   try {
     const projectId = payload?.projectId || context?.extension?.project?.id;
     if (!projectId) return { epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {} };
-    const reqFields = getRequirementJqlFields(payload?.config);
-    const cf = resolveCustomFields(payload?.config);
 
-    // Step 0: Get project issue types to identify exact Epic and Requirement type IDs and names
+    let effectiveConfig = payload?.config || {};
+    if (!effectiveConfig.requirementIssueTypes || effectiveConfig.requirementIssueTypes.length === 0) {
+      try {
+        const cfgResp = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+        if (cfgResp.ok) {
+          const cfgData = await cfgResp.json();
+          if (cfgData?.value) {
+            effectiveConfig = { ...cfgData.value, ...effectiveConfig };
+          }
+        }
+      } catch (_) {}
+    }
+
+    const reqFields = getRequirementJqlFields(effectiveConfig);
+    const cf = resolveCustomFields(effectiveConfig);
+
+    // Step 0: Get project issue types to identify exact Epic and Story type IDs and names
     let epicTypeNames = [];
     let epicTypeIds = [];
     let availableTypes = [];
@@ -933,18 +1039,19 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       if (e.key) epicMap[e.key.toUpperCase()] = e;
     });
 
-    // Define all issue types that belong to test management or defects and must NEVER be treated as requirements
+    // Define all issue types that belong to tasks, subtasks, test management, or defects and must NEVER be treated as Stories
     const blacklistWords = [
+      'task', 'tarea', 'sub-task', 'subtarea', 'subtask',
       'test case', 'testcase', 'caso de prueba', 'casos de prueba',
       'test cycle', 'testcycle', 'ciclo de prueba', 'ciclo de pruebas', 'ciclo',
       'test plan', 'testplan', 'plan de prueba', 'plan de pruebas', 'test set', 'testset',
       'test run', 'testrun', 'ejecución', 'ejecucion',
       'bug', 'defecto', 'error', 'incidencia',
       ...epicTypeNames.map(n => (n || '').toLowerCase().trim()),
-      (payload?.config?.testCaseType || '').toLowerCase().trim(),
-      (payload?.config?.testCycleType || '').toLowerCase().trim(),
-      (payload?.config?.planIssueType || '').toLowerCase().trim(),
-      (payload?.config?.testRunType || '').toLowerCase().trim()
+      (effectiveConfig?.testCaseType || '').toLowerCase().trim(),
+      (effectiveConfig?.testCycleType || '').toLowerCase().trim(),
+      (effectiveConfig?.planIssueType || '').toLowerCase().trim(),
+      (effectiveConfig?.testRunType || '').toLowerCase().trim()
     ].filter(Boolean);
 
     const isBlacklistedType = (typeName) => {
@@ -953,14 +1060,28 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
       return blacklistWords.some(w => lower === w || lower.includes(w));
     };
 
-    // Step 2: Traer TODAS las HISTORIAS / REQUISITOS del proyecto (incluyendo historias huérfanas sin épica)
-    let configuredReqTypes = (payload?.config?.requirementIssueTypes || []).filter(Boolean);
-    configuredReqTypes = configuredReqTypes.filter(t => !isBlacklistedType(t));
+    // Step 2: Traer estrictamente las HISTORIAS del proyecto según la configuración (excluyendo Tareas y Épicas)
+    let configuredReqTypes = (effectiveConfig?.requirementIssueTypes || [])
+      .map(t => String(t).trim())
+      .filter(t => t && !isBlacklistedType(t));
+
+    const configuredStoryLower = configuredReqTypes.map(t => t.toLowerCase());
+    const defaultStoryWords = ['story', 'historia', 'historia de usuario', 'user story'];
+
+    const isAllowedStoryType = (typeName) => {
+      if (!typeName) return false;
+      const lower = String(typeName).toLowerCase().trim();
+      if (isBlacklistedType(lower)) return false;
+      if (configuredStoryLower.length > 0) {
+        return configuredStoryLower.some(cfg => lower === cfg || lower.includes(cfg) || cfg.includes(lower));
+      }
+      return defaultStoryWords.some(w => lower === w || lower.includes(w));
+    };
 
     let validProjectTypes = [];
     if (availableTypes.length > 0) {
       validProjectTypes = availableTypes.filter(
-        t => !t.subtask && t.hierarchyLevel !== 1 && !isBlacklistedType(t.name)
+        t => !t.subtask && t.hierarchyLevel !== 1 && isAllowedStoryType(t.name)
       );
     }
 
@@ -972,20 +1093,20 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     } else {
       let reqTypes = configuredReqTypes.length > 0
         ? configuredReqTypes
-        : ['Story', 'Historia', 'Historia de usuario', 'Requirement', 'Requisito', 'User Story', 'Task', 'Tarea'];
+        : ['Story', 'Historia', 'Historia de usuario', 'User Story'];
       const typeList = reqTypes.map(t => `"${t}"`).join(', ');
       const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${typeList}) ORDER BY created DESC`;
       rawStories = await fetchAllIssues(storiesJql, reqFields, null, null, 10);
     }
 
-    // Fallback: si la consulta por issuetype devolvió vacío, consultar issues del proyecto y filtrar en memoria
+    // Fallback: si la consulta por issuetype devolvió vacío, consultar issues del proyecto y filtrar en memoria por isAllowedStoryType
     if (!rawStories || rawStories.length === 0) {
       const fallbackJql = `project = "${resolvedProjectKey}" ORDER BY created DESC`;
       rawStories = await fetchAllIssues(fallbackJql, reqFields, null, null, 10);
     }
 
     const stories = (rawStories || [])
-      .filter(issue => !issue.fields?.issuetype?.subtask && !isBlacklistedType(issue.fields?.issuetype?.name))
+      .filter(issue => !issue.fields?.issuetype?.subtask && isAllowedStoryType(issue.fields?.issuetype?.name))
       .map(issue => ({
         id: issue.id,
         key: issue.key,
@@ -998,7 +1119,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         issuelinks: issue.fields?.issuelinks || []
       }));
 
-    // If epics exist, also find any issues directly having parent in epics (in chunks of 50 epics)
+    // If epics exist, also find any Stories directly having parent in epics (in chunks of 50 epics)
     if (epics.length > 0) {
       const seenKeys = new Set(stories.map(s => s.key));
       for (let i = 0; i < Math.min(epics.length, 200); i += 50) {
@@ -1009,7 +1130,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
           if (Array.isArray(childrenIssues)) {
             childrenIssues.forEach(issue => {
               const issueType = issue.fields?.issuetype?.name || '';
-              if (isBlacklistedType(issueType)) return;
+              if (issue.fields?.issuetype?.subtask || !isAllowedStoryType(issueType)) return;
               if (!seenKeys.has(issue.key)) {
                 seenKeys.add(issue.key);
                 stories.push({
@@ -1042,7 +1163,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
           if (!cand || !cand.key) return;
           const candKeyUpper = cand.key.toUpperCase();
           const candType = cand.fields?.issuetype?.name || '';
-          if (isBlacklistedType(candType)) return;
+          if (candType && !isAllowedStoryType(candType)) return;
           if (epicMap[candKeyUpper]) return; // Ignore epic-to-epic links
           if (!epicLinkedStoryMap[candKeyUpper]) {
             epicLinkedStoryMap[candKeyUpper] = { epicKey: epic.key, epicSummary: epic.summary };
@@ -1061,8 +1182,11 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
         if (!stPage?.error && Array.isArray(stPage?.issues)) {
           stPage.issues.forEach(issue => {
             const issueType = issue.fields?.issuetype?.name || '';
-            if (isBlacklistedType(issueType)) return;
             const kUpper = (issue.key || '').toUpperCase();
+            if (issue.fields?.issuetype?.subtask || !isAllowedStoryType(issueType)) {
+              delete epicLinkedStoryMap[kUpper];
+              return;
+            }
             if (!seenStoryKeysUpper.has(kUpper)) {
               seenStoryKeysUpper.add(kUpper);
               stories.push({
@@ -1083,12 +1207,24 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     }
 
     // Step 2c: Resolve any missing Epic summaries (e.g. cross-project Epics or customfield_10014 links)
+    const isEpicIssueType = (typeName, hierarchyLevel) => {
+      if (hierarchyLevel === 1) return true;
+      const lower = String(typeName || '').toLowerCase().trim();
+      return lower === 'epic' || lower === 'épica' || lower === 'epica' || lower.includes('epic') || lower.includes('épica');
+    };
+
     const missingEpicKeys = new Set();
     stories.forEach(story => {
       if (story.parent?.key) {
         const pk = story.parent.key.toUpperCase();
+        const pType = story.parent.fields?.issuetype?.name || '';
+        const pLevel = story.parent.fields?.issuetype?.hierarchyLevel;
+        if (pType && !isEpicIssueType(pType, pLevel)) {
+          story.parent = null;
+          return;
+        }
         if (!epicMap[pk]) {
-          if (story.parent.fields?.summary) {
+          if (story.parent.fields?.summary && isEpicIssueType(pType, pLevel)) {
             const entry = {
               id: story.parent.id || pk,
               key: story.parent.key,
@@ -1112,10 +1248,10 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (missingEpicKeys.size > 0) {
       const missingArr = Array.from(missingEpicKeys).slice(0, 100);
       try {
-        const epPage = await fetchJqlPage(`issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'status'], null, null, null, 100);
+        const epPage = await fetchJqlPage(`issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'status', 'issuetype'], null, null, null, 100);
         if (!epPage?.error && Array.isArray(epPage?.issues)) {
           epPage.issues.forEach(ep => {
-            if (ep?.key) {
+            if (ep?.key && isEpicIssueType(ep.fields?.issuetype?.name, ep.fields?.issuetype?.hierarchyLevel)) {
               const entry = {
                 id: ep.id,
                 key: ep.key,
@@ -1425,8 +1561,20 @@ resolver.define('getTestCaseDetailsBatch', async ({ payload }) => {
 
 // === Test Set Management ===
 resolver.define('createTestSet', async (req) => {
-  const { summary, description, projectId } = req.payload;
-  // This requires the "Test Set" issue type to exist in the Jira project
+  const { summary, description, projectId, config: payloadConfig } = req.payload || {};
+  let config = payloadConfig && typeof payloadConfig === 'object' ? payloadConfig : null;
+  if (!config && projectId) {
+    try {
+      const configResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+      if (configResponse.status === 200) {
+        config = (await configResponse.json()).value || {};
+      }
+    } catch (_) {}
+  }
+  const setIssueType = config?.planIssueTypeId
+    ? { id: String(config.planIssueTypeId) }
+    : { name: config?.planIssueType || 'Test Set' };
+
   const body = {
     fields: {
       summary: summary,
@@ -1436,11 +1584,11 @@ resolver.define('createTestSet', async (req) => {
         content: [{ type: "paragraph", content: [{ type: "text", text: description || "" }] }]
       },
       project: { id: projectId },
-      issuetype: { name: "Test Set" }
+      issuetype: setIssueType
     }
   };
   
-  const response = await api.asApp().requestJira(route`/rest/api/3/issue`, {
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue`, {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -1471,20 +1619,25 @@ resolver.define('linkTestToFolder', async ({ payload }) => {
 
 // === Test Cycle Management ===
 resolver.define('createTestCycle', async (req) => {
-  const { summary, description, projectId } = req.payload;
+  const { summary, description, projectId, config: payloadConfig } = req.payload || {};
   
   // Fetch configured testCycleType (primary key: testops-config, legacy fallback: testpulse-config)
-  let config = {};
-  const configResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
-  if (configResponse.status === 200) {
-    config = (await configResponse.json()).value || {};
-  } else {
-    const legacyResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-config`);
-    if (legacyResponse.status === 200) {
-      config = (await legacyResponse.json()).value || {};
+  let config = payloadConfig && typeof payloadConfig === 'object' ? payloadConfig : {};
+  if (!config.testCycleType && !config.testCycleTypeId && projectId) {
+    const configResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`);
+    if (configResponse.status === 200) {
+      config = (await configResponse.json()).value || {};
+    } else {
+      const legacyResponse = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-config`);
+      if (legacyResponse.status === 200) {
+        config = (await legacyResponse.json()).value || {};
+      }
     }
   }
   const cycleType = config?.testCycleType || 'Test Cycle';
+  const cycleIssueType = config?.testCycleTypeId
+    ? { id: String(config.testCycleTypeId) }
+    : { name: cycleType };
 
   const body = {
     fields: {
@@ -1495,11 +1648,11 @@ resolver.define('createTestCycle', async (req) => {
         content: [{ type: "paragraph", content: [{ type: "text", text: description || "" }] }]
       },
       project: { id: projectId },
-      issuetype: { name: cycleType }
+      issuetype: cycleIssueType
     }
   };
   
-  const response = await api.asApp().requestJira(route`/rest/api/3/issue`, {
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue`, {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -2239,19 +2392,24 @@ const getCycleExecutionSummary = async (cycleId) => {
             ], getIterationEvidenceKeys(runData.iterations)),
             iterations: runData.iterations || [],
             comment: runData.comment || '',
-            linkedBugs: (runData.linkedBugs && runData.linkedBugs.length > 0)
-              ? runData.linkedBugs
-              : (run.fields?.issuelinks || [])
-                  .filter(l => l.type?.name === 'Blocks' || l.outwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug') || l.inwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug'))
-                  .map(l => {
-                    const linked = l.outwardIssue || l.inwardIssue;
-                    return {
-                      key: linked?.key,
-                      summary: linked?.fields?.summary,
-                      status: linked?.fields?.status?.name,
-                      priority: linked?.fields?.priority?.name
-                    };
-                  }).filter(b => !!b.key),
+            // Validate linkedBugs against live Jira issue links and cycle project prefix
+            linkedBugs: (() => {
+              const runProjPrefix = (run.key && run.key.includes('-')) ? run.key.split('-')[0].toUpperCase() : '';
+              const rawLinks = (run.fields?.issuelinks || [])
+                .filter(l => l.type?.name === 'Blocks' || l.outwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug') || l.inwardIssue?.fields?.issuetype?.name?.toLowerCase().includes('bug'))
+                .map(l => {
+                  const linked = l.outwardIssue || l.inwardIssue;
+                  return {
+                    key: linked?.key,
+                    summary: linked?.fields?.summary,
+                    status: linked?.fields?.status?.name,
+                    priority: linked?.fields?.priority?.name
+                  };
+                })
+                .filter(b => !!b.key && (!runProjPrefix || String(b.key).toUpperCase().startsWith(runProjPrefix + '-')));
+              const sourceBugs = (runData.linkedBugs && runData.linkedBugs.length > 0) ? runData.linkedBugs : rawLinks;
+              return sourceBugs.filter(b => b && b.key && (!runProjPrefix || String(b.key).toUpperCase().startsWith(runProjPrefix + '-')));
+            })(),
             lockedAt: runData.lockedAt || null,
             _detailLoaded: false
           };
@@ -2330,6 +2488,32 @@ const getCycleExecutionSummary = async (cycleId) => {
               await linkTwoIssues(targetRunRef, cycleId, 'Relates').catch(() => {});
             }
           }
+        }
+
+        // Verify any linkedBugs in this cycle against live Jira (purges bugs moved to another project or deleted)
+        const cycleBugKeys = new Set();
+        let cycleProjPrefix = (typeof cycleId === 'string' && cycleId.includes('-')) ? cycleId.split('-')[0].toUpperCase() : '';
+        cleanEntries.forEach(e => {
+          if (!cycleProjPrefix) {
+            const sampleKey = e.testRunKey || e.testCaseKey || e.key || '';
+            if (sampleKey && sampleKey.includes('-')) cycleProjPrefix = sampleKey.split('-')[0].toUpperCase();
+          }
+          (e.linkedBugs || []).forEach(b => {
+            if (b && b.key) cycleBugKeys.add(b.key);
+          });
+        });
+        if (cycleBugKeys.size > 0) {
+          const validCycleBugs = await fetchBugsBatch(Array.from(cycleBugKeys), config, null, cycleProjPrefix || null);
+          cleanEntries.forEach(e => {
+            if (Array.isArray(e.linkedBugs) && e.linkedBugs.length > 0) {
+              e.linkedBugs = e.linkedBugs
+                .filter(b => b && b.key && validCycleBugs[b.key])
+                .map(b => {
+                  const { rawFields: _rf, ...leanBug } = validCycleBugs[b.key];
+                  return { ...b, ...leanBug };
+                });
+            }
+          });
         }
 
         // Reconcile cycle sharded index ONLY if the compact snapshot actually changed,
@@ -2424,13 +2608,14 @@ const updateLightweightIndex = async (cycleId, updateFn) => {
 };
 
 
-const fetchBugsBatch = async (keys = []) => {
+const fetchBugsBatch = async (keys = [], config = null, projectId = null, projectKey = null) => {
   const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
   if (uniqueKeys.length === 0) return {};
-  const sevField = 'customfield_10238';
-  const estResField = 'customfield_10763';
+  const requestedSet = new Set(uniqueKeys.map(k => String(k).trim().toUpperCase()));
+  const targetProjId = projectId ? String(projectId).trim() : null;
+  const targetProjKey = projectKey ? String(projectKey).trim().toUpperCase() : null;
   const bugMap = {};
-  const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'issuetype', sevField, estResField];
+  const fieldsToFetch = getBugJqlFields(config, ['project']);
 
   // Chunk into groups of 50 keys to stay well within Jira JQL URL/payload limits
   const CHUNK_SIZE = 50;
@@ -2466,30 +2651,36 @@ const fetchBugsBatch = async (keys = []) => {
         const issues = data.issues || [];
         for (const issue of issues) {
           const key = issue.key;
-          let sevVal = 'Sin definir';
-          if (issue.fields?.[sevField]) {
-            const sf = issue.fields[sevField];
-            sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-          } else if (issue.fields) {
-            for (const [fKey, fVal] of Object.entries(issue.fields)) {
-              if (fKey.startsWith('customfield_') && fVal) {
-                const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-                if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
-                  sevVal = vStr;
-                  break;
-                }
-              }
-            }
+          const upperKey = String(key || '').trim().toUpperCase();
+          // 1. If the issue was moved in Jira, its current key will differ from the requested key.
+          // Reject any issue whose current key is not in the requested set.
+          if (!requestedSet.has(upperKey)) {
+            continue;
           }
+          // 2. Verify the issue still belongs to the current project (if projectId / projectKey provided)
+          const issueProjId = issue.fields?.project?.id ? String(issue.fields.project.id).trim() : '';
+          const issueProjKey = issue.fields?.project?.key ? String(issue.fields.project.key).trim().toUpperCase() : '';
+          if (targetProjKey && issueProjKey && issueProjKey !== targetProjKey) {
+            continue;
+          }
+          if (targetProjKey && !upperKey.startsWith(targetProjKey + '-')) {
+            continue;
+          }
+          if (targetProjId && issueProjId && issueProjKey && issueProjId !== targetProjId && issueProjKey !== targetProjId.toUpperCase()) {
+            continue;
+          }
+
+          const sevVal = extractBugSeverityFromFields(issue.fields, config);
 
           const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
           const versionDisplay = fixVersions.length > 0 ? fixVersions.join(', ') : (affectsVersions.length > 0 ? affectsVersions.join(', ') : 'Sin versión');
-          const estResDate = issue.fields?.[estResField] || null;
+          const estResDate = extractBugEstimatedDateFromFields(issue.fields, config, false);
           const changelogMeta = analyzeBugChangelog(issue);
 
           bugMap[key] = {
             key,
+            project: issueProjKey || undefined,
             summary: issue.fields?.summary || '',
             status: issue.fields?.status?.name || '',
             statusCategory: issue.fields?.status?.statusCategory?.key || '',
@@ -2635,7 +2826,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     };
   });
 
-  // Fetch live bug details in bulk via fast JQL
+  // Fetch live bug details in bulk via fast JQL, scoped to the current project
   const allBugKeys = new Set();
   cycles.forEach(c => {
     c.execution?.forEach(ex => {
@@ -2645,21 +2836,38 @@ resolver.define('getExecutionReport', async ({ payload }) => {
     });
   });
 
-  const bugMap = await fetchBugsBatch(Array.from(allBugKeys));
+  const inferredProjKey = (allIssues[0]?.key && allIssues[0].key.includes('-'))
+    ? allIssues[0].key.split('-')[0].toUpperCase()
+    : (projectId && isNaN(projectId) ? String(projectId).trim().toUpperCase() : null);
+
+  const bugMap = await fetchBugsBatch(Array.from(allBugKeys), config, projectId, inferredProjKey);
 
   cycles.forEach(c => {
+    let hadStaleBugs = false;
     if (Array.isArray(c.execution)) {
       c.execution.forEach(ex => {
-        if (Array.isArray(ex.linkedBugs)) {
-          // Purge any dead or non-existent bugs from Jira
+        if (Array.isArray(ex.linkedBugs) && ex.linkedBugs.length > 0) {
+          const prevLen = ex.linkedBugs.length;
+          // Purge any dead, deleted, or moved-to-other-project bugs from Jira
           ex.linkedBugs = ex.linkedBugs
             .filter(b => b && b.key && bugMap[b.key])
             .map(b => {
               const { rawFields: _rf, ...leanBug } = bugMap[b.key];
               return { ...b, ...leanBug };
             });
+          if (ex.linkedBugs.length !== prevLen) {
+            hadStaleBugs = true;
+          }
         }
       });
+    }
+    if (hadStaleBugs && c.id) {
+      // Self-heal stored cycle index in background so moved/deleted bugs don't reappear
+      const cleanedCompact = (c.execution || []).map(item => ({
+        ...item,
+        linkedBugs: trimBugsForIndex(item.linkedBugs || [])
+      }));
+      writeCycleIndex(c.id, cleanedCompact).catch(() => {});
     }
   });
 
@@ -2755,8 +2963,8 @@ resolver.define('getExecutionReport', async ({ payload }) => {
 });
 
 resolver.define('getBugsBatch', async ({ payload }) => {
-  const { keys = [] } = payload || {};
-  return await fetchBugsBatch(keys);
+  const { keys = [], config = null } = payload || {};
+  return await fetchBugsBatch(keys, config);
 });
 
 resolver.define('getCycleExecution', async ({ payload }) => {
@@ -3548,8 +3756,7 @@ resolver.define('linkBugToTest', async ({ payload }) => {
 
   try {
     // 1. Verify that the bug actually exists in Jira
-    const sevField = 'customfield_10238';
-    const fieldsToFetch = ['summary', 'status', 'assignee', 'resolution', 'priority', 'created', 'resolutiondate', 'versions', 'fixVersions', 'issuetype', sevField].join(',');
+    const fieldsToFetch = getBugJqlFields(payload?.config).join(',');
     const checkResp = await api.asUser().requestJira(route`/rest/api/3/issue/${keyToCheck}?fields=${fieldsToFetch}`);
     
     if (checkResp.status === 404 || !checkResp.ok) {
@@ -3598,22 +3805,8 @@ resolver.define('linkBugToTest', async ({ payload }) => {
       console.warn(`[linkBugToTest] IssueLink warning for ${keyToCheck}:`, linkErrMsg);
     }
 
-    // Extract severity and versions
-    let sevVal = 'Sin definir';
-    if (issueData.fields?.[sevField]) {
-      const sf = issueData.fields[sevField];
-      sevVal = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-    } else if (issueData.fields) {
-      for (const [fKey, fVal] of Object.entries(issueData.fields)) {
-        if (fKey.startsWith('customfield_') && fVal) {
-          const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || '') : String(fVal);
-          if (['bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media', 'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'].includes(String(vStr).toLowerCase())) {
-            sevVal = vStr;
-            break;
-          }
-        }
-      }
-    }
+    // Extract severity and versions dynamically
+    const sevVal = extractBugSeverityFromFields(issueData.fields, payload?.config);
 
     const affectsVersions = (issueData.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issueData.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
@@ -4014,7 +4207,7 @@ resolver.define('migrateAllCycles', async ({ payload }) => {
 
 // ── Todos los bugs del espacio/proyecto Jira en el que se trabaja ──
 resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
-  const { projectId, projectKey, linkedBugKeys = [], bugIssueTypes = [] } = payload;
+  const { projectId, projectKey, linkedBugKeys = [], bugIssueTypes = [], config = null } = payload || {};
 
   const linkedSet = new Set(linkedBugKeys.map(String));
 
@@ -4067,7 +4260,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
   console.log(`[getProjectUnlinkedBugs] Running JQL query: ${jql}`);
-  const fields = ['summary', 'status', 'assignee', 'priority', 'resolution', 'created', 'resolutiondate', 'duedate', 'versions', 'fixVersions', 'reporter', 'issuetype', 'project', 'customfield_10238', 'customfield_10763', 'issuelinks'];
+  const fields = getBugJqlFields(config, ['reporter', 'project', 'issuelinks']);
 
   let allIssues = [];
   let token = null;
@@ -4093,18 +4286,28 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 
   console.log(`[getProjectUnlinkedBugs] Total bugs retrieved from Jira: ${allIssues.length}`);
 
-  // Return ALL bugs with explicit issuelinks detection
-  return allIssues.map(issue => {
-    let sev = 'Sin definir';
-    if (issue.fields?.customfield_10238) {
-      const sf = issue.fields.customfield_10238;
-      sev = typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
-    }
+  const upperProjKey = resolvedProjectKey ? String(resolvedProjectKey).trim().toUpperCase() : '';
+  const targetProjIdStr = projectId ? String(projectId).trim() : '';
 
+  // Strictly exclude any bug whose current key or project does not belong to the active project
+  const projectIssues = allIssues.filter(issue => {
+    const issueKeyUpper = String(issue?.key || '').trim().toUpperCase();
+    if (!issueKeyUpper) return false;
+    const issueProjKey = issue?.fields?.project?.key ? String(issue.fields.project.key).trim().toUpperCase() : '';
+    const issueProjId = issue?.fields?.project?.id ? String(issue.fields.project.id).trim() : '';
+    if (upperProjKey && !issueKeyUpper.startsWith(upperProjKey + '-')) return false;
+    if (upperProjKey && issueProjKey && issueProjKey !== upperProjKey) return false;
+    if (targetProjIdStr && issueProjId && issueProjKey && issueProjId !== targetProjIdStr && issueProjKey !== targetProjIdStr.toUpperCase()) return false;
+    return true;
+  });
+
+  // Return ALL project bugs with explicit issuelinks detection
+  return projectIssues.map(issue => {
+    const sev = extractBugSeverityFromFields(issue.fields, config);
     const affectsVersions = (issue.fields?.versions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const fixVersions = (issue.fields?.fixVersions || []).map(v => typeof v === 'object' ? (v.name || v.value || String(v)) : String(v)).filter(Boolean);
     const versionDisplay = affectsVersions.length > 0 ? affectsVersions.join(', ') : (fixVersions.length > 0 ? fixVersions.join(', ') : 'Sin versión');
-    const estResDate = issue.fields?.customfield_10763 || issue.fields?.duedate || null;
+    const estResDate = extractBugEstimatedDateFromFields(issue.fields, config, true);
     const changelogMeta = analyzeBugChangelog(issue);
 
     // Inspect Jira issuelinks on the bug to see if it is linked to any test entity
@@ -4773,20 +4976,130 @@ resolver.define('listCycleRunsForResync', async ({ payload }) => {
   return { items, withoutRun };
 });
 
-// ─── Tester assignment (Execution) ───
+// ─── Tester & Bug assignment (Execution & BugSlidePanel) ───
 resolver.define('searchAssignableUsers', async ({ payload }) => {
-  const { projectId, query } = payload || {};
-  if (!projectId) return [];
-  try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/user/assignable/search?project=${String(projectId)}&query=${String(query || '')}&maxResults=20`);
-    if (!res.ok) {
-      console.warn(`[searchAssignableUsers] ${res.status}`);
-      return [];
+  const { issueKey, projectKey, projectId, query } = payload || {};
+  const qStr = String(query || '').trim();
+  const normText = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+  const normalizeUsers = (arr) => {
+    if (!Array.isArray(arr)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const u of arr) {
+      if (!u || !u.accountId) continue;
+      if (u.active === false) continue;
+      if (u.accountType === 'app') continue;
+      if (seen.has(u.accountId)) continue;
+      seen.add(u.accountId);
+      out.push({
+        accountId: u.accountId,
+        displayName: u.displayName || u.name || u.emailAddress || u.accountId,
+        email: u.emailAddress || null,
+        avatarUrl: u.avatarUrls?.['24x24'] || u.avatarUrls?.['48x48'] || u.avatarUrls?.['32x32'] || null
+      });
     }
-    const users = await res.json();
-    return (users || [])
-      .filter(u => u.active !== false && u.accountType !== 'app')
-      .map(u => ({ accountId: u.accountId, displayName: u.displayName, avatarUrl: u.avatarUrls?.['24x24'] || null }));
+    return out;
+  };
+
+  const filterUsersByQuery = (users, q) => {
+    const nq = normText(q);
+    if (!nq) return users;
+    const tokens = nq.split(/\s+/).filter(Boolean);
+    return users.filter(u => {
+      const haystack = `${normText(u.displayName)} ${normText(u.email)}`;
+      return tokens.every(tok => haystack.includes(tok));
+    });
+  };
+
+  const fetchUsersFromEndpoint = async (jiraRoute) => {
+    try {
+      const resUser = await api.asUser().requestJira(jiraRoute);
+      if (resUser.ok) {
+        const data = await resUser.json();
+        const list = normalizeUsers(Array.isArray(data) ? data : (data?.values || data?.users || []));
+        if (list.length > 0) return list;
+      }
+    } catch (e) {
+      console.warn('[searchAssignableUsers] asUser error:', e.message);
+    }
+    try {
+      const resApp = await api.asApp().requestJira(jiraRoute);
+      if (resApp.ok) {
+        const data = await resApp.json();
+        const list = normalizeUsers(Array.isArray(data) ? data : (data?.values || data?.users || []));
+        if (list.length > 0) return list;
+      }
+    } catch (e) {
+      console.warn('[searchAssignableUsers] asApp error:', e.message);
+    }
+    return [];
+  };
+
+  const validIssueKey = (issueKey && String(issueKey).includes('-') && String(issueKey) !== 'BUG')
+    ? String(issueKey).trim()
+    : null;
+  const derivedKeyFromIssue = validIssueKey ? validIssueKey.split('-')[0] : null;
+
+  let resolvedProjectKey = (projectKey && !/^\d+$/.test(String(projectKey).trim()))
+    ? String(projectKey).trim()
+    : derivedKeyFromIssue;
+  const rawProjectRef = resolvedProjectKey || projectKey || projectId || null;
+
+  try {
+    // 1. Try assignable search by specific issueKey (most accurate for Bugs & Test Runs)
+    if (validIssueKey) {
+      const byIssue = await fetchUsersFromEndpoint(
+        route`/rest/api/3/user/assignable/search?issueKey=${validIssueKey}&query=${qStr}&maxResults=50`
+      );
+      if (byIssue.length > 0) return byIssue.slice(0, 30);
+
+      if (qStr) {
+        const allForIssue = await fetchUsersFromEndpoint(
+          route`/rest/api/3/user/assignable/search?issueKey=${validIssueKey}&maxResults=200`
+        );
+        const filteredIssue = filterUsersByQuery(allForIssue, qStr);
+        if (filteredIssue.length > 0) return filteredIssue.slice(0, 30);
+      }
+    }
+
+    // 2. If we only have a numeric projectId, resolve its project key so Jira assignable search always succeeds
+    if (!resolvedProjectKey && rawProjectRef && /^\d+$/.test(String(rawProjectRef).trim())) {
+      try {
+        const pRes = await api.asUser().requestJira(route`/rest/api/3/project/${String(rawProjectRef).trim()}`);
+        if (pRes.ok) {
+          const pData = await pRes.json();
+          if (pData?.key) resolvedProjectKey = pData.key;
+        }
+      } catch (_) {}
+    }
+
+    const projectCandidates = Array.from(new Set([resolvedProjectKey, rawProjectRef].filter(Boolean).map(String)));
+    for (const proj of projectCandidates) {
+      const byProj = await fetchUsersFromEndpoint(
+        route`/rest/api/3/user/assignable/search?project=${proj}&query=${qStr}&maxResults=50`
+      );
+      if (byProj.length > 0) return byProj.slice(0, 30);
+
+      if (qStr) {
+        const allForProj = await fetchUsersFromEndpoint(
+          route`/rest/api/3/user/assignable/search?project=${proj}&maxResults=200`
+        );
+        const filteredProj = filterUsersByQuery(allForProj, qStr);
+        if (filteredProj.length > 0) return filteredProj.slice(0, 30);
+      }
+    }
+
+    // 3. Fallback: general Jira user search if project/issue assignable search returned empty
+    const byUserSearch = await fetchUsersFromEndpoint(
+      route`/rest/api/3/user/search?query=${qStr}&maxResults=50`
+    );
+    if (byUserSearch.length > 0) return filterUsersByQuery(byUserSearch, qStr).slice(0, 30);
+
+    const allUsersFallback = await fetchUsersFromEndpoint(
+      route`/rest/api/3/users/search?maxResults=200`
+    );
+    return filterUsersByQuery(allUsersFallback, qStr).slice(0, 30);
   } catch (e) {
     console.warn('[searchAssignableUsers] error:', e.message);
     return [];

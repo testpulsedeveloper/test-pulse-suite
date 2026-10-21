@@ -36,21 +36,24 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
 
 const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 export default function ExecutionView({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
+  const [dockWidth, , isResizingDock] = usePanelDockWidth();
   const {
     _uid,
     _uname,
     addNotification,
     availableEnvironments,
+    bugKeyInput,
     calcScheduleDays,
     cycleScheduleForm,
     cycleTests,
     deferredExecutionSearch,
+    doLinkBug,
     execFolderFilter,
     execTesterFilter,
     execTesterFilterSource,
@@ -74,6 +77,7 @@ export default function ExecutionView({ ctx }) {
     groupToolBtnStyle,
     handleAddIteration,
     handleCaptureScreen,
+    handleCreateBug,
     handleCreateIssue,
     handleCycleSelect,
     handleDeleteEvidence,
@@ -94,11 +98,13 @@ export default function ExecutionView({ ctx }) {
     isResizing,
     isTestMine,
     isTestUnassigned,
+    linkingBugTestId,
     matchesFolder,
     matchesTester,
     mergeIterationsPreservingLocal,
     myAccountId,
     openAssignModal,
+    perCycleCacheRef,
     planCyclesSummary,
     planScheduleForm,
     renderGroupToolbar,
@@ -107,6 +113,8 @@ export default function ExecutionView({ ctx }) {
     selectedCycle,
     selectedPlanId,
     setActiveTab,
+    setBugKeyInput,
+    setCycleTests,
     setExecFolderFilter,
     setExecTesterFilter,
     setExecTesterFilterSource,
@@ -118,7 +126,9 @@ export default function ExecutionView({ ctx }) {
     setExecutionStatusFilter,
     setExpandedExecutionTest,
     setIsResizing,
+    setLinkingBugTestId,
     setRefreshTrigger,
+    setSelectedBug,
     setSelectedCycle,
     setSelectedPlanId,
     sidebarWidth,
@@ -161,6 +171,18 @@ export default function ExecutionView({ ctx }) {
     const notRunCount = deduplicatedCycleTests.filter(t => isNotRun(t.status)).length;
     const executedCount = passedCount + failedCount + blockedCount + inProgressCount;
     const completionRate = totalInCycle > 0 ? Math.round(((passedCount + failedCount + blockedCount) / totalInCycle) * 100) : 0;
+
+    // Breakdown of Manual vs Automated cases and execution progress in the active cycle
+    const isCycleTestAuto = t => getExecVal(t).includes('auto') || t?.isAutomated === true || String(t?.testType || '').toLowerCase().includes('auto');
+    const isCycleTestExecuted = t => isPassed(t.status) || isFailed(t.status) || isBlocked(t.status) || isInProgress(t.status);
+    const autoCycleTests = deduplicatedCycleTests.filter(isCycleTestAuto);
+    const manualCycleTests = deduplicatedCycleTests.filter(t => !isCycleTestAuto(t));
+    const autoTotalCount = autoCycleTests.length;
+    const autoExecutedCount = autoCycleTests.filter(isCycleTestExecuted).length;
+    const autoExecPct = autoTotalCount > 0 ? Number(((autoExecutedCount / autoTotalCount) * 100).toFixed(1)) : 0;
+    const manualTotalCount = manualCycleTests.length;
+    const manualExecutedCount = manualCycleTests.filter(isCycleTestExecuted).length;
+    const manualExecPct = manualTotalCount > 0 ? Number(((manualExecutedCount / manualTotalCount) * 100).toFixed(1)) : 0;
 
     const passedPct = totalInCycle > 0 ? ((passedCount / totalInCycle) * 100).toFixed(1) : '0';
     const failedPct = totalInCycle > 0 ? ((failedCount / totalInCycle) * 100).toFixed(1) : '0';
@@ -1157,27 +1179,79 @@ export default function ExecutionView({ ctx }) {
                             </div>
 
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px', paddingTop: '2px' }}>
-                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #E5E7EB' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
-                                  <span>Tiempo ciclo consumido</span>
-                                  <span style={{ fontWeight: 700, color: '#172B4D' }}>
-                                    {cycleElapsedPct}% (Día {cycleElapsedDays}/{cycleTotalBizDays})
-                                  </span>
+                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #E5E7EB', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                                <div>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
+                                    <span>Tiempo ciclo consumido</span>
+                                    <span style={{ fontWeight: 700, color: '#172B4D' }}>
+                                      {cycleElapsedPct}% (Día {cycleElapsedDays}/{cycleTotalBizDays})
+                                    </span>
+                                  </div>
+                                  <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                    <div style={{ background: '#94A3B8', height: '100%', width: `${cycleElapsedPct}%`, transition: 'width 0.3s ease' }} />
+                                  </div>
                                 </div>
-                                <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
-                                  <div style={{ background: '#94A3B8', height: '100%', width: `${cycleElapsedPct}%`, transition: 'width 0.3s ease' }} />
+                                <div style={{ marginTop: '6px', paddingTop: '5px', borderTop: '1px dashed #E5E7EB', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '10px', color: '#626F86' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>Días hábiles restantes</span>
+                                    <span style={{ fontWeight: 700, color: '#172B4D' }}>
+                                      {Math.max(0, cycleTotalBizDays - cycleElapsedDays)} de {cycleTotalBizDays} días
+                                    </span>
+                                  </div>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>Composición del ciclo</span>
+                                    <span style={{ fontWeight: 600, color: '#44546F' }}>
+                                      {manualTotalCount} man · {autoTotalCount} auto ({totalInCycle > 0 ? Math.round((autoTotalCount / totalInCycle) * 100) : 0}%)
+                                    </span>
+                                  </div>
                                 </div>
                               </div>
 
-                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #A7F3D0' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
-                                  <span>Casos ejecutados</span>
-                                  <span style={{ fontWeight: 700, color: '#047857' }}>
-                                    {cycleExecPct}% ({executedCount} de {totalInCycle})
-                                  </span>
+                              <div style={{ background: 'rgba(255, 255, 255, 0.85)', padding: '6px 8px', borderRadius: '6px', border: '1px solid #A7F3D0', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                                <div>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#626F86', marginBottom: '4px' }}>
+                                    <span>Casos ejecutados (Total)</span>
+                                    <span style={{ fontWeight: 700, color: '#047857' }}>
+                                      {cycleExecPct}% ({executedCount} de {totalInCycle})
+                                    </span>
+                                  </div>
+                                  <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                    <div style={{ background: '#10B981', height: '100%', width: `${cycleExecPct}%`, transition: 'width 0.3s ease' }} />
+                                  </div>
                                 </div>
-                                <div style={{ width: '100%', background: '#E5E7EB', height: '6px', borderRadius: '9999px', overflow: 'hidden' }}>
-                                  <div style={{ background: '#10B981', height: '100%', width: `${cycleExecPct}%`, transition: 'width 0.3s ease' }} />
+
+                                <div style={{ marginTop: '6px', paddingTop: '5px', borderTop: '1px dashed #A7F3D0', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                  {/* Avance Ejecución Manual */}
+                                  <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px', marginBottom: '2px' }}>
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#44546F', fontWeight: 600 }}>
+                                        <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#0C66E4', display: 'inline-block' }} />
+                                        <span>Manuales</span>
+                                      </span>
+                                      <span style={{ fontWeight: 700, color: '#0C66E4' }}>
+                                        {manualExecPct}% ({manualExecutedCount} de {manualTotalCount})
+                                      </span>
+                                    </div>
+                                    <div style={{ width: '100%', background: '#E5E7EB', height: '4px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                      <div style={{ background: '#0C66E4', height: '100%', width: `${manualExecPct}%`, transition: 'width 0.3s ease' }} />
+                                    </div>
+                                  </div>
+
+                                  {/* Avance Ejecución Automatizada */}
+                                  <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px', marginBottom: '2px' }}>
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#581C87', fontWeight: 600 }}>
+                                        <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#7C3AED', display: 'inline-block' }} />
+                                        <span>⚡ Automatizados</span>
+                                      </span>
+                                      <span style={{ fontWeight: 700, color: '#7C3AED' }}>
+                                        {autoExecPct}% ({autoExecutedCount} de {autoTotalCount})
+                                      </span>
+                                    </div>
+                                    <div style={{ width: '100%', background: '#E5E7EB', height: '4px', borderRadius: '9999px', overflow: 'hidden' }}>
+                                      <div style={{ background: '#7C3AED', height: '100%', width: `${autoExecPct}%`, transition: 'width 0.3s ease' }} />
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -1726,10 +1800,13 @@ export default function ExecutionView({ ctx }) {
                               centerMinHeight: '420px',
                               centerMaxHeight: '88vh',
                               drawerWidth: DOCK_SPLIT_WIDTH,
-                              drawerMinWidth: '420px',
+                              dockWidthPx: dockWidth,
+                              isResizing: isResizingDock,
+                              drawerMinWidth: '380px',
                               backgroundColor: '#F7F8F9'
                             })}
                           >
+                            <PanelResizeHandle dockPosition={dockPosition} />
                             {/* Top Modal Bar: Case Info + Play + General Status + Nav + Dock + Close */}
                             <div
                               style={{
@@ -2019,7 +2096,210 @@ export default function ExecutionView({ ctx }) {
                                       </span>
                                     </div>
                                   </div>
+
+                                  {/* Acciones de Defectos: Chips de Bugs vinculados + Reportar Bug + Vincular Bug */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    {modalTest.linkedBugs && modalTest.linkedBugs.length > 0 && (
+                                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+                                        {modalTest.linkedBugs.map((bug, bIdx) => (
+                                          <div
+                                            key={bIdx}
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              backgroundColor: '#FFEBE6',
+                                              border: '1px solid #FFBDAD',
+                                              borderRadius: '4px',
+                                              padding: '2px 8px',
+                                              gap: '6px'
+                                            }}
+                                          >
+                                            <span
+                                              onClick={() => setSelectedBug && setSelectedBug(bug)}
+                                              title="Ver detalle del defecto"
+                                              style={{ fontSize: '11px', fontWeight: 700, color: '#BF2600', cursor: 'pointer' }}
+                                            >
+                                              🔴 {bug.key}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={async (e) => {
+                                                e.stopPropagation();
+                                                const updatedBugs = modalTest.linkedBugs.filter((_, i) => i !== bIdx);
+                                                setCycleTests(prev => {
+                                                  const next = prev.map(t => String(t.id) === String(modalTest.id) ? { ...t, linkedBugs: updatedBugs } : t);
+                                                  if (selectedCycle?.id && perCycleCacheRef?.current) {
+                                                    perCycleCacheRef.current[String(selectedCycle.id)] = next;
+                                                  }
+                                                  return next;
+                                                });
+                                                try {
+                                                  await invoke('updateTestStatus', {
+                                                    cycleId: selectedCycle.id,
+                                                    testId: modalTest.id,
+                                                    testRunId: modalTest?.testRunId || modalTest?.testRunKey,
+                                                    linkedBugs: updatedBugs
+                                                  });
+                                                } catch (err) {
+                                                  console.error('Error unlinking bug:', err);
+                                                }
+                                              }}
+                                              style={{
+                                                border: 'none',
+                                                background: 'none',
+                                                color: '#BF2600',
+                                                cursor: 'pointer',
+                                                padding: '0 2px',
+                                                fontSize: '11px',
+                                                fontWeight: 700,
+                                                lineHeight: 1
+                                              }}
+                                              title="Desvincular defecto"
+                                            >
+                                              ✕
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCreateBug(modalTest)}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '5px',
+                                        padding: '5px 10px',
+                                        backgroundColor: '#FFF1F2',
+                                        color: '#E11D48',
+                                        border: '1px solid #FECDD3',
+                                        borderRadius: '6px',
+                                        fontSize: '11px',
+                                        fontWeight: 700,
+                                        cursor: 'pointer',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                                      }}
+                                      title="Crear un nuevo Bug en Jira y vincularlo a esta ejecución"
+                                    >
+                                      <span>🐞 Reportar Bug</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setLinkingBugTestId(linkingBugTestId === modalTest.id ? null : modalTest.id);
+                                        setBugKeyInput('');
+                                      }}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '5px',
+                                        padding: '5px 10px',
+                                        backgroundColor: linkingBugTestId === modalTest.id ? '#E9F2FF' : '#FFFFFF',
+                                        color: linkingBugTestId === modalTest.id ? '#0C66E4' : '#334155',
+                                        border: `1px solid ${linkingBugTestId === modalTest.id ? '#85B8FF' : '#CBD5E1'}`,
+                                        borderRadius: '6px',
+                                        fontSize: '11px',
+                                        fontWeight: 700,
+                                        cursor: 'pointer',
+                                        boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)'
+                                      }}
+                                      title="Vincular un Bug existente de Jira mediante su clave (ej. CEL-10)"
+                                    >
+                                      <span>🔗 Vincular Bug</span>
+                                    </button>
+                                  </div>
                                 </div>
+
+                                {/* Barra inline para vincular clave de Bug recién creado o existente */}
+                                {linkingBugTestId === modalTest.id && (
+                                  <div
+                                    style={{
+                                      padding: '10px 16px',
+                                      backgroundColor: '#FFF8F6',
+                                      borderBottom: '1px solid #FFBDAD',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      gap: '10px',
+                                      flexWrap: 'wrap'
+                                    }}
+                                  >
+                                    <span style={{ fontSize: '11px', fontWeight: 600, color: '#BF2600' }}>
+                                      🐞 Ingresa la clave del Bug creado (o existente en Jira) para vincularlo al caso:
+                                    </span>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <input
+                                        type="text"
+                                        placeholder="Key (ej: CEL-10)"
+                                        value={bugKeyInput}
+                                        onChange={(e) => setBugKeyInput(e.target.value)}
+                                        onKeyDown={async (e) => {
+                                          if (e.key === 'Enter' && bugKeyInput.trim()) {
+                                            await doLinkBug(modalTest, bugKeyInput.trim());
+                                            setLinkingBugTestId(null);
+                                            setBugKeyInput('');
+                                          }
+                                          if (e.key === 'Escape') {
+                                            setLinkingBugTestId(null);
+                                          }
+                                        }}
+                                        style={{
+                                          width: '140px',
+                                          padding: '4px 8px',
+                                          fontSize: '11px',
+                                          border: '1px solid #FFBDAD',
+                                          borderRadius: '4px',
+                                          outline: 'none',
+                                          backgroundColor: '#FFFFFF',
+                                          color: '#172B4D',
+                                          fontWeight: 600
+                                        }}
+                                        autoFocus
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          if (bugKeyInput.trim()) {
+                                            await doLinkBug(modalTest, bugKeyInput.trim());
+                                            setLinkingBugTestId(null);
+                                            setBugKeyInput('');
+                                          }
+                                        }}
+                                        style={{
+                                          padding: '4px 10px',
+                                          fontSize: '11px',
+                                          backgroundColor: '#DE350B',
+                                          color: '#FFFFFF',
+                                          border: 'none',
+                                          borderRadius: '4px',
+                                          cursor: 'pointer',
+                                          fontWeight: 700
+                                        }}
+                                      >
+                                        Vincular
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setLinkingBugTestId(null)}
+                                        style={{
+                                          padding: '4px 7px',
+                                          fontSize: '11px',
+                                          backgroundColor: 'transparent',
+                                          color: '#626F86',
+                                          border: '1px solid #DCDFE4',
+                                          borderRadius: '4px',
+                                          cursor: 'pointer',
+                                          fontWeight: 600
+                                        }}
+                                        title="Cancelar"
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
 
                                 <div
                                   className="execution-scenario-content"

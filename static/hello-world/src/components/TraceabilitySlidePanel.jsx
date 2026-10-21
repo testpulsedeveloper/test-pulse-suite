@@ -36,12 +36,20 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './PanelDockSwitcher';
+import PanelDockSwitcher, {
+  usePanelDockPosition,
+  usePanelDockWidth,
+  PanelResizeHandle,
+  getDockOverlayStyle,
+  getDockContainerStyle,
+  DOCK_SPLIT_WIDTH
+} from './PanelDockSwitcher';
 
 const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
 
 export default function TraceabilitySlidePanel({ ctx }) {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
+  const [dockWidth, , isResizingDock] = usePanelDockWidth();
   const {
     formatFileSize,
     handlePreviewEvidence,
@@ -307,8 +315,25 @@ export default function TraceabilitySlidePanel({ ctx }) {
     // Build Epic-level Stories & Coverage if this is an Epic
     let epicGroupData = item.groupData || null;
     if (isEpic && !epicGroupData) {
+      const configuredStoryTypesLower = (projectConfig?.requirementIssueTypes || [])
+        .map(t => String(t).toLowerCase().trim())
+        .filter(t => t && !['epic', 'épica', 'epica', 'task', 'tarea', 'sub-task', 'subtarea', 'subtask'].some(w => t === w || t.includes(w)));
+
+      const isValidStoryType = (typeStr) => {
+        const t = String(typeStr || '').toLowerCase().trim();
+        if (!t) return false;
+        if (['epic', 'épica', 'epica', 'task', 'tarea', 'sub-task', 'subtarea', 'subtask', 'test', 'caso', 'ciclo', 'plan', 'ejecuc', 'bug', 'defecto', 'error', 'incidencia'].some(w => t === w || t.includes(w))) {
+          return false;
+        }
+        if (configuredStoryTypesLower.length > 0) {
+          return configuredStoryTypesLower.some(cfg => t === cfg || t.includes(cfg) || cfg.includes(t));
+        }
+        return ['story', 'historia', 'historia de usuario', 'user story'].some(w => t === w || t.includes(w));
+      };
+
       const storiesMapForEpic = new Map();
       (traceabilityHierarchy?.stories || []).forEach(st => {
+        if (st?.issuetype && !isValidStoryType(st.issuetype)) return;
         if (String(st?.epicKey || '').trim().toUpperCase() === itemKeyUpper && st?.key) {
           storiesMapForEpic.set(st.key.toUpperCase(), {
             key: st.key,
@@ -320,6 +345,7 @@ export default function TraceabilitySlidePanel({ ctx }) {
         }
       });
       Object.values(requirementsMap || {}).forEach(req => {
+        if (!isValidStoryType(req?.issueType)) return;
         if (String(req?.epicKey || '').trim().toUpperCase() === itemKeyUpper && req?.key) {
           const kUp = req.key.toUpperCase();
           if (!storiesMapForEpic.has(kUp)) {
@@ -337,13 +363,15 @@ export default function TraceabilitySlidePanel({ ctx }) {
         if (!tc) return;
         const ext = extractEpicAndRequirement(tc, projectConfig, requirementsMap);
         if (String(ext?.epicKey || '').trim().toUpperCase() === itemKeyUpper && ext?.reqKey) {
+          const reqFromMap = requirementsMap?.[ext.reqKey];
+          if (reqFromMap?.issueType && !isValidStoryType(reqFromMap.issueType)) return;
           const kUp = ext.reqKey.toUpperCase();
           if (!storiesMapForEpic.has(kUp)) {
             storiesMapForEpic.set(kUp, {
               key: ext.reqKey,
               summary: ext.reqSummary || '',
-              workflowStatus: requirementsMap?.[ext.reqKey]?.status || '',
-              workflowStatusCategory: requirementsMap?.[ext.reqKey]?.statusCategory || '',
+              workflowStatus: reqFromMap?.status || '',
+              workflowStatusCategory: reqFromMap?.statusCategory || '',
               linkedTcCount: 1
             });
           } else {
@@ -440,10 +468,13 @@ export default function TraceabilitySlidePanel({ ctx }) {
             centerHeight: '90vh',
             centerMinHeight: '640px',
             centerMaxHeight: '920px',
+            dockWidthPx: dockWidth,
+            isResizing: isResizingDock,
             drawerWidth: DOCK_SPLIT_WIDTH,
-            drawerMinWidth: '420px'
+            drawerMinWidth: '380px'
           })}
         >
+          <PanelResizeHandle dockPosition={dockPosition} />
           {/* Header */}
           <div style={{
             padding: '1rem 1.5rem',

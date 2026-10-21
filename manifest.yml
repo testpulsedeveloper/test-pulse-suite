@@ -37,11 +37,6 @@ permissions:
     - read:jira-user
     - manage:jira-project
     - storage:app
-  external:
-    fetch:
-      backend:
-        - '*.atlassian.com'
-        - '*.atlassian.net'
 app:
   runtime:
     name: nodejs24.x

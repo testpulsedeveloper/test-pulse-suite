@@ -42,44 +42,82 @@ export const DEFAULT_CUSTOM_FIELDS = Object.freeze({
  */
 export function resolveCustomFields(config = {}, overrides = {}) {
   const safeConfig = config && typeof config === 'object' ? config : {};
+  const nestedConfig = safeConfig.customFields && typeof safeConfig.customFields === 'object' ? safeConfig.customFields : {};
   const safeOverrides = overrides && typeof overrides === 'object' ? overrides : {};
+  const nestedOverrides = safeOverrides.customFields && typeof safeOverrides.customFields === 'object' ? safeOverrides.customFields : {};
 
   return {
     executionType:
       safeOverrides.executionTypeFieldId ||
+      safeOverrides.executionType ||
+      nestedOverrides.executionType ||
       safeConfig.executionTypeFieldId ||
+      safeConfig.executionType ||
+      nestedConfig.executionType ||
       DEFAULT_CUSTOM_FIELDS.executionType,
     testLevel:
       safeOverrides.testLevelFieldId ||
+      safeOverrides.testLevel ||
+      nestedOverrides.testLevel ||
       safeConfig.testLevelFieldId ||
+      safeConfig.testLevel ||
+      nestedConfig.testLevel ||
       DEFAULT_CUSTOM_FIELDS.testLevel,
     testType:
       safeOverrides.testTypeFieldId ||
+      safeOverrides.testType ||
+      nestedOverrides.testType ||
       safeConfig.testTypeFieldId ||
+      safeConfig.testType ||
+      nestedConfig.testType ||
       DEFAULT_CUSTOM_FIELDS.testType,
     preconditionDefault:
       safeOverrides.preconditionFieldId ||
+      safeOverrides.preconditionDefault ||
+      nestedOverrides.preconditionDefault ||
       safeConfig.preconditionFieldId ||
+      safeConfig.preconditionDefault ||
+      nestedConfig.preconditionDefault ||
       DEFAULT_CUSTOM_FIELDS.preconditionDefault,
     stepsDefault:
       safeOverrides.stepsFieldId ||
+      safeOverrides.stepsDefault ||
+      nestedOverrides.stepsDefault ||
       safeConfig.stepsFieldId ||
+      safeConfig.stepsDefault ||
+      nestedConfig.stepsDefault ||
       DEFAULT_CUSTOM_FIELDS.stepsDefault,
     expectedDefault:
       safeOverrides.expectedFieldId ||
+      safeOverrides.expectedDefault ||
+      nestedOverrides.expectedDefault ||
       safeConfig.expectedFieldId ||
+      safeConfig.expectedDefault ||
+      nestedConfig.expectedDefault ||
       DEFAULT_CUSTOM_FIELDS.expectedDefault,
     epicLink:
       safeOverrides.epicLinkFieldId ||
+      safeOverrides.epicLink ||
+      nestedOverrides.epicLink ||
       safeConfig.epicLinkFieldId ||
+      safeConfig.epicLink ||
+      nestedConfig.epicLink ||
       DEFAULT_CUSTOM_FIELDS.epicLink,
     bugSeverity:
       safeOverrides.bugSeverityFieldId ||
+      safeOverrides.bugSeverity ||
+      nestedOverrides.bugSeverity ||
       safeConfig.bugSeverityFieldId ||
+      safeConfig.bugSeverity ||
+      nestedConfig.bugSeverity ||
       DEFAULT_CUSTOM_FIELDS.bugSeverity,
     bugEstimatedDate:
       safeOverrides.bugEstimatedDateFieldId ||
+      safeOverrides.bugEstimatedDate ||
+      nestedOverrides.bugEstimatedDate ||
       safeConfig.bugEstimatedDateFieldId ||
+      safeConfig.bugEstimatedDate ||
+      nestedConfig.bugEstimatedDate ||
       DEFAULT_CUSTOM_FIELDS.bugEstimatedDate
   };
 }
@@ -232,3 +270,140 @@ export function extractExecutionTypeFromFields(fields = {}, config = {}, fallbac
 
   return fallback;
 }
+
+/**
+ * Builds the field list required when querying Defect / Bug issues via JQL.
+ *
+ * @param {Object} [config={}] - Optional project configuration.
+ * @returns {Array<string>} Deduplicated array of Jira field keys.
+ */
+export function getBugJqlFields(config = {}) {
+  const cf = resolveCustomFields(config);
+  return uniqueFields([
+    'summary',
+    'status',
+    'assignee',
+    'resolution',
+    'priority',
+    'created',
+    'resolutiondate',
+    'duedate',
+    'versions',
+    'fixVersions',
+    'reporter',
+    'issuetype',
+    'project',
+    'issuelinks',
+    cf.bugSeverity,
+    DEFAULT_CUSTOM_FIELDS.bugSeverity,
+    cf.bugEstimatedDate,
+    DEFAULT_CUSTOM_FIELDS.bugEstimatedDate
+  ]);
+}
+
+/**
+ * Extracts the human-readable Defect Severity ('Bloqueante', 'Crítico', 'Mayor', etc.)
+ * from a Jira issue's `fields` object using the configured or default custom field IDs,
+ * with heuristic fallback across custom fields if not populated on the primary field.
+ *
+ * @param {Object} [fields={}] - The `issue.fields` object returned by Jira REST API.
+ * @param {Object} [config={}] - Optional project configuration.
+ * @param {string} [fallback='Sin definir'] - Fallback value if no severity field is populated.
+ * @returns {string} Resolved severity label.
+ */
+export function extractBugSeverityFromFields(fields = {}, config = {}, fallback = 'Sin definir') {
+  if (!fields || typeof fields !== 'object') return fallback;
+  const cf = resolveCustomFields(config);
+  const candidateKeys = uniqueFields([
+    cf.bugSeverity,
+    DEFAULT_CUSTOM_FIELDS.bugSeverity
+  ]);
+
+  for (const key of candidateKeys) {
+    const sf = fields[key];
+    if (!sf) continue;
+    if (Array.isArray(sf) && sf.length > 0) {
+      const first = sf[0];
+      return (typeof first === 'object' && first !== null)
+        ? (first.value || first.name || first.label || String(first))
+        : String(first);
+    }
+    return typeof sf === 'object' ? (sf.value || sf.name || sf.label || String(sf)) : String(sf);
+  }
+
+  // Secondary heuristic scan across customfield_* if primary IDs are empty
+  const knownSeverityLabels = [
+    'bloqueante', 'crítico', 'critico', 'mayor', 'menor', 'medio', 'media',
+    'blocker', 'critical', 'major', 'minor', 'medium', 'alta', 'high', 'low'
+  ];
+  for (const [fKey, fVal] of Object.entries(fields)) {
+    if (fKey.startsWith('customfield_') && fVal) {
+      const vStr = typeof fVal === 'object' ? (fVal.value || fVal.name || fVal.label || '') : String(fVal);
+      if (vStr && knownSeverityLabels.includes(String(vStr).toLowerCase())) {
+        return String(vStr);
+      }
+    }
+  }
+
+  return fallback;
+}
+
+/**
+ * Extracts the estimated resolution date from a Jira Bug `fields` object using the
+ * configured or default `bugEstimatedDate` custom field ID.
+ *
+ * @param {Object} [fields={}] - The `issue.fields` object returned by Jira REST API.
+ * @param {Object} [config={}] - Optional project configuration.
+ * @param {boolean} [includeDueDateFallback=false] - Whether to fall back to `fields.duedate`.
+ * @returns {string|null} ISO date string or null.
+ */
+export function extractBugEstimatedDateFromFields(fields = {}, config = {}, includeDueDateFallback = false) {
+  if (!fields || typeof fields !== 'object') return null;
+  const cf = resolveCustomFields(config);
+  const candidateKeys = uniqueFields([
+    cf.bugEstimatedDate,
+    DEFAULT_CUSTOM_FIELDS.bugEstimatedDate
+  ]);
+
+  for (const key of candidateKeys) {
+    const raw = fields[key];
+    if (raw !== undefined && raw !== null && raw !== '') {
+      return typeof raw === 'object' ? (raw.value || raw.name || String(raw)) : String(raw);
+    }
+  }
+
+  if (includeDueDateFallback && fields.duedate) {
+    return String(fields.duedate);
+  }
+  return null;
+}
+
+/**
+ * Computes `p50`, `p95`, and `maxMs` latency metrics from an array of numeric duration samples.
+ *
+ * @param {Array<number>} [samples=[]] - Array of elapsed durations in milliseconds.
+ * @returns {{ p50: number, p95: number, maxMs: number }} Computed percentile metrics.
+ */
+export function computePercentiles(samples = []) {
+  if (!Array.isArray(samples) || samples.length === 0) {
+    return { count: 0, p50: 0, p95: 0, maxMs: 0 };
+  }
+  const sorted = samples
+    .map(n => Number(n))
+    .filter(n => Number.isFinite(n) && n >= 0)
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) {
+    return { count: 0, p50: 0, p95: 0, maxMs: 0 };
+  }
+  const pick = (q) => {
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1));
+    return Math.round(sorted[idx]);
+  };
+  return {
+    count: sorted.length,
+    p50: pick(0.50),
+    p95: pick(0.95),
+    maxMs: Math.round(sorted[sorted.length - 1])
+  };
+}
+

@@ -1,10 +1,11 @@
 {
   "name": "jira-project-page-custom-ui",
-  "version": "4.5.1",
+  "version": "4.7.7",
   "main": "index.js",
   "license": "MIT",
   "private": true,
   "scripts": {
+    "test": "node --test tests/phase3.test.js",
     "build": "npm --prefix static/hello-world run build",
     "deploy": "forge deploy --non-interactive",
     "deploy:prod": "forge deploy -e production --non-interactive"

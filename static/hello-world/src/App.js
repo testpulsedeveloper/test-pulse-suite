@@ -38,7 +38,7 @@ import {
 } from './components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
-import PanelDockSwitcher, { usePanelDockPosition, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './components/PanelDockSwitcher';
+import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockSplitCssWidth, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './components/PanelDockSwitcher';
 
 export { normalizeUiStatus };
 
@@ -55,6 +55,7 @@ const ReportAutomationModal = React.lazy(() => import('./components/ReportAutoma
 
 function App() {
   const [dockPosition, setDockPosition] = usePanelDockPosition();
+  const [dockWidth, , isResizingDock] = usePanelDockWidth();
   const [activeTab, setActiveTab] = useState('design'); // design, planning, execution, config
   
   // Design Tab State
@@ -74,18 +75,30 @@ function App() {
   const [activeFolder, setActiveFolder] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
   const [isAllTestsExpanded, setIsAllTestsExpanded] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(260);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const saved = parseInt(window.localStorage.getItem('tp_folder_sidebar_width'), 10);
+      return Number.isFinite(saved) ? Math.max(200, Math.min(saved, 800)) : 260;
+    } catch (_) {
+      return 260;
+    }
+  });
   const [isResizing, setIsResizing] = useState(false);
 
   useEffect(() => {
     if (!isResizing) return;
+    let latestW = sidebarWidth;
     const handleMouseMove = (e) => {
       let newWidth = e.clientX;
       if (newWidth < 200) newWidth = 200;
       if (newWidth > 800) newWidth = 800;
+      latestW = newWidth;
       setSidebarWidth(newWidth);
     };
-    const handleMouseUp = () => setIsResizing(false);
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      try { window.localStorage.setItem('tp_folder_sidebar_width', String(latestW)); } catch (_) {}
+    };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
     return () => {
@@ -176,7 +189,7 @@ function App() {
               description: backendItem.description || existing.description,
               iterations: mergeIterationsPreservingLocal(existing.iterations, backendItem.iterations),
               evidences: (backendItem.evidences && backendItem.evidences.length > 0) ? backendItem.evidences : (existing.evidences || []),
-              linkedBugs: (backendItem.linkedBugs && backendItem.linkedBugs.length > 0) ? backendItem.linkedBugs : (existing.linkedBugs || []),
+              linkedBugs: Array.isArray(backendItem.linkedBugs) ? backendItem.linkedBugs : (existing.linkedBugs || []),
               _detailLoaded: existing._detailLoaded || backendItem._detailLoaded || false
             };
           }
@@ -380,6 +393,8 @@ function App() {
       setSelectedBugDetails(null);
       setBugAssigneeOpen(false);
       setBugAssigneeQuery('');
+      setBugAssigneeResults([]);
+      setBugAssigneeSearching(false);
       setBugEditingEnv(false);
       setBugCommentText('');
       setBugCommentFiles([]);
@@ -618,7 +633,7 @@ function App() {
         loadTraceabilityHierarchy(selectedProjectId, projectConfig);
       }
     }
-  }, [activeTab, dashboardSubView, selectedProjectId]);
+  }, [activeTab, dashboardSubView, selectedProjectId, projectConfig, loadTraceabilityHierarchy]);
 
   // Notifications
   const { addNotification } = useNotification();
@@ -1006,16 +1021,36 @@ function App() {
       });
 
       if (Array.isArray(reqRes) && reqRes.length > 0) {
+        const activeCfg = cfg || projectConfig || {};
+        const cfgStoryTypes = (activeCfg.requirementIssueTypes || [])
+          .map(t => String(t).toLowerCase().trim())
+          .filter(t => t && !['epic', 'épica', 'epica', 'task', 'tarea', 'sub-task', 'subtarea', 'subtask'].some(w => t === w || t.includes(w)));
         const reqMap = {};
         reqRes.forEach(issue => {
           if (!issue || !issue.key) return;
+          const iType = (issue.fields?.issuetype?.name || '').toLowerCase().trim();
+          const isEpic = iType === 'epic' || iType === 'épica' || iType === 'epica' || iType.includes('epic') || iType.includes('épica') || issue.fields?.issuetype?.hierarchyLevel === 1;
+          const isBlacklisted =
+            !iType ||
+            issue.fields?.issuetype?.subtask ||
+            ['task', 'tarea', 'sub-task', 'subtarea', 'subtask', 'test', 'caso', 'ciclo', 'plan', 'ejecuc', 'bug', 'defecto', 'error', 'incidencia'].some(w => iType === w || iType.includes(w));
+          const isStory = !isEpic && !isBlacklisted && (
+            cfgStoryTypes.length > 0
+              ? cfgStoryTypes.some(ct => iType === ct || iType.includes(ct) || ct.includes(iType))
+              : ['story', 'historia', 'historia de usuario', 'user story'].some(w => iType === w || iType.includes(w))
+          );
+          if (!isEpic && !isStory) return;
+
           const p = issue.fields?.parent;
           const cf10014 = issue.fields?.customfield_10014;
           let epicKey = issue.epicKey || null;
           let epicSummary = issue.epicSummary || null;
           if (!epicKey && p?.key) {
-            epicKey = p.key;
-            epicSummary = p.fields?.summary || null;
+            const pType = (p.fields?.issuetype?.name || '').toLowerCase().trim();
+            if (!pType || pType === 'epic' || pType === 'épica' || pType === 'epica' || pType.includes('epic') || pType.includes('épica') || p.fields?.issuetype?.hierarchyLevel === 1) {
+              epicKey = p.key;
+              epicSummary = p.fields?.summary || null;
+            }
           } else if (!epicKey && typeof cf10014 === 'string' && /^[A-Z][A-Z0-9]+-\d+$/i.test(cf10014.trim())) {
             epicKey = cf10014.trim();
           }
@@ -1041,7 +1076,7 @@ function App() {
             epicSummary
           };
         });
-        setRequirementsMap(prev => ({ ...prev, ...reqMap }));
+        setRequirementsMap(reqMap);
       }
     } catch (e) {
       console.warn("fetchLinkedRequirements error:", e);
@@ -1134,6 +1169,7 @@ function App() {
       setIsAdmin(adminVal);
       setProjectConfig(config);
       setProjectIssueTypes(projectTypes);
+      loadTraceabilityHierarchy(targetProjectId, config);
 
       invoke('getReportAutomationConfig', { projectId: targetProjectId }).then(autoRes => {
         if (autoRes && autoRes.success && autoRes.config) {
@@ -2256,11 +2292,15 @@ Then el sistema valida la identidad.
                   } else if (activeTab === 'reports') {
                     setLocalLoading(true);
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
-                    const [fetchedCycles, fetchedPlans] = await Promise.all([
+                    const promises = [
                       invoke('getTestCycles', { projectId: selectedProjectId, config }),
                       invoke('getTestPlans', { projectId: selectedProjectId, config }),
-                      loadReportData(selectedProjectId, config)
-                    ]);
+                      loadReportData(selectedProjectId, config, false, true)
+                    ];
+                    if (dashboardSubView === 'traceability') {
+                      promises.push(loadTraceabilityHierarchy(selectedProjectId, config));
+                    }
+                    const [fetchedCycles, fetchedPlans] = await Promise.all(promises);
                     if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
                     if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
                   } else {
@@ -3700,13 +3740,16 @@ Then el sistema valida la identidad.
               centerMinHeight: '620px',
               centerMaxHeight: '940px',
               drawerWidth: DOCK_SPLIT_WIDTH,
-              drawerMinWidth: '420px',
+              dockWidthPx: dockWidth,
+              isResizing: isResizingDock,
+              drawerMinWidth: '380px',
               backgroundColor: '#FFFFFF'
             }),
             color: '#172B4D'
           }}
           onClick={e => e.stopPropagation()}
         >
+          <PanelResizeHandle dockPosition={dockPosition} />
           {/* Modal Header */}
           <div style={{ padding: '1.25rem 1.5rem 0.75rem 1.5rem', borderBottom: '1px solid #DCDFE4', backgroundColor: '#FFFFFF', flexShrink: 0 }}>
             {/* Top Meta Line: Folder Path, Issue Key, Lozenges, Dock Switcher, Close button */}
@@ -4531,6 +4574,7 @@ Then el sistema valida la identidad.
     prevRefreshRef.current = refreshTrigger;
     deletedIdsRef.current = new Set(perCycleDeletedRef.current[cycleId] || []);
     setPlanningChecked(new Set()); // clear multi-select
+    setSelectedTestsForCycle([]); // clear available tests multi-select
     setExecutionChecked(new Set()); // clear execution multi-select
 
     const cached = perCycleCacheRef.current[cycleId];
@@ -4661,24 +4705,31 @@ Then el sistema valida la identidad.
     if (!selectedCycle) return;
     const cycleId = String(selectedCycle.id);
     const idStr = String(testCase.id);
+    const keyStr = testCase.key ? String(testCase.key) : '';
 
     // Clear deleted tracking so re-added test is rendered immediately
     deletedIdsRef.current.delete(idStr);
+    if (keyStr) deletedIdsRef.current.delete(keyStr);
     if (perCycleDeletedRef.current[cycleId]) {
       perCycleDeletedRef.current[cycleId].delete(idStr);
+      if (keyStr) perCycleDeletedRef.current[cycleId].delete(keyStr);
     }
+    setSelectedTestsForCycle(prev => (prev || []).filter(id => String(id) !== idStr));
     
     // Optimistic UI
     const locallyAdded = {
-        id: testCase.id,
+        id: idStr,
+        testCaseId: idStr,
         key: testCase.key,
+        testCaseKey: testCase.key,
         summary: testCase.summary,
+        folderId: testCase.folderId,
         executionType: testCase.executionType || 'Manual',
         status: 'Not Run'
     };
     setCycleTests(prev => {
         let updated;
-        if (!prev.some(existing => String(existing.id) === idStr)) {
+        if (!prev.some(existing => String(existing.id) === idStr || (keyStr && (existing.key === keyStr || existing.testCaseKey === keyStr)))) {
             updated = [...prev, locallyAdded];
         } else {
             updated = prev;
@@ -5881,10 +5932,16 @@ Then el sistema valida la identidad.
     }
   };
 
-  const loadReportData = async (overrideProjectId = null, overrideConfig = null, isSilent = false) => {
+  const loadReportData = async (overrideProjectId = null, overrideConfig = null, isSilent = false, forceRefresh = false) => {
     const projId = overrideProjectId || selectedProjectId;
     const cfg = overrideConfig || projectConfig;
     if (!projId) return;
+    if (forceRefresh) {
+      perCycleCacheRef.current = {};
+      try {
+        localStorage.removeItem(`tp_report_snapshot_${projId}`);
+      } catch (e) {}
+    }
     if (isCircuitBroken()) {
       try {
         const snapshotKey = `tp_report_snapshot_${projId}`;
@@ -5929,7 +5986,8 @@ Then el sistema valida la identidad.
         projectId: projId, 
         config: cfg, 
         limit: initialLimit, 
-        offset: 0 
+        offset: 0,
+        forceRefresh: Boolean(forceRefresh)
       });
 
       if (currentSession !== hydrationSessionRef.current) return;
@@ -5942,10 +6000,32 @@ Then el sistema valida la identidad.
         setSelectedPlanId(prev => prev || data.plans[0]?.id || null);
       }
 
+      // Sanitize any in-memory perCycleCacheRef entries for loaded cycles so moved/deleted bugs are purged
+      initialCycles.forEach(c => {
+        const cid = String(c.id);
+        if (Array.isArray(perCycleCacheRef.current[cid])) {
+          const sanitizedByKey = new Map();
+          (c.execution || []).forEach(ex => {
+            const k = ex.testCaseKey || ex.key || ex.id;
+            if (k) sanitizedByKey.set(String(k), ex.linkedBugs || []);
+          });
+          perCycleCacheRef.current[cid] = perCycleCacheRef.current[cid].map(item => {
+            const k = item.testCaseKey || item.key || item.id;
+            if (k && sanitizedByKey.has(String(k))) {
+              return { ...item, linkedBugs: sanitizedByKey.get(String(k)) };
+            }
+            return {
+              ...item,
+              linkedBugs: (item.linkedBugs || []).filter(b => b && b.key && initialBugMap[b.key])
+            };
+          });
+        }
+      });
+
       // Silent background sync with history already loaded: merge only the recent cycles into the
       // existing data. Replacing would drop historical cycles and force a full re-hydration (N extra calls).
       const isFullyHydrated = hasExistingData && currentReport.cycles.length >= (currentReport.totalCycles || 0);
-      const isIncrementalSync = isSilent && isFullyHydrated;
+      const isIncrementalSync = isSilent && isFullyHydrated && !forceRefresh;
       if (isIncrementalSync) {
         setReportData(prev => {
           const merged = new Map((prev?.cycles || []).map(c => [String(c.id), c]));
@@ -6024,6 +6104,7 @@ Then el sistema valida la identidad.
         projectKey: targetProjectKey,
         linkedBugKeys,
         bugIssueTypes: cfg?.bugIssueTypes || [],
+        config: cfg
       })
         .then(bugs => setUnlinkedBugs(bugs || []))
         .catch(console.warn);
@@ -6055,6 +6136,28 @@ Then el sistema valida la identidad.
               if (currentSession !== hydrationSessionRef.current) break;
 
               if (batchData?.cycles && Array.isArray(batchData.cycles)) {
+                const batchBugMap = batchData.bugMap || {};
+                batchData.cycles.forEach(c => {
+                  const cid = String(c.id);
+                  if (Array.isArray(perCycleCacheRef.current[cid])) {
+                    const sanitizedByKey = new Map();
+                    (c.execution || []).forEach(ex => {
+                      const k = ex.testCaseKey || ex.key || ex.id;
+                      if (k) sanitizedByKey.set(String(k), ex.linkedBugs || []);
+                    });
+                    perCycleCacheRef.current[cid] = perCycleCacheRef.current[cid].map(item => {
+                      const k = item.testCaseKey || item.key || item.id;
+                      if (k && sanitizedByKey.has(String(k))) {
+                        return { ...item, linkedBugs: sanitizedByKey.get(String(k)) };
+                      }
+                      return {
+                        ...item,
+                        linkedBugs: (item.linkedBugs || []).filter(b => b && b.key && batchBugMap[b.key])
+                      };
+                    });
+                  }
+                });
+
                 setReportData(prev => {
                   const existingCycles = prev?.cycles || [];
                   const existingMap = new Map(existingCycles.map(c => [String(c.id), c]));
@@ -6062,7 +6165,7 @@ Then el sistema valida la identidad.
                     existingMap.set(String(c.id), c);
                   });
                   const mergedCycles = Array.from(existingMap.values());
-                  const mergedBugMap = { ...(prev?.bugMap || {}), ...(batchData.bugMap || {}) };
+                  const mergedBugMap = { ...(prev?.bugMap || {}), ...batchBugMap };
 
                   setHydrationProgress({ loaded: mergedCycles.length, total: totalCycles });
                   return {
@@ -6281,25 +6384,62 @@ Then el sistema valida la identidad.
 
   const handleCreateBug = (test) => {
     const projectId = selectedProjectId || context?.extension?.project?.id;
-    // Open the native Jira create-issue modal
-    const createBugModal = new CreateIssueModal({ context: { pid: projectId } });
+    const configuredBugTypes = (projectConfig?.bugIssueTypes || []).map(t => String(t || '').toLowerCase().trim()).filter(Boolean);
+    const defaultBugKw = ['bug', 'error', 'defecto', 'defect', 'falla', 'incidente', 'incident'];
+    const matchedBugType = (projectIssueTypes || []).find(it => {
+      const n = String(it?.name || '').toLowerCase().trim();
+      return configuredBugTypes.includes(n) || defaultBugKw.some(kw => n === kw || n.includes(kw));
+    });
+    const resolvedBugTypeId = projectConfig?.bugIssueTypeId || matchedBugType?.id;
+
+    // Open the native Jira create-issue modal (pre-selecting Bug issue type when configured)
+    const createBugModal = new CreateIssueModal({
+      context: {
+        pid: projectId,
+        ...(resolvedBugTypeId ? { issueTypeId: resolvedBugTypeId } : {})
+      },
+      onClose: async (payload) => {
+        const created = Array.isArray(payload)
+          ? payload[0]
+          : (Array.isArray(payload?.issues) ? payload.issues[0] : (payload?.issue || payload));
+        const createdKey = created?.key || created?.issueKey || created?.issueId || created?.id;
+        if (createdKey) {
+          await doLinkBug(test, String(createdKey));
+          setLinkingBugTestId(null);
+          setBugKeyInput('');
+        }
+        // Always refresh project bugs so any newly created bug in Jira is immediately read
+        const currentProj = projects.find(p => String(p.id) === String(projectId) || String(p.key) === String(projectId));
+        const targetProjectKey = currentProj?.key || (isNaN(projectId) ? projectId : null);
+        invoke('getProjectUnlinkedBugs', {
+          projectId,
+          projectKey: targetProjectKey,
+          linkedBugKeys: [],
+          bugIssueTypes: projectConfig?.bugIssueTypes || [],
+          config: projectConfig
+        })
+          .then(bugs => { if (Array.isArray(bugs)) setUnlinkedBugs(bugs); })
+          .catch(console.warn);
+      }
+    });
     createBugModal.open();
-    // Show the inline input so the user can paste the key after creating the bug
-    setLinkingBugTestId(test.id);
-    setBugKeyInput('');
   };
 
   const doLinkBug = async (test, bugKey) => {
-    const cleanKey = (bugKey || '').trim().toUpperCase();
+    const cleanKey = (bugKey || '').toString().trim().toUpperCase();
     if (!cleanKey) return;
 
     // 1. Avoid duplicates
     const currentBugs = test.linkedBugs || [];
-    if (currentBugs.some(b => b.key === cleanKey)) return;
+    if (currentBugs.some(b => b.key === cleanKey || String(b.id) === cleanKey)) return;
 
     // 2. Validate against Jira and create Issue Link
     try {
-      const res = await invoke('linkBugToTest', { testCaseId: test.id, bugKey: cleanKey });
+      const res = await invoke('linkBugToTest', {
+        testCaseId: test.id,
+        bugKey: cleanKey,
+        config: projectConfig
+      });
       if (res && res.success === false) {
         addNotification({
           type: 'error',
@@ -6310,12 +6450,48 @@ Then el sistema valida la identidad.
       }
 
       const verifiedBug = res?.bug || { key: cleanKey };
-      const updatedBugs = [...currentBugs, verifiedBug];
+      const finalKey = verifiedBug.key || cleanKey;
+      const updatedBugs = currentBugs.some(b => b.key === finalKey)
+        ? currentBugs
+        : [...currentBugs, verifiedBug];
 
-      // 3. Update UI
-      setCycleTests(prev => prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t));
+      // 3. Update UI & cycle cache
+      setCycleTests(prev => {
+        const next = prev.map(t => String(t.id) === String(test.id) ? { ...t, linkedBugs: updatedBugs } : t);
+        if (selectedCycle?.id && perCycleCacheRef?.current) {
+          perCycleCacheRef.current[String(selectedCycle.id)] = next;
+        }
+        return next;
+      });
 
-      // 4. Save in background
+      // 4. Update reportData & unlinkedBugs in memory so Reports view immediately reflects the linked bug
+      if (selectedCycle?.id) {
+        setReportData(prev => {
+          const nextCycles = (prev?.cycles || []).map(c => {
+            if (String(c.id) !== String(selectedCycle.id)) return c;
+            const nextExec = (c.execution || []).map(ex => {
+              if (String(ex.id) !== String(test.id) && String(ex.testCaseId) !== String(test.id)) return ex;
+              return { ...ex, linkedBugs: updatedBugs };
+            });
+            return { ...c, execution: nextExec };
+          });
+          const nextBugMap = {
+            ...(prev?.bugMap || {}),
+            [finalKey]: { ...verifiedBug, key: finalKey }
+          };
+          return { ...(prev || {}), cycles: nextCycles, bugMap: nextBugMap };
+        });
+      }
+
+      setUnlinkedBugs(prev => {
+        const list = Array.isArray(prev) ? prev : [];
+        if (list.some(b => b.key === finalKey)) {
+          return list.map(b => b.key === finalKey ? { ...b, ...verifiedBug, key: finalKey, isLinked: true } : b);
+        }
+        return [{ ...verifiedBug, key: finalKey, isLinked: true }, ...list];
+      });
+
+      // 5. Save in background
       await invoke('updateTestStatus', {
         cycleId: selectedCycle.id,
         testId: test.id,
@@ -6326,7 +6502,7 @@ Then el sistema valida la identidad.
       addNotification({
         type: 'success',
         title: '✅ Defecto Vinculado',
-        description: `Incidencia ${cleanKey} vinculada correctamente.`
+        description: `Incidencia ${finalKey} vinculada correctamente.`
       });
     } catch (err) {
       console.error('Error linking bug:', err);
@@ -6468,12 +6644,11 @@ Then el sistema valida la identidad.
 
   const getExecVal = (t) => {
     if (!t) return 'manual';
-    let target = t;
-    if (t && !t.rawFields) {
-      const tc = findTc(t.id);
-      if (tc) target = tc;
-    }
-    return isAutomatedTest(target) ? 'automatizado' : 'manual';
+    if (isAutomatedTest(t)) return 'automatizado';
+    if (t.testType && String(t.testType).toLowerCase().includes('auto')) return 'automatizado';
+    const tc = findTc(t.id) || findTc(t.testCaseId) || findTc(t.testCaseKey) || findTc(t.key);
+    if (tc && isAutomatedTest(tc)) return 'automatizado';
+    return 'manual';
   };
 
   // Incremental rendering counters for Planning lists (reset on cycle/filter change)
@@ -7319,15 +7494,6 @@ Then el sistema valida la identidad.
 
 
   const handleGlobalTestAutomatedReportDispatch = async () => {
-    if (!reportAutomationConfig.webhookUrl || !reportAutomationConfig.webhookUrl.startsWith('http')) {
-      addNotification({
-        type: 'warning',
-        title: 'Webhook Inválido',
-        description: 'Por favor ingresa una URL de Webhook válida de Jira Automation (ej. https://automation.atlassian.com/pro/hooks/...)'
-      });
-      return;
-    }
-
     try {
       setReportAutomationTesting(true);
       const targetId = selectedProjectId || context?.extension?.project?.id;
@@ -7335,98 +7501,31 @@ Then el sistema valida la identidad.
       const projName = currentProjectObj?.name || context?.extension?.project?.name || 'Proyecto';
       const projKey = currentProjectObj?.key || context?.extension?.project?.key || targetId;
 
-      let backendSuccess = false;
-      try {
-        const res = await invoke('triggerManualReportDispatch', {
-          projectId: targetId,
-          webhookUrl: reportAutomationConfig.webhookUrl,
-          reportData: {
-            projectName: projName,
-            projectKey: projKey,
-            recipients: reportAutomationConfig.recipients || ''
-          }
-        });
-
-        if (res && res.success) {
-          backendSuccess = true;
-          setReportAutomationLastDispatch(res.lastDispatch || null);
-          addNotification({
-            type: 'success',
-            title: '⚡ ¡Prueba de Envío Exitosa!',
-            description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${res.statusCode || 200}). Revisa la regla y tu correo.`
-          });
-          return;
-        }
-      } catch (backendErr) {
-        console.warn('[Automation] Backend dispatch attempt failed, falling back to client-side direct webhook...', backendErr);
-      }
-
-      // Fallback: Direct client-side dispatch
-      const nowFormatted = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
-      const testHtml = `
-        <div style="max-width: 700px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; border: 1px solid #DFE1E6; border-radius: 8px; overflow: hidden; background: #ffffff;">
-          <div style="background: linear-gradient(135deg, #E1007A 0%, #002D62 100%); color: #ffffff; padding: 20px 24px;">
-            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #FFE0F0;">TEST PULSE SUITE • PRUEBA DE CONEXIÓN</div>
-            <h2 style="margin: 4px 0 0 0; font-size: 20px; color: #ffffff;">Reporte Ejecutivo (Prueba)</h2>
-          </div>
-          <div style="padding: 24px; color: #172B4D;">
-            <p style="font-size: 14px; line-height: 1.5; margin: 0 0 12px 0;">Este es un correo de prueba de <strong>Test Pulse Suite</strong> para verificar la regla de <strong>Jira Automation</strong>.</p>
-            <p style="font-size: 13px; margin: 0 0 8px 0;"><strong>Proyecto:</strong> ${projName} (${projKey})</p>
-            <p style="font-size: 13px; margin: 0 0 16px 0;"><strong>Fecha y Hora de Prueba:</strong> ${nowFormatted} (CDMX)</p>
-            <div style="background: #E3FCEF; border: 1px solid #ABF5D1; color: #006644; padding: 12px 16px; border-radius: 6px; font-weight: 600; font-size: 13px;">
-              🟢 La integración con el webhook entrante de Jira Automation está operando correctamente.
-            </div>
-          </div>
-          <div style="background: #FAFBFC; padding: 12px 24px; border-top: 1px solid #EBECF0; font-size: 11px; color: #626F86; text-align: center;">
-            Test Pulse Suite • El Puerto de Liverpool
-          </div>
-        </div>
-      `;
-
-      const directRes = await fetch(reportAutomationConfig.webhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          timestamp: new Date().toISOString(),
-          source: `Test Pulse Suite ${APP_VERSION}`,
-          projectId: targetId || 'N/A',
+      const res = await invoke('triggerManualReportDispatch', {
+        projectId: targetId,
+        webhookUrl: reportAutomationConfig.webhookUrl || 'NATIVE_JIRA',
+        reportData: {
           projectName: projName,
           projectKey: projKey,
-          recipients: reportAutomationConfig.recipients || '',
-          emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`,
-          htmlReport: testHtml,
-          plainText: `Test Pulse Suite - Prueba de Conexión para ${projName} (${nowFormatted})`,
-          summary: { type: 'TEST_DISPATCH' },
-          stats: {}
-        })
+          recipients: reportAutomationConfig.recipients || ''
+        }
       });
 
-      const lastLog = {
-        timestamp: new Date().toISOString(),
-        status: directRes.ok ? 'SUCCESS' : 'ERROR',
-        statusCode: directRes.status,
-        statusText: directRes.statusText || (directRes.ok ? 'OK' : 'Error'),
-        recipients: reportAutomationConfig.recipients || 'Configurados en Jira Automation',
-        emailSubject: `[Prueba de Conexión] Test Pulse Suite - ${projName} (${nowFormatted})`
-      };
-      setReportAutomationLastDispatch(lastLog);
-
-      if (directRes.ok || (directRes.status >= 200 && directRes.status < 300)) {
+      if (res && res.success) {
+        setReportAutomationLastDispatch(res.lastDispatch || null);
         addNotification({
           type: 'success',
-          title: '⚡ ¡Prueba de Envío Exitosa!',
-          description: `Se despachó el reporte al Webhook de Jira Automation (HTTP ${directRes.status}). Revisa la regla y tu correo.`
+          title: '⚡ ¡Publicación Nativa Exitosa!',
+          description: `El reporte ejecutivo se publicó 100% nativamente en Jira (${res.lastDispatch?.statusText || 'Runs on Atlassian'}).`
         });
+        return;
       } else {
         addNotification({
           type: 'error',
-          title: 'Error al Despachar',
-          description: `Jira Automation respondió con código ${directRes.status}. Revisa que la URL sea la correcta.`
+          title: 'Error al Publicar Reporte',
+          description: res?.error || 'No se pudo publicar el reporte ejecutivo en Jira.'
         });
       }
-
     } catch (err) {
       addNotification({
         type: 'error',
@@ -7466,7 +7565,7 @@ Then el sistema valida la identidad.
 
   const renderExecutionTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Execution..." />}>
-      <ExecutionView ctx={{ _uid, _uname, addNotification, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setRefreshTrigger, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
+      <ExecutionView ctx={{ _uid, _uname, addNotification, availableEnvironments, bugKeyInput, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, doLinkBug, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateBug, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, linkingBugTestId, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, perCycleCacheRef, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setBugKeyInput, setCycleTests, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setLinkingBugTestId, setRefreshTrigger, setSelectedBug, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 
@@ -7609,6 +7708,7 @@ Then el sistema valida la identidad.
       (activeTab === 'execution' && expandedExecutionTest)
     )
   );
+  const activeDockCssWidth = getDockSplitCssWidth(dockWidth);
 
   return (
     <div className="app-container">
@@ -7617,16 +7717,17 @@ Then el sistema valida la identidad.
       <div
         className="workspace-split-host"
         style={{
+          position: 'relative',
           display: 'flex',
           flexDirection: 'column',
           flex: 1,
           minHeight: 0,
           minWidth: 0,
           overflow: 'hidden',
-          width: isSideSplitOpen ? `calc(100vw - ${DOCK_SPLIT_WIDTH})` : '100%',
-          marginLeft: isSideSplitOpen && dockPosition === 'left' ? DOCK_SPLIT_WIDTH : '0px',
-          marginRight: isSideSplitOpen && dockPosition === 'right' ? DOCK_SPLIT_WIDTH : '0px',
-          transition: 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), margin 0.18s cubic-bezier(0.16, 1, 0.3, 1)'
+          width: isSideSplitOpen ? `calc(100vw - ${activeDockCssWidth})` : '100%',
+          marginLeft: isSideSplitOpen && dockPosition === 'left' ? activeDockCssWidth : '0px',
+          marginRight: isSideSplitOpen && dockPosition === 'right' ? activeDockCssWidth : '0px',
+          transition: isResizingDock ? 'none' : 'width 0.18s cubic-bezier(0.16, 1, 0.3, 1), margin 0.18s cubic-bezier(0.16, 1, 0.3, 1)'
         }}
       >
         {!isProjectAllowed && isAdmin && (
@@ -7654,7 +7755,29 @@ Then el sistema valida la identidad.
           </>
         )}
 
-        <div style={{ textAlign: 'center', marginTop: '3rem', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', borderTop: '1px solid var(--ds-border)' }}>
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '6px',
+            left: '10px',
+            zIndex: 30,
+            pointerEvents: 'none',
+            userSelect: 'none',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '4px',
+            padding: '2px 8px',
+            borderRadius: '9999px',
+            backgroundColor: 'rgba(255, 255, 255, 0.85)',
+            backdropFilter: 'blur(4px)',
+            border: '1px solid rgba(220, 223, 228, 0.8)',
+            boxShadow: '0 1px 3px rgba(9, 30, 66, 0.06)',
+            color: 'var(--text-secondary, #626F86)',
+            fontSize: '10px',
+            lineHeight: 1.3,
+            opacity: 0.82
+          }}
+        >
           <strong>Test Pulse Suite</strong> {APP_VERSION} © El Puerto de Liverpool
         </div>
       </div>

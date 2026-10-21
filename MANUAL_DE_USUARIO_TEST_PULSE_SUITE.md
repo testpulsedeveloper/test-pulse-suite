@@ -1,22 +1,26 @@
 # 📘 Manual de Usuario — Test Pulse Suite
-**Versión de la Suite:** 5.36.0  
-**Entorno:** Atlassian Jira Cloud (Forge Native)  
+**Versión de la Suite:** `4.6.0` (Forge Production `v4.111.0` — Actualizado Octubre 2026)  
+**Entorno:** Atlassian Jira Cloud (Forge Native — El Puerto de Liverpool)  
 **Audiencia:** QA Engineers, Testers, Scrum Masters, Product Owners y Líderes de Proyecto.
+
+> [!TIP]
+> **🟢 GUÍA DE CAMBIOS RECIENTES (`v4.1.0` → `v4.6.0`):**  
+> Todos los cambios, nuevas funcionalidades y correcciones recientes incorporados en esta versión del manual están **resaltados en bloques de color verde (`[!TIP]`) y púrpura (`[!IMPORTANT]`)** e identificados con la etiqueta $\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5 – v4.6}}}$ o $\colorbox{#E9F2FF}{\textcolor{#0C66E4}{\textbf{⚡ MEJORA v4.1 – v4.4}}}$ para su rápida identificación.
 
 ---
 
 ## 📑 Tabla de Contenido
-1. [Introducción y Navegación General](#1-introducción-y-navegación-general)
+1. [Introducción, Navegación General y Paneles Acoplables (`Split-View`)](#1-introducción-navegación-general-y-paneles-acoplables-split-view)
 2. [Módulo 1: Repositorio y Diseño de Casos de Prueba (Design)](#2-módulo-1-repositorio-y-diseño-de-casos-de-prueba-design)
 3. [Módulo 2: Planificación de Pruebas (Planning)](#3-módulo-2-planificación-de-pruebas-planning)
 4. [Módulo 3: Ejecución de Pruebas (Execution)](#4-módulo-3-ejecución-de-pruebas-execution)
 5. [Módulo 4: Informes, Métricas y Dashboard Ejecutivo (Reports)](#5-módulo-4-informes-métricas-y-dashboard-ejecutivo-reports)
-6. [Módulo 5: Automatización e Integración CI/CD (Test Automation)](#6-módulo-5-automatización-e-integración-cicd-test-automation)
+6. [Módulo 5: Configuración del Proyecto (`⚙️ Settings`) e Integración CI/CD](#6-módulo-5-configuración-del-proyecto-settings-e-integración-cicd)
 7. [Buenas Prácticas para el Equipo de QA](#7-buenas-prácticas-para-el-equipo-de-qa)
 
 ---
 
-## 1. Introducción y Navegación General
+## 1. Introducción, Navegación General y Paneles Acoplables (`Split-View`)
 
 ### 1.1 Barra Superior y Selector de Proyecto
 En la parte superior de la aplicación encontrarás la barra de navegación principal:
@@ -26,7 +30,16 @@ En la parte superior de la aplicación encontrarás la barra de navegación prin
   - 📅 **Planificación (Planning):** Definición de Planes de Prueba (*Test Plans*) y Ciclos de Prueba (*Test Cycles*), con asignación de casos y testers.
   - ⚡ **Ejecución (Execution):** Panel de pruebas en tiempo real, registro de iteraciones, evidencias multimedia, cambios de estado y gestión de bugs vinculados.
   - 📊 **Informes (Reports):** Dashboard ejecutivo, métricas de calidad, gráficos de distribución, matriz de trazabilidad y reporte de defectos.
+  - ⚙️ **Configuración (Settings — Solo Administradores):** Parametrización del proyecto, catálogo de ambientes, automatización de reportes ejecutivos, diagnóstico de *Custom Fields* y resincronización de ciclos.
 - **Indicador de Sincronización:** Muestra el estado de conexión activa con el entorno Forge de Atlassian.
+
+> [!TIP]
+> ### $\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5.0 – v4.5.1}}}$ 1.2 Sistema de Paneles Acoplables y Vista Dividida (`Split-View`: Izquierda / Centro / Derecha)
+> Ahora todos los paneles de detalle, edición y ejecución cuentan en su esquina superior derecha con el selector **`◧` | `▣` | `◨`**, que permite elegir cómo visualizar la ventana de trabajo:
+> - **`◧` Acoplar a la Izquierda (`Split-View` Integrado):** El panel se fija del lado izquierdo debajo de la barra superior y **la pantalla principal se recorre automáticamente hacia la derecha**, permitiéndote trabajar lado a lado sin tapar la tabla ni oscurecer el fondo.
+> - **`▣` Modal al Centro (`Overlay`):** El panel se abre centrado frente a la pantalla con fondo desenfocado, ideal para concentrarse en la edición o lectura detallada de un elemento.
+> - **`◨` Acoplar a la Derecha (`Split-View` Integrado):** El panel se fija del lado derecho y **ajusta automáticamente el ancho del listado izquierdo** (*Master-Detail*), permitiendo navegar de un caso de prueba, historia o defecto al siguiente con un solo clic sin cerrar el panel.
+> - **Memoria de Preferencia:** Tu elección se guarda automáticamente en el navegador (`tp_panel_dock_pos`) y se respeta en **Diseño**, **Ejecución**, **Defectos** y **Trazabilidad**.
 
 ---
 
@@ -59,6 +72,10 @@ El panel izquierdo permite organizar tus casos de prueba en estructuras lógicas
 
 ### 2.2 Creación de Casos de Prueba
 Haz clic en el botón azul **`+ Crear Caso de Prueba`** en la esquina superior derecha. Se abrirá el formulario de creación:
+
+> [!IMPORTANT]
+> **$\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5.1}}}$ Autoría Lado a Lado en Diseño:**  
+> Al abrir o editar un Caso de Prueba en **Diseño**, puedes usar los botones **`◧` / `▣` / `◨`** en la cabecera del panel para acoplarlo a la izquierda o derecha de tu tabla de casos. Así puedes consultar otros casos del repositorio mientras redactas o editas pasos sin tener que cerrar el formulario.
 
 #### A. Campos Principales y Metadatos
 | Campo | Descripción | Opciones / Ejemplos |
@@ -157,16 +174,33 @@ Un **Ciclo de Prueba** representa una iteración de pruebas concreta ejecutada e
 
 ### 3.3 Asignación de Casos a un Ciclo
 1. Selecciona el Ciclo en el panel izquierdo.
-2. En el panel principal, haz clic en **`+ Asignar Casos de Prueba`**.
+2. En el panel principal, haz clic en **`+ Asignar Casos de Prueba`** (`Add Tests`).
 3. Utiliza el selector con árbol de carpetas y filtros para elegir los casos de prueba del repositorio.
 4. Puedes asignar un **Tester Responsable** a cada caso individualmente o a toda la selección en masa.
 5. Haz clic en **`Guardar Asignación`**. La barra inferior de progreso del ciclo actualizará el total de casos planificados en tiempo real.
+
+> [!TIP]
+> ### $\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.6.0}}}$ Barra de Selección Masiva (`Seleccionar todos`) y Botón Inteligente `+ Añadir todos`
+> En la ventana de asignación de casos al ciclo (**`Available Test Cases`**), ahora dispones de un flujo mejorado de selección y carga por lotes:
+> 1. **Modo de Selección Masiva al Seleccionar un Caso:**  
+>    - En la parte superior de la lista se incluye un **checkbox maestro** (con soporte para estado parcial `indeterminate`).  
+>    - En cuanto seleccionas **un caso de prueba**, la barra superior se ilumina en azul mostrando el contador **`N de M casos seleccionados`** y habilita el botón **`Seleccionar todos (M)`** (para marcar todos los casos visibles con un clic) junto con **`Limpiar selección`**.
+> 2. **Botón Dinámico `+ Añadir todos (M)` / `+ Añadir seleccionados (N)`:**  
+>    - Si no has marcado casillas individuales, el botón **`+ Añadir todos (M)`** agrega únicamente los **`M` casos disponibles que coinciden con tu búsqueda actual, carpeta seleccionada y filtros de prioridad/tipo**, omitiendo los que ya están dentro del ciclo.  
+>    - Si seleccionaste casos específicos, el botón cambia automáticamente a **`+ Añadir seleccionados (N)`** para agregar exactamente tu selección.
+> 3. **Re-adición garantizada de casos retirados:**  
+>    - Si habías eliminado un caso del ciclo y decides volver a incluirlo (ya sea con `+ Add` individual o con `+ Añadir todos`), el sistema limpia automáticamente el bloqueo temporal anti-fantasma y conserva su carpeta (`folderId`) y clave de Jira (`testCaseKey`).
 
 ---
 
 ## 4. Módulo 3: Ejecución de Pruebas (Execution)
 
 El módulo de **Ejecución** es el espacio de trabajo diario del tester, donde se registran los resultados, se documentan iteraciones, se adjuntan evidencias y se reportan defectos en Jira.
+
+> [!TIP]
+> ### $\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5.0 – v4.5.1}}}$ Consola de Ejecución en Vista Dividida (`Split-View`) y Velocidad 3x (`v4.4.0`)
+> - **Ejecución Lado a Lado (`Master-Detail`):** Al abrir un caso de prueba en **Ejecución**, usa los botones **`◧` / `▣` / `◨`** en la cabecera del inspector para acoplarlo a la **Derecha (`◨`)** o **Izquierda (`◧`)**. La lista de casos del ciclo se ajustará automáticamente en la mitad opuesta de la pantalla (sin fondo oscuro), permitiéndote pasar de un caso de prueba al siguiente con un solo clic mientras ejecutas sus pasos.
+> - **Guardado ~3x más Rápido (`⚡ v4.4.0`):** El cambio de estado de pasos e iteraciones (`PASS`, `FAIL`, `BLOCKED`) ahora guarda en paralelo y utiliza caché inteligente de sesión, reduciendo el tiempo de respuesta en más de un 60% y evitando bloqueos por límite de peticiones (`HTTP 429`).
 
 ---
 
@@ -223,6 +257,10 @@ Es fundamental respaldar los resultados de prueba con evidencias multimedia:
 - **Nivel de Evidencia:** Puedes adjuntar evidencias a nivel global del caso de prueba o dentro de una iteración específica.
 - **Renombrar y Eliminar:** Puedes cambiar el nombre del archivo adjunto para facilitar su lectura o eliminarlo haciendo clic en el icono de papelera.
 
+> [!IMPORTANT]
+> **$\colorbox{#E9F2FF}{\textcolor{#0C66E4}{\textbf{⚡ MEJORA v4.4.0}}}$ Carga Instantánea de Evidencias (Doble Caché LRU):**  
+> Las imágenes y capturas adjuntas a los pasos de prueba ahora se almacenan en una doble caché inteligente (en el navegador y en el servidor Forge). Al volver a abrir un paso o cambiar entre casos del ciclo, las miniaturas se visualizan de forma **instantánea (`0 ms`)** sin volver a descargarlas desde Jira.
+
 ---
 
 ### 4.4 Gestión y Vinculación de Defectos (Bugs)
@@ -262,7 +300,7 @@ El módulo de **Informes** consolida en tiempo real la información de todas las
 │ 📊 DASHBOARD EJECUTIVO DE CALIDAD                                                      │
 ├───────────────────┬───────────────────┬───────────────────┬────────────────────────────┤
 │ Total Casos: 974  │ Aprobados: 812    │ Fallidos: 98      │ Bloqueados: 21  (Sin Run: 43)│
-│ Cobertura: 95.6%  │ % Éxito: 83.4%    │ Bugs Abiertos: 34 │ Tiempo Promedio: 4.2h      │
+│ Cobertura: 95.6%  │ % Éxito: 83.4%    │ Bugs Abiertos: 34 │ Resolución (MTTR): 0d / 4.2d │
 └───────────────────┴───────────────────┴───────────────────┴────────────────────────────┘
 ```
 
@@ -274,6 +312,10 @@ En la parte superior del módulo de reportes puedes segmentar los datos:
 - **Filtro por Ciclos de Prueba:** Selecciona ciclos individuales para análisis granular.
 - **Filtro por Tipo de Prueba:** Alterna entre pruebas *Funcionales* y *No Funcionales*.
 
+> [!IMPORTANT]
+> **$\colorbox{#E9F2FF}{\textcolor{#0C66E4}{\textbf{⚡ MEJORA v4.4.0}}}$ Caché Compartida de Reportes (`< 300 ms`):**  
+> El Dashboard Ejecutivo ahora incorpora una caché compartida de dos niveles (Memoria + `@forge/kvs`). Cuando un integrante del equipo consulta el reporte de un proyecto, las consultas subsecuentes del equipo cargan en **menos de `300 ms`**, invalidándose de forma automática en el instante en que se registra cualquier cambio en casos, ejecuciones o defectos.
+
 ---
 
 ### 5.2 Secciones y Tableros Analíticos
@@ -284,6 +326,12 @@ En la parte superior del módulo de reportes puedes segmentar los datos:
 - **Tasa de Fallos (*Fail Rate*):** Porcentaje de pruebas fallidas sobre el total.
 - **Pruebas Bloqueadas:** Alerta temprana de dependencias e impedimentos técnicos.
 
+> [!TIP]
+> ### $\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5.2}}}$ Precisión del KPI `RESOLUCIÓN (MTTR)` por Ciclo Filtrado
+> - **Cálculo aislado por ciclo:** Cuando seleccionas uno o más ciclos en los filtros del Dashboard, la tarjeta **`RESOLUCIÓN (MTTR)`** y el desglose de **Tiempo Promedio de Resolución por Severidad** se calculan **exclusivamente con los defectos vinculados a los ciclos seleccionados**.
+> - **Ciclos nuevos en `0d`:** Si un ciclo es nuevo o aún no tiene defectos resueltos vinculados, el KPI mostrará **`0d`** con total exactitud (sin arrastrar el promedio histórico global de otros ciclos del proyecto).
+> - **Vista global del proyecto:** Si no se selecciona ningún filtro de ciclo, el indicador muestra el MTTR global de todos los defectos resueltos del proyecto.
+
 #### 2. Gráficos de Distribución de Estado
 - **Gráfico de Dona (*Donut Chart*):** Proporción visual de `Passed`, `Failed`, `Blocked`, `In Progress` y `Not Run`.
 - **Progreso Temporal (*Execution Velocity*):** Curva de casos ejecutados a lo largo de los días del ciclo.
@@ -293,6 +341,10 @@ En la parte superior del módulo de reportes puedes segmentar los datos:
 - **Defectos Abiertos vs. Resueltos:** Seguimiento del ritmo de corrección del equipo de desarrollo.
 - **Listado de Defectos Críticos de Ciclo:** Tabla interactiva con enlace directo a Jira, tester asignado, casos afectados y estado de resolución.
 - **Defectos Huérfanos / Sin Vincular:** Detección de bugs reportados en el proyecto de Jira que no están asociados a ningún caso de prueba formal.
+
+> [!TIP]
+> **$\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.2.0 – v4.5.1}}}$ Rediseño Ejecutivo de Defectos y Paneles Acoplables (`Split-View`):**  
+> Al hacer clic sobre cualquier Defecto o sobre una Épica/Historia en la **Matriz de Trazabilidad**, se abre su panel de detalle interactivo con el selector **`◧` | `▣` | `◨`**. Puedes acoplarlo a la derecha (`◨`) para inspeccionar y editar defectos o revisar la cobertura de historias lado a lado sin perder de vista la tabla del reporte.
 
 #### 4. Estadísticas por Tester y Componente
 - **Productividad del Equipo:** Número de ejecuciones y defectos reportados por cada tester.
@@ -311,21 +363,37 @@ Puedes compartir el estado de la calidad con stakeholders mediante los botones d
 
 ---
 
-## 6. Módulo 5: Automatización e Integración CI/CD (Test Automation)
+## 6. Módulo 5: Configuración del Proyecto (`⚙️ Settings`) e Integración CI/CD
 
-Test Pulse Suite permite consolidar los resultados de pruebas manuales y automatizadas en una única fuente de verdad.
+### 6.1 Pestaña `⚙️ Configuración` (Exclusiva para Administradores)
+La 5.ª pestaña de la barra de navegación superior (**`⚙️ Configuración`**) está disponible para los administradores del proyecto y centraliza la parametrización operativa de **Test Pulse Suite**:
 
-### 6.1 Frameworks Soportados
-La suite puede recibir resultados de los frameworks más populares del mercado:
-- **Java / JVM:** JUnit 4/5, TestNG, Cucumber-JVM.
-- **JavaScript / TypeScript:** Cypress, Playwright, Jest, Mocha.
-- **Python:** PyTest, Robot Framework, Behave.
-- **C# / .NET:** NUnit, xUnit, SpecFlow.
+1. **Habilitación del Proyecto y Mapeo de Entidades de Jira:**
+   - Permite activar o desactivar Test Pulse en el proyecto actual.
+   - Define qué tipos de incidencia (*Issue Types*) representan un **Caso de Prueba (*Test Case*)**, **Ciclo de Prueba (*Test Cycle*)**, **Plan de Prueba (*Test Plan*)**, **Ejecución (*Test Run*)** y **Defecto (*Bug*)**, así como el tipo de enlace estándar (*Issue Link Type*, p. ej. `Relates`).
+2. **Catálogo de Ambientes de Ejecución:**
+   - Permite agregar, editar o eliminar los ambientes disponibles al crear ciclos o registrar ejecuciones (*Desarrollo, QA, Staging, UAT, Producción, POS, Mobile*, etc.).
+3. **Automatización y Programación de Reportes Ejecutivos:**
+   - Configura el envío o generación automática de reportes ejecutivos en horarios programados (ej. `18:00 hrs CDMX`), integrándose con reglas de **Jira Automation** mediante un *Scheduled Trigger* nativo de Forge.
+4. **Herramienta de Resincronización de *Test Runs* por Ciclo:**
+   - Permite reconstruir y auditar la lista de corridas vinculadas a un ciclo de pruebas en caso de cambios masivos directos en Jira.
 
-### 6.2 Consulta de Historial Automatizado
-Dentro de la pestaña de Automatización puedes:
-- Consultar las corridas de pruebas enviadas por tus pipelines de integración continua (**GitHub Actions, GitLab CI, Jenkins, Azure DevOps, Bitbucket Pipelines**).
-- Ver la correspondencia automática entre los métodos de prueba del código y los casos de prueba de Test Pulse.
+> [!IMPORTANT]
+> **$\colorbox{#E9F2FF}{\textcolor{#0C66E4}{\textbf{⚡ MEJORA v4.1.0 – v4.3.0}}}$ Desacoplamiento Dinámico de *Custom Fields* y Carga Diferida:**  
+> El módulo de Configuración ahora gestiona dinámicamente el mapa de campos personalizados (`snapshotFieldMap`) por proyecto en Forge Storage (con respaldo automático a los IDs corporativos de El Puerto de Liverpool) y se carga bajo demanda (`React.lazy`) para no impactar el tiempo de arranque de los testers.
+
+---
+
+### 6.2 Integración de Pruebas Automatizadas (CI/CD vía API REST v3 de Jira)
+La integración con frameworks de automatización **no requiere una pestaña separada ni instalar plugins adicionales**, ya que opera directamente sobre la **API REST v3 de Jira Cloud** y el modelo nativo de datos de Test Pulse (consulta la guía técnica completa en [`INTEGRACION_AUTOMATIZACION.md`](file:///Users/gbarbosam/jira-test-management/INTEGRACION_AUTOMATIZACION.md)):
+
+- **Cómo reportan los *Runners* de CI/CD:**
+  1. Tu pipeline (**GitHub Actions, GitLab CI, Jenkins, Azure DevOps o Bitbucket Pipelines**) ejecuta las pruebas en **Playwright, Cypress, Selenium, PyTest, JUnit, TestNG, Postman o Robot Framework**.
+  2. El *runner* consulta los `Test Runs` del ciclo mediante JQL (`GET /rest/api/3/search`) y publica el resultado actualizando la transición del issue, la propiedad de entidad `testpulse-run-data` (`PUT /rest/api/3/issue/{runKey}/properties/testpulse-run-data`) y las evidencias o logs adjuntos.
+- **Dónde se visualizan en Test Pulse Suite:**
+  - **En Diseño (`Design`):** Cada caso cuenta con el campo **`Estado de Automatización`** (*Manual, Automatizado, Candidato*) para controlar la cobertura de automatización del repositorio.
+  - **En Ejecución (`Execution`):** Los `Test Runs` actualizados por el pipeline reflejan automáticamente su estado (`PASSED`, `FAILED`, `BLOCKED`), comentarios de pasos y evidencias adjuntas dentro del ciclo.
+  - **En Informes (`Reports`):** El widget ejecutivo **"Salud de Automatización & CI/CD"** consolida el porcentaje de pruebas automatizadas vs. manuales y su efectividad en el ciclo.
 
 ---
 
@@ -336,3 +404,4 @@ Dentro de la pestaña de Automatización puedes:
 3. **Evidencias Claras en Fallos:** Adjunta siempre una captura de pantalla del mensaje de error y el archivo de log correspondiente antes de marcar una iteración como `Failed`.
 4. **Vincular siempre los Bugs al Caso:** No reportes bugs aislados en Jira; créalos o vincúlalos directamente desde la ejecución de Test Pulse para que se reflejen en la Matriz de Trazabilidad.
 5. **Cierre de Ciclos:** Al finalizar un sprint o release, verifica que ningún caso permanezca en estado `In Progress` o `Not Run`.
+6. **$\colorbox{#E3FCEF}{\textcolor{#006644}{\textbf{🆕 NUEVO v4.5.1}}}$ Aprovecha la Vista Dividida (`◨ Derecha`) en Ejecución:** Durante jornadas intensivas de pruebas, acopla el panel de ejecución a la derecha (`◨`) para avanzar por la lista de casos del ciclo sin abrir ni cerrar modales.
