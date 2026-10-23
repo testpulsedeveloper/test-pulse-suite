@@ -37,7 +37,7 @@ import {
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
 
-const APP_VERSION = `v${packageJson.version || '4.8.9'}`;
+const APP_VERSION = `v${packageJson.version || '4.10.0'}`;
 
 export default function SettingsView({ ctx }) {
   const {

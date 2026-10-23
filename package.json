@@ -1,11 +1,11 @@
 {
   "name": "jira-project-page-custom-ui",
-  "version": "4.9.0",
+  "version": "4.10.0",
   "main": "index.js",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node --test --experimental-test-module-mocks tests/phase3.test.js tests/authz.behavior.test.js",
+    "test": "node --test --experimental-test-module-mocks tests/phase3.test.js tests/authz.behavior.test.js tests/runDataContract.test.js",
     "build": "npm --prefix static/hello-world run build",
     "deploy": "forge deploy --non-interactive",
     "deploy:prod": "forge deploy -e production --non-interactive"
@@ -17,6 +17,7 @@
   "dependencies": {
     "@forge/api": "^8.0.2",
     "@forge/kvs": "^2.0.6",
-    "@forge/resolver": "^2.0.0"
+    "@forge/resolver": "^2.0.0",
+    "@forge/sql": "^4.0.8"
   }
 }

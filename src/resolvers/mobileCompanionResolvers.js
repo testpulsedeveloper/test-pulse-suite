@@ -34,6 +34,7 @@ import {
   getIssueVisibleToUser,
   userHasPermissions
 } from '../utils/authz.js';
+import { stampRunDataV2 } from '../utils/runDataContract.js';
 
 export {
   QR_SESSION_TTL_MS,
@@ -500,7 +501,7 @@ export async function mobileUploadHandler(request) {
           await api.asApp().requestJira(route`/rest/api/3/issue/${targetIssue}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedProp)
+            body: JSON.stringify(stampRunDataV2(updatedProp, session.projectId || null))
           });
         }
       } catch (propErr) {

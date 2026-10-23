@@ -4,13 +4,16 @@ import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import { jqlQuote } from './utils/jqlHelpers.js';
+import { stampRunDataV2 } from './utils/runDataContract.js';
+import { applyExecutionIndexMigrations, getExecutionIndexHealth } from './sql/executionIndexSchema.js';
 import {
   AuthorizationError,
   normalizeProjectRef,
   canAccessProject,
   canAdministerProject,
   isProjectEnabled,
-  isSuperuser
+  isSuperuser,
+  normalizeIssueRef
 } from './utils/authz.js';
 import {
   getIterationEvidenceKeys,
@@ -2097,7 +2100,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
             await api.asUser().requestJira(route`/rest/api/3/issue/${existingRun.id}/properties/testpulse-run-data`, {
               method: 'PUT',
               headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-              body: JSON.stringify(updatedProp)
+              body: JSON.stringify(stampRunDataV2(updatedProp, projectId))
             });
 
             const nativeStatus = existingRun.fields?.status?.name || 'Not Run';
@@ -2259,7 +2262,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
         await api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(runData)
+          body: JSON.stringify(stampRunDataV2(runData, projectId))
         }).catch(() => {});
 
         // 3. Secondary link: Link Test Run to Test Case
@@ -3297,7 +3300,9 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
   const ids = testIds.map(String).filter(Boolean);
   const idsSet = new Set(ids);
 
-  // 1. Immediately update lightweight index on cycle (matching all potential ID / Key variations)
+  // 1. Immediately update lightweight index on cycle (matching all potential ID / Key variations).
+  //    The entries being removed are remembered: they carry the exact Test Run of each case.
+  const removedEntries = [];
   await updateLightweightIndex(cycleId, (lw) => {
     return lw.filter(t => {
       const tId = String(t.id || '');
@@ -3305,24 +3310,40 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       const tTcKey = String(t.testCaseKey || '');
       const tRunId = String(t.testRunId || '');
       const tRunKey = String(t.testRunKey || '');
-      return !idsSet.has(tId) &&
+      const keep = !idsSet.has(tId) &&
              (!tKey || !idsSet.has(tKey)) &&
              (!tTcKey || !idsSet.has(tTcKey)) &&
              (!tRunId || !idsSet.has(tRunId)) &&
              (!tRunKey || !idsSet.has(tRunKey));
+      if (!keep) removedEntries.push(t);
+      return keep;
     });
   });
 
-  // 2. Fetch all linked issues for this cycle (without restricting issuetype, to catch Task fallback runs)
+  // 2. Find the Test Runs to clean up.
+  //    Fast path: every removed entry knows its testRunId → fetch only those runs by id.
+  //    Slow path (legacy entries without testRunId): scan all issues linked to the cycle, as before.
+  //    Scanning a large cycle on every removal used to exceed Forge's 25-second limit.
   try {
-    const jql = `issue in linkedIssues(${jqlQuote(cycleId)})`;
-    const runIssues = await fetchAllIssues(
-      jql,
-      ['id', 'key', 'status', 'attachment', 'issuelinks', 'summary'],
-      null,
-      ['testpulse-run-data'],
-      50
-    );
+    const knownRunIds = Array.from(new Set(removedEntries.map(e => String(e.testRunId || '')).filter(id => /^\d+$/.test(id))));
+    const everyEntryHasRun = removedEntries.length > 0 && removedEntries.every(e => /^\d+$/.test(String(e.testRunId || '')));
+    const runFields = ['id', 'key', 'status', 'attachment', 'issuelinks', 'summary'];
+    let runIssues = [];
+    if (everyEntryHasRun) {
+      for (let i = 0; i < knownRunIds.length; i += 100) {
+        const chunk = knownRunIds.slice(i, i + 100);
+        const page = await fetchAllIssues(`id in (${chunk.map(id => jqlQuote(id)).join(',')})`, runFields, null, ['testpulse-run-data'], 1);
+        runIssues = runIssues.concat(page || []);
+      }
+    } else {
+      runIssues = await fetchAllIssues(
+        `issue in linkedIssues(${jqlQuote(cycleId)})`,
+        runFields,
+        null,
+        ['testpulse-run-data'],
+        50
+      );
+    }
 
     // Identify which Test Runs in Jira belong to any of the deleted testIds
     const matchingRuns = (runIssues || []).filter(r => {
@@ -3372,12 +3393,12 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
           await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+            body: JSON.stringify(stampRunDataV2({
               ...prop,
               cycleId: String(cycleId),
               unlinkedFromCycle: true,
               unlinkedAt: Date.now()
-            })
+            }, null))
           }).catch(() => {});
         } else {
           // Pristine / unexecuted: Delete issue from Jira to prevent clutter
@@ -3388,20 +3409,32 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
             await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
               method: 'PUT',
               headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-              body: JSON.stringify({
+              body: JSON.stringify(stampRunDataV2({
                 ...prop,
                 cycleId: String(cycleId),
                 unlinkedFromCycle: true,
                 unlinkedAt: Date.now()
-              })
+              }, null))
             }).catch(() => {});
           }
         }
       } catch (e) {}
     });
 
-    // Clean execution properties in parallel
-    await processInBatches(ids, 15, 30, async (testId) => {
+    // Clean legacy `exec_<id>` properties: list the cycle's property keys ONCE and delete only
+    // the ones that exist (blind deletes cost ~5 Jira calls per removed case).
+    let execKeysToDelete = [];
+    try {
+      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+      if (keysRes.ok) {
+        const keysData = await keysRes.json();
+        const existing = new Set((keysData.keys || []).map(k => k.key));
+        execKeysToDelete = ids.filter(testId => existing.has(`exec_${testId}`));
+      }
+    } catch (_) {
+      execKeysToDelete = [];
+    }
+    await processInBatches(execKeysToDelete, 15, 30, async (testId) => {
       await api.asUser().requestJira(
         route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
         { method: 'DELETE' }
@@ -3577,7 +3610,7 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
     await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(newProp)
+      body: JSON.stringify(stampRunDataV2(newProp, projectId))
     }).catch(console.warn);
 
     // 2. Execute all secondary Jira synchronization tasks in parallel (Promise.allSettled)
@@ -3744,7 +3777,7 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
           await api.asUser().requestJira(route`/rest/api/3/issue/${createdRunId}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(runDataProp)
+            body: JSON.stringify(stampRunDataV2(runDataProp, projectId))
           }).catch(() => {});
         }
       }
@@ -4672,7 +4705,7 @@ resolver.define('createTestRunsForCycle', async ({ payload }) => {
         await api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(initialRunData)
+          body: JSON.stringify(stampRunDataV2(initialRunData, projectId))
         });
 
         createdRuns.push({
@@ -4832,7 +4865,7 @@ resolver.define('updateTestRunExecution', async ({ payload, context }) => {
   await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/properties/testpulse-run-data`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(updatedRunData)
+    body: JSON.stringify(stampRunDataV2(updatedRunData, projectId))
   });
 
   // 3. Execute secondary updates in parallel (status transition, conditional assignee, ADF comment)
@@ -5242,7 +5275,7 @@ resolver.define('resyncTestRunsBatch', async ({ payload, context }) => {
       let propRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}/properties/testpulse-run-data`, {
         method: 'PUT',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(newRunData)
+        body: JSON.stringify(stampRunDataV2(newRunData, projectId))
       });
       if (!propRes.ok && propRes.status !== 429) {
         // Property too large → keep only metadata in history
@@ -5250,7 +5283,7 @@ resolver.define('resyncTestRunsBatch', async ({ payload, context }) => {
         propRes = await api.asUser().requestJira(route`/rest/api/3/issue/${it.testRunId}/properties/testpulse-run-data`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(newRunData)
+          body: JSON.stringify(stampRunDataV2(newRunData, projectId))
         });
       }
       return { testRunId: it.testRunId, ok: propRes.ok, reason: propRes.ok ? null : `prop ${propRes.status}`, sections: (tcSnapshot.includedSections || []).length };
@@ -5582,7 +5615,7 @@ resolver.define('migrateCycleBatch', async ({ payload }) => {
         await api.asUser().requestJira(route`/rest/api/3/issue/${runIssue.id}/properties/testpulse-run-data`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(runData)
+          body: JSON.stringify(stampRunDataV2(runData, projectId))
         });
 
         // 6. Transition status if needed
@@ -5735,7 +5768,7 @@ resolver.define('syncCycleBatchTestRuns', async ({ payload }) => {
         await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/properties/testpulse-run-data`, {
           method: 'PUT',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(runData)
+          body: JSON.stringify(stampRunDataV2(runData, null))
         });
 
         syncedCount++;
@@ -5836,6 +5869,62 @@ export const scheduledReportHandler = createScheduledReportHandler({ getAppStora
 // ==========================================
 registerMobileCompanionResolvers(resolver);
 export const mobileUploadHandler = modularMobileUploadHandler;
+
+// ==========================================
+// EXECUTION INDEX (Opción A · fase 0)
+// ==========================================
+
+/**
+ * Forge lifecycle trigger (`avi:forge:installed:app`, `avi:forge:upgraded:app`): creates or
+ * updates the Forge SQL schema of the execution index. Idempotent.
+ */
+export const sqlMigrationsHandler = async (event) => {
+  try {
+    const applied = await applyExecutionIndexMigrations();
+    console.log(`[sql] migrations ok event=${event?.eventType || 'n/a'} applied=${applied.length ? applied.join(',') : 'none'}`);
+  } catch (err) {
+    console.error('[sql] migrations failed:', err?.message || err);
+  }
+};
+
+/**
+ * Superuser-only diagnostic used to validate phase 0 on a site:
+ *  - Forge SQL: whether the index tables exist and their row counts.
+ *  - JQL index: for a cycle, how many Test Runs JQL finds through `tpCycleId` (new contract v2
+ *    property) versus the legacy `linkedIssues` link. In phase 0 only runs written after the
+ *    deploy carry `activeCycleId`, so the first number can be lower for old cycles.
+ */
+resolver.define('getExecutionIndexHealth', async ({ payload, context }) => {
+  if (!(await isSuperuser(context))) {
+    throw new AuthorizationError('FORBIDDEN', 'Solo los superusuarios de Test Pulse pueden consultar el índice.');
+  }
+  const result = { sql: null, jql: null };
+  try {
+    result.sql = await getExecutionIndexHealth();
+  } catch (err) {
+    result.sql = { error: err?.message || String(err) };
+  }
+
+  const cycleRef = normalizeIssueRef(payload?.cycleId);
+  if (cycleRef) {
+    const countJql = async (jql) => {
+      const res = await api.asUser().requestJira(route`/rest/api/3/search/approximate-count`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jql })
+      });
+      if (!res.ok) return { error: summarizeJiraError(await res.text()) };
+      const data = await res.json();
+      return { count: data?.count ?? null };
+    };
+    result.jql = {
+      cycleId: cycleRef,
+      byIndexedProperty: await countJql(`tpCycleId = ${jqlQuote(cycleRef)}`),
+      byLegacyLink: await countJql(`issue in linkedIssues(${jqlQuote(cycleRef)})`)
+    };
+  }
+  return result;
+});
 
 export const handler = resolver.getDefinitions();
 

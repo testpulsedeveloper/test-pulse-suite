@@ -20,6 +20,39 @@ modules:
   webtrigger:
     - key: mobile-upload-webtrigger
       function: mobileUploadHandler
+  # Opción A · fase 0: Jira indexes these fields of the `testpulse-run-data` issue property,
+  # so Test Runs can be searched with JQL (e.g. `tpCycleId = "10500"`) without issue links.
+  jira:entityProperty:
+    - key: testpulse-run-index
+      entityType: issue
+      propertyKey: testpulse-run-data
+      values:
+        - path: activeCycleId
+          type: string
+          searchAlias: tpCycleId
+        - path: projectId
+          type: string
+          searchAlias: tpProjectId
+        - path: status
+          type: string
+          searchAlias: tpStatus
+        - path: executedAtIso
+          type: date
+          searchAlias: tpExecutedAt
+        - path: executedBy.accountId
+          type: user
+          searchAlias: tpExecutedBy
+  # Opción A · fase 0: Forge SQL database used as a rebuildable index of executions.
+  sql:
+    - key: main
+      engine: mysql
+  # Applies the Forge SQL schema migrations when the app is installed or upgraded.
+  trigger:
+    - key: sql-migrations-trigger
+      function: sqlMigrationsHandler
+      events:
+        - avi:forge:installed:app
+        - avi:forge:upgraded:app
   function:
     - key: resolver
       handler: index.handler
@@ -27,6 +60,8 @@ modules:
       handler: index.scheduledReportHandler
     - key: mobileUploadHandler
       handler: index.mobileUploadHandler
+    - key: sqlMigrationsHandler
+      handler: index.sqlMigrationsHandler
 resources:
   - key: main
     path: static/hello-world/build
