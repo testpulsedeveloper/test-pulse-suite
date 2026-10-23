@@ -2577,7 +2577,8 @@ const getCycleExecutionSummary = async (cycleId) => {
           });
         });
         if (cycleBugKeys.size > 0) {
-          const validCycleBugs = await fetchBugsBatch(Array.from(cycleBugKeys), config, null, cycleProjPrefix || null);
+          // No project config in this scope: fetchBugsBatch falls back to its default bug fields.
+          const validCycleBugs = await fetchBugsBatch(Array.from(cycleBugKeys), null, null, cycleProjPrefix || null);
           cleanEntries.forEach(e => {
             if (Array.isArray(e.linkedBugs) && e.linkedBugs.length > 0) {
               e.linkedBugs = e.linkedBugs
@@ -3380,12 +3381,16 @@ function knownRunsOf(removedEntries) {
  * @param {{canDelete: boolean, canLink: boolean, canEdit: boolean}} [opts.perms] - What the
  *        requesting user may do. Background jobs run as the app, so these flags (checked as
  *        the user when the job was queued) decide which actions are performed.
+ * @param {number} [opts.deadlineAt] - Epoch ms after which no new run is processed. Used when
+ *        the cleanup runs inside a 25-second resolver, so it stops cleanly instead of timing out.
  */
 async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
   if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
   const ids = testIds.map(String).filter(Boolean);
   const idsSet = new Set(ids);
   const perms = { canDelete: true, canLink: true, canEdit: true, ...(opts.perms || {}) };
+  const deadlineAt = Number(opts.deadlineAt) || Infinity;
+  let unprocessedRuns = 0;
 
   // 1. Update the lightweight index on the cycle (unless the caller already did).
   const removedEntries = opts.skipIndex ? [] : await removeCasesFromCycleIndex(cycleId, idsSet);
@@ -3412,7 +3417,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
         runFields,
         null,
         ['testpulse-run-data'],
-        50
+        Number.isFinite(deadlineAt) ? 10 : 50
       );
     }
 
@@ -3450,6 +3455,10 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
     // - Unexecuted / pristine runs -> Hard DELETE from Jira to keep project clean
     // - Executed runs with evidences/comments -> Unlink from cycle & preserve for auto-recovery
     await processInBatches(matchingRuns, 10, 50, async (r) => {
+      if (Date.now() > deadlineAt) {
+        unprocessedRuns++;
+        return;
+      }
       try {
         const prop = r.properties?.['testpulse-run-data'] || {};
         const normStatus = normalizeJiraStatus(r.fields?.status?.name || prop.status || 'Not Run');
@@ -3515,6 +3524,10 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
   }
 
   await invalidateProjectReportCache();
+  if (unprocessedRuns > 0) {
+    console.warn(`[performRemoveTestsFromCycle] time budget reached: ${unprocessedRuns} runs left in cycle ${cycleId}`);
+    return { success: false, partial: true, unprocessedRuns, removed: ids.length };
+  }
   return { success: true, removed: ids.length };
 }
 
@@ -3561,9 +3574,12 @@ async function requestCycleRemoval({ payload, context }) {
     console.log(`[cycleRemoval] queued cycle=${cycle.id} ids=${ids.length} runs=${knownRunIds.length} job=${jobId}`);
     return { success: true, removed: ids.length, queued: true, jobId };
   } catch (err) {
-    console.warn('[cycleRemoval] queue unavailable, cleaning up in this invocation:', err?.message);
+    console.warn(`[cycleRemoval] queue unavailable, cleaning up in this invocation: ${err?.message} code=${err?.code ?? 'n/a'} details=${JSON.stringify(err?.details ?? null)}`);
     await clearPendingRemoval(cycle.id, markerId);
-    const result = await performRemoveTestsFromCycle(cycle.id, ids, { skipIndex: true, knownRunIds, everyEntryHasRun, perms });
+    // Stop at ~18 s so this 25-second invocation never times out; whatever is left is reported.
+    const result = await performRemoveTestsFromCycle(cycle.id, ids, {
+      skipIndex: true, knownRunIds, everyEntryHasRun, perms, deadlineAt: Date.now() + 18000
+    });
     return { ...result, queued: false };
   }
 }

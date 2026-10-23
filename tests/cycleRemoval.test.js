@@ -42,11 +42,12 @@ mock.module('@forge/events', { namedExports: { Queue: FakeQueue } });
 
 const q = await import('../src/utils/cycleRemovalQueue.js');
 
-test('jobs go to the removal queue, one at a time per cycle', async () => {
+test('jobs go to the removal queue without a concurrency key (rejected by Forge with 400)', async () => {
   const jobId = await q.enqueueCycleRemoval({ cycleId: '10500', ids: ['CUQ-1'] });
   assert.equal(jobId, 'job-1');
   assert.equal(pushed[0].queue, q.CYCLE_REMOVAL_QUEUE_KEY);
-  assert.deepEqual(pushed[0].concurrency, { key: 'cycle-10500', limit: 1 });
+  assert.deepEqual(pushed[0].body, { cycleId: '10500', ids: ['CUQ-1'] });
+  assert.equal(pushed[0].concurrency, undefined);
 });
 
 test('pending ids hide cases until the job clears them, per cycle', async () => {
@@ -91,4 +92,18 @@ test('removal resolvers queue the work; the worker runs as the app with the user
   const m = fs.readFileSync(path.join(ROOT_DIR, 'manifest.yml'), 'utf8');
   assert.ok(m.includes('queue: cycle-removal-queue') && m.includes('method: process-cycle-removal'));
   assert.ok(/handler: index\.cycleRemovalWorker\n\s+timeoutSeconds: 300/.test(m));
+});
+
+test('in-resolver fallback stops at a deadline instead of hitting the 25 s timeout', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('deadlineAt: Date.now() + 18000'), 'fallback sets an 18 s deadline');
+  assert.ok(src.includes('return { success: false, partial: true, unprocessedRuns, removed: ids.length };'));
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(app.includes('if (res?.partial) {'), 'frontend warns about a partial removal');
+});
+
+test('cycle summary no longer references an undefined `config` (bugs on a cycle broke the list)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(!src.includes('fetchBugsBatch(Array.from(cycleBugKeys), config,'));
+  assert.ok(src.includes('fetchBugsBatch(Array.from(cycleBugKeys), null, null, cycleProjPrefix || null)'));
 });

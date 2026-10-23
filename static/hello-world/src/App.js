@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.11.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.11.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -4878,6 +4878,17 @@ Then el sistema valida la identidad.
       // Test Runs in a background job, so reloading the page does not interrupt it.
       const res = await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(idsToTrack)) });
       const plural = testIds.length !== 1 ? 's' : '';
+      if (res?.partial) {
+        // The server ran out of time before cleaning every Test Run: tell the user and reload the list.
+        addNotification({
+          type: 'warning',
+          title: 'Eliminación incompleta',
+          description: `Quedaron ${res.unprocessedRuns} ejecucion(es) por limpiar. Vuelve a quitar los casos que sigan apareciendo en el ciclo.`
+        });
+        const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
+        if (execution) safeSetCycleTests(execution);
+        return;
+      }
       addNotification({
         type: 'success',
         title: `${testIds.length} caso${plural} quitado${plural} del ciclo`,

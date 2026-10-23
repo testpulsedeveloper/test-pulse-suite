@@ -25,17 +25,16 @@ const pendingPrefix = (cycleId) => `cycle_removal_${String(cycleId)}_`;
 const removalQueue = new Queue({ key: CYCLE_REMOVAL_QUEUE_KEY });
 
 /**
- * Queues a background removal job. Jobs of the same cycle run one at a time
- * (concurrency key per cycle) so they never overwrite each other's index writes.
+ * Queues a background removal job.
+ * No concurrency key is sent: Forge rejected it in production (400 Bad Request), and it is
+ * not needed because the cycle index is updated by the resolver before queueing; jobs only
+ * touch their own Test Runs and `exec_<id>` properties, so two jobs never overwrite each other.
  *
  * @param {Object} body - Job payload (`cycleId`, `ids`, `knownRunIds`, `everyEntryHasRun`, `perms`, …).
  * @returns {Promise<string>} Forge job id.
  */
 export async function enqueueCycleRemoval(body) {
-  const { jobId } = await removalQueue.push({
-    body,
-    concurrency: { key: `cycle-${String(body.cycleId)}`, limit: 1 }
-  });
+  const { jobId } = await removalQueue.push({ body });
   return jobId;
 }
 
