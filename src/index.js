@@ -2216,8 +2216,11 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       console.warn(`[createTestRunsInJiraForCycle] Bulk create exception:`, bulkErr.message);
     }
 
-    // Process created issues (or fallback if bulk creation was incomplete)
-    const runProcessingPromises = testCasesToCreate.map(async (tc, idx) => {
+    // Process created issues (or fallback if bulk creation was incomplete).
+    // At most 4 runs at a time: each run needs ~3 Jira calls (link to cycle, property,
+    // link to case); processing 25 at once fired ~75 parallel calls and triggered 429s.
+    const RUN_PROCESSING_CONCURRENCY = 4;
+    const settledRuns = await mapWithConcurrency(testCasesToCreate, RUN_PROCESSING_CONCURRENCY, async (tc, idx) => {
       const tcSnapshot = snapshots[idx];
       let runIssue = bulkCreatedIssues[idx];
 
@@ -2313,7 +2316,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       }
     });
 
-    const settledRuns = await Promise.all(runProcessingPromises);
+
     settledRuns.forEach(r => {
       if (r) createdRuns.push(r);
     });
@@ -3157,13 +3160,61 @@ resolver.define('getTestExecution', async ({ payload }) => {
   return null;
 });
 
+/**
+ * Test Runs that already exist for `cycleId`, keyed by test case id, found through the
+ * phase 0 JQL index (`tpCycleId`). Makes bulk adds idempotent: if a previous call timed out
+ * after creating some runs, the frontend's retry skips those cases instead of duplicating them.
+ * Runs created before v4.10.0 are not in this index; for them the cycle index still applies.
+ */
+async function findExistingRunsInCycle(cycleId) {
+  const byCase = new Map();
+  try {
+    const runs = await fetchAllIssues(`tpCycleId = ${jqlQuote(cycleId)}`, ['summary'], null, ['testpulse-run-data'], 10);
+    for (const r of runs || []) {
+      const prop = r.properties?.['testpulse-run-data'] || {};
+      if (prop.testCaseId && !byCase.has(String(prop.testCaseId))) {
+        byCase.set(String(prop.testCaseId), { run: r, prop });
+      }
+    }
+  } catch (e) {
+    console.warn('[addBulkTestsToCycle] existing-run lookup failed:', e?.message);
+  }
+  return byCase;
+}
+
 resolver.define('addBulkTestsToCycle', async ({ payload }) => {
   const { cycleId, testCases, config, projectId, cycleKey, skipIndexWrite } = payload;
 
   let lightWeightIndex = (await readCycleIndex(cycleId)) ?? [];
   // Only skip TCs that already have a tracked run in the lightweight index
   const existingIds = new Set(lightWeightIndex.filter(t => t.testRunId).map(t => String(t.id)));
-  const newTests = (testCases || []).filter(tc => !existingIds.has(String(tc.id)));
+  let newTests = (testCases || []).filter(tc => !existingIds.has(String(tc.id)));
+
+  // Cases that already got a run in this cycle (e.g. by a call that timed out before the
+  // frontend retried it) are reported back as added instead of being created again.
+  const alreadyCreated = [];
+  if (newTests.length > 0) {
+    const existingRuns = await findExistingRunsInCycle(cycleId);
+    newTests = newTests.filter(tc => {
+      const hit = existingRuns.get(String(tc.id));
+      if (!hit) return true;
+      alreadyCreated.push({
+        id: String(tc.id),
+        key: hit.run.key,
+        testRunId: hit.run.id,
+        testRunKey: hit.run.key,
+        testCaseId: String(tc.id),
+        testCaseKey: tc.key,
+        summary: tc.summary,
+        executionType: hit.prop.executionType || tc.executionType || 'Manual',
+        status: hit.prop.status || 'Not Run'
+      });
+      return false;
+    });
+    if (alreadyCreated.length > 0) {
+      console.log(`[addBulkTestsToCycle] cycle=${cycleId} skipped ${alreadyCreated.length} case(s) that already have a run`);
+    }
+  }
 
   if (newTests.length > 0) {
     // createTestRunsInJiraForCycle with skipCandidateSearch avoids redundant JQL scans during bulk adds
@@ -3205,10 +3256,10 @@ resolver.define('addBulkTestsToCycle', async ({ payload }) => {
     }
 
     await invalidateProjectReportCache(projectId || null);
-    return { success: true, addedTests: allCreatedRuns };
+    return { success: true, addedTests: [...alreadyCreated, ...allCreatedRuns] };
   }
 
-  return { success: true, addedTests: [] };
+  return { success: true, addedTests: alreadyCreated };
 });
 
 resolver.define('syncCycleIndexWithRuns', async ({ payload }) => {

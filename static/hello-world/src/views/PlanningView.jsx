@@ -1957,7 +1957,9 @@ export default function PlanningView({ ctx }) {
                               }
                             });
 
-                            const CHUNK_SIZE = 25;
+                            // 10 cases per call keeps each backend invocation well under
+                            // Forge's 25 s limit (25 per call was timing out).
+                            const CHUNK_SIZE = 10;
                             let allAddedTests = [];
                             for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
                               const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);

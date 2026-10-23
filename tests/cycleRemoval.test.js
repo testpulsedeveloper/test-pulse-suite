@@ -107,3 +107,13 @@ test('cycle summary no longer references an undefined `config` (bugs on a cycle 
   assert.ok(!src.includes('fetchBugsBatch(Array.from(cycleBugKeys), config,'));
   assert.ok(src.includes('fetchBugsBatch(Array.from(cycleBugKeys), null, null, cycleProjPrefix || null)'));
 });
+
+test('adding cases: bounded concurrency, idempotent retries and smaller batches (v4.11.2)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('await mapWithConcurrency(testCasesToCreate, RUN_PROCESSING_CONCURRENCY,'), 'runs are processed a few at a time');
+  assert.ok(!src.includes('runProcessingPromises'), 'no unbounded Promise.all over every run');
+  assert.ok(src.includes('const existingRuns = await findExistingRunsInCycle(cycleId);'), 'retries skip cases that already have a run');
+  assert.ok(src.includes('`tpCycleId = ${jqlQuote(cycleId)}`'), 'uses the phase 0 JQL index');
+  const planning = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/PlanningView.jsx'), 'utf8');
+  assert.ok(planning.includes('const CHUNK_SIZE = 10;'));
+});
