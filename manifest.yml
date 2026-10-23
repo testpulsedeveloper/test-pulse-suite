@@ -53,6 +53,13 @@ modules:
       events:
         - avi:forge:installed:app
         - avi:forge:upgraded:app
+  # Background removal of cases from a cycle: keeps running even if the page is reloaded.
+  consumer:
+    - key: cycle-removal-consumer
+      queue: cycle-removal-queue
+      resolver:
+        function: cycleRemovalWorker
+        method: process-cycle-removal
   function:
     - key: resolver
       handler: index.handler
@@ -62,6 +69,9 @@ modules:
       handler: index.mobileUploadHandler
     - key: sqlMigrationsHandler
       handler: index.sqlMigrationsHandler
+    - key: cycleRemovalWorker
+      handler: index.cycleRemovalWorker
+      timeoutSeconds: 300
 resources:
   - key: main
     path: static/hello-world/build

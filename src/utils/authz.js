@@ -317,3 +317,30 @@ export async function requireProjectAdmin(projectId, context) {
     throw new AuthorizationError('FORBIDDEN', 'Solo los administradores de este proyecto o los superusuarios de Test Pulse pueden realizar esta acción.');
   }
 }
+
+/**
+ * Reads, as the current user, the Jira permissions a background job needs to act on their
+ * behalf in `projectId`. Background jobs run as the app, so they only perform the actions
+ * these flags allow (e.g. a user without "Delete issues" gets runs unlinked, never deleted).
+ *
+ * @param {string} projectId - Jira project ID or key.
+ * @returns {Promise<{canDelete: boolean, canLink: boolean, canEdit: boolean}>}
+ */
+export async function getProjectActionPermissions(projectId) {
+  const flags = { canDelete: false, canLink: false, canEdit: false };
+  const ref = normalizeProjectRef(projectId);
+  if (!ref) return flags;
+  const perms = 'DELETE_ISSUES,LINK_ISSUES,EDIT_ISSUES';
+  try {
+    const res = await api.asUser().requestJira(
+      route`/rest/api/3/mypermissions?projectId=${ref}&permissions=${perms}`
+    );
+    if (!res.ok) return flags;
+    const data = await res.json();
+    const has = (key) => data?.permissions?.[key]?.havePermission === true;
+    return { canDelete: has('DELETE_ISSUES'), canLink: has('LINK_ISSUES'), canEdit: has('EDIT_ISSUES') };
+  } catch (e) {
+    console.warn('[authz] action permission lookup failed:', e?.message);
+    return flags;
+  }
+}

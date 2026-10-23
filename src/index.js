@@ -2,6 +2,7 @@ import Resolver from '@forge/resolver';
 import api, { route, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import { jqlQuote } from './utils/jqlHelpers.js';
 import { stampRunDataV2 } from './utils/runDataContract.js';
@@ -13,8 +14,17 @@ import {
   canAdministerProject,
   isProjectEnabled,
   isSuperuser,
-  normalizeIssueRef
+  normalizeIssueRef,
+  getIssueVisibleToUser,
+  getProjectActionPermissions
 } from './utils/authz.js';
+import {
+  enqueueCycleRemoval,
+  markPendingRemoval,
+  clearPendingRemoval,
+  getPendingRemovalIds,
+  filterPendingRemovals
+} from './utils/cycleRemovalQueue.js';
 import {
   getIterationEvidenceKeys,
   dedupeEvidences,
@@ -120,8 +130,10 @@ try {
               if (res && (res.status === 429 || res.status === 503)) {
                 if (store && res.status === 429) store.r429++;
                 const elapsed = store?.startedAt ? (Date.now() - store.startedAt) : 0;
-                // Only retry if we still have safe headroom inside Forge's 25s invocation window
-                if (attempt < maxRetries && elapsed < 17500) {
+                // Only retry if we still have safe headroom inside the invocation window
+                // (25 s for resolvers; background jobs set a larger `budgetMs`).
+                const budgetMs = store?.budgetMs || 20000;
+                if (attempt < maxRetries && elapsed < budgetMs - 2500) {
                   let delay = (attempt + 1) * 1100 + Math.floor(Math.random() * 650);
                   try {
                     const retryAfter = res.headers?.get?.('Retry-After') || res.headers?.get?.('retry-after');
@@ -132,7 +144,7 @@ try {
                       }
                     }
                   } catch (_) {}
-                  if (elapsed + delay < 20000) {
+                  if (elapsed + delay < budgetMs) {
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                   }
@@ -150,6 +162,15 @@ try {
 } catch (e) {
   console.warn('[perf] instrumentation disabled:', e?.message);
 }
+
+/**
+ * Jira requester for the current invocation.
+ * - Resolvers (a user clicked something): `api.asUser()`, so Jira enforces their permissions.
+ * - Background jobs (Forge async events run without a user): `api.asApp()`. Those jobs only
+ *   perform actions that the requesting user was verified to be allowed to do when the job
+ *   was queued (see `removeManyTestsFromCycle`).
+ */
+const jiraRequester = () => (__perfALS.getStore()?.actAsApp ? api.asApp() : api.asUser());
 
 // Primary storage via @forge/kvs with transparent dual-read migration from legacy /rest/api/3/app/properties
 const getAppStorage = async (key) => {
@@ -252,7 +273,7 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
       body.properties = propArray.slice(0, 5);
     }
 
-    const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+    const response = await jiraRequester().requestJira(route`/rest/api/3/search/jql`, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -1753,7 +1774,7 @@ const _shardIndexFromKey = (key) => {
 // Returns null if the listing endpoint failed (caller should fall back to legacy probing).
 const listCycleShards = async (cycleId) => {
   try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+    const res = await jiraRequester().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
     if (!res.ok) return null;
     const data = await res.json();
     return (data.keys || [])
@@ -1768,7 +1789,7 @@ const listCycleShards = async (cycleId) => {
 const _fetchShard = async (cycleId, shard) => {
   const propName = _shardProp(shard);
   for (let attempt = 0; attempt <= 3; attempt++) {
-    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
+    const res = await jiraRequester().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${propName}`);
     if (res.status === 429) {
       if (attempt === 3) return { error: 429 };
       await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt) + Math.random() * 500));
@@ -1863,7 +1884,7 @@ const readCycleIndex = async (cycleId, preloadedShard0 = undefined) => {
 
 const _putShard = async (cycleId, shard, shardEntries) => {
   const propName = _shardProp(shard);
-  const doPut = () => api.asUser().requestJira(
+  const doPut = () => jiraRequester().requestJira(
     route`/rest/api/3/issue/${cycleId}/properties/${propName}`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -1930,7 +1951,7 @@ const writeCycleIndex = async (cycleId, entries) => {
       else if (st === 'Not Run') meta.notRun++;
       else meta.other++;
     }
-    await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, {
+    await jiraRequester().requestJira(route`/rest/api/3/issue/${cycleId}/properties/execution-meta`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(meta)
@@ -1945,7 +1966,7 @@ const writeCycleIndex = async (cycleId, entries) => {
     : existingShards.filter(n => n >= shardCount);
   if (trailing.length > 0) {
     await mapWithConcurrency(trailing, 3, (shard) =>
-      api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
+      jiraRequester().requestJira(route`/rest/api/3/issue/${cycleId}/properties/${_shardProp(shard)}`, { method: 'DELETE' }).catch(() => null)
     );
   }
 };
@@ -1961,17 +1982,21 @@ const deleteCycleIndex = async (cycleId) => {
 
 
 // Helper: Safely unlinks a Test Run issue from a Cycle issue (without deleting the Test Run)
-async function unlinkIssueFromCycle(runIssueId, cycleId) {
+async function unlinkIssueFromCycle(runIssueId, cycleId, knownLinks = null) {
   try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${runIssueId}?fields=issuelinks`);
-    if (!res.ok) return false;
-    const data = await res.json();
-    const links = data.fields?.issuelinks || [];
+    // Callers that already fetched the run's `issuelinks` pass them in to save one Jira call.
+    let links = Array.isArray(knownLinks) ? knownLinks : null;
+    if (!links) {
+      const res = await jiraRequester().requestJira(route`/rest/api/3/issue/${runIssueId}?fields=issuelinks`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      links = data.fields?.issuelinks || [];
+    }
     let unlinkedAny = false;
     for (const link of links) {
       const linked = link.outwardIssue || link.inwardIssue;
       if (linked && (String(linked.id) === String(cycleId) || String(linked.key) === String(cycleId))) {
-        await api.asUser().requestJira(route`/rest/api/3/issueLink/${link.id}`, {
+        await jiraRequester().requestJira(route`/rest/api/3/issueLink/${link.id}`, {
           method: 'DELETE'
         }).catch(() => {});
         unlinkedAny = true;
@@ -3018,12 +3043,22 @@ resolver.define('getBugsBatch', async ({ payload }) => {
 
 resolver.define('getCycleExecution', async ({ payload }) => {
   const { cycleId } = payload;
-  return await getCycleExecutionSummary(cycleId);
+  // Hide cases that a background job is still removing, so a reload never shows them again.
+  const [entries, pendingIds] = await Promise.all([
+    getCycleExecutionSummary(cycleId),
+    getPendingRemovalIds(cycleId)
+  ]);
+  return filterPendingRemovals(entries, pendingIds);
 });
 
 resolver.define('getCycleExecutionSummary', async ({ payload }) => {
   const { cycleId } = payload;
-  return await getCycleExecutionSummary(cycleId);
+  // Hide cases that a background job is still removing, so a reload never shows them again.
+  const [entries, pendingIds] = await Promise.all([
+    getCycleExecutionSummary(cycleId),
+    getPendingRemovalIds(cycleId)
+  ]);
+  return filterPendingRemovals(entries, pendingIds);
 });
 
 resolver.define('getTestExecution', async ({ payload }) => {
@@ -3295,13 +3330,11 @@ resolver.define('addMultipleTestsToCycle', async ({ payload }) => {
   return { success: true, addedTests: createdRuns };
 });
 
-async function performRemoveTestsFromCycle(cycleId, testIds) {
-  if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
-  const ids = testIds.map(String).filter(Boolean);
-  const idsSet = new Set(ids);
-
-  // 1. Immediately update lightweight index on cycle (matching all potential ID / Key variations).
-  //    The entries being removed are remembered: they carry the exact Test Run of each case.
+/**
+ * Removes the given cases from the cycle's lightweight index (fast: one read + one write).
+ * Returns the removed index entries, which carry the exact Test Run of each case.
+ */
+async function removeCasesFromCycleIndex(cycleId, idsSet) {
   const removedEntries = [];
   await updateLightweightIndex(cycleId, (lw) => {
     return lw.filter(t => {
@@ -3319,14 +3352,52 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       return keep;
     });
   });
+  return removedEntries;
+}
+
+/**
+ * Summarises which Test Runs are known for the removed index entries.
+ * `everyEntryHasRun` = true allows fetching only those runs instead of scanning the cycle.
+ */
+function knownRunsOf(removedEntries) {
+  const isNumericId = (v) => /^\d+$/.test(String(v || ''));
+  return {
+    knownRunIds: Array.from(new Set(removedEntries.map(e => String(e.testRunId || '')).filter(isNumericId))),
+    everyEntryHasRun: removedEntries.length > 0 && removedEntries.every(e => isNumericId(e.testRunId))
+  };
+}
+
+/**
+ * Cleans up the Test Runs of cases removed from a cycle:
+ * executed runs are unlinked and kept for history; pristine runs are deleted.
+ *
+ * @param {string} cycleId - Cycle issue id.
+ * @param {string[]} testIds - Every id/key variant of the removed cases.
+ * @param {Object} [opts]
+ * @param {boolean} [opts.skipIndex] - The index was already updated by the caller.
+ * @param {string[]} [opts.knownRunIds] - Test Runs known from the index (with `everyEntryHasRun`).
+ * @param {boolean} [opts.everyEntryHasRun] - Every removed case had a known Test Run.
+ * @param {{canDelete: boolean, canLink: boolean, canEdit: boolean}} [opts.perms] - What the
+ *        requesting user may do. Background jobs run as the app, so these flags (checked as
+ *        the user when the job was queued) decide which actions are performed.
+ */
+async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
+  if (!testIds || testIds.length === 0) return { success: true, removed: 0 };
+  const ids = testIds.map(String).filter(Boolean);
+  const idsSet = new Set(ids);
+  const perms = { canDelete: true, canLink: true, canEdit: true, ...(opts.perms || {}) };
+
+  // 1. Update the lightweight index on the cycle (unless the caller already did).
+  const removedEntries = opts.skipIndex ? [] : await removeCasesFromCycleIndex(cycleId, idsSet);
+  const { knownRunIds, everyEntryHasRun } = opts.skipIndex
+    ? { knownRunIds: opts.knownRunIds || [], everyEntryHasRun: Boolean(opts.everyEntryHasRun) }
+    : knownRunsOf(removedEntries);
 
   // 2. Find the Test Runs to clean up.
   //    Fast path: every removed entry knows its testRunId → fetch only those runs by id.
-  //    Slow path (legacy entries without testRunId): scan all issues linked to the cycle, as before.
+  //    Slow path (legacy entries without testRunId): scan all issues linked to the cycle.
   //    Scanning a large cycle on every removal used to exceed Forge's 25-second limit.
   try {
-    const knownRunIds = Array.from(new Set(removedEntries.map(e => String(e.testRunId || '')).filter(id => /^\d+$/.test(id))));
-    const everyEntryHasRun = removedEntries.length > 0 && removedEntries.every(e => /^\d+$/.test(String(e.testRunId || '')));
     const runFields = ['id', 'key', 'status', 'attachment', 'issuelinks', 'summary'];
     let runIssues = [];
     if (everyEntryHasRun) {
@@ -3387,10 +3458,11 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
         const hasCommentsOrIterations = (prop.comment && prop.comment.trim().length > 0) || (prop.iterations && prop.iterations.length > 0) || Boolean(prop.executedBy) || Boolean(prop.executedAt);
         const hasLinkedBugs = prop.linkedBugs && prop.linkedBugs.length > 0;
 
-        if (isExecuted || hasEvidences || hasCommentsOrIterations || hasLinkedBugs) {
-          // Preserve historical execution in Jira: Unlink from cycle and mark for recovery
-          await unlinkIssueFromCycle(r.id, cycleId);
-          await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
+        // Unlink from the cycle and keep the run for history (only with the user's permissions).
+        const unlinkAndKeep = async () => {
+          if (perms.canLink) await unlinkIssueFromCycle(r.id, cycleId, r.fields?.issuelinks);
+          if (!perms.canEdit) return;
+          await jiraRequester().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
             body: JSON.stringify(stampRunDataV2({
@@ -3400,22 +3472,20 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
               unlinkedAt: Date.now()
             }, null))
           }).catch(() => {});
+        };
+
+        if (isExecuted || hasEvidences || hasCommentsOrIterations || hasLinkedBugs) {
+          // Preserve historical execution in Jira: Unlink from cycle and mark for recovery
+          await unlinkAndKeep();
+        } else if (!perms.canDelete) {
+          // The user may not delete issues: keep the pristine run but take it out of the cycle
+          await unlinkAndKeep();
         } else {
           // Pristine / unexecuted: Delete issue from Jira to prevent clutter
-          const delRes = await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}`, { method: 'DELETE' }).catch(() => null);
+          const delRes = await jiraRequester().requestJira(route`/rest/api/3/issue/${r.id}`, { method: 'DELETE' }).catch(() => null);
           if (!delRes || !delRes.ok) {
-            // Permission fallback: If user lacks Jira 'Delete Issues' permission, safely unlink
-            await unlinkIssueFromCycle(r.id, cycleId);
-            await api.asUser().requestJira(route`/rest/api/3/issue/${r.id}/properties/testpulse-run-data`, {
-              method: 'PUT',
-              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-              body: JSON.stringify(stampRunDataV2({
-                ...prop,
-                cycleId: String(cycleId),
-                unlinkedFromCycle: true,
-                unlinkedAt: Date.now()
-              }, null))
-            }).catch(() => {});
+            // Delete refused by Jira: safely unlink instead
+            await unlinkAndKeep();
           }
         }
       } catch (e) {}
@@ -3425,7 +3495,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
     // the ones that exist (blind deletes cost ~5 Jira calls per removed case).
     let execKeysToDelete = [];
     try {
-      const keysRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
+      const keysRes = await jiraRequester().requestJira(route`/rest/api/3/issue/${cycleId}/properties`);
       if (keysRes.ok) {
         const keysData = await keysRes.json();
         const existing = new Set((keysData.keys || []).map(k => k.key));
@@ -3435,7 +3505,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
       execKeysToDelete = [];
     }
     await processInBatches(execKeysToDelete, 15, 30, async (testId) => {
-      await api.asUser().requestJira(
+      await jiraRequester().requestJira(
         route`/rest/api/3/issue/${cycleId}/properties/exec_${testId}`,
         { method: 'DELETE' }
       ).catch(() => {});
@@ -3448,17 +3518,83 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
   return { success: true, removed: ids.length };
 }
 
-resolver.define('removeTestFromCycle', async ({ payload }) => {
-  const { cycleId, testId, testIds } = payload;
+/**
+ * Removes cases from a cycle WITHOUT depending on the browser staying open:
+ *   1. As the user: check access to the cycle and read their Jira permissions in its project.
+ *   2. Take the cases out of the cycle index right away (fast).
+ *   3. Remember the ids as "pending" so the cycle list hides them, even after a reload.
+ *   4. Queue a background job (Forge async event, up to 300 s) that unlinks or deletes the
+ *      Test Runs with exactly those permissions, then clears the pending marker.
+ * If the queue is unavailable, the cleanup runs in this invocation as before.
+ */
+async function requestCycleRemoval({ payload, context }) {
+  const { cycleId, testIds, testId } = payload || {};
   const targetIds = testIds || (testId ? (Array.isArray(testId) ? testId : [testId]) : []);
-  return await performRemoveTestsFromCycle(cycleId, targetIds);
-});
+  const ids = Array.from(new Set(targetIds.map(String).filter(Boolean)));
+  if (!cycleId || ids.length === 0) return { success: true, removed: 0 };
 
-resolver.define('removeManyTestsFromCycle', async ({ payload }) => {
-  const { cycleId, testIds, testId } = payload;
-  const targetIds = testIds || (testId ? (Array.isArray(testId) ? testId : [testId]) : []);
-  return await performRemoveTestsFromCycle(cycleId, targetIds);
+  const cycle = await getIssueVisibleToUser(cycleId);
+  if (!cycle) {
+    throw new AuthorizationError('FORBIDDEN', 'No tienes acceso a este ciclo.');
+  }
+  const perms = await getProjectActionPermissions(cycle.projectId);
+  if (!perms.canEdit) {
+    throw new AuthorizationError('FORBIDDEN', 'No tienes permiso para editar issues en este proyecto.');
+  }
+
+  const removedEntries = await removeCasesFromCycleIndex(cycle.id, new Set(ids));
+  const { knownRunIds, everyEntryHasRun } = knownRunsOf(removedEntries);
+  const markerId = randomUUID();
+
+  try {
+    await markPendingRemoval(cycle.id, markerId, ids);
+    const jobId = await enqueueCycleRemoval({
+      cycleId: cycle.id,
+      projectId: cycle.projectId,
+      ids,
+      knownRunIds,
+      everyEntryHasRun,
+      perms,
+      markerId,
+      requestedBy: context?.accountId || null
+    });
+    console.log(`[cycleRemoval] queued cycle=${cycle.id} ids=${ids.length} runs=${knownRunIds.length} job=${jobId}`);
+    return { success: true, removed: ids.length, queued: true, jobId };
+  } catch (err) {
+    console.warn('[cycleRemoval] queue unavailable, cleaning up in this invocation:', err?.message);
+    await clearPendingRemoval(cycle.id, markerId);
+    const result = await performRemoveTestsFromCycle(cycle.id, ids, { skipIndex: true, knownRunIds, everyEntryHasRun, perms });
+    return { ...result, queued: false };
+  }
+}
+
+resolver.define('removeTestFromCycle', requestCycleRemoval);
+
+resolver.define('removeManyTestsFromCycle', requestCycleRemoval);
+
+// Background worker for `cycle-removal-queue` (manifest: consumer `cycle-removal-consumer`).
+// Runs as the app (no user in async events), with a 280 s budget for 429 retries.
+const cycleRemovalWorkerResolver = new Resolver();
+cycleRemovalWorkerResolver.define('process-cycle-removal', async ({ payload }) => {
+  const job = payload || {};
+  const store = { calls: 0, r429: 0, startedAt: Date.now(), actAsApp: true, budgetMs: 280000 };
+  try {
+    const result = await __perfALS.run(store, () => performRemoveTestsFromCycle(job.cycleId, job.ids || [], {
+      skipIndex: true,
+      knownRunIds: job.knownRunIds,
+      everyEntryHasRun: job.everyEntryHasRun,
+      perms: job.perms
+    }));
+    console.log(`[cycleRemoval] done cycle=${job.cycleId} ids=${(job.ids || []).length} jiraCalls=${store.calls} r429=${store.r429} ms=${Date.now() - store.startedAt} requestedBy=${job.requestedBy || 'n/a'}`);
+    return result;
+  } catch (err) {
+    console.error(`[cycleRemoval] failed cycle=${job.cycleId}:`, err?.message || err);
+    throw err;
+  } finally {
+    await clearPendingRemoval(job.cycleId, job.markerId);
+  }
 });
+export const cycleRemovalWorker = cycleRemovalWorkerResolver.getDefinitions();
 
 
 

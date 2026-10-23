@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.10.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.11.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -4874,8 +4874,17 @@ Then el sistema valida la identidad.
       return next;
     });
     try {
-      await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(idsToTrack)) });
-      addNotification({ type: 'success', title: `${testIds.length} caso${testIds.length !== 1 ? 's' : ''} eliminado${testIds.length !== 1 ? 's' : ''} del ciclo` });
+      // The backend removes the cases from the cycle right away and finishes cleaning up their
+      // Test Runs in a background job, so reloading the page does not interrupt it.
+      const res = await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(idsToTrack)) });
+      const plural = testIds.length !== 1 ? 's' : '';
+      addNotification({
+        type: 'success',
+        title: `${testIds.length} caso${plural} quitado${plural} del ciclo`,
+        description: res?.queued
+          ? 'La limpieza de sus ejecuciones termina en segundo plano; puedes seguir trabajando o recargar.'
+          : undefined
+      });
     } catch (err) {
       // Rollback on error
       idsToTrack.forEach(trackId => {
