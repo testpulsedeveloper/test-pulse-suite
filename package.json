@@ -1,11 +1,11 @@
 {
   "name": "jira-project-page-custom-ui",
-  "version": "4.8.10",
+  "version": "4.9.0",
   "main": "index.js",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node --test tests/phase3.test.js",
+    "test": "node --test --experimental-test-module-mocks tests/phase3.test.js tests/authz.behavior.test.js",
     "build": "npm --prefix static/hello-world run build",
     "deploy": "forge deploy --non-interactive",
     "deploy:prod": "forge deploy -e production --non-interactive"

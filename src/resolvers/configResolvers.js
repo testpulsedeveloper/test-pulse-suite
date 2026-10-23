@@ -1,7 +1,18 @@
 import api, { route } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
+import { summarizeJiraError } from '../utils/jiraErrors.js';
+import {
+  canAdministerProject,
+  requireProjectAdmin,
+  isSuperuser,
+  invalidateProjectEnabledCache
+} from '../utils/authz.js';
 
 const REMOVED_DASHBOARD_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles_progress'];
+// Since v4.9.0 these two KVS keys are only a DEFAULT TEMPLATE: they seed projects that have
+// not defined their own environments/widgets yet. Each project's own values (stored in its
+// `testops-config` property, editable only by that project's admins or superusers) always win,
+// so a change made in one project never leaks into another.
 const GLOBAL_WIDGETS_KVS_KEY = 'testpulse_global_dashboard_widgets_v2';
 const GLOBAL_ENVIRONMENTS_KVS_KEY = 'testpulse_global_environments_v1';
 
@@ -64,14 +75,15 @@ export function registerConfigResolvers(resolver) {
   });
 
   // === Project Management & Configuration ===
-  resolver.define('getProjects', async () => {
+  resolver.define('getProjects', async ({ context }) => {
     try {
       let response = await api.asUser().requestJira(route`/rest/api/3/project`);
       let data = null;
       if (response.ok) {
         data = await response.json();
-      } else {
-        // Fallback to asApp() in case of user permission scheme quirks
+      } else if (await isSuperuser(context)) {
+        // Site-wide project list as the app is reserved to superusers; everyone else only
+        // sees the projects Jira already shows them.
         response = await api.asApp().requestJira(route`/rest/api/3/project`);
         if (response.ok) {
           data = await response.json();
@@ -173,20 +185,28 @@ export function registerConfigResolvers(resolver) {
         const data = await response.json();
         const config = data?.value || {};
         const projectWidgets = sanitizeDashboardWidgetsList(config.dashboardWidgets);
-        const effectiveWidgets = globalWidgets || projectWidgets;
-
         const projectEnvs = sanitizeEnvironmentsList(config.environments);
-        const effectiveEnvironments = globalEnvironments || projectEnvs || DEFAULT_EXECUTION_ENVIRONMENTS;
 
-        if (!globalWidgets && projectWidgets) {
+        // Project values win; the old global catalog is only the starting template.
+        const effectiveWidgets = projectWidgets || globalWidgets;
+        const effectiveEnvironments = projectEnvs || globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS;
+
+        // One-time migration: a configured project that still relied on the old shared
+        // catalog gets its own copy, so later template changes don't alter it silently.
+        if ((!projectWidgets && globalWidgets) || (!projectEnvs && globalEnvironments)) {
           try {
-            await storage.set(GLOBAL_WIDGETS_KVS_KEY, projectWidgets);
-          } catch (e) {}
-        }
-        if (!globalEnvironments && projectEnvs) {
-          try {
-            await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, projectEnvs);
-          } catch (e) {}
+            await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
+              method: 'PUT',
+              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...config,
+                ...(effectiveWidgets ? { dashboardWidgets: effectiveWidgets } : {}),
+                environments: effectiveEnvironments
+              })
+            });
+          } catch (e) {
+            console.warn('[getConfig] per-project catalog migration failed:', e?.message);
+          }
         }
 
         const merged = {
@@ -222,22 +242,18 @@ export function registerConfigResolvers(resolver) {
     return defaultConf;
   });
 
-  resolver.define('setConfig', async ({ payload }) => {
-    const { projectId, config } = payload;
+  resolver.define('setConfig', async ({ payload, context }) => {
+    const { projectId, config } = payload || {};
+
+    // Only admins of THIS project (or Test Pulse superusers) can change its configuration.
+    await requireProjectAdmin(projectId, context);
+
     const nextConfig = { ...(config || {}) };
     if (Array.isArray(nextConfig.dashboardWidgets)) {
-      const sanitized = sanitizeDashboardWidgetsList(nextConfig.dashboardWidgets) || [];
-      nextConfig.dashboardWidgets = sanitized;
-      try {
-        await storage.set(GLOBAL_WIDGETS_KVS_KEY, sanitized);
-      } catch (e) {}
+      nextConfig.dashboardWidgets = sanitizeDashboardWidgetsList(nextConfig.dashboardWidgets) || [];
     }
     if (Array.isArray(nextConfig.environments)) {
-      const sanitizedEnvs = sanitizeEnvironmentsList(nextConfig.environments) || DEFAULT_EXECUTION_ENVIRONMENTS;
-      nextConfig.environments = sanitizedEnvs;
-      try {
-        await storage.set(GLOBAL_ENVIRONMENTS_KVS_KEY, sanitizedEnvs);
-      } catch (e) {}
+      nextConfig.environments = sanitizeEnvironmentsList(nextConfig.environments) || DEFAULT_EXECUTION_ENVIRONMENTS;
     }
     // Auto-resolve issueType IDs when project issueTypes are available so multi-language Jira sites stay resilient
     try {
@@ -259,7 +275,10 @@ export function registerConfigResolvers(resolver) {
       }
     } catch (_) {}
 
-    const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
+    // Written as the app because a superuser may not be a Jira admin of this specific
+    // project; the authorization decision was already made by `requireProjectAdmin` above.
+    // Environments and widgets are saved ONLY in this project's property (no global write).
+    const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-config`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(nextConfig)
@@ -268,13 +287,11 @@ export function registerConfigResolvers(resolver) {
   });
 
   // === Permissions ===
-  resolver.define('checkAdminPermission', async ({ payload }) => {
+  resolver.define('checkAdminPermission', async ({ payload, context }) => {
     try {
-      const { projectId } = payload;
-      const response = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
-      if (!response.ok) return false;
-      const data = await response.json();
-      return data?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+      const { projectId } = payload || {};
+      // `true` for admins of this project and for Test Pulse superusers.
+      return await canAdministerProject(projectId, context);
     } catch (e) {
       console.error("checkAdminPermission error:", e);
       return false;
@@ -336,13 +353,13 @@ export function registerConfigResolvers(resolver) {
   });
 
   // === Project Allowlist ===
-  resolver.define('getAllowedProjects', async () => {
+  resolver.define('getAllowedProjects', async ({ context }) => {
     try {
       let response = await api.asUser().requestJira(route`/rest/api/3/project`);
       let data = await response.json();
       let projects = Array.isArray(data) ? data : (data.values || []);
 
-      if (projects.length === 0) {
+      if (projects.length === 0 && (await isSuperuser(context))) {
         response = await api.asApp().requestJira(route`/rest/api/3/project`);
         data = await response.json();
         projects = Array.isArray(data) ? data : (data.values || []);
@@ -355,15 +372,19 @@ export function registerConfigResolvers(resolver) {
     }
   });
 
-  resolver.define('setAllowedProjects', async ({ payload }) => {
-    const { projectId, enabled } = payload;
-    await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-enabled`, {
+  resolver.define('setAllowedProjects', async ({ payload, context }) => {
+    const { projectId, enabled } = payload || {};
+    // Each project's admins (or superusers) decide whether Test Pulse is enabled there.
+    await requireProjectAdmin(projectId, context);
+    // Written as the app after the check above, so superusers can toggle any project.
+    await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-enabled`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       // Stored as `{ enabled: boolean }`, which is the shape `isProjectAllowed` reads.
       // (It used to store a bare boolean, so turning a project off never took effect.)
       body: JSON.stringify({ enabled: enabled !== false })
     });
+    invalidateProjectEnabledCache(projectId);
     return { success: true };
   });
 
@@ -406,7 +427,7 @@ export function registerConfigResolvers(resolver) {
       });
 
       if (!response.ok) {
-        const errText = await response.text();
+        const errText = summarizeJiraError(await response.text());
         console.error(`[uploadAttachment] Failed for issue ${issueId}: ${response.status} ${errText}`);
         throw new Error(`Jira upload error ${response.status}: ${errText}`);
       }

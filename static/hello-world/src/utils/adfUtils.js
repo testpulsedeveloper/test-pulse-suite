@@ -1,5 +1,37 @@
 import { invoke, requestJira } from '@forge/bridge';
+import DOMPurify from 'dompurify';
 import { formatAttachmentSize } from './constants';
+
+// DOMPurify configuration shared by every HTML string rendered with dangerouslySetInnerHTML.
+// - Strips <script>, inline event handlers (onerror, onclick…), <iframe>, <form>, <object>…
+// - Keeps `target` on links and allows `blob:` image sources, which the app uses to show
+//   attachments it has already downloaded through the Forge bridge.
+const PURIFY_CONFIG = {
+  ADD_ATTR: ['target'],
+  FORBID_TAGS: ['form', 'input', 'textarea', 'select', 'style'],
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i
+};
+
+// Every link opened from rendered content gets rel="noopener noreferrer" so the target
+// page cannot reach back into the app through `window.opener`.
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A' && node.getAttribute('target')) {
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
+/**
+ * Removes any executable or phishing-capable markup from an HTML string before it is
+ * injected into the DOM. Use it for every `dangerouslySetInnerHTML` / `innerHTML` value
+ * that may contain data typed by users (descriptions, comments, steps, environments…).
+ *
+ * @param {string} html - Untrusted HTML.
+ * @returns {string} Safe HTML.
+ */
+export function sanitizeHtml(html) {
+  if (!html) return '';
+  return DOMPurify.sanitize(String(html), PURIFY_CONFIG);
+}
 
 /**
  * In-memory cache of resolved attachment blobs keyed by attachment ID.
@@ -255,7 +287,9 @@ export function sanitizeRenderedHtml(html, attachments = [], attachmentUrls = {}
     return `<span class="adf-inline-file-card" data-preview-attachment-id="${safeId}" data-preview-attachment-name="${safeName}" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:#E9F2FF;border:1px solid #85B8FF;border-radius:6px;color:#0C66E4;font-size:11.5px;font-weight:700;cursor:pointer;margin-top:4px;" title="Clic para previsualizar ${safeName}">📎 ${safeName} (Ver evidencia)</span>`;
   });
 
-  return cleaned.trim();
+  // Final pass: whatever came in (Jira-rendered HTML, legacy HTML strings stored by the
+  // app, or ADF rendered above) is sanitized before it can reach the DOM.
+  return sanitizeHtml(cleaned.trim());
 }
 
 export function adfToHtml(adf, attachments = [], attachmentUrls = {}) {

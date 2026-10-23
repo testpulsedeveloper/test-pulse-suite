@@ -13,6 +13,8 @@ import api, { route } from '@forge/api';
 import { getBusinessMilliseconds, analyzeBugChangelog } from '../utils/slaHelpers.js';
 import { invalidateProjectReportCache } from '../utils/reportSnapshotCache.js';
 import { DEFAULT_CUSTOM_FIELDS, resolveCustomFields } from '../utils/customFieldConfig.js';
+import { jqlQuote } from '../utils/jqlHelpers.js';
+import { summarizeJiraError } from '../utils/jiraErrors.js';
 
 // Helper to extract plain editable text from Jira's Environment field (which may be ADF or HTML/string)
 function extractPlainTextFromEnv(rawEnv, renderedEnv) {
@@ -76,7 +78,7 @@ export function registerBugResolvers(resolver) {
       const allBugIssues = [];
       for (let i = 0; i < uniqueBugKeys.length; i += 50) {
         const chunk = uniqueBugKeys.slice(i, i + 50);
-        const jql = `key in (${chunk.map(k => `"${k}"`).join(',')})`;
+        const jql = `key in (${chunk.map(k => jqlQuote(k)).join(',')})`;
         const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
           method: 'POST',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -183,7 +185,7 @@ export function registerBugResolvers(resolver) {
       const allIssues = [];
       for (let i = 0; i < uniqueBugKeys.length; i += 50) {
         const chunk = uniqueBugKeys.slice(i, i + 50);
-        const jql = `key in (${chunk.map(k => `"${k}"`).join(',')})`;
+        const jql = `key in (${chunk.map(k => jqlQuote(k)).join(',')})`;
         const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
           method: 'POST',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -543,7 +545,7 @@ export function registerBugResolvers(resolver) {
           body: JSON.stringify({ accountId: value || null })
         });
         if (!res.ok) {
-          const errText = await res.text();
+          const errText = summarizeJiraError(await res.text());
           return { error: `No se pudo actualizar el responsable (${res.status}): ${errText}` };
         }
         return { success: true };
@@ -591,7 +593,7 @@ export function registerBugResolvers(resolver) {
           }
         }
         if (!res.ok) {
-          const errText = await res.text();
+          const errText = summarizeJiraError(await res.text());
           return { error: `No se pudo cambiar el estado (${res.status}): ${errText}` };
         }
         return { success: true };
@@ -626,7 +628,7 @@ export function registerBugResolvers(resolver) {
           });
         }
         if (!res.ok) {
-          const errText = await res.text();
+          const errText = summarizeJiraError(await res.text());
           return { error: `No se pudo actualizar *Severity (${res.status}): ${errText}` };
         }
         return { success: true };
@@ -661,7 +663,7 @@ export function registerBugResolvers(resolver) {
           if (resFix.ok || resAff.ok) {
             return { success: true };
           }
-          const errText = await resFix.text().catch(() => '');
+          const errText = summarizeJiraError(await resFix.text().catch(() => ''));
           return { error: `No se pudo actualizar Versiones afectadas (${resFix.status}): ${errText}` };
         }
         return { success: true };
@@ -730,7 +732,7 @@ export function registerBugResolvers(resolver) {
           }
         }
 
-        const errText = lastRes ? await lastRes.text().catch(() => '') : 'Campo no disponible en pantalla de edición';
+        const errText = lastRes ? summarizeJiraError(await lastRes.text().catch(() => '')) : 'Campo no disponible en pantalla de edición';
         return { error: `No se pudo actualizar Fecha Estimada (${lastRes ? lastRes.status : 400}). Verifica que el campo Fecha Estimada esté en la pantalla de Editar del Bug en Jira: ${errText}` };
       }
 
@@ -760,7 +762,7 @@ export function registerBugResolvers(resolver) {
           });
         }
         if (!res.ok) {
-          const errText = await res.text();
+          const errText = summarizeJiraError(await res.text());
           return { error: `No se pudo actualizar el ambiente (${res.status}): ${errText}` };
         }
         return { success: true };
@@ -843,7 +845,7 @@ export function registerBugResolvers(resolver) {
           }
         }
         if (!res.ok) {
-          const errText = await res.text();
+          const errText = summarizeJiraError(await res.text());
           return { error: `No se pudo actualizar la resolución (${res.status}). Verifica que el campo Resolución esté en la pantalla de edición o transición de Jira: ${errText}` };
         }
         return { success: true };
@@ -956,7 +958,7 @@ export function registerBugResolvers(resolver) {
           })
         });
         if (!commRes.ok) {
-          const errTxt = await commRes.text();
+          const errTxt = summarizeJiraError(await commRes.text());
           return { error: `No se pudo publicar el comentario (${commRes.status}): ${errTxt}` };
         }
       }

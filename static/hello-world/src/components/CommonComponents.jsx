@@ -1,20 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { formatAttachmentSize, normalizeUiStatus } from '../utils/constants';
-import { fetchAttachmentBlobData, getCachedAttachmentBlobUrl } from '../utils/adfUtils';
+import { fetchAttachmentBlobData, getCachedAttachmentBlobUrl, sanitizeHtml } from '../utils/adfUtils';
 
 export const RichTextEditor = ({ value, onChange, disabled }) => {
   const editorRef = React.useRef(null);
 
   React.useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== value) {
-      editorRef.current.innerHTML = value || '';
+    // Stored rich text is sanitized before it becomes live DOM inside the editor.
+    const safeValue = sanitizeHtml(value || '');
+    if (editorRef.current && editorRef.current.innerHTML !== safeValue) {
+      editorRef.current.innerHTML = safeValue;
     }
   }, [value]);
 
   const execCmd = (cmd) => {
     document.execCommand(cmd, false, null);
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      onChange(sanitizeHtml(editorRef.current.innerHTML));
     }
   };
 
@@ -31,7 +33,7 @@ export const RichTextEditor = ({ value, onChange, disabled }) => {
       <div
         ref={editorRef}
         contentEditable={!disabled}
-        onBlur={() => onChange(editorRef.current.innerHTML)}
+        onBlur={() => onChange(sanitizeHtml(editorRef.current.innerHTML))}
         style={{ minHeight: '150px', padding: '0.5rem', color: 'var(--text-primary)', outline: 'none' }}
       />
     </div>
@@ -289,10 +291,14 @@ export function PdfDocumentPreview({ byteArray, blobUrl, filename }) {
           throw new Error('El archivo PDF está vacío o no se pudo leer.');
         }
 
-        const [pdfjsModule] = await Promise.all([
+        // PDF.js v4 is ESM-only and no longer ships `pdf.worker.entry`. Exposing the worker
+        // module as `globalThis.pdfjsWorker` keeps the previous behaviour: PDF parsing runs on
+        // the main thread, so no separate Worker/blob URL is needed inside the Forge iframe.
+        const [pdfjsModule, pdfjsWorkerModule] = await Promise.all([
           import('pdfjs-dist'),
-          import('pdfjs-dist/build/pdf.worker.entry')
+          import('pdfjs-dist/build/pdf.worker.min.mjs')
         ]);
+        if (!globalThis.pdfjsWorker) globalThis.pdfjsWorker = pdfjsWorkerModule;
         const pdfjsLib = pdfjsModule.default || pdfjsModule;
 
         const loadingTask = pdfjsLib.getDocument({

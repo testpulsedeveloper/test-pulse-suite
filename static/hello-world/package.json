@@ -1,6 +1,6 @@
 {
   "name": "jira-project-page-custom-ui-static",
-  "version": "4.8.10",
+  "version": "4.9.0",
   "private": true,
   "homepage": ".",
   "dependencies": {
@@ -16,11 +16,11 @@
     "@forge/bridge": "6.3.1",
     "@forge/jira-bridge": "^1.0.0",
     "@tanstack/react-query": "^5.62.0",
-    "pdfjs-dist": "^3.11.174",
+    "dompurify": "^3.4.17",
+    "pdfjs-dist": "^4.10.38",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-router-dom": "^6.22.3"
+    "react-dom": "^18.2.0"
   },
   "scripts": {
     "start": "vite",
@@ -43,5 +43,8 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "vite": "^5.4.11"
+  },
+  "overrides": {
+    "prosemirror-view": "^1.42.6"
   }
 }

@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.9.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -665,8 +665,11 @@ function App() {
     !!(circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current)
   , []);
 
-  // Dashboard Customizable Widgets State (Global across all projects in Test Pulse)
-  const GLOBAL_WIDGETS_STORAGE_KEY = 'testpulse_global_dashboard_widgets_v2';
+  // Dashboard Customizable Widgets State (per project since v4.9.0).
+  // Priority: the current user's personal layout for this project (saved by non-admins in
+  // their own browser) → the project's layout (saved by project admins / superusers in the
+  // project configuration) → the default layout. A change in one project never affects another.
+  const PERSONAL_WIDGETS_STORAGE_PREFIX = 'testpulse_personal_widgets_';
   const sanitizeDashboardWidgets = (list) => {
     if (!Array.isArray(list)) return [];
     const allowedTypes = new Set(AVAILABLE_WIDGET_CATALOG.map(c => c.type));
@@ -678,38 +681,26 @@ function App() {
   const [showAddWidgetModal, setShowAddWidgetModal] = useState(false);
   const [draggedWidgetIndex, setDraggedWidgetIndex] = useState(null);
 
-  // Sync dashboardWidgets globally across projects
+  // Resolve the dashboard layout for the selected project
   useEffect(() => {
-    const fromConfig = sanitizeDashboardWidgets(projectConfig?.dashboardWidgets);
-    if (fromConfig.length > 0) {
-      setDashboardWidgets(fromConfig);
+    if (selectedProjectId) {
       try {
-        localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(fromConfig));
-      } catch (e) {}
-      return;
-    }
-
-    try {
-      const globalCached = localStorage.getItem(GLOBAL_WIDGETS_STORAGE_KEY);
-      if (globalCached) {
-        const parsedGlobal = sanitizeDashboardWidgets(JSON.parse(globalCached));
-        if (parsedGlobal.length > 0) {
-          setDashboardWidgets(parsedGlobal);
-          return;
-        }
-      }
-      if (selectedProjectId) {
-        const legacyCached = localStorage.getItem(`testpulse_widgets_${selectedProjectId}`);
-        if (legacyCached) {
-          const parsedLegacy = sanitizeDashboardWidgets(JSON.parse(legacyCached));
-          if (parsedLegacy.length > 0) {
-            setDashboardWidgets(parsedLegacy);
-            localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(parsedLegacy));
+        const personalCached = localStorage.getItem(`${PERSONAL_WIDGETS_STORAGE_PREFIX}${selectedProjectId}`);
+        if (personalCached) {
+          const parsedPersonal = sanitizeDashboardWidgets(JSON.parse(personalCached));
+          if (parsedPersonal.length > 0) {
+            setDashboardWidgets(parsedPersonal);
             return;
           }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
+
+    const fromConfig = sanitizeDashboardWidgets(projectConfig?.dashboardWidgets);
+    if (fromConfig.length > 0) {
+      setDashboardWidgets(fromConfig);
+      return;
+    }
 
     setDashboardWidgets(DEFAULT_DASHBOARD_WIDGETS);
   }, [projectConfig?.dashboardWidgets, selectedProjectId]);
@@ -718,17 +709,31 @@ function App() {
     const sanitized = sanitizeDashboardWidgets(newWidgets);
     const finalWidgets = sanitized.length > 0 ? sanitized : DEFAULT_DASHBOARD_WIDGETS;
     setDashboardWidgets(finalWidgets);
-    try {
-      localStorage.setItem(GLOBAL_WIDGETS_STORAGE_KEY, JSON.stringify(finalWidgets));
-      if (selectedProjectId) {
-        localStorage.setItem(`testpulse_widgets_${selectedProjectId}`, JSON.stringify(finalWidgets));
-      }
-    } catch (e) {}
-    if (selectedProjectId) {
-      const updatedConf = { ...projectConfig, dashboardWidgets: finalWidgets };
-      setProjectConfig(updatedConf);
-      invoke('setConfig', { projectId: selectedProjectId, config: updatedConf }).catch(() => {});
+    if (!selectedProjectId) return;
+    const personalKey = `${PERSONAL_WIDGETS_STORAGE_PREFIX}${selectedProjectId}`;
+
+    if (!isAdmin) {
+      // Members customise only their own view of this project (stored in their browser).
+      try { localStorage.setItem(personalKey, JSON.stringify(finalWidgets)); } catch (e) {}
+      addNotification({
+        type: 'success',
+        title: 'Layout guardado',
+        description: 'Tu acomodo del dashboard se guardó solo para ti en este proyecto.'
+      });
+      return;
     }
+
+    // Project admins / superusers save the layout for everyone in THIS project.
+    try { localStorage.removeItem(personalKey); } catch (e) {}
+    const updatedConf = { ...projectConfig, dashboardWidgets: finalWidgets };
+    setProjectConfig(updatedConf);
+    invoke('setConfig', { projectId: selectedProjectId, config: updatedConf }).catch((e) => {
+      addNotification({
+        type: 'error',
+        title: 'No se pudo guardar el layout del proyecto',
+        description: e?.message || String(e)
+      });
+    });
   };
 
   const handleDragStart = (e, index) => {

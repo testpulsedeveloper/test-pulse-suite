@@ -21,7 +21,7 @@ import {
   formatBugCreatedDate,
   formatBugAge
 } from '../utils/constants';
-import { textToAdf, sanitizeRenderedHtml, adfToHtml, fetchAttachmentBlobData } from '../utils/adfUtils';
+import { textToAdf, sanitizeRenderedHtml, sanitizeHtml, adfToHtml, fetchAttachmentBlobData } from '../utils/adfUtils';
 import {
   RichTextEditor,
   SearchableSelect,
@@ -2315,7 +2315,7 @@ export default function ExecutionView({ ctx }) {
                                   }}
                                 >
                                   {modalScenarioDesc ? (
-                                    <div dangerouslySetInnerHTML={{ __html: formatScenarioHtml(adfToHtml(modalScenarioDesc)) }} />
+                                    <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(formatScenarioHtml(adfToHtml(modalScenarioDesc))) }} />
                                   ) : (
                                     <span style={{ color: '#626F86', fontStyle: 'italic', fontSize: '12px' }}>
                                       Sin descripción registrada para este caso de prueba en Jira.
@@ -2328,7 +2328,7 @@ export default function ExecutionView({ ctx }) {
                                       <ol style={{ margin: 0, paddingLeft: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                                         {executionTestDetails[modalTest.id].content.map((step, idx) => (
                                           <li key={idx} style={{ paddingLeft: '4px' }}>
-                                            <div dangerouslySetInnerHTML={{ __html: formatScenarioHtml(adfToHtml(step.action)) }} />
+                                            <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(formatScenarioHtml(adfToHtml(step.action))) }} />
                                             {step.expectedResult && (
                                               <div style={{ fontSize: '11px', color: '#44546F', marginTop: '2px' }}>
                                                 <strong>Resultado esperado:</strong>{' '}

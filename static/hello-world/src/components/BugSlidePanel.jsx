@@ -21,7 +21,7 @@ import {
   formatBugCreatedDate,
   formatBugAge
 } from '../utils/constants';
-import { textToAdf, sanitizeRenderedHtml, adfToHtml, fetchAttachmentBlobData } from '../utils/adfUtils';
+import { textToAdf, sanitizeRenderedHtml, sanitizeHtml, adfToHtml, fetchAttachmentBlobData } from '../utils/adfUtils';
 import {
   RichTextEditor,
   SearchableSelect,
@@ -1663,7 +1663,7 @@ export default function BugSlidePanel({ ctx }) {
                           fontSize: '11px',
                           fontWeight: 700
                         }}
-                        dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? b.environment : adfToHtml(b.environment) }}
+                        dangerouslySetInnerHTML={{ __html: typeof b.environment === 'string' ? sanitizeHtml(b.environment) : adfToHtml(b.environment) }}
                       />
                     ) : (
                       <span style={{ fontSize: '12px', color: '#626F86', fontStyle: 'italic' }}>

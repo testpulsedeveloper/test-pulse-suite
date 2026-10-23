@@ -3,6 +3,15 @@ import api, { route, webTrigger } from '@forge/api';
 import { kvs as storage } from '@forge/kvs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
+import { jqlQuote } from './utils/jqlHelpers.js';
+import {
+  AuthorizationError,
+  normalizeProjectRef,
+  canAccessProject,
+  canAdministerProject,
+  isProjectEnabled,
+  isSuperuser
+} from './utils/authz.js';
 import {
   getIterationEvidenceKeys,
   dedupeEvidences,
@@ -38,13 +47,13 @@ import {
   getCachedExecutionReport,
   invalidateProjectReportCache
 } from './utils/reportSnapshotCache.js';
+import { summarizeJiraError } from './utils/jiraErrors.js';
 
 // ── Enterprise Scalability Caches (Stage 3A+) ──
 // In-memory 10-minute TTL caches for `/rest/api/3/myself` and `/rest/api/3/mypermissions`
 // keyed by Forge accountId so every test execution click avoids 2 sequential HTTP roundtrips.
 const USER_CACHE_TTL_MS = 10 * 60 * 1000;
 const _userProfileCache = new Map();
-const _adminPermCache = new Map();
 
 async function getCachedMyself(context) {
   // Never fall back to a shared key: without an accountId the profile is fetched live and
@@ -76,35 +85,10 @@ async function getCachedMyself(context) {
 }
 
 async function getCachedIsProjectAdmin(projectId, context) {
+  // Project admin of THIS project or Test Pulse superuser (Jira admin / superuser group).
+  // Cached per Jira account inside authz.js, never shared between users.
   if (!projectId) return false;
-  // SECURITY: the cache is keyed per Jira account. Without an accountId we must NOT share a
-  // cached answer between users (that previously let a non-admin inherit an admin's result),
-  // so the check goes straight to Jira and the result is not cached.
-  const accountId = context?.accountId ? String(context.accountId) : null;
-  const cacheKey = accountId ? `${accountId}::${projectId}` : null;
-  const now = Date.now();
-  const cached = cacheKey ? _adminPermCache.get(cacheKey) : null;
-  if (cached && now - cached.at < USER_CACHE_TTL_MS) {
-    return cached.isAdmin;
-  }
-  try {
-    const permRes = await api.asUser().requestJira(
-      route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`
-    );
-    if (permRes.ok) {
-      const permData = await permRes.json();
-      const isAdmin = permData?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
-      if (_adminPermCache.size >= 200) {
-        const oldest = _adminPermCache.keys().next().value;
-        if (oldest !== undefined) _adminPermCache.delete(oldest);
-      }
-      if (cacheKey) _adminPermCache.set(cacheKey, { at: now, isAdmin });
-      return isAdmin;
-    }
-  } catch (e) {
-    console.error('Error checking admin permissions', e);
-  }
-  return false;
+  return canAdministerProject(projectId, context);
 }
 
 // ── Perf instrumentation (Fase 0 + Fase 3 p50/p95/maxMs) ──
@@ -304,14 +288,71 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
 
 const resolver = new Resolver();
 
-// Wrap every resolver: run it inside a perf context and log one compact line with p50/p95/maxMs when it finishes.
+// Resolvers that must keep working while Test Pulse is DISABLED in a project, so the UI
+// can still load, show the "disabled" screen and let an admin switch it back on.
+// (Project membership is still verified for them whenever a projectId is sent.)
+const PROJECT_ENABLED_GATE_EXEMPT = new Set([
+  'isProjectAllowed',
+  'setAllowedProjects',
+  'checkAdminPermission',
+  'getConfig',
+  'getProjectIssueTypes',
+  'getProjects',
+  'getAllowedProjects',
+  'getFields',
+  'getIssueLinkTypes',
+  'getBulkMapping'
+]);
+
+/**
+ * Central per-project authorization filter, applied to EVERY resolver before it runs.
+ *
+ * When the payload names a project (`payload.projectId`):
+ *   1. The value must be a well-formed project ID/key.
+ *   2. The user must be a member of that project (BROWSE_PROJECTS) or a Test Pulse superuser.
+ *   3. Test Pulse must be enabled in that project, unless the resolver is in the exempt list
+ *      above or the user administers the project (admins/superusers can always reach a
+ *      disabled project in order to re-enable it).
+ *
+ * Admin-only actions (configuration, enabling the app, report automation, folder deletion…)
+ * additionally call `requireProjectAdmin` / `canAdministerProject` inside the resolver.
+ */
+async function enforceProjectScope(name, req) {
+  const rawProjectId = req?.payload?.projectId;
+  if (rawProjectId === undefined || rawProjectId === null || rawProjectId === '') return;
+
+  const projectRef = normalizeProjectRef(rawProjectId);
+  if (!projectRef) {
+    throw new AuthorizationError('INVALID_PROJECT', 'Proyecto inválido.');
+  }
+  if (!(await canAccessProject(projectRef, req.context))) {
+    throw new AuthorizationError('FORBIDDEN', 'No tienes acceso a este proyecto en Jira.');
+  }
+  if (PROJECT_ENABLED_GATE_EXEMPT.has(name)) return;
+  if (await isProjectEnabled(projectRef)) return;
+  if (await canAdministerProject(projectRef, req.context)) return;
+  throw new AuthorizationError('PROJECT_DISABLED', 'Test Pulse no está habilitado en este proyecto.');
+}
+
+// Wrap every resolver: enforce the per-project permission model, then run it inside a perf
+// context and log one compact line with p50/p95/maxMs when it finishes.
 {
   const __origDefine = resolver.define.bind(resolver);
   resolver.define = (name, fn) => __origDefine(name, async (req) => {
     const t0 = Date.now();
     const store = { calls: 0, r429: 0, startedAt: t0 };
     try {
-      return await __perfALS.run(store, () => fn(req));
+      return await __perfALS.run(store, async () => {
+        await enforceProjectScope(name, req);
+        return fn(req);
+      });
+    } catch (err) {
+      if (err instanceof AuthorizationError) {
+        console.warn(`[authz] resolver=${name} code=${err.code} account=${req?.context?.accountId || 'n/a'} project=${req?.payload?.projectId ?? 'n/a'}`);
+        // Prefix with the code so the frontend can recognise the reason (`FORBIDDEN: ...`).
+        throw new Error(`${err.code}: ${err.message}`);
+      }
+      throw err;
     } finally {
       const elapsed = Date.now() - t0;
       let samples = __perfSamplesByResolver.get(name);
@@ -366,7 +407,7 @@ async function fetchIssuesByCandidateTypes(projectId, projectJql, candidates, pr
   if (validTypes.length === 0 && primaryType) validTypes = [primaryType];
   if (validTypes.length === 0) return [];
 
-  const buildJql = (types) => `${projectJql}issuetype in (${types.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+  const buildJql = (types) => `${projectJql}issuetype in (${types.map(t => jqlQuote(t)).join(', ')}) ORDER BY created DESC`;
   const firstPage = await fetchJqlPage(buildJql(validTypes), fields, expand, properties, null, 100);
 
   if (firstPage.error) {
@@ -411,7 +452,7 @@ resolver.define('getTestPlans', async ({ payload }) => {
   try {
     const { projectId, config, projectIssueTypes } = payload || {};
     const planType = config?.planIssueType;
-    const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+    const projectJql = projectId ? `project = ${jqlQuote(projectId)} AND ` : '';
     
     const candidatePlanTypes = [
       planType,
@@ -458,7 +499,7 @@ resolver.define('getTestCycles', async ({ payload }) => {
   try {
     const { projectId, config, projectIssueTypes } = payload || {};
     const cycleType = config?.testCycleType;
-    const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+    const projectJql = projectId ? `project = ${jqlQuote(projectId)} AND ` : '';
     
     const candidateCycleTypes = [
       cycleType,
@@ -700,7 +741,7 @@ resolver.define('getFields', async () => {
     });
     if (!response.ok) {
       console.error(`getFields failed: ${response.status} ${response.statusText}`);
-      return { _isError: true, status: response.status, message: await response.text() };
+      return { _isError: true, status: response.status, message: summarizeJiraError(await response.text()) };
     }
     const data = await response.json();
     return data;
@@ -762,7 +803,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   const { folderId, projectId, config, nextPageToken } = payload;
   const tcType = config?.testCaseType || 'Test Case';
   
-  const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+  const projectJql = projectId ? `project = ${jqlQuote(projectId)} AND ` : '';
   const candidateTcTypes = [
     tcType,
     'Test Case',
@@ -774,7 +815,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   ];
   const validTcTypes = filterValidIssueTypes(candidateTcTypes, payload?.projectIssueTypes, tcType);
 
-  let jql = `${projectJql}issuetype in (${validTcTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+  let jql = `${projectJql}issuetype in (${validTcTypes.map(t => jqlQuote(t)).join(', ')}) ORDER BY created DESC`;
   
   let fieldsToFetch = getTestCaseJqlFields(config, payload);
   
@@ -792,10 +833,10 @@ resolver.define('getTestCases', async ({ payload, context }) => {
          }
        } catch (e) { /* ignore */ }
      }
-     const retryJql = `${projectJql}issuetype in (${fallbackTypes.map(t => `"${t}"`).join(', ')}) ORDER BY created DESC`;
+     const retryJql = `${projectJql}issuetype in (${fallbackTypes.map(t => jqlQuote(t)).join(', ')}) ORDER BY created DESC`;
      pageData = await fetchJqlPage(retryJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
      if (pageData.error && fallbackTypes.length > 1) {
-       const singleJql = `${projectJql}issuetype = "${tcType}" ORDER BY created DESC`;
+       const singleJql = `${projectJql}issuetype = ${jqlQuote(tcType)} ORDER BY created DESC`;
        pageData = await fetchJqlPage(singleJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
      }
   }
@@ -882,7 +923,7 @@ resolver.define('getRequirements', async ({ payload, context }) => {
     if (issueKeys.length > 0) {
       for (let i = 0; i < Math.min(issueKeys.length, 500); i += 100) {
         const chunk = issueKeys.slice(i, i + 100);
-        const keyList = chunk.map(k => `"${k}"`).join(', ');
+        const keyList = chunk.map(k => jqlQuote(k)).join(', ');
         const jql = `issueKey IN (${keyList})`;
         const pageData = await fetchJqlPage(jql, fields, null, null, null, 100);
         if (!pageData?.error && Array.isArray(pageData?.issues)) {
@@ -897,8 +938,8 @@ resolver.define('getRequirements', async ({ payload, context }) => {
       const queryTypes = validReqTypes.length > 0
         ? validReqTypes
         : ['Story', 'Historia', 'Historia de usuario', 'User Story', 'Epic', 'Épica'];
-      const projectJql = projectId ? `project = "${projectId}" AND ` : '';
-      const typeList = queryTypes.map(t => `"${t}"`).join(', ');
+      const projectJql = projectId ? `project = ${jqlQuote(projectId)} AND ` : '';
+      const typeList = queryTypes.map(t => jqlQuote(t)).join(', ');
       const jql = `${projectJql}issuetype IN (${typeList}) ORDER BY created DESC`;
       allIssues = await fetchAllIssues(jql, fields, null, null, 5);
     }
@@ -938,7 +979,7 @@ resolver.define('getRequirements', async ({ payload, context }) => {
 
     if (missingEpicKeys.size > 0) {
       const missingArr = Array.from(missingEpicKeys).slice(0, 100);
-      const epJql = `issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`;
+      const epJql = `issueKey IN (${missingArr.map(k => jqlQuote(k)).join(', ')})`;
       const epPage = await fetchJqlPage(epJql, ['summary'], null, null, null, 100);
       if (!epPage?.error && Array.isArray(epPage?.issues)) {
         epPage.issues.forEach(ep => {
@@ -1027,8 +1068,8 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     // Step 1: Traer las ÉPICAS del proyecto (hasta 500 épicas)
     const epicTypeSelector = epicTypeIds.length > 0
       ? epicTypeIds.join(', ')
-      : epicTypeNames.map(t => `"${t}"`).join(', ');
-    const epicsJql = `project = "${resolvedProjectKey}" AND issuetype IN (${epicTypeSelector}) ORDER BY created DESC`;
+      : epicTypeNames.map(t => jqlQuote(t)).join(', ');
+    const epicsJql = `project = ${jqlQuote(resolvedProjectKey)} AND issuetype IN (${epicTypeSelector}) ORDER BY created DESC`;
     const rawEpics = await fetchAllIssues(epicsJql, ['summary', 'status', 'issuelinks'], null, null, 5);
     const epics = (rawEpics || []).map(issue => ({
       id: issue.id,
@@ -1093,20 +1134,20 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     let rawStories = [];
     if (validProjectTypes.length > 0) {
       const validTypeIds = validProjectTypes.map(t => t.id).filter(Boolean);
-      const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${validTypeIds.join(', ')}) ORDER BY created DESC`;
+      const storiesJql = `project = ${jqlQuote(resolvedProjectKey)} AND issuetype IN (${validTypeIds.join(', ')}) ORDER BY created DESC`;
       rawStories = await fetchAllIssues(storiesJql, reqFields, null, null, 10);
     } else {
       let reqTypes = configuredReqTypes.length > 0
         ? configuredReqTypes
         : ['Story', 'Historia', 'Historia de usuario', 'User Story'];
-      const typeList = reqTypes.map(t => `"${t}"`).join(', ');
-      const storiesJql = `project = "${resolvedProjectKey}" AND issuetype IN (${typeList}) ORDER BY created DESC`;
+      const typeList = reqTypes.map(t => jqlQuote(t)).join(', ');
+      const storiesJql = `project = ${jqlQuote(resolvedProjectKey)} AND issuetype IN (${typeList}) ORDER BY created DESC`;
       rawStories = await fetchAllIssues(storiesJql, reqFields, null, null, 10);
     }
 
     // Fallback: si la consulta por issuetype devolvió vacío, consultar issues del proyecto y filtrar en memoria por isAllowedStoryType
     if (!rawStories || rawStories.length === 0) {
-      const fallbackJql = `project = "${resolvedProjectKey}" ORDER BY created DESC`;
+      const fallbackJql = `project = ${jqlQuote(resolvedProjectKey)} ORDER BY created DESC`;
       rawStories = await fetchAllIssues(fallbackJql, reqFields, null, null, 10);
     }
 
@@ -1128,7 +1169,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (epics.length > 0) {
       const seenKeys = new Set(stories.map(s => s.key));
       for (let i = 0; i < Math.min(epics.length, 200); i += 50) {
-        const epicChunk = epics.slice(i, i + 50).map(e => `"${e.key}"`).join(', ');
+        const epicChunk = epics.slice(i, i + 50).map(e => jqlQuote(e.key)).join(', ');
         try {
           const childrenJql = `parent IN (${epicChunk}) ORDER BY created DESC`;
           const childrenIssues = await fetchAllIssues(childrenJql, reqFields, null, null, 3);
@@ -1183,7 +1224,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (unseenStoryKeys.size > 0) {
       const unseenArr = Array.from(unseenStoryKeys).slice(0, 100);
       try {
-        const stPage = await fetchJqlPage(`issueKey IN (${unseenArr.map(k => `"${k}"`).join(', ')})`, reqFields, null, null, null, 100);
+        const stPage = await fetchJqlPage(`issueKey IN (${unseenArr.map(k => jqlQuote(k)).join(', ')})`, reqFields, null, null, null, 100);
         if (!stPage?.error && Array.isArray(stPage?.issues)) {
           stPage.issues.forEach(issue => {
             const issueType = issue.fields?.issuetype?.name || '';
@@ -1253,7 +1294,7 @@ resolver.define('getTraceabilityHierarchy', async ({ payload, context }) => {
     if (missingEpicKeys.size > 0) {
       const missingArr = Array.from(missingEpicKeys).slice(0, 100);
       try {
-        const epPage = await fetchJqlPage(`issueKey IN (${missingArr.map(k => `"${k}"`).join(', ')})`, ['summary', 'status', 'issuetype'], null, null, null, 100);
+        const epPage = await fetchJqlPage(`issueKey IN (${missingArr.map(k => jqlQuote(k)).join(', ')})`, ['summary', 'status', 'issuetype'], null, null, null, 100);
         if (!epPage?.error && Array.isArray(epPage?.issues)) {
           epPage.issues.forEach(ep => {
             if (ep?.key && isEpicIssueType(ep.fields?.issuetype?.name, ep.fields?.issuetype?.hierarchyLevel)) {
@@ -1968,7 +2009,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
     try {
       // 1. Fetch runs currently linked to the cycle
       let candidateRuns = await fetchAllIssues(
-        `issue in linkedIssues("${cycleId}")`,
+        `issue in linkedIssues(${jqlQuote(cycleId)})`,
         getRunCandidateJqlFields(config),
         null,
         ['testpulse-run-data'],
@@ -1984,7 +2025,7 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
       }
 
       const tcLinkedRunsArray = await Promise.all(chunks.map(async (chunk) => {
-        const jql = chunk.map(id => `issue in linkedIssues("${id}")`).join(' OR ');
+        const jql = chunk.map(id => `issue in linkedIssues(${jqlQuote(id)})`).join(' OR ');
         return await fetchAllIssues(
           `(${jql})`,
           getRunCandidateJqlFields(config),
@@ -2270,7 +2311,7 @@ const getCycleExecutionSummary = async (cycleId) => {
   const runSummary = async () => {
   try {
     // 1. Fetch native Test Runs linked to this cycle in real time via JQL
-    const jql = `issue in linkedIssues("${cycleId}")`;
+    const jql = `issue in linkedIssues(${jqlQuote(cycleId)})`;
     const runIssues = await fetchAllIssues(
       jql,
       getRunCandidateJqlFields(),
@@ -2627,7 +2668,7 @@ const fetchBugsBatch = async (keys = [], config = null, projectId = null, projec
   for (let i = 0; i < uniqueKeys.length; i += CHUNK_SIZE) {
     const chunk = uniqueKeys.slice(i, i + CHUNK_SIZE);
     try {
-      const jql = `key in (${chunk.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`;
+      const jql = `key in (${chunk.map(k => jqlQuote(k)).join(',')})`;
       let resp = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -2733,9 +2774,9 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   }
   const reportCacheKey = `${projectId || 'ALL'}_${numOffset}_${numLimit}_${fetchAll ? '1' : '0'}_${cycleType}`;
   return await getCachedExecutionReport(reportCacheKey, projectId, async () => {
-  const cycleTypes = Array.from(new Set([cycleType, 'Test Cycle', 'Ciclo de Pruebas', 'Ciclo de Prueba'])).map(t => `"${t}"`).join(', ');
+  const cycleTypes = Array.from(new Set([cycleType, 'Test Cycle', 'Ciclo de Pruebas', 'Ciclo de Prueba'])).map(t => jqlQuote(t)).join(', ');
   
-  const jql = `project = "${projectId}" AND issuetype in (${cycleTypes}) ORDER BY created DESC`;
+  const jql = `project = ${jqlQuote(projectId)} AND issuetype in (${cycleTypes}) ORDER BY created DESC`;
   let allIssues = [];
   let token = null;
   let isLast = false;
@@ -2880,7 +2921,7 @@ resolver.define('getExecutionReport', async ({ payload }) => {
   if (numOffset === 0) {
     try {
       const planType = config?.planIssueType || config?.testPlanIssueType;
-      const projectJql = projectId ? `project = "${projectId}" AND ` : '';
+      const projectJql = projectId ? `project = ${jqlQuote(projectId)} AND ` : '';
       const planCandidates = [
         planType,
         'Test Plan',
@@ -2998,7 +3039,7 @@ resolver.define('getTestExecution', async ({ payload }) => {
     }
     if (!targetRunId) {
       const runIssues = await fetchAllIssues(
-        `issue in linkedIssues("${cycleId}")`,
+        `issue in linkedIssues(${jqlQuote(cycleId)})`,
         ['summary', 'status', 'assignee', 'attachment', 'description', 'issuelinks'],
         null,
         ['testpulse-run-data'],
@@ -3274,7 +3315,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds) {
 
   // 2. Fetch all linked issues for this cycle (without restricting issuetype, to catch Task fallback runs)
   try {
-    const jql = `issue in linkedIssues("${cycleId}")`;
+    const jql = `issue in linkedIssues(${jqlQuote(cycleId)})`;
     const runIssues = await fetchAllIssues(
       jql,
       ['id', 'key', 'status', 'attachment', 'issuelinks', 'summary'],
@@ -3426,7 +3467,7 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
     if (!targetRunId) {
       try {
         const runIssues = await fetchAllIssues(
-          `issue in linkedIssues("${cycleId}")`,
+          `issue in linkedIssues(${jqlQuote(cycleId)})`,
           ['summary', 'status', 'description', 'assignee', 'issuelinks'],
           null,
           ['testpulse-run-data'],
@@ -3799,7 +3840,7 @@ resolver.define('linkBugToTest', async ({ payload }) => {
           linkOk = true;
           break;
         } else {
-          linkErrMsg = await response.text();
+          linkErrMsg = summarizeJiraError(await response.text());
         }
       } catch (err) {
         linkErrMsg = err.message;
@@ -3925,7 +3966,7 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     // 1. Test Runs linked to this Test Case (runs are always linked to their TC on creation)
     try {
       const ref = tcKey || tcId;
-      const jql = `issue in linkedIssues("${ref}") ORDER BY created DESC`;
+      const jql = `issue in linkedIssues(${jqlQuote(ref)}) ORDER BY created DESC`;
       const runs = await fetchAllIssues(jql, ['summary', 'status', 'assignee', 'issuelinks', 'created', 'issuetype'], null, ['testpulse-run-data'], 4);
       for (const run of runs) {
         const prop = run.properties?.['testpulse-run-data'] || {};
@@ -3957,7 +3998,7 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     try {
       if (targetProjectId && Date.now() - startedAt < TIME_BUDGET_MS) {
         const cycleType = config?.testCycleType || 'Test Cycle';
-        const cycleJql = `project = ${targetProjectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+        const cycleJql = `project = ${jqlQuote(targetProjectId)} AND issuetype = ${jqlQuote(cycleType)} ORDER BY created DESC`;
         const page = await fetchJqlPage(cycleJql, ['summary'], null, null, null, 100);
         if (page.error) console.warn('[getTestCaseHistory] Cycle search error:', page.error);
         const cycles = page.issues || [];
@@ -4055,7 +4096,7 @@ resolver.define('getIssueDescription', async ({ payload }) => {
 // Rebuilds the execution index directly from native Jira Test Run issues
 resolver.define('rebuildCycleIndex', async ({ payload }) => {
   const { cycleId } = payload;
-  const jql = `issue in linkedIssues("${cycleId}")`;
+  const jql = `issue in linkedIssues(${jqlQuote(cycleId)})`;
   const runIssues = await fetchAllIssues(
     jql,
     ['summary', 'status', 'assignee', 'issuelinks'],
@@ -4149,7 +4190,7 @@ resolver.define('rebuildCycleIndex', async ({ payload }) => {
 resolver.define('migrateAllCycles', async ({ payload }) => {
   const { projectId, config, offset = 0, limit = 1 } = payload;
   const cycleType = config?.testCycleType || 'Test Cycle';
-  const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+  const jql = `project = ${jqlQuote(projectId)} AND issuetype = ${jqlQuote(cycleType)} ORDER BY created DESC`;
 
   // Fetch all cycle stubs — IDs + execution snapshot (no exec_ reads)
   let allIssues = [];
@@ -4251,7 +4292,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
   const effectiveProject = resolvedProjectKey || targetProj || projectId;
   let projectJql = '';
   if (effectiveProject) {
-    projectJql = `project = "${effectiveProject}" AND `;
+    projectJql = `project = ${jqlQuote(effectiveProject)} AND `;
   }
 
   let typeClause = '';
@@ -4260,7 +4301,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
   } else {
     // Fallback to all standard bug names if typeIds couldn't be resolved
     const fallbackTypes = ['Error', 'Bug', 'Defect', 'Defecto', 'Falla', 'Incident', 'Incidente', 'Problema', 'Problem'];
-    typeClause = `issuetype in (${fallbackTypes.map(t => `"${t}"`).join(',')})`;
+    typeClause = `issuetype in (${fallbackTypes.map(t => jqlQuote(t)).join(',')})`;
   }
 
   const jql = `${projectJql}${typeClause} ORDER BY created DESC`;
@@ -4497,7 +4538,7 @@ async function transitionJiraIssue(issueIdOrKey, targetStatusName) {
     });
 
     if (!transRes.ok) {
-      const errText = await transRes.text();
+      const errText = summarizeJiraError(await transRes.text());
       console.warn(`[transitionJiraIssue] Transition failed for ${issueIdOrKey}: ${transRes.status} ${errText}`);
       return { success: false, error: errText };
     }
@@ -4666,7 +4707,7 @@ resolver.define('getCycleTestRuns', async ({ payload }) => {
 
   try {
     // 1. First check if cycle has linked Test Runs via JQL
-    const jql = `issue in linkedIssues("${cycleId}") AND issuetype = "${testRunType}" ORDER BY key ASC`;
+    const jql = `issue in linkedIssues(${jqlQuote(cycleId)}) AND issuetype = ${jqlQuote(testRunType)} ORDER BY key ASC`;
     let allRuns = [];
     let token = null;
     let isLast = false;
@@ -5032,7 +5073,10 @@ resolver.define('searchAssignableUsers', async ({ payload }) => {
       const resApp = await api.asApp().requestJira(jiraRoute);
       if (resApp.ok) {
         const data = await resApp.json();
-        const list = normalizeUsers(Array.isArray(data) ? data : (data?.values || data?.users || []));
+        // Results fetched as the app bypass the user's e-mail visibility settings, so the
+        // e-mail is dropped; name, avatar and accountId are enough to pick an assignee.
+        const list = normalizeUsers(Array.isArray(data) ? data : (data?.values || data?.users || []))
+          .map(u => ({ ...u, email: null }));
         if (list.length > 0) return list;
       }
     } catch (e) {
@@ -5127,7 +5171,7 @@ resolver.define('bulkAssignTestRuns', async ({ payload, context }) => {
         });
         if (r.status === 429) { await new Promise(res => setTimeout(res, 1000 * (attempt + 1) + Math.random() * 400)); continue; }
         if (!r.ok) {
-          const txt = await r.text().catch(() => '');
+          const txt = summarizeJiraError(await r.text().catch(() => ''));
           return { testRunId: it.testRunId, ok: false, reason: `${r.status} ${txt.slice(0, 120)}` };
         }
         return { testRunId: it.testRunId, ok: true };
@@ -5426,7 +5470,7 @@ resolver.define('migrateCycleBatch', async ({ payload }) => {
     });
 
     if (!res.ok) {
-      const errText = await res.text();
+      const errText = summarizeJiraError(await res.text());
       console.error(`[migrateCycleBatch] Bulk create error: ${res.status} ${errText}`);
       return { success: false, error: errText };
     }
@@ -5728,7 +5772,7 @@ resolver.define('getProjectCyclesMigrationStatus', async ({ payload }) => {
   const cycleType = config?.testCycleType || 'Test Cycle';
 
   try {
-    const jql = `project = ${projectId} AND issuetype = "${cycleType}" ORDER BY created DESC`;
+    const jql = `project = ${jqlQuote(projectId)} AND issuetype = ${jqlQuote(cycleType)} ORDER BY created DESC`;
     let allIssues = [];
     let token = null;
     let isLast = false;

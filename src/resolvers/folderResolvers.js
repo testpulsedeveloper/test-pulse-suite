@@ -9,6 +9,7 @@
  */
 
 import api, { route } from '@forge/api';
+import { requireProjectAdmin } from '../utils/authz.js';
 
 /**
  * Fetches the folder tree stored in the `testops-folders` Jira project property.
@@ -71,20 +72,10 @@ export function registerFolderResolvers(resolver) {
     return updatedFolders;
   });
 
-  resolver.define('deleteFolder', async ({ payload }) => {
+  resolver.define('deleteFolder', async ({ payload, context }) => {
     const { projectId, folderId } = payload;
-    // Only Project Admins are permitted to delete repository folders
-    const permissionRes = await api.asUser().requestJira(
-      route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`
-    );
-    if (permissionRes.ok) {
-      const permissionData = await permissionRes.json();
-      if (!permissionData?.permissions?.ADMINISTER_PROJECTS?.havePermission) {
-        throw new Error('Only Project Admins can delete folders');
-      }
-    } else {
-      throw new Error('Failed to check permissions');
-    }
+    // Only admins of this project (or Test Pulse superusers) may delete repository folders
+    await requireProjectAdmin(projectId, context);
 
     const folders = await getProjectFolders(projectId);
     const toDelete = [folderId];

@@ -236,3 +236,67 @@ test('Core Helpers — normalizeJiraStatus, ensureValidAdf and dedupeEvidences',
   const deduped = dedupeEvidences([{ id: '101', filename: 'a.png' }, { id: '101', filename: 'a.png' }]);
   assert.equal(deduped.length, 1);
 });
+
+test('JQL — jqlQuote escapes quotes/backslashes so payload values cannot inject clauses (M2)', async () => {
+  const { jqlQuote } = await import('../src/utils/jqlHelpers.js');
+  assert.equal(jqlQuote('Test Case'), '"Test Case"');
+  assert.equal(jqlQuote('10001'), '"10001"');
+  assert.equal(jqlQuote('10001" OR project is not EMPTY'), '"10001\\" OR project is not EMPTY"');
+  assert.equal(jqlQuote('a\\"b'), '"a\\\\\\"b"');
+  assert.equal(jqlQuote('line1\nline2'), '"line1 line2"');
+  assert.equal(jqlQuote(null), '""');
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(!/linkedIssues\("\$\{/.test(src), 'no raw linkedIssues interpolation');
+  assert.ok(!/project = "\$\{/.test(src), 'no raw project interpolation');
+});
+
+test('Errors — summarizeJiraError keeps Jira messages and drops raw bodies (M3)', async () => {
+  const { summarizeJiraError } = await import('../src/utils/jiraErrors.js');
+  assert.equal(
+    summarizeJiraError(JSON.stringify({ errorMessages: ['Issue does not exist'], errors: { customfield_1: 'not on screen' } })),
+    'Issue does not exist | customfield_1: not on screen'
+  );
+  assert.match(summarizeJiraError('<html><body>Stack trace at com.atlassian...</body></html>'), /sin detalle legible/);
+  assert.equal(summarizeJiraError(''), 'Sin detalle de Jira.');
+  assert.ok(summarizeJiraError(JSON.stringify({ errorMessages: ['x'.repeat(1000)] })).length <= 300);
+});
+
+test('Frontend — every injected HTML string goes through DOMPurify (M1)', () => {
+  const adf = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/utils/adfUtils.js'), 'utf8');
+  assert.ok(adf.includes("import DOMPurify from 'dompurify'"));
+  assert.ok(adf.includes('return sanitizeHtml(cleaned.trim());'), 'sanitizeRenderedHtml ends with DOMPurify');
+  const settings = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/SettingsView.jsx'), 'utf8');
+  assert.ok(!settings.includes('__html: buildTestingExitReportHtml()'), 'exit report HTML is sanitized');
+});
+
+test('Per-project model — every resolver goes through the central project filter (v4.9.0)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('await enforceProjectScope(name, req);'), 'resolver.define wrapper enforces project scope');
+  assert.ok(src.includes("throw new AuthorizationError('PROJECT_DISABLED'"), 'disabled projects are blocked in the backend');
+  assert.ok(src.includes('return canAdministerProject(projectId, context);'), 'project-admin checks include superusers');
+});
+
+test('Per-project model — environments/widgets are stored per project, never globally (A3)', () => {
+  const cfg = fs.readFileSync(path.join(ROOT_DIR, 'src/resolvers/configResolvers.js'), 'utf8');
+  assert.ok(!/storage\.set\(GLOBAL_/.test(cfg), 'no writes to the shared global catalog');
+  assert.ok(cfg.includes('const effectiveEnvironments = projectEnvs || globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS;'), 'project values win over the template');
+  assert.equal((cfg.match(/await requireProjectAdmin\(projectId, context\);/g) || []).length, 2, 'setConfig and setAllowedProjects require project admin/superuser');
+});
+
+test('Per-project model — report dispatch stays inside its project and is audited (A2)', () => {
+  const rep = fs.readFileSync(path.join(ROOT_DIR, 'src/resolvers/reportAutomationResolvers.js'), 'utf8');
+  assert.ok(rep.includes('validateReportTargetChannel'), 'target issue must belong to the same project');
+  assert.ok(rep.includes('recipients: configuredRecipients'), 'recipients come from the admin-saved config');
+  assert.ok(rep.includes('appendReportAudit('), 'each dispatch is audited');
+  assert.ok(rep.includes('await requireProjectAdmin(projectId, context);'), 'automation config is admin/superuser only');
+});
+
+test('Superuser — Jira admin or configurable group, cached per account', async () => {
+  const authz = await import('../src/utils/authz.js');
+  assert.equal(authz.DEFAULT_SUPERUSER_GROUP, 'test-pulse-admins');
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/authz.js'), 'utf8');
+  assert.ok(src.includes("['ADMINISTER']"), 'Jira global admin is a superuser');
+  assert.ok(src.includes('TESTPULSE_SUPERUSER_GROUP'), 'group name is configurable');
+  const err = new authz.AuthorizationError('FORBIDDEN', 'x');
+  assert.equal(err.code, 'FORBIDDEN');
+});

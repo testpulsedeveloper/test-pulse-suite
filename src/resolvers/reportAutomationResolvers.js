@@ -9,6 +9,57 @@
  */
 
 import api, { route } from '@forge/api';
+import { requireProjectAdmin } from '../utils/authz.js';
+
+const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]*-\d+$/;
+const MAX_AUDIT_ENTRIES = 50;
+
+/**
+ * Ensures that the report "target channel", when it is a Jira issue key, belongs to the
+ * SAME project as the report. The app later comments on that issue as itself (also from
+ * the scheduled trigger), so without this check a report of project A could write into
+ * project B. The issue is read as the app only to compare its project.
+ *
+ * @param {string} projectId - Project the report belongs to (ID or key).
+ * @param {string} targetChannel - `NATIVE_JIRA` or an issue key such as `QA-100`.
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function validateReportTargetChannel(projectId, targetChannel) {
+  const trimmed = String(targetChannel || '').trim().toUpperCase();
+  if (!trimmed || trimmed === 'NATIVE_JIRA' || !ISSUE_KEY_PATTERN.test(trimmed)) {
+    return { ok: true };
+  }
+  try {
+    const res = await api.asApp().requestJira(route`/rest/api/3/issue/${trimmed}?fields=project`);
+    if (!res.ok) return { ok: false, error: `La issue destino ${trimmed} no existe.` };
+    const issue = await res.json();
+    const ref = String(projectId);
+    const sameProject = String(issue?.fields?.project?.id || '') === ref ||
+      String(issue?.fields?.project?.key || '').toUpperCase() === ref.toUpperCase();
+    if (!sameProject) {
+      return { ok: false, error: `La issue destino ${trimmed} debe pertenecer al mismo proyecto del reporte.` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'No se pudo validar la issue destino del reporte.' };
+  }
+}
+
+/**
+ * Appends an entry to the per-project report audit log (last 50 dispatches), so every
+ * publication records WHO triggered it, even though Jira shows the app as the author.
+ */
+async function appendReportAudit(getAppStorage, setAppStorage, projectId, entry) {
+  try {
+    const key = `report_automation_audit_${projectId}`;
+    const current = await getAppStorage(key);
+    const list = Array.isArray(current) ? current : [];
+    list.unshift(entry);
+    await setAppStorage(key, list.slice(0, MAX_AUDIT_ENTRIES));
+  } catch (e) {
+    console.warn('[ReportAutomation] audit log write failed:', e?.message);
+  }
+}
 
 /**
  * Publishes the executive report 100% natively inside Jira Cloud (Opción A - Runs on Atlassian):
@@ -155,6 +206,12 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
       if (!projectId) return { success: false, error: 'ProjectId es requerido' };
       if (!config) return { success: false, error: 'Configuración es requerida' };
 
+      // Report automation (schedule, recipients, target issue) is configured per project
+      // by its admins or by Test Pulse superusers.
+      await requireProjectAdmin(projectId, context);
+      const targetCheck = await validateReportTargetChannel(projectId, config.webhookUrl);
+      if (!targetCheck.ok) return { success: false, error: targetCheck.error };
+
       const normalizedConfig = {
         ...config,
         webhookUrl: String(config.webhookUrl || 'NATIVE_JIRA').trim() || 'NATIVE_JIRA'
@@ -191,6 +248,14 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         return { success: false, error: 'ProjectId es requerido para publicar el reporte en Jira' };
       }
 
+      // Any member of the project may publish (membership is enforced by the central
+      // filter), but only into an issue of the same project, and only to the recipients an
+      // admin configured: recipients sent by the browser are ignored.
+      const targetCheck = await validateReportTargetChannel(projectId, targetChannel);
+      if (!targetCheck.ok) return { success: false, error: targetCheck.error };
+      const storedConfig = (await getAppStorage(`report_automation_config_${projectId}`)) || {};
+      const configuredRecipients = String(storedConfig.recipients || '');
+
       let activeReportData = reportData;
       if (!activeReportData || !activeReportData.htmlReport) {
         const projName = activeReportData?.projectName || 'Proyecto Jira';
@@ -214,7 +279,7 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         activeReportData = {
           projectName: projName,
           projectKey: activeReportData?.projectKey || '',
-          recipients: activeReportData?.recipients || '',
+          recipients: configuredRecipients,
           emailSubject: `[Reporte Ejecutivo] Test Pulse Suite - ${projName} (${nowFormatted})`,
           htmlReport: testHtml,
           plainText: `Test Pulse Suite - Reporte Ejecutivo Nativo para ${projName} (${nowFormatted})`,
@@ -229,7 +294,7 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         projectId: projectId || 'N/A',
         projectName: activeReportData.projectName || 'Proyecto',
         projectKey: activeReportData.projectKey || '',
-        recipients: activeReportData.recipients || '',
+        recipients: configuredRecipients,
         emailSubject: activeReportData.emailSubject || `[Reporte Ejecutivo] ${activeReportData.projectName}`,
         htmlReport: activeReportData.htmlReport || '',
         plainText: activeReportData.plainText || '',
@@ -246,12 +311,20 @@ export function registerReportAutomationResolvers(resolver, { getAppStorage, set
         statusCode: nativeRes.status,
         statusText: nativeRes.statusText,
         responseSummary: `Publicado 100% nativo en Jira (${nativeRes.mode}) • Runs on Atlassian`,
-        recipients: reportData?.recipients || 'Configurados en Jira Automation (100% Nativo)',
-        emailSubject: bodyPayload.emailSubject
+        recipients: configuredRecipients || 'Configurados en Jira Automation (100% Nativo)',
+        emailSubject: bodyPayload.emailSubject,
+        triggeredBy: context?.accountId || null
       };
 
       if (projectId) {
         await setAppStorage(`report_automation_last_dispatch_${projectId}`, dispatchLog);
+        await appendReportAudit(getAppStorage, setAppStorage, projectId, {
+          timestamp: dispatchLog.timestamp,
+          accountId: context?.accountId || null,
+          target: targetChannel,
+          recipients: configuredRecipients,
+          status: dispatchLog.status
+        });
       }
 
       if (!isSuccess) {
