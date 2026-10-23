@@ -21,7 +21,9 @@ import {
 import {
   enqueueCycleRemoval,
   markPendingRemoval,
+  saveRemainingRuns,
   clearPendingRemoval,
+  listPendingRemovals,
   getPendingRemovalIds,
   filterPendingRemovals
 } from './utils/cycleRemovalQueue.js';
@@ -3441,7 +3443,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
   const idsSet = new Set(ids);
   const perms = { canDelete: true, canLink: true, canEdit: true, ...(opts.perms || {}) };
   const deadlineAt = Number(opts.deadlineAt) || Infinity;
-  let unprocessedRuns = 0;
+  const remainingRunIds = [];
 
   // 1. Update the lightweight index on the cycle (unless the caller already did).
   const removedEntries = opts.skipIndex ? [] : await removeCasesFromCycleIndex(cycleId, idsSet);
@@ -3507,7 +3509,7 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
     // - Executed runs with evidences/comments -> Unlink from cycle & preserve for auto-recovery
     await processInBatches(matchingRuns, 10, 50, async (r) => {
       if (Date.now() > deadlineAt) {
-        unprocessedRuns++;
+        remainingRunIds.push(String(r.id));
         return;
       }
       try {
@@ -3575,9 +3577,9 @@ async function performRemoveTestsFromCycle(cycleId, testIds, opts = {}) {
   }
 
   await invalidateProjectReportCache();
-  if (unprocessedRuns > 0) {
-    console.warn(`[performRemoveTestsFromCycle] time budget reached: ${unprocessedRuns} runs left in cycle ${cycleId}`);
-    return { success: false, partial: true, unprocessedRuns, removed: ids.length };
+  if (remainingRunIds.length > 0) {
+    console.warn(`[performRemoveTestsFromCycle] time budget reached: ${remainingRunIds.length} runs left in cycle ${cycleId}`);
+    return { success: false, partial: true, unprocessedRuns: remainingRunIds.length, remainingRunIds, removed: ids.length };
   }
   return { success: true, removed: ids.length };
 }
@@ -3626,14 +3628,64 @@ async function requestCycleRemoval({ payload, context }) {
     return { success: true, removed: ids.length, queued: true, jobId };
   } catch (err) {
     console.warn(`[cycleRemoval] queue unavailable, cleaning up in this invocation: ${err?.message} code=${err?.code ?? 'n/a'} details=${JSON.stringify(err?.details ?? null)}`);
-    await clearPendingRemoval(cycle.id, markerId);
-    // Stop at ~18 s so this 25-second invocation never times out; whatever is left is reported.
+    // Stop at ~18 s so this 25-second invocation never times out. Leftover runs are kept in
+    // the marker (cases stay hidden) and finished by `resumeCycleRemoval`.
     const result = await performRemoveTestsFromCycle(cycle.id, ids, {
       skipIndex: true, knownRunIds, everyEntryHasRun, perms, deadlineAt: Date.now() + 18000
     });
+    if (result.partial) {
+      await saveRemainingRuns(cycle.id, markerId, ids, result.remainingRunIds);
+      return { success: true, partial: true, remainingRuns: result.remainingRunIds.length, removed: ids.length, queued: false };
+    }
+    await clearPendingRemoval(cycle.id, markerId);
     return { ...result, queued: false };
   }
 }
+
+/**
+ * Finishes removals that ran out of time (see `requestCycleRemoval`). Called by the page in a
+ * loop right after a partial removal, and whenever a cycle is opened, so a reload only pauses
+ * the cleanup. Runs as the user, so Jira enforces their permissions on every change.
+ *
+ * @returns {Promise<{remainingRuns: number, processedRuns: number}>}
+ */
+resolver.define('resumeCycleRemoval', async ({ payload }) => {
+  const cycleId = normalizeIssueRef(payload?.cycleId);
+  if (!cycleId) return { remainingRuns: 0, processedRuns: 0 };
+  const markers = (await listPendingRemovals(cycleId))
+    .filter(m => Array.isArray(m.value.remainingRunIds) && m.value.remainingRunIds.length > 0);
+  if (markers.length === 0) return { remainingRuns: 0, processedRuns: 0 };
+
+  const cycle = await getIssueVisibleToUser(cycleId);
+  if (!cycle) {
+    throw new AuthorizationError('FORBIDDEN', 'No tienes acceso a este ciclo.');
+  }
+  const perms = await getProjectActionPermissions(cycle.projectId);
+  const deadlineAt = Date.now() + 18000;
+  let remainingRuns = 0;
+  let processedRuns = 0;
+
+  for (const { markerId, value } of markers) {
+    const runIds = value.remainingRunIds.map(String);
+    if (Date.now() > deadlineAt) {
+      remainingRuns += runIds.length;
+      continue;
+    }
+    const result = await performRemoveTestsFromCycle(cycle.id, value.ids || [], {
+      skipIndex: true, knownRunIds: runIds, everyEntryHasRun: true, perms, deadlineAt
+    });
+    const left = result.partial ? result.remainingRunIds : [];
+    processedRuns += runIds.length - left.length;
+    remainingRuns += left.length;
+    if (left.length > 0) {
+      await saveRemainingRuns(cycle.id, markerId, value.ids || [], left);
+    } else {
+      await clearPendingRemoval(cycle.id, markerId);
+    }
+  }
+  console.log(`[cycleRemoval] resumed cycle=${cycle.id} processed=${processedRuns} remaining=${remainingRuns}`);
+  return { remainingRuns, processedRuns };
+});
 
 resolver.define('removeTestFromCycle', requestCycleRemoval);
 

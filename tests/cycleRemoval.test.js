@@ -94,12 +94,28 @@ test('removal resolvers queue the work; the worker runs as the app with the user
   assert.ok(/handler: index\.cycleRemovalWorker\n\s+timeoutSeconds: 300/.test(m));
 });
 
-test('in-resolver fallback stops at a deadline instead of hitting the 25 s timeout', () => {
+test('in-resolver fallback stops at a deadline and keeps the leftover runs to resume them', () => {
   const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
   assert.ok(src.includes('deadlineAt: Date.now() + 18000'), 'fallback sets an 18 s deadline');
-  assert.ok(src.includes('return { success: false, partial: true, unprocessedRuns, removed: ids.length };'));
+  assert.ok(src.includes('remainingRunIds.push(String(r.id));'), 'leftover runs are remembered');
+  assert.ok(src.includes('await saveRemainingRuns(cycle.id, markerId, ids, result.remainingRunIds);'));
+  assert.ok(src.includes("resolver.define('resumeCycleRemoval'"), 'leftovers can be resumed');
   const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
-  assert.ok(app.includes('if (res?.partial) {'), 'frontend warns about a partial removal');
+  assert.ok(app.includes("await invoke('resumeCycleRemoval', { cycleId })"), 'the page finishes leftovers right away');
+  assert.ok(app.includes('}, [selectedCycle?.id]);') && app.includes("const result = await invoke('resumeCycleRemoval', { cycleId })"), 'and again when a cycle is opened');
+});
+
+test('markers with leftover runs stay hidden longer and are listed for resuming', async () => {
+  await q.saveRemainingRuns('20000', 'r1', ['CUQ-9'], ['7001', '7002']);
+  const markers = await q.listPendingRemovals('20000');
+  assert.equal(markers.length, 1);
+  assert.equal(markers[0].markerId, 'r1');
+  assert.deepEqual(markers[0].value.remainingRunIds, ['7001', '7002']);
+  // A leftover marker older than the 30-minute TTL is still live (7-day resume window).
+  store.set('cycle_removal_20000_old', { ids: ['CUQ-8'], remainingRunIds: ['7003'], createdAt: Date.now() - q.PENDING_REMOVAL_TTL_MS - 1000 });
+  assert.ok((await q.getPendingRemovalIds('20000')).has('CUQ-8'));
+  store.set('cycle_removal_20000_ancient', { ids: ['CUQ-7'], remainingRunIds: ['7004'], createdAt: Date.now() - q.PENDING_RESUME_TTL_MS - 1000 });
+  assert.equal((await q.getPendingRemovalIds('20000')).has('CUQ-7'), false);
 });
 
 test('cycle summary no longer references an undefined `config` (bugs on a cycle broke the list)', () => {

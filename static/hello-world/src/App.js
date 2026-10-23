@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.11.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.11.3'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -112,6 +112,21 @@ function App() {
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [testCycles, setTestCycles] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState(null);
+
+  // Finish any cleanup of removed cases that ran out of time earlier (e.g. the page was
+  // reloaded in the middle). Runs quietly in the background whenever a cycle is opened.
+  useEffect(() => {
+    const cycleId = selectedCycle?.id ? String(selectedCycle.id) : null;
+    if (!cycleId) return undefined;
+    let cancelled = false;
+    (async () => {
+      for (let round = 0; round < 20 && !cancelled; round++) {
+        const result = await invoke('resumeCycleRemoval', { cycleId }).catch(() => null);
+        if (!result || !result.remainingRuns) break;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCycle?.id]);
   
   const [cycleTests, setCycleTests] = useState([]);
   const activeCycleIdRef = useRef(null);   // currently selected / active cycle ID
@@ -4879,14 +4894,23 @@ Then el sistema valida la identidad.
       const res = await invoke('removeManyTestsFromCycle', { cycleId, testIds: Array.from(new Set(idsToTrack)) });
       const plural = testIds.length !== 1 ? 's' : '';
       if (res?.partial) {
-        // The server ran out of time before cleaning every Test Run: tell the user and reload the list.
-        addNotification({
-          type: 'warning',
-          title: 'Eliminación incompleta',
-          description: `Quedaron ${res.unprocessedRuns} ejecucion(es) por limpiar. Vuelve a quitar los casos que sigan apareciendo en el ciclo.`
-        });
-        const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
-        if (execution) safeSetCycleTests(execution);
+        // The server ran out of time before cleaning every Test Run. The cases stay hidden and
+        // the leftover runs are finished here; if the page is reloaded, opening the cycle
+        // resumes the cleanup (see the resumeCycleRemoval effect).
+        let remaining = res.remainingRuns || 0;
+        for (let round = 0; round < 20 && remaining > 0; round++) {
+          const next = await invoke('resumeCycleRemoval', { cycleId }).catch(() => null);
+          if (!next) break;
+          remaining = next.remainingRuns || 0;
+        }
+        const plural = testIds.length !== 1 ? 's' : '';
+        addNotification(remaining > 0
+          ? {
+              type: 'warning',
+              title: `${testIds.length} caso${plural} quitado${plural} del ciclo`,
+              description: `Faltan ${remaining} ejecucion(es) por limpiar; se terminarán la próxima vez que abras este ciclo.`
+            }
+          : { type: 'success', title: `${testIds.length} caso${plural} quitado${plural} del ciclo` });
         return;
       }
       addNotification({
