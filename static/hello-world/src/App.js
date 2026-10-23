@@ -1518,9 +1518,9 @@ function App() {
     return () => { cancelled = true; };
   }, [activeTab, selectedPlanId, testCycles.length]);
 
-  // Reports: load on entering tab only if not loaded yet, and poll quietly in the background
+  // Reports & Config Exit Report: load on entering tab only if not loaded yet, and poll quietly in the background
   useEffect(() => {
-    if (activeTab !== 'reports') return;
+    if (activeTab !== 'reports' && activeTab !== 'config') return;
     if (!reportData.cycles || reportData.cycles.length === 0 || !reportData._loadedAt) {
       loadReportData(null, null, false);
     }
@@ -2805,7 +2805,7 @@ Then el sistema valida la identidad.
           })()}
         </div>
         <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', marginTop: 'auto' }}>
-          <button className="btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.82rem', padding: '0.45rem' }} onClick={handleCreateFolder}>
+          <button className="btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.82rem', padding: '0.45rem' }} onClick={() => handleCreateFolder(null)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             <span>+ New Folder</span>
           </button>
@@ -4685,6 +4685,10 @@ Then el sistema valida la identidad.
 
   const handleDeleteFolder = async (folderId, name) => {
     if (!selectedProjectId) return;
+    if (!isAdmin) {
+      addNotification({ type: 'error', title: 'Permiso denegado', description: 'Solo los administradores pueden eliminar carpetas.' });
+      return;
+    }
     showConfirm(
       'Eliminar carpeta',
       `¿Eliminar "${name}"? Esta acción no se puede deshacer.`,
@@ -7582,7 +7586,7 @@ Then el sistema valida la identidad.
 
   const renderConfigTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando Configuración..." />}>
-      <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, editingEnvDesc, editingEnvId, editingEnvName, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isProjectAllowed, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setAllowedProjects, setEditingEnvDesc, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setShowReportAutomationModal, snapshotFieldMap, testCycles }} />
+      <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
     </Suspense>
   );
 

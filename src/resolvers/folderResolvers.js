@@ -3,13 +3,37 @@
  * @description Backend resolvers for Test Case Repository folder hierarchy management.
  *
  * Folders are stored per-project inside the `testops-folders` Jira Project Property.
- * Read access uses `.asApp()` so all users with project access can view the folder tree,
- * while write and delete operations use `.asUser()` (with explicit `ADMINISTER_PROJECTS`
- * permission verification on deletion).
+ * Read and write access to the project property uses `.asApp()` after verifying user
+ * permissions via `.asUser()` because Jira restricts direct `PUT /rest/api/3/project/{id}/properties/{key}`
+ * calls to Project Administrators (`ADMINISTER_PROJECTS`).
+ * - Creating and renaming folders is permitted for all project members (`BROWSE_PROJECTS`).
+ * - Deleting folders is strictly restricted to Project Administrators (`ADMINISTER_PROJECTS`).
  */
 
 import api, { route } from '@forge/api';
+import { summarizeJiraError } from '../utils/jiraErrors.js';
 import { requireProjectAdmin } from '../utils/authz.js';
+
+/**
+ * Verifies that the current user has permission to access the project (`BROWSE_PROJECTS`).
+ * Required before using `.asApp()` to write project-level folder properties on behalf of non-admin users.
+ *
+ * @param {string} projectId - Jira project ID or key.
+ * @returns {Promise<void>}
+ */
+const verifyProjectBrowseAccess = async (projectId) => {
+  const permissionRes = await api.asUser().requestJira(
+    route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=BROWSE_PROJECTS`
+  );
+  if (permissionRes.ok) {
+    const permissionData = await permissionRes.json();
+    if (!permissionData?.permissions?.BROWSE_PROJECTS?.havePermission) {
+      throw new Error('No tienes permisos de acceso al proyecto para crear o modificar carpetas.');
+    }
+  } else {
+    throw new Error('No se pudieron verificar los permisos del usuario en el proyecto.');
+  }
+};
 
 /**
  * Fetches the folder tree stored in the `testops-folders` Jira project property.
@@ -31,17 +55,23 @@ export const getProjectFolders = async (projectId) => {
 
 /**
  * Persists the updated folder tree into the `testops-folders` Jira project property.
+ * Uses `.asApp()` because Jira Cloud restricts project property PUT requests to `ADMINISTER_PROJECTS`
+ * when called via `.asUser()`. Callers must verify appropriate user permissions before invoking this helper.
  *
  * @param {string} projectId - Jira project ID or key.
  * @param {Array<Object>} data - Complete array of folder objects to store.
  * @returns {Promise<void>}
  */
 export const setProjectFolders = async (projectId, data) => {
-  await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`, {
+  const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   });
+  if (!response.ok) {
+    const errText = summarizeJiraError(await response.text().catch(() => ''));
+    throw new Error(`No se pudo guardar la estructura de carpetas (HTTP ${response.status}): ${errText}`);
+  }
 };
 
 /**
@@ -57,6 +87,8 @@ export function registerFolderResolvers(resolver) {
 
   resolver.define('createFolder', async ({ payload }) => {
     const { projectId, name, parentId } = payload;
+    // Any user with project access can create folders
+    await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
     const newFolder = { id: `folder-${Date.now()}`, name, parentId: parentId || null };
     folders.push(newFolder);
@@ -66,6 +98,8 @@ export function registerFolderResolvers(resolver) {
 
   resolver.define('updateFolder', async ({ payload }) => {
     const { projectId, folderId, newName } = payload;
+    // Any user with project access can rename folders
+    await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
     const updatedFolders = folders.map(f => (f.id === folderId ? { ...f, name: newName } : f));
     await setProjectFolders(projectId, updatedFolders);
@@ -93,3 +127,4 @@ export function registerFolderResolvers(resolver) {
     return updatedFolders;
   });
 }
+
