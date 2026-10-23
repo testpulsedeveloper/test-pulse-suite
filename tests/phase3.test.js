@@ -23,10 +23,18 @@ import {
 import {
   MAX_UPLOADS_PER_SESSION,
   QR_SESSION_TTL_MS,
+  MAX_MOBILE_UPLOAD_BYTES,
+  generateMobileSessionId,
+  resolveAllowedMobileMime,
   signMobileSessionToken,
   verifyMobileSessionToken,
   resolveSafeCorsOrigin
 } from '../src/utils/mobileSecurity.js';
+
+import {
+  normalizeProjectRef,
+  normalizeIssueRef
+} from '../src/utils/authz.js';
 
 import {
   normalizeJiraStatus,
@@ -95,21 +103,80 @@ test('3.1 Dynamic Custom Fields — extractBugSeverityFromFields & extractBugEst
 });
 
 test('3.4 Mobile Companion Security — HMAC-SHA256 signing, constant-time verification & tamper rejection', () => {
-  const sessionId = 'qr_1792450000000_abc1234';
+  const secret = 'a'.repeat(64);
+  const sessionId = generateMobileSessionId();
   const createdAt = 1792450000000;
-  const token = signMobileSessionToken(sessionId, createdAt);
+  const token = signMobileSessionToken(sessionId, createdAt, secret);
 
   assert.equal(typeof token, 'string');
-  assert.equal(token.length, 32);
-  assert.equal(verifyMobileSessionToken(sessionId, createdAt, token), true);
+  assert.equal(token.length, 64);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, token, secret), true);
 
-  // Tampered sessionId, timestamp, or token must fail
-  assert.equal(verifyMobileSessionToken(sessionId + '_x', createdAt, token), false);
-  assert.equal(verifyMobileSessionToken(sessionId, createdAt + 1, token), false);
-  assert.equal(verifyMobileSessionToken(sessionId, createdAt, '0'.repeat(32)), false);
-  assert.equal(verifyMobileSessionToken(sessionId, createdAt, ''), false);
+  // Tampered sessionId, timestamp, token or a different secret must fail
+  assert.equal(verifyMobileSessionToken(sessionId + '_x', createdAt, token, secret), false);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt + 1, token, secret), false);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, '0'.repeat(64), secret), false);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, token, 'b'.repeat(64)), false);
   assert.equal(MAX_UPLOADS_PER_SESSION, 15);
   assert.equal(QR_SESSION_TTL_MS, 2 * 60 * 60 * 1000);
+});
+
+test('3.4 Mobile Companion Security — missing signature or secret is always rejected (C2)', () => {
+  const secret = 'c'.repeat(64);
+  const sessionId = generateMobileSessionId();
+  const createdAt = Date.now();
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, '', secret), false);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, undefined, secret), false);
+  assert.equal(verifyMobileSessionToken(sessionId, createdAt, 'x', undefined), false);
+  assert.throws(() => signMobileSessionToken(sessionId, createdAt, ''), /not configured/);
+});
+
+test('3.4 Mobile Companion Security — no hard-coded HMAC fallback secret in source (C2)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/mobileSecurity.js'), 'utf8');
+  assert.ok(!src.includes('tp-liverpool-forge-mobile-hmac'), 'legacy hard-coded secret must be gone');
+});
+
+test('3.4 Mobile Companion Security — session ids are random and unique (C2)', () => {
+  const ids = new Set(Array.from({ length: 200 }, () => generateMobileSessionId()));
+  assert.equal(ids.size, 200);
+  for (const id of ids) assert.match(id, /^qr_[0-9a-f]{32}$/);
+});
+
+test('3.4 Mobile Companion Security — upload MIME allowlist and size cap (C3)', () => {
+  assert.deepEqual(resolveAllowedMobileMime('image/jpeg'), { mime: 'image/jpeg', ext: 'jpg' });
+  assert.deepEqual(resolveAllowedMobileMime('video/mp4; codecs=avc1'), { mime: 'video/mp4', ext: 'mp4' });
+  assert.equal(resolveAllowedMobileMime('text/html'), null);
+  assert.equal(resolveAllowedMobileMime('image/svg+xml'), null);
+  assert.equal(resolveAllowedMobileMime('application/octet-stream'), null);
+  assert.equal(MAX_MOBILE_UPLOAD_BYTES, 10 * 1024 * 1024);
+});
+
+test('Authz — project and issue references reject JQL/route injection payloads (A5)', () => {
+  assert.equal(normalizeProjectRef('10001'), '10001');
+  assert.equal(normalizeProjectRef('qa'), 'QA');
+  assert.equal(normalizeProjectRef('10001" OR project is not EMPTY'), null);
+  assert.equal(normalizeProjectRef(''), null);
+  assert.equal(normalizeIssueRef('qa-12'), 'QA-12');
+  assert.equal(normalizeIssueRef('10234'), '10234');
+  assert.equal(normalizeIssueRef('QA-12/../../myself'), null);
+});
+
+test('Authz — admin-gated resolvers pass the caller context to the permission cache (A1)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(!src.includes('_isProjectAdmin(projectId))'), 'every _isProjectAdmin call must include context');
+  assert.ok(!src.includes("'default_user'"), 'no shared default_user cache key');
+});
+
+test('Allowlist — testpulse-enabled is stored as { enabled } so disabling a project takes effect (A4)', () => {
+  // Report automation and config keep their original (internal-cloud) permission model;
+  // only the allowlist storage shape was fixed so `isProjectAllowed` can read it.
+  const config = fs.readFileSync(path.join(ROOT_DIR, 'src/resolvers/configResolvers.js'), 'utf8');
+  assert.ok(config.includes('JSON.stringify({ enabled: enabled !== false })'));
+});
+
+test('Mobile app — no OAuth client secret committed (C1)', () => {
+  const login = fs.readFileSync(path.join(ROOT_DIR, 'test-pulse-mobile/src/screens/LoginScreen.js'), 'utf8');
+  assert.ok(!/ATOA[A-Za-z0-9_-]{20,}/.test(login), 'Atlassian client secret must come from .env');
 });
 
 test('3.4 Mobile Companion Security — resolveSafeCorsOrigin restricts CORS to Atlassian domains', () => {

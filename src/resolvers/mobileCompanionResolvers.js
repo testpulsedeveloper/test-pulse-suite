@@ -18,13 +18,22 @@ import {
   generateMobileErrorHtml,
   generateMobileUploadHtml
 } from '../utils/mobileUploadTemplates.js';
+import { randomBytes } from 'node:crypto';
 import {
   QR_SESSION_TTL_MS,
   MAX_UPLOADS_PER_SESSION,
+  MAX_MOBILE_UPLOAD_BYTES,
+  MIN_HMAC_SECRET_LENGTH,
+  generateMobileSessionId,
+  resolveAllowedMobileMime,
   signMobileSessionToken,
   verifyMobileSessionToken,
   resolveSafeCorsOrigin
 } from '../utils/mobileSecurity.js';
+import {
+  getIssueVisibleToUser,
+  userHasPermissions
+} from '../utils/authz.js';
 
 export {
   QR_SESSION_TTL_MS,
@@ -34,17 +43,71 @@ export {
   resolveSafeCorsOrigin
 };
 
+// Key of the encrypted KVS secret that holds the per-installation HMAC key.
+const MOBILE_HMAC_KVS_SECRET_KEY = 'tp_mobile_hmac_secret_v2';
+
+// In-memory copy of the HMAC key so warm invocations skip the KVS read.
+let _cachedHmacSecret = null;
+
+/**
+ * Returns the HMAC key used to sign QR upload sessions. Resolution order:
+ *  1. `FORGE_MOBILE_HMAC_SECRET` encrypted Forge variable
+ *     (`forge variables set --encrypt FORGE_MOBILE_HMAC_SECRET <value>`), if it is long enough.
+ *  2. A random 256-bit key generated once per installation and stored in the
+ *     encrypted KVS secret store (`kvs.setSecret`). It is never sent to the browser.
+ *
+ * `FAIL_IF_EXISTS` guarantees that two concurrent first calls cannot overwrite each
+ * other's key: the loser simply re-reads the winner's value.
+ *
+ * @returns {Promise<string>}
+ */
+export async function getMobileHmacSecret() {
+  if (_cachedHmacSecret) return _cachedHmacSecret;
+
+  const envSecret = process.env.FORGE_MOBILE_HMAC_SECRET;
+  if (envSecret && envSecret.length >= MIN_HMAC_SECRET_LENGTH) {
+    _cachedHmacSecret = envSecret;
+    return _cachedHmacSecret;
+  }
+
+  let stored = await storage.getSecret(MOBILE_HMAC_KVS_SECRET_KEY);
+  if (!stored) {
+    const generated = randomBytes(32).toString('hex');
+    try {
+      await storage.setSecret(MOBILE_HMAC_KVS_SECRET_KEY, generated, { keyPolicy: 'FAIL_IF_EXISTS' });
+      stored = generated;
+    } catch (_) {
+      // Another invocation created the key first: use theirs.
+      stored = await storage.getSecret(MOBILE_HMAC_KVS_SECRET_KEY);
+    }
+  }
+  if (!stored) throw new Error('No se pudo inicializar la llave de seguridad de sesiones móviles.');
+  _cachedHmacSecret = stored;
+  return _cachedHmacSecret;
+}
+
+/**
+ * Builds a JSON WebTrigger response with the shared CORS headers.
+ */
+function jsonResponse(statusCode, defaultHeaders, bodyObj) {
+  return {
+    statusCode,
+    headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
+    body: JSON.stringify(bodyObj)
+  };
+}
+
 /**
  * Registers `createMobileUploadSession` and `checkMobileUploadStatus` resolvers.
  *
  * @param {import('@forge/resolver').default} resolver - Forge Resolver instance.
  */
 export function registerMobileCompanionResolvers(resolver) {
-  resolver.define('createMobileUploadSession', async ({ payload }) => {
+  resolver.define('createMobileUploadSession', async ({ payload, context }) => {
     const { testId, testKey, testRunKey, testRunId, testSummary, iterId, iterName, cycleId } = payload || {};
     const createdAt = Date.now();
-    const sessionId = 'qr_' + createdAt + '_' + Math.random().toString(36).substring(2, 9);
-    const sessionToken = signMobileSessionToken(sessionId, createdAt);
+    const sessionId = generateMobileSessionId();
+    const sessionToken = signMobileSessionToken(sessionId, createdAt, await getMobileHmacSecret());
 
     let webtriggerUrl = '';
     try {
@@ -69,16 +132,35 @@ export function registerMobileCompanionResolvers(resolver) {
       } catch (_) {}
     }
 
+    // SECURITY: the WebTrigger later writes to this issue with `.asApp()` (the phone has no
+    // Jira session). We therefore resolve the target issue AS THE USER right now and require
+    // that they can both edit it and attach files to it. The canonical id/key returned by
+    // Jira is stored in the session, so nothing the browser sent is trusted afterwards.
+    const requestedTarget = resolvedRunKey || testRunKey || resolvedRunId || testRunId || testKey || testId;
+    const targetIssue = await getIssueVisibleToUser(requestedTarget);
+    if (!targetIssue) {
+      throw new Error('No tienes acceso a la ejecución seleccionada o la referencia no es válida.');
+    }
+    const canUpload = await userHasPermissions(
+      { issueId: targetIssue.id },
+      ['EDIT_ISSUES', 'CREATE_ATTACHMENTS']
+    );
+    if (!canUpload) {
+      throw new Error('No tienes permisos para adjuntar evidencias en esta ejecución.');
+    }
+
     const sessionData = {
       sessionId,
       sessionToken,
       testId: testId || testKey,
       testKey: testKey || testId,
-      testRunKey: resolvedRunKey || testRunKey || testKey || testId,
-      testRunId: resolvedRunId || testRunId || resolvedRunKey || testId,
-      testSummary: testSummary || 'Caso de Prueba',
+      testRunKey: targetIssue.key,
+      testRunId: targetIssue.id,
+      projectId: targetIssue.projectId,
+      createdBy: context?.accountId || null,
+      testSummary: String(testSummary || 'Caso de Prueba').slice(0, 255),
       iterId: iterId || null,
-      iterName: iterName || null,
+      iterName: iterName ? String(iterName).slice(0, 120) : null,
       cycleId: cycleId || null,
       createdAt
     };
@@ -98,9 +180,15 @@ export function registerMobileCompanionResolvers(resolver) {
     };
   });
 
-  resolver.define('checkMobileUploadStatus', async ({ payload }) => {
+  resolver.define('checkMobileUploadStatus', async ({ payload, context }) => {
     const { sessionId } = payload || {};
-    if (!sessionId) return { uploaded: false };
+    if (!sessionId || typeof sessionId !== 'string') return { uploaded: false };
+
+    // Only the user who opened the QR session may consume its upload receipts.
+    const session = await storage.get('qrsession_' + sessionId);
+    if (session?.createdBy && session.createdBy !== context?.accountId) {
+      return { uploaded: false };
+    }
 
     const uploadResult = await storage.get('qrupload_' + sessionId);
     if (uploadResult && uploadResult.uploaded) {
@@ -191,7 +279,9 @@ export async function mobileUploadHandler(request) {
       };
     }
 
-    if (session.sessionToken && querySig && !verifyMobileSessionToken(sessionId, session.createdAt, querySig)) {
+    // The signature is MANDATORY: a missing `sig` is rejected exactly like a forged one.
+    const hmacSecret = await getMobileHmacSecret();
+    if (!verifyMobileSessionToken(sessionId, session.createdAt, String(querySig || ''), hmacSecret)) {
       return {
         statusCode: 403,
         headers: { ...defaultHeaders, 'Content-Type': ['text/html; charset=utf-8'] },
@@ -243,12 +333,24 @@ export async function mobileUploadHandler(request) {
         };
       }
 
-      if (session.sessionToken && sessionToken && !verifyMobileSessionToken(sessionId, session.createdAt, sessionToken)) {
-        return {
-          statusCode: 403,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: 'Firma HMAC de sesión inválida.' })
-        };
+      // The signature is MANDATORY: a missing token is rejected exactly like a forged one.
+      const hmacSecret = await getMobileHmacSecret();
+      if (!verifyMobileSessionToken(sessionId, session.createdAt, sessionToken, hmacSecret)) {
+        return jsonResponse(403, defaultHeaders, { success: false, error: 'Firma HMAC de sesión inválida.' });
+      }
+
+      // Only accept camera media types and cap the decoded size, so the public endpoint
+      // cannot be abused to store arbitrary (e.g. HTML/SVG) or oversized files in Jira.
+      const allowedMime = resolveAllowedMobileMime(mimeType || 'image/jpeg');
+      if (!allowedMime) {
+        return jsonResponse(415, defaultHeaders, { success: false, error: 'Tipo de archivo no permitido. Solo fotos o videos.' });
+      }
+      if (typeof base64Data !== 'string') {
+        return jsonResponse(400, defaultHeaders, { success: false, error: 'Formato de archivo inválido.' });
+      }
+      // Base64 encodes 3 bytes in 4 chars, so this is a cheap pre-check before decoding.
+      if (base64Data.length > Math.ceil(MAX_MOBILE_UPLOAD_BYTES / 3) * 4 + 256) {
+        return jsonResponse(413, defaultHeaders, { success: false, error: 'El archivo supera el límite de 10 MB.' });
       }
 
       const prevHistoryForLimit = Array.isArray(session.uploadedHistory) ? session.uploadedHistory : [];
@@ -263,15 +365,18 @@ export async function mobileUploadHandler(request) {
         };
       }
 
-      const targetIssue = session.testRunKey || session.testRunId || session.testKey || session.testId;
+      // Target issue was resolved and permission-checked as the user when the session was created.
+      const targetIssue = session.testRunId || session.testRunKey;
+      if (!targetIssue) {
+        return jsonResponse(400, defaultHeaders, { success: false, error: 'Sesión sin ejecución destino. Genera un nuevo QR.' });
+      }
       const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
       const buffer = Buffer.from(cleanBase64, 'base64');
-      const resolvedMime = mimeType || 'image/jpeg';
-      const ext = resolvedMime.includes('png')
-        ? 'png'
-        : (resolvedMime.includes('video') || resolvedMime.includes('mp4'))
-          ? 'mp4'
-          : 'jpg';
+      if (buffer.length === 0 || buffer.length > MAX_MOBILE_UPLOAD_BYTES) {
+        return jsonResponse(413, defaultHeaders, { success: false, error: 'El archivo está vacío o supera el límite de 10 MB.' });
+      }
+      const resolvedMime = allowedMime.mime;
+      const ext = allowedMime.ext;
 
       // Generate unique filename with Test Run prefix, timestamp, and short random suffix
       const now = new Date();
@@ -297,11 +402,8 @@ export async function mobileUploadHandler(request) {
       if (!attachRes.ok) {
         const errText = await attachRes.text();
         console.error('[mobileUploadHandler] Jira attachment error:', attachRes.status, errText);
-        return {
-          statusCode: 500,
-          headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-          body: JSON.stringify({ success: false, error: `Error Jira (${attachRes.status}): ${errText}` })
-        };
+        // Do not echo Jira's raw error body to the public endpoint; details stay in `forge logs`.
+        return jsonResponse(502, defaultHeaders, { success: false, error: `Jira rechazó la evidencia (HTTP ${attachRes.status}).` });
       }
 
       const attachData = await attachRes.json();
@@ -442,11 +544,7 @@ export async function mobileUploadHandler(request) {
       };
     } catch (err) {
       console.error('[mobileUploadHandler] POST exception:', err);
-      return {
-        statusCode: 500,
-        headers: { ...defaultHeaders, 'Content-Type': ['application/json'] },
-        body: JSON.stringify({ success: false, error: err.message || String(err) })
-      };
+      return jsonResponse(500, defaultHeaders, { success: false, error: 'Error interno al procesar la evidencia.' });
     }
   }
 

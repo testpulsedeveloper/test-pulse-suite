@@ -55,3 +55,6 @@ Thumbs.db
 scratch/
 backups_dev_phase/
 *.backup
+
+# Local AI chat transcripts (may contain secrets)
+historial_chats/

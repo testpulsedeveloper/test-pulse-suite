@@ -7,9 +7,13 @@ import * as AuthSession from 'expo-auth-session';
 
 WebBrowser.maybeCompleteAuthSession();
 
-// Credentials provided by the user
-const CLIENT_ID = 'JqrGfXYHkN9sKWV0g2HB40Zhau2UHyz5';
-const CLIENT_SECRET = 'ATOAF6tlaulAs8BVO3tY-qEIVxMFilb2GD1Kk7sd4AEdPcam1qZBme2FT8CLIsaKXLbsB187A47D';
+// OAuth 2.0 (3LO) credentials are injected at build time from `.env` (never committed).
+// Expo inlines variables prefixed with EXPO_PUBLIC_ into the bundle; see `.env.example`.
+// SECURITY: anything shipped inside a mobile binary can be extracted. The client secret
+// must be rotated if it ever leaks, and the long-term goal is to move the code-for-token
+// exchange to a backend you control so the secret never ships with the app.
+const CLIENT_ID = process.env.EXPO_PUBLIC_ATLASSIAN_CLIENT_ID || '';
+const CLIENT_SECRET = process.env.EXPO_PUBLIC_ATLASSIAN_CLIENT_SECRET || '';
 
 // Endpoints
 const discovery = {
@@ -62,7 +66,8 @@ export default function LoginScreen() {
         body: JSON.stringify({
           grant_type: 'authorization_code',
           client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET,
+          // Only sent when configured, so a PKCE-only setup works without a secret.
+          ...(CLIENT_SECRET ? { client_secret: CLIENT_SECRET } : {}),
           code,
           redirect_uri: redirectUri,
           code_verifier: request?.codeVerifier,

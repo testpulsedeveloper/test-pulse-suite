@@ -360,7 +360,9 @@ export function registerConfigResolvers(resolver) {
     await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/testpulse-enabled`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(enabled)
+      // Stored as `{ enabled: boolean }`, which is the shape `isProjectAllowed` reads.
+      // (It used to store a bare boolean, so turning a project off never took effect.)
+      body: JSON.stringify({ enabled: enabled !== false })
     });
     return { success: true };
   });

@@ -47,9 +47,11 @@ const _userProfileCache = new Map();
 const _adminPermCache = new Map();
 
 async function getCachedMyself(context) {
-  const key = String(context?.accountId || 'default_user');
+  // Never fall back to a shared key: without an accountId the profile is fetched live and
+  // only cached under the accountId Jira returns, so one user can't be recorded as another.
+  const key = context?.accountId ? String(context.accountId) : null;
   const now = Date.now();
-  const cached = _userProfileCache.get(key);
+  const cached = key ? _userProfileCache.get(key) : null;
   if (cached && now - cached.at < USER_CACHE_TTL_MS) {
     return cached.data;
   }
@@ -61,7 +63,7 @@ async function getCachedMyself(context) {
         const oldest = _userProfileCache.keys().next().value;
         if (oldest !== undefined) _userProfileCache.delete(oldest);
       }
-      _userProfileCache.set(key, { at: now, data });
+      if (key) _userProfileCache.set(key, { at: now, data });
       if (data?.accountId && data.accountId !== key) {
         _userProfileCache.set(String(data.accountId), { at: now, data });
       }
@@ -75,10 +77,13 @@ async function getCachedMyself(context) {
 
 async function getCachedIsProjectAdmin(projectId, context) {
   if (!projectId) return false;
-  const userKey = String(context?.accountId || 'default_user');
-  const cacheKey = `${userKey}::${projectId}`;
+  // SECURITY: the cache is keyed per Jira account. Without an accountId we must NOT share a
+  // cached answer between users (that previously let a non-admin inherit an admin's result),
+  // so the check goes straight to Jira and the result is not cached.
+  const accountId = context?.accountId ? String(context.accountId) : null;
+  const cacheKey = accountId ? `${accountId}::${projectId}` : null;
   const now = Date.now();
-  const cached = _adminPermCache.get(cacheKey);
+  const cached = cacheKey ? _adminPermCache.get(cacheKey) : null;
   if (cached && now - cached.at < USER_CACHE_TTL_MS) {
     return cached.isAdmin;
   }
@@ -93,7 +98,7 @@ async function getCachedIsProjectAdmin(projectId, context) {
         const oldest = _adminPermCache.keys().next().value;
         if (oldest !== undefined) _adminPermCache.delete(oldest);
       }
-      _adminPermCache.set(cacheKey, { at: now, isAdmin });
+      if (cacheKey) _adminPermCache.set(cacheKey, { at: now, isAdmin });
       return isAdmin;
     }
   } catch (e) {
@@ -4959,9 +4964,9 @@ resolver.define('getSnapshotFieldMapping', async () => {
   return map;
 });
 
-resolver.define('listCycleRunsForResync', async ({ payload }) => {
+resolver.define('listCycleRunsForResync', async ({ payload, context }) => {
   const { projectId, cycleId } = payload || {};
-  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  if (!(await _isProjectAdmin(projectId, context))) return { error: 'FORBIDDEN' };
   if (!cycleId) return { error: 'MISSING_CYCLE' };
   const entries = (await readCycleIndex(cycleId)) || [];
   const seen = new Set();
@@ -5106,9 +5111,9 @@ resolver.define('searchAssignableUsers', async ({ payload }) => {
   }
 });
 
-resolver.define('bulkAssignTestRuns', async ({ payload }) => {
+resolver.define('bulkAssignTestRuns', async ({ payload, context }) => {
   const { projectId, cycleId, items, user } = payload || {};
-  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  if (!(await _isProjectAdmin(projectId, context))) return { error: 'FORBIDDEN' };
   const batch = (items || []).filter(it => it && it.testRunId).slice(0, 25);
   const accountId = user?.accountId || null; // null = unassign
 
@@ -5140,7 +5145,7 @@ resolver.define('bulkAssignTestRuns', async ({ payload }) => {
 
 resolver.define('resyncTestRunsBatch', async ({ payload, context }) => {
   const { projectId, items } = payload || {};
-  if (!(await _isProjectAdmin(projectId))) return { error: 'FORBIDDEN' };
+  if (!(await _isProjectAdmin(projectId, context))) return { error: 'FORBIDDEN' };
   const batch = (items || []).slice(0, 10);
   const actor = context?.accountId || null;
 
