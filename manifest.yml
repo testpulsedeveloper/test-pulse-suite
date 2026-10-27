@@ -47,7 +47,14 @@ modules:
     - key: main
       engine: mysql
   # Applies the Forge SQL schema migrations when the app is installed or upgraded.
+  # Records automation results (Tosca / IArvis) posted as comments on Test Runs.
   trigger:
+    - key: automation-comment-trigger
+      function: automationComments
+      events:
+        - avi:jira:commented:issue
+      filter:
+        ignoreSelf: true
     - key: sql-migrations-trigger
       function: sqlMigrationsHandler
       events:
@@ -72,6 +79,8 @@ modules:
     - key: cycleRemovalWorker
       handler: index.cycleRemovalWorker
       timeoutSeconds: 300
+    - key: automationComments
+      handler: index.automationCommentHandler
 resources:
   - key: main
     path: static/hello-world/build

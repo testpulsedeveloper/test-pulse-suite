@@ -137,6 +137,38 @@ export default function ExecutionView({ ctx }) {
     toggleFolderSidebar
   } = ctx;
 
+  // "Reprocesar automatización": ingests Tosca / IArvis result comments posted on this cycle's
+  // Test Runs before the automatic comment trigger existed (or while it failed).
+  const [reprocessingAutomation, setReprocessingAutomation] = React.useState(false);
+  const handleReprocessAutomation = async () => {
+    if (!selectedCycle?.id || reprocessingAutomation) return;
+    setReprocessingAutomation(true);
+    let recorded = 0;
+    let offset = 0;
+    try {
+      // Each call works ~18 s; keep calling until every Test Run of the cycle was checked.
+      for (let round = 0; round < 30 && offset !== null; round++) {
+        const res = await invoke('reprocessAutomationComments', { cycleId: String(selectedCycle.id), offset });
+        recorded += res?.recorded || 0;
+        offset = res?.nextOffset ?? null;
+      }
+      clearPersistentCache();
+      queryClient.invalidateQueries();
+      handleCycleSelect(selectedCycle);
+      addNotification({
+        type: 'success',
+        title: 'Automatización reprocesada',
+        description: recorded > 0
+          ? `Se registraron ${recorded} resultado(s) de Tosca / IArvis.`
+          : 'No se encontraron resultados de automatización nuevos en este ciclo.'
+      });
+    } catch (err) {
+      addNotification({ type: 'error', title: 'No se pudo reprocesar', description: err?.message || String(err) });
+    } finally {
+      setReprocessingAutomation(false);
+    }
+  };
+
     const isPassed = s => normalizeUiStatus(s) === 'Passed';
     const isFailed = s => normalizeUiStatus(s) === 'Failed';
     const isBlocked = s => normalizeUiStatus(s) === 'Blocked';
@@ -944,6 +976,31 @@ export default function ExecutionView({ ctx }) {
 
                         <button
                           type="button"
+                          onClick={handleReprocessAutomation}
+                          disabled={reprocessingAutomation}
+                          title="Lee los comentarios de Tosca / IArvis en los Test Runs de este ciclo y registra sus resultados"
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#172B4D',
+                            background: '#FFFFFF',
+                            border: '1px solid #DCDFE4',
+                            borderRadius: '6px',
+                            boxShadow: '0 1px 2px rgba(9, 30, 66, 0.04)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            cursor: reprocessingAutomation ? 'wait' : 'pointer',
+                            opacity: reprocessingAutomation ? 0.7 : 1
+                          }}
+                        >
+                          <span aria-hidden="true">🤖</span>
+                          <span>{reprocessingAutomation ? 'Reprocesando…' : 'Reprocesar automatización'}</span>
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => {
                             const firstTarget = (groupByFolder ? filteredTests : paginatedTests)[0];
                             if (firstTarget) {
@@ -1590,6 +1647,29 @@ export default function ExecutionView({ ctx }) {
                                   title="Abrir Test Run (Ejecución) en Jira"
                                 >
                                   Run: {test.testRunKey}
+                                </span>
+                              )}
+
+                              {/* Result recorded from a Tosca / IArvis comment: opens that comment */}
+                              {test.automation?.commentId && test.testRunKey && (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    router.open(`/browse/${test.testRunKey}?focusedCommentId=${encodeURIComponent(test.automation.commentId)}`);
+                                  }}
+                                  style={{
+                                    fontSize: '11px',
+                                    background: '#F3F0FF',
+                                    color: '#5E4DB2',
+                                    padding: '1px 6px',
+                                    borderRadius: '3px',
+                                    cursor: 'pointer',
+                                    fontWeight: 600,
+                                    flexShrink: 0
+                                  }}
+                                  title={`${test.automation.label || 'Automatización'}${test.executedBy?.displayName ? ` · ejecutado por ${test.executedBy.displayName}` : ''} · ver comentario de origen`}
+                                >
+                                  🤖 {test.automation.tool || 'Tosca'}
                                 </span>
                               )}
 

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import { jqlQuote } from './utils/jqlHelpers.js';
 import { stampRunDataV2 } from './utils/runDataContract.js';
+import { parseAutomationComment, mentionsAutomationMarker } from './utils/automationCommentParser.js';
 import { applyExecutionIndexMigrations, getExecutionIndexHealth } from './sql/executionIndexSchema.js';
 import {
   AuthorizationError,
@@ -2462,6 +2463,7 @@ const getCycleExecutionSummary = async (cycleId) => {
             status: normStatus,
             nativeStatus: nativeStatusName || normStatus,
             executionType: runData.executionType || runData.snapshot?.executionType || extractExecutionTypeFromFields(run.fields),
+            automation: runData.automation || null,
             assignee: run.fields?.assignee || null,
             executedBy: runData.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
             executedAt: runData.executedAt || null,
@@ -4729,7 +4731,7 @@ resolver.define('getProjectUnlinkedBugs', async ({ payload }) => {
 async function transitionJiraIssue(issueIdOrKey, targetStatusName) {
   if (!issueIdOrKey || !targetStatusName) return { success: false, reason: 'Missing params' };
   try {
-    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`);
+    const res = await jiraRequester().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`);
     if (!res.ok) {
       console.warn(`[transitionJiraIssue] Failed to get transitions for ${issueIdOrKey}: ${res.status}`);
       return { success: false, status: res.status };
@@ -4804,7 +4806,7 @@ async function transitionJiraIssue(issueIdOrKey, targetStatusName) {
       });
       if (inProgTrans) {
         // Step 1: transition to In Progress
-        await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+        await jiraRequester().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
           method: 'POST',
           headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
           body: JSON.stringify({ transition: { id: inProgTrans.id } })
@@ -4819,7 +4821,7 @@ async function transitionJiraIssue(issueIdOrKey, targetStatusName) {
       return { success: false, reason: 'No transition match', available: transitions.map(t => t.name) };
     }
 
-    const transRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
+    const transRes = await jiraRequester().requestJira(route`/rest/api/3/issue/${issueIdOrKey}/transitions`, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ transition: { id: matched.id } })
@@ -5650,6 +5652,8 @@ const syncExecutionComment = async (testRunId, commentAdf) => {
       const allComments = commentsData.comments || [];
       existingTestPulseComment = allComments.find(c => {
         const str = JSON.stringify(c.body || {});
+        // Automation results (Tosca / IArvis) are records of their own: never overwrite them.
+        if (mentionsAutomationMarker(str)) return false;
         return str.includes('Resultado de Ejecución') || str.includes('Iteraciones');
       });
     }
@@ -6124,6 +6128,217 @@ export const scheduledReportHandler = createScheduledReportHandler({ getAppStora
 // ==========================================
 registerMobileCompanionResolvers(resolver);
 export const mobileUploadHandler = modularMobileUploadHandler;
+
+// ==========================================
+// AUTOMATION RESULTS FROM COMMENTS (Tosca / IArvis)
+// ==========================================
+// Contract: doc "Integración Tosca → Test Pulse: formato de comentario".
+// Tosca posts a comment on the Test Run (with the tester's own Jira account) containing the
+// marker "Ejecutado por: Automatización IArvis" and, ideally, a JSON block. Test Pulse records
+// it as an execution: the real comment author is the executor and Tosca is the tool.
+
+const MAX_INGESTED_COMMENT_IDS = 50;
+
+/** Fetches one comment (ADF body, author, created) with the current requester. */
+async function fetchRunComment(issueId, commentId) {
+  const res = await jiraRequester().requestJira(route`/rest/api/3/issue/${issueId}/comment/${commentId}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Records an automation result comment as the Test Run's execution.
+ * Idempotent: a comment already ingested (or an older result than the current one) is not
+ * applied again. Runs as the app inside the comment trigger and as the user when a person
+ * presses "Reprocesar"; `jiraRequester()` picks the right identity.
+ *
+ * @param {string} issueId - Test Run issue id or key.
+ * @param {Object} comment - Jira comment (`id`, `body`, `author`, `created`).
+ * @returns {Promise<{status: string, reason?: string}>}
+ */
+async function ingestAutomationComment(issueId, comment) {
+  const parsed = parseAutomationComment(comment?.body);
+  if (!parsed) return { status: 'ignored', reason: 'no-marker' };
+  if (parsed.error) {
+    console.warn(`[automation] comment ${comment?.id} on ${issueId} not processed: ${parsed.error}`);
+    return { status: 'invalid', reason: parsed.error };
+  }
+
+  const issueRes = await jiraRequester().requestJira(
+    route`/rest/api/3/issue/${issueId}?fields=summary,status,attachment,project&properties=testpulse-run-data`
+  );
+  if (!issueRes.ok) return { status: 'ignored', reason: `issue ${issueRes.status}` };
+  const issue = await issueRes.json();
+  const prop = issue.properties?.['testpulse-run-data'] || {};
+
+  // Only Test Runs managed by Test Pulse carry run data with their test case.
+  const isTestRun = Boolean(prop.testCaseId || prop.testCaseKey) || /^\[Run\]/i.test(issue.fields?.summary || '');
+  if (!isTestRun) return { status: 'ignored', reason: 'not-a-test-run' };
+
+  const commentId = String(comment.id);
+  const ingested = Array.isArray(prop.ingestedCommentIds) ? prop.ingestedCommentIds.map(String) : [];
+  if (ingested.includes(commentId)) return { status: 'skipped', reason: 'already-ingested' };
+
+  const executedAtMs = (parsed.executedAt && Number.isFinite(Date.parse(parsed.executedAt)))
+    ? Date.parse(parsed.executedAt)
+    : (Date.parse(comment.created) || Date.now());
+  const executor = comment.author?.accountId
+    ? { accountId: comment.author.accountId, displayName: comment.author.displayName || comment.author.accountId }
+    : null;
+  const automation = {
+    tool: parsed.tool,
+    label: `Automatización IArvis (${parsed.tool})`,
+    commentId,
+    format: parsed.format,
+    externalId: parsed.externalId,
+    environment: parsed.environment,
+    ingestedAt: new Date().toISOString()
+  };
+
+  // "The most recent result wins": an older automation result is kept as history only.
+  const currentExecutedAt = Number(prop.executedAt) || 0;
+  const historyEntry = { commentId, status: parsed.status, executedAt: executedAtMs, executedBy: executor, tool: parsed.tool };
+  const automationHistory = [historyEntry, ...(Array.isArray(prop.automationHistory) ? prop.automationHistory : [])].slice(0, 20);
+  const nextIngested = [commentId, ...ingested].slice(0, MAX_INGESTED_COMMENT_IDS);
+
+  if (currentExecutedAt && executedAtMs < currentExecutedAt) {
+    await jiraRequester().requestJira(route`/rest/api/3/issue/${issue.id}/properties/testpulse-run-data`, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(stampRunDataV2({ ...prop, ingestedCommentIds: nextIngested, automationHistory }, issue.fields?.project?.id || null))
+    });
+    return { status: 'history-only', reason: 'older-than-current-result' };
+  }
+
+  // Link evidence file names to the run's attachments (latest attachment wins on duplicates).
+  const attachmentsByName = new Map();
+  [...(issue.fields?.attachment || [])]
+    .sort((a, b) => Date.parse(a.created || 0) - Date.parse(b.created || 0))
+    .forEach(a => attachmentsByName.set(String(a.filename), a));
+  const toEvidence = (name) => {
+    const att = attachmentsByName.get(String(name));
+    return att
+      ? { id: String(att.id), filename: att.filename, url: att.content, mimeType: att.mimeType, uploadedAt: att.created, source: 'automation' }
+      : null;
+  };
+
+  const iterations = parsed.iterations.map((it, idx) => ({
+    id: `auto-${commentId}-${idx + 1}`,
+    expectedData: it.data,
+    actualResult: it.result,
+    status: it.status,
+    executedBy: executor?.accountId || null,
+    executedAt: executedAtMs,
+    evidences: it.evidences.map(toEvidence).filter(Boolean)
+  }));
+
+  const nextProp = {
+    ...prop,
+    status: parsed.status,
+    iterations,
+    comment: parsed.comment || '',
+    executedBy: executor,
+    executedAt: executedAtMs,
+    executionType: 'Automated',
+    automation,
+    automationHistory,
+    ingestedCommentIds: nextIngested
+  };
+  if (parsed.environment) nextProp.environment = parsed.environment;
+
+  const putRes = await jiraRequester().requestJira(route`/rest/api/3/issue/${issue.id}/properties/testpulse-run-data`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(stampRunDataV2(nextProp, issue.fields?.project?.id || null))
+  });
+  if (!putRes.ok) {
+    console.warn(`[automation] could not save run data for ${issue.key}: ${putRes.status}`);
+    return { status: 'error', reason: `property ${putRes.status}` };
+  }
+
+  // Same side effects as a manual execution: Jira status + cycle index + report cache.
+  await transitionJiraIssue(issue.id, parsed.status).catch(e => console.warn('[automation] transition:', e?.message));
+  const cycleId = prop.activeCycleId || (prop.unlinkedFromCycle ? null : prop.cycleId);
+  if (cycleId) {
+    await updateLightweightIndex(cycleId, (lw) => {
+      const item = lw.find(l => String(l.testRunId) === String(issue.id) || String(l.id) === String(prop.testCaseId));
+      if (item) {
+        item.status = parsed.status;
+        item.executedBy = executor;
+      }
+      return lw;
+    }).catch(e => console.warn('[automation] cycle index:', e?.message));
+  }
+  await invalidateProjectReportCache(issue.fields?.project?.id || null);
+
+  console.log(`[automation] recorded ${issue.key} status=${parsed.status} iterations=${iterations.length} format=${parsed.format} comment=${commentId} by=${executor?.accountId || 'n/a'}`);
+  return { status: 'recorded' };
+}
+
+/**
+ * Forge product trigger (`avi:jira:commented:issue`): processes automation result comments.
+ * Every comment on the site arrives here, so anything without the marker is dropped before
+ * any Jira call when the event already carries the body.
+ */
+export const automationCommentHandler = async (event) => {
+  const issueId = event?.issue?.id;
+  const commentId = event?.comment?.id;
+  if (!issueId || !commentId) return;
+  if (event.comment.body !== undefined && !mentionsAutomationMarker(event.comment.body)) return;
+
+  const store = { calls: 0, r429: 0, startedAt: Date.now(), actAsApp: true, budgetMs: 20000 };
+  await __perfALS.run(store, async () => {
+    try {
+      const comment = await fetchRunComment(issueId, commentId);
+      if (!comment || !mentionsAutomationMarker(comment.body)) return;
+      const result = await ingestAutomationComment(issueId, comment);
+      if (result.status !== 'recorded') {
+        console.log(`[automation] comment ${commentId} on ${issueId}: ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
+      }
+    } catch (err) {
+      console.error(`[automation] failed for comment ${commentId} on ${issueId}:`, err?.message || err);
+    }
+  });
+};
+
+/**
+ * "Reprocesar comentarios de automatización" for one cycle: ingests automation comments that
+ * were posted before the trigger existed (or while it failed). Runs as the user, so Jira
+ * enforces their permissions; stops at ~18 s and reports what is left.
+ */
+resolver.define('reprocessAutomationComments', async ({ payload }) => {
+  const cycleId = normalizeIssueRef(payload?.cycleId);
+  if (!cycleId) return { processed: 0, recorded: 0, remaining: 0 };
+  const cycle = await getIssueVisibleToUser(cycleId);
+  if (!cycle) {
+    throw new AuthorizationError('FORBIDDEN', 'No tienes acceso a este ciclo.');
+  }
+
+  const index = (await readCycleIndex(cycle.id)) || [];
+  const runIds = Array.from(new Set(index.map(e => String(e.testRunId || '')).filter(id => /^\d+$/.test(id))));
+  const startAt = Math.max(0, Number(payload?.offset) || 0);
+  const deadlineAt = Date.now() + 18000;
+  let processed = 0;
+  let recorded = 0;
+  let cursor = startAt;
+
+  for (; cursor < runIds.length; cursor++) {
+    if (Date.now() > deadlineAt) break;
+    const runId = runIds[cursor];
+    const res = await api.asUser().requestJira(route`/rest/api/3/issue/${runId}/comment?orderBy=created&maxResults=100`);
+    if (!res.ok) continue;
+    const data = await res.json();
+    for (const c of (data.comments || [])) {
+      if (!mentionsAutomationMarker(c.body)) continue;
+      const result = await ingestAutomationComment(runId, c);
+      if (result.status === 'recorded') recorded++;
+    }
+    processed++;
+  }
+  const remaining = runIds.length - cursor;
+  console.log(`[automation] reprocess cycle=${cycle.id} runs=${processed} recorded=${recorded} remaining=${remaining}`);
+  return { processed, recorded, remaining, nextOffset: remaining > 0 ? cursor : null };
+});
 
 // ==========================================
 // EXECUTION INDEX (Opción A · fase 0)
