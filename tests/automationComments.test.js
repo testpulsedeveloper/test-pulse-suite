@@ -122,3 +122,18 @@ test('wiring: comment trigger, idempotent ingestion, manual comments never overw
   assert.ok(ui.includes("invoke('reprocessAutomationComments'"));
   assert.ok(ui.includes('focusedCommentId='));
 });
+
+test('text copied from Jira screen with all labels on ONE line (real comment 771701, v4.12.1)', () => {
+  const oneLine = '📊 Resultado de Ejecución: Passed Ciclo: CUQ-90 | Caso de Prueba: CUQ-12 | Estado: Passed '
+    + 'Ejecutado por: Automatización IArvis 💬 Comentario: Corrida 3 🔁 Iteraciones (2) '
+    + 'Iteración #1 [d1] — Estado: Passed Comentario / Resultado: Detalles de la prueba 1 '
+    + 'Iteración #2 — Estado: Passed Comentario / Resultado: Detalles de la prueba 2 Adjuntos: ticket.pdf';
+  const r = parseAutomationComment(oneLine);
+  assert.equal(r.format, 'text');
+  assert.equal(r.status, 'Passed');
+  assert.equal(r.comment, 'Corrida 3');
+  assert.deepEqual(r.iterations, [
+    { data: 'd1', status: 'Passed', result: 'Detalles de la prueba 1', evidences: [] },
+    { data: '', status: 'Passed', result: 'Detalles de la prueba 2', evidences: ['ticket.pdf'] }
+  ]);
+});

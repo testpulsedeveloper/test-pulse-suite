@@ -144,11 +144,22 @@ function fromJson(json) {
   };
 }
 
-function fromText(lines) {
+/**
+ * Puts every label on its own line. Comments copied from Jira's screen (or written by tools)
+ * often lose line breaks, leaving "… — Estado: Passed Comentario / Resultado: … Adjuntos: …"
+ * on a single line; splitting before each known label makes both layouts read the same.
+ */
+function splitLabels(lines) {
+  const LABELS = /\s+(?=(?:[-•*]\s*)?(?:iteraci[oó]n\s*#|comentario\s*\/\s*resultado:|adjuntos:|ejecutado por:|ciclo:|(?:💬\s*)?comentario:|(?:📊\s*)?resultado de ejecuci[oó]n:|(?:🔁\s*)?iteraciones\s*\())/gi;
+  return lines.flatMap(line => String(line).split(LABELS));
+}
+
+function fromText(rawLines) {
   let status = null;
   let comment = '';
   const iterations = [];
   let lastIteration = null;
+  const lines = splitLabels(rawLines);
 
   for (const rawLine of lines) {
     const line = rawLine.replace(/^[\s\-•*]+/, '').trim();
