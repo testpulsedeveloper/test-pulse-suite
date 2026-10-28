@@ -59,6 +59,10 @@ export default function BugSlidePanel({ ctx }) {
     return 275;
   });
   const [isMetaResizing, setIsMetaResizing] = useState(false);
+  // Draft of "Fecha Estimada de Solución" while the user picks it. Saving on every change closed
+  // Chrome's calendar (changing month/year inside it already changes the value) and stored the
+  // intermediate date; now the value is saved once, when the field loses focus or on Enter.
+  const [estDateDraft, setEstDateDraft] = useState(null); // { bugKey, value } | null
   const [isMetaHover, setIsMetaHover] = useState(false);
   const metaColRef = useRef(null);
   const assigneeSearchSeqRef = useRef(0);
@@ -423,7 +427,7 @@ export default function BugSlidePanel({ ctx }) {
     const badgeColor = age.tone === 'red' ? '#FFEBE6' : age.tone === 'orange' ? '#FFF0B3' : age.tone === 'green' ? '#E3FCEF' : age.tone === 'onhold' ? '#E9F2FF' : '#F1F2F4';
     const textColor = age.tone === 'red' ? '#BF2600' : age.tone === 'orange' ? '#172B4D' : age.tone === 'green' ? '#006644' : age.tone === 'onhold' ? '#0C66E4' : '#44546F';
 
-    // Fecha Estimada de Solución (strictly customfield_10763 / estimatedResolutionDate, NOT duedate)
+    // Fecha Estimada de Solución (strictly customfield_12695 / estimatedResolutionDate, NOT duedate)
     const estDateRaw = b.estimatedResolutionDate || selectedBug.estimatedResolutionDate || null;
     const estDateInputVal = estDateRaw ? String(estDateRaw).slice(0, 10) : '';
     let formattedEstDate = null;
@@ -1477,7 +1481,7 @@ export default function BugSlidePanel({ ctx }) {
                 </div>
               </div>
 
-              {/* 6. Fecha Estimada de Solución (Custom Field customfield_10763, NOT duedate) */}
+              {/* 6. Fecha Estimada de Solución (Custom Field customfield_12695, NOT duedate) */}
               <div>
                 <div style={{ fontSize: '11px', fontWeight: 700, color: '#626F86', marginBottom: '4px' }}>
                   FECHA ESTIMADA DE SOLUCIÓN
@@ -1485,20 +1489,31 @@ export default function BugSlidePanel({ ctx }) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: formattedEstDate && isEstDateFlagged ? '6px' : 0 }}>
                   <input
                     type="date"
-                    value={estDateInputVal}
-                    disabled={bugSavingField === 'estimatedDate'}
-                    onChange={(e) => {
-                      const nextDate = e.target.value || null;
+                    min="2000-01-01"
+                    max="2100-12-31"
+                    value={estDateDraft && estDateDraft.bugKey === (b.key || selectedBug.key) ? estDateDraft.value : estDateInputVal}
+                    readOnly={bugSavingField === 'estimatedDate'}
+                    onChange={(e) => setEstDateDraft({ bugKey: b.key || selectedBug.key, value: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                    onBlur={() => {
+                      const draft = estDateDraft && estDateDraft.bugKey === (b.key || selectedBug.key) ? estDateDraft.value : null;
+                      setEstDateDraft(null);
+                      if (draft === null || draft === estDateInputVal) return;
+                      // Ignore half-typed dates (e.g. year 0202 while typing 2026)
+                      const year = Number(String(draft).slice(0, 4));
+                      if (draft && (year < 2000 || year > 2100)) return;
                       handleUpdateBugField(
                         'estimatedDate',
-                        nextDate,
+                        draft || null,
                         {
-                          customFieldId: b.estDateFieldId || 'customfield_10763',
+                          customFieldId: b.estDateFieldId || 'customfield_12695',
+                          fieldType: b.estDateFieldType || null,
                           candidateFieldIds: Array.isArray(b.estDateCandidateIds) ? b.estDateCandidateIds : []
                         },
                         'Fecha Estimada de Solución'
                       );
                     }}
+                    title="Elige la fecha y sal del campo (o presiona Enter) para guardarla"
                     style={{
                       flex: 1,
                       padding: '5px 8px',
@@ -1507,7 +1522,8 @@ export default function BugSlidePanel({ ctx }) {
                       backgroundColor: '#FFFFFF',
                       fontSize: '12px',
                       color: '#172B4D',
-                      fontWeight: 600
+                      fontWeight: 600,
+                      opacity: bugSavingField === 'estimatedDate' ? 0.6 : 1
                     }}
                   />
                   {estDateInputVal && (
@@ -1518,7 +1534,8 @@ export default function BugSlidePanel({ ctx }) {
                         'estimatedDate',
                         null,
                         {
-                          customFieldId: b.estDateFieldId || 'customfield_10763',
+                          customFieldId: b.estDateFieldId || 'customfield_12695',
+                          fieldType: b.estDateFieldType || null,
                           candidateFieldIds: Array.isArray(b.estDateCandidateIds) ? b.estDateCandidateIds : []
                         },
                         'Fecha Estimada de Solución'

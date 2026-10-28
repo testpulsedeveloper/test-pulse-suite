@@ -14,6 +14,54 @@ import { getBusinessMilliseconds, analyzeBugChangelog } from '../utils/slaHelper
 import { invalidateProjectReportCache } from '../utils/reportSnapshotCache.js';
 import { DEFAULT_CUSTOM_FIELDS, resolveCustomFields } from '../utils/customFieldConfig.js';
 import { jqlQuote } from '../utils/jqlHelpers.js';
+
+// ── Fecha Estimada de Solución helpers ──
+// Only DATE / DATETIME custom fields whose name clearly means "estimated solution date" may be
+// used. The old match on any name containing "estimated" also caught fields such as
+// "Estimated Hours" or "Estimated start date" and could read or write the wrong field.
+export const isEstDateFieldName = (rawName) => {
+  const n = String(rawName || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return (
+    n.includes('fecha estimada') ||
+    n.includes('fecha de solucion') ||
+    n.includes('solucion estimada') ||
+    n.includes('estimated resolution') ||
+    n.includes('estimated fix') ||
+    n.includes('estimated solution')
+  );
+};
+export const isDateFieldType = (type) => type === 'date' || type === 'datetime';
+
+/**
+ * Value to send to Jira for a "YYYY-MM-DD" chosen in the UI.
+ * DATETIME fields get 12:00 UTC: it is the same calendar day everywhere from UTC-11 to UTC+11.
+ * Sending a bare date to a DATETIME field is stored as 00:00 UTC, which in Mexico (UTC-6) is
+ * the PREVIOUS day at 18:00, the "one day less" bug.
+ */
+export const toEstDateFieldValue = (cleanDate, fieldType) => {
+  if (!cleanDate) return null;
+  return fieldType === 'datetime' ? `${cleanDate}T12:00:00.000+0000` : cleanDate;
+};
+
+// Field id -> schema type ('date', 'datetime', …), cached per instance for 10 minutes.
+let _fieldTypeCache = { at: 0, map: null };
+async function getFieldTypeMap() {
+  if (_fieldTypeCache.map && Date.now() - _fieldTypeCache.at < 10 * 60 * 1000) return _fieldTypeCache.map;
+  const map = {};
+  const nameMap = {};
+  try {
+    const res = await api.asUser().requestJira(route`/rest/api/3/field`);
+    if (res.ok) {
+      for (const fld of (await res.json()) || []) {
+        if (!fld?.id) continue;
+        map[fld.id] = fld.schema?.type || null;
+        nameMap[fld.id] = fld.name || '';
+      }
+    }
+  } catch (_) {}
+  _fieldTypeCache = { at: Date.now(), map: { types: map, names: nameMap } };
+  return _fieldTypeCache.map;
+}
 import { summarizeJiraError } from '../utils/jiraErrors.js';
 
 // Helper to extract plain editable text from Jira's Environment field (which may be ADF or HTML/string)
@@ -228,7 +276,7 @@ export function registerBugResolvers(resolver) {
       // Fetch all relevant fields plus editmeta and transitions in parallel for fast in-app editing
       const [response, editMetaRes, transitionsRes, resolutionsRes] = await Promise.all([
         api.asUser().requestJira(
-          route`/rest/api/3/issue/${issueIdOrKey}?expand=renderedFields,changelog,names`
+          route`/rest/api/3/issue/${issueIdOrKey}?expand=renderedFields,changelog,names,schema`
         ),
         api.asUser().requestJira(
           route`/rest/api/3/issue/${issueIdOrKey}/editmeta`
@@ -311,40 +359,32 @@ export function registerBugResolvers(resolver) {
             { id: '', value: 'Menor' }
           ];
 
-      // Discover Fecha Estimada custom field ID (strictly custom field, NOT duedate)
-      const isEstDateFieldName = (rawName) => {
-        const mName = String(rawName || '').trim().toLowerCase();
-        return (
-          mName.includes('fecha estimada') ||
-          mName.includes('fecha de solución') ||
-          mName.includes('fecha de solucion') ||
-          mName.includes('solución estimada') ||
-          mName.includes('solucion estimada') ||
-          mName.includes('estimated')
-        );
-      };
+      // Discover Fecha Estimada custom field ID (strictly a DATE/DATETIME custom field, NOT duedate)
+      const fieldSchemaMap = data.schema || {};
+      const fieldTypeOf = (fKey) => editFields[fKey]?.schema?.type || fieldSchemaMap[fKey]?.type || null;
       const estDateCandidateIds = [];
-      if (defaultEstDateField && !estDateCandidateIds.includes(defaultEstDateField)) {
-        estDateCandidateIds.push(defaultEstDateField);
-      }
+      const addEstCandidate = (fKey) => {
+        if (!fKey || fKey === 'duedate' || estDateCandidateIds.includes(fKey)) return;
+        const t = fieldTypeOf(fKey);
+        if (t && !isDateFieldType(t)) return; // a known non-date field is never a candidate
+        estDateCandidateIds.push(fKey);
+      };
+      addEstCandidate(defaultEstDateField);
       for (const [fKey, fMeta] of Object.entries(editFields)) {
-        if (fKey === 'duedate') continue;
-        if (isEstDateFieldName(fMeta?.name)) {
-          if (!estDateCandidateIds.includes(fKey)) estDateCandidateIds.push(fKey);
-        }
+        if (isEstDateFieldName(fMeta?.name)) addEstCandidate(fKey);
       }
       for (const [fKey, fLabel] of Object.entries(fieldNamesMap)) {
-        if (fKey === 'duedate') continue;
-        if (isEstDateFieldName(fLabel)) {
-          if (!estDateCandidateIds.includes(fKey)) estDateCandidateIds.push(fKey);
-        }
+        if (isEstDateFieldName(fLabel)) addEstCandidate(fKey);
       }
-      if (!estDateCandidateIds.includes(DEFAULT_CUSTOM_FIELDS.bugEstimatedDate)) {
-        estDateCandidateIds.push(DEFAULT_CUSTOM_FIELDS.bugEstimatedDate);
-      }
-      // Prefer a candidate field that currently holds a value, otherwise the first editable/discovered candidate
+      addEstCandidate(DEFAULT_CUSTOM_FIELDS.bugEstimatedDate);
+      // The configured field wins whenever this bug has it (even if empty); only when it does
+      // not exist on the bug do we fall back to another clearly-named date field.
+      const configuredExists = Object.prototype.hasOwnProperty.call(f, defaultEstDateField) || Boolean(editFields[defaultEstDateField]);
       const populatedEstFieldId = estDateCandidateIds.find(id => f[id] !== undefined && f[id] !== null && f[id] !== '');
-      const estDateFieldId = populatedEstFieldId || estDateCandidateIds[0] || defaultEstDateField;
+      const estDateFieldId = (configuredExists && estDateCandidateIds.includes(defaultEstDateField))
+        ? defaultEstDateField
+        : (populatedEstFieldId || estDateCandidateIds[0] || defaultEstDateField);
+      const estDateFieldType = fieldTypeOf(estDateFieldId);
 
       // Available project versions for fixVersions / versions
       const editFixVerAllowed = editFields.fixVersions?.allowedValues || [];
@@ -449,13 +489,10 @@ export function registerBugResolvers(resolver) {
       const environmentPlainText = extractPlainTextFromEnv(f.environment, rf.environment);
 
       // 6. Strict Fecha Estimada (custom field, NOT duedate) and *Severity (custom field, NOT priority)
-      let rawEstDateVal = null;
-      for (const candId of estDateCandidateIds) {
-        if (f[candId] !== undefined && f[candId] !== null && f[candId] !== '') {
-          rawEstDateVal = f[candId];
-          break;
-        }
-      }
+      // Shown value comes ONLY from the chosen field, never from another candidate.
+      const rawEstDateVal = (f[estDateFieldId] !== undefined && f[estDateFieldId] !== null && f[estDateFieldId] !== '')
+        ? f[estDateFieldId]
+        : null;
       const estResDate = rawEstDateVal
         ? (typeof rawEstDateVal === 'object' ? (rawEstDateVal.value || rawEstDateVal.name || String(rawEstDateVal)) : String(rawEstDateVal))
         : null;
@@ -504,6 +541,7 @@ export function registerBugResolvers(resolver) {
         severityFieldId,
         severityOptions,
         estDateFieldId,
+        estDateFieldType,
         estDateCandidateIds,
         versions: combinedVersions,
         fixVersions: combinedVersions,
@@ -669,7 +707,7 @@ export function registerBugResolvers(resolver) {
         return { success: true };
       }
 
-      // 5. Fecha Estimada (custom field, e.g. customfield_10763, NOT duedate)
+      // 5. Fecha Estimada (custom field customfield_12695 by default, NOT duedate)
       if (field === 'estimatedDate') {
         const primaryFieldId = payload.customFieldId || payload.fieldId || extra.customFieldId || extra.fieldId || cf.bugEstimatedDate || DEFAULT_CUSTOM_FIELDS.bugEstimatedDate;
         const candidateIdsFromPayload = Array.isArray(payload.candidateFieldIds) ? payload.candidateFieldIds : [];
@@ -682,53 +720,44 @@ export function registerBugResolvers(resolver) {
           }
         }
 
-        const tryUpdateDateOnField = async (fId, dateVal) => {
-          let r = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+        // Use each field's real type: DATETIME fields get 12:00 UTC (same day in Mexico),
+        // DATE fields get the bare date. Unknown or non-date fields are never written.
+        const { types: fieldTypes, names: fieldNames } = await getFieldTypeMap();
+        const typeOf = (fId) => (fId === primaryFieldId && payload.fieldType) ? payload.fieldType : (fieldTypes[fId] || null);
+
+        const tryUpdateDateOnField = async (fId) => {
+          const fType = typeOf(fId);
+          if (fType && !isDateFieldType(fType)) return null; // e.g. a number field named "Estimated…"
+          return api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fields: { [fId]: dateVal } })
+            body: JSON.stringify({ fields: { [fId]: toEstDateFieldValue(cleanDate, fType) } })
           });
-          if (!r.ok && dateVal) {
-            r = await api.asUser().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
-              method: 'PUT',
-              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-              body: JSON.stringify({ fields: { [fId]: `${dateVal}T12:00:00.000+0000` } })
-            });
-          }
-          return r;
         };
 
         let lastRes = null;
         for (const fId of candidateFieldIds) {
-          const r = await tryUpdateDateOnField(fId, cleanDate);
+          const r = await tryUpdateDateOnField(fId);
+          if (!r) continue;
           lastRes = r;
           if (r.ok) {
-            return { success: true, updatedFieldId: fId };
+            return { success: true, updatedFieldId: fId, fieldType: typeOf(fId) };
           }
         }
 
-        const allFieldsRes = await api.asUser().requestJira(route`/rest/api/3/field`).catch(() => null);
-        if (allFieldsRes && allFieldsRes.ok) {
-          const allFields = await allFieldsRes.json().catch(() => []);
-          const matchingCustomFields = (Array.isArray(allFields) ? allFields : []).filter(fObj => {
-            if (!fObj || !fObj.id || !String(fObj.id).startsWith('customfield_')) return false;
-            const nm = String(fObj.name || '').toLowerCase();
-            return (
-              nm.includes('fecha estimada') ||
-              nm.includes('fecha de solución') ||
-              nm.includes('fecha de solucion') ||
-              nm.includes('solución estimada') ||
-              nm.includes('solucion estimada') ||
-              nm.includes('estimated')
-            );
-          });
-          for (const mf of matchingCustomFields) {
-            if (candidateFieldIds.includes(mf.id)) continue;
-            const r = await tryUpdateDateOnField(mf.id, cleanDate);
-            lastRes = r;
-            if (r.ok) {
-              return { success: true, updatedFieldId: mf.id };
-            }
+        // Last resort: other DATE/DATETIME custom fields whose name clearly means estimated solution date.
+        const matchingCustomFields = Object.keys(fieldTypes).filter(fId =>
+          fId.startsWith('customfield_') &&
+          isDateFieldType(fieldTypes[fId]) &&
+          isEstDateFieldName(fieldNames[fId]) &&
+          !candidateFieldIds.includes(fId)
+        );
+        for (const fId of matchingCustomFields) {
+          const r = await tryUpdateDateOnField(fId);
+          if (!r) continue;
+          lastRes = r;
+          if (r.ok) {
+            return { success: true, updatedFieldId: fId, fieldType: typeOf(fId) };
           }
         }
 

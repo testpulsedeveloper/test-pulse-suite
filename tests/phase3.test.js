@@ -49,7 +49,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 test('3.1 Dynamic Custom Fields — resolveCustomFields returns Liverpool defaults and merges overrides', () => {
   const defaults = resolveCustomFields(null);
   assert.equal(defaults.bugSeverity, 'customfield_10238');
-  assert.equal(defaults.bugEstimatedDate, 'customfield_10763');
+  assert.equal(defaults.bugEstimatedDate, 'customfield_12695');
   assert.equal(defaults.epicLink, 'customfield_10014');
 
   const customCfg = {

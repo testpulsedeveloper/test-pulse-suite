@@ -29,7 +29,7 @@ export const DEFAULT_CUSTOM_FIELDS = Object.freeze({
 
   // Defect / Bug tracking custom fields
   bugSeverity: 'customfield_10238',         // *Severity / Severidad del Defecto
-  bugEstimatedDate: 'customfield_10763'     // Fecha Estimada de Solución
+  bugEstimatedDate: 'customfield_12695'     // "UAT - Fecha Estimada de Solución" (date picker) in liverpooldigital
 });
 
 /**
