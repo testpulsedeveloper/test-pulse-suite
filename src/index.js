@@ -115,6 +115,41 @@ async function getCachedIsProjectAdmin(projectId, context) {
 const __perfALS = new AsyncLocalStorage();
 const __perfSamplesByResolver = new Map();
 const PERF_SAMPLE_LIMIT = 200;
+
+// ── Jira outage breaker ──
+// When Jira itself is failing (502/503/504 or dropped connections, as on 2026-10-28), retrying
+// only adds load while it is saturated and makes every screen wait the full 25 s. After
+// JIRA_OUTAGE_THRESHOLD such failures within JIRA_OUTAGE_WINDOW_MS, this instance stops calling
+// Jira for JIRA_OUTAGE_PAUSE_MS and answers immediately with a synthetic 503, so the UI fails
+// fast and backs off. 429 (rate limit) is NOT an outage: it keeps its own retry with Retry-After.
+const JIRA_OUTAGE_STATUSES = new Set([502, 503, 504]);
+const JIRA_OUTAGE_THRESHOLD = 3;
+const JIRA_OUTAGE_WINDOW_MS = 60 * 1000;
+const JIRA_OUTAGE_PAUSE_MS = 30 * 1000;
+const __jiraOutage = { failures: [], openUntil: 0 };
+
+function recordJiraOutageFailure(reason) {
+  const now = Date.now();
+  __jiraOutage.failures = __jiraOutage.failures.filter(t => now - t < JIRA_OUTAGE_WINDOW_MS);
+  __jiraOutage.failures.push(now);
+  if (__jiraOutage.failures.length >= JIRA_OUTAGE_THRESHOLD && __jiraOutage.openUntil < now) {
+    __jiraOutage.openUntil = now + JIRA_OUTAGE_PAUSE_MS;
+    console.warn(`[jira-breaker] pausing Jira calls for ${JIRA_OUTAGE_PAUSE_MS / 1000}s after ${__jiraOutage.failures.length} failures in ${JIRA_OUTAGE_WINDOW_MS / 1000}s (last: ${reason})`);
+  }
+}
+
+function jiraOutagePausedResponse() {
+  const body = { errorMessages: ['Jira no está respondiendo; Test Pulse pausó sus llamadas unos segundos. Intenta de nuevo en un momento.'] };
+  return {
+    ok: false,
+    status: 503,
+    statusText: 'Jira unavailable (Test Pulse pause)',
+    headers: { get: () => null },
+    json: async () => body,
+    text: async () => JSON.stringify(body)
+  };
+}
+
 try {
   for (const m of ['asUser', 'asApp']) {
     const orig = api[m];
@@ -128,10 +163,26 @@ try {
             const store = __perfALS.getStore();
             const maxRetries = 3;
             for (let attempt = 0; attempt <= maxRetries; attempt++) {
+              if (Date.now() < __jiraOutage.openUntil) {
+                if (store) store.paused = (store.paused || 0) + 1;
+                return jiraOutagePausedResponse();
+              }
               if (store) store.calls++;
-              const res = await origReq.apply(requester, reqArgs);
-              if (res && (res.status === 429 || res.status === 503)) {
-                if (store && res.status === 429) store.r429++;
+              let res;
+              try {
+                res = await origReq.apply(requester, reqArgs);
+              } catch (networkErr) {
+                // Dropped connection / timeout towards Jira: count it, never retry it here.
+                recordJiraOutageFailure(networkErr?.message || 'network error');
+                throw networkErr;
+              }
+              if (res && JIRA_OUTAGE_STATUSES.has(res.status)) {
+                // Jira is failing: no retry (it only adds load). Fail fast to the caller.
+                recordJiraOutageFailure(`HTTP ${res.status}`);
+                return res;
+              }
+              if (res && res.status === 429) {
+                if (store) store.r429++;
                 const elapsed = store?.startedAt ? (Date.now() - store.startedAt) : 0;
                 // Only retry if we still have safe headroom inside the invocation window
                 // (25 s for resolvers; background jobs set a larger `budgetMs`).
@@ -390,7 +441,7 @@ async function enforceProjectScope(name, req) {
       samples.push(elapsed);
       if (samples.length > PERF_SAMPLE_LIMIT) samples.shift();
       const { p50, p95, maxMs } = computePercentiles(samples);
-      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}`);
+      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}${store.paused ? ` jiraPaused=${store.paused}` : ''}`);
     }
   });
 }

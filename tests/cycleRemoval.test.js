@@ -133,3 +133,16 @@ test('adding cases: bounded concurrency, idempotent retries and smaller batches 
   const planning = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/PlanningView.jsx'), 'utf8');
   assert.ok(planning.includes('const CHUNK_SIZE = 10;'));
 });
+
+test('Jira outage: no retries on 5xx, breaker pauses calls, UI stops auto-refresh (v4.12.2)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('const JIRA_OUTAGE_STATUSES = new Set([502, 503, 504]);'));
+  assert.ok(src.includes('if (res && JIRA_OUTAGE_STATUSES.has(res.status)) {'), '5xx is returned without retry');
+  assert.ok(!src.includes('res.status === 429 || res.status === 503'), 'the old 503 retry loop is gone');
+  assert.ok(src.includes('if (Date.now() < __jiraOutage.openUntil) {'), 'paused instance answers without calling Jira');
+  assert.ok(src.includes("recordJiraOutageFailure(networkErr?.message || 'network error');"), 'dropped connections count too');
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(app.includes("timed out|timeout|jira no est"), 'timeouts and 5xx trip the UI breaker');
+  assert.ok(app.includes('if (document.hidden || isCircuitBroken()) return;'), 'report auto-sync respects the breaker');
+  assert.ok(!app.includes("err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker()"));
+});

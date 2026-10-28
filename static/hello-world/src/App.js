@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.12.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.12.2'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -665,16 +665,32 @@ function App() {
     setTextInputModal({ isOpen: true, title, label, defaultValue, placeholder, onConfirm });
   }, []);
 
-  // Circuit breaker — pauses background refreshes after 429 for 3 min
+  // Circuit breaker — pauses background refreshes for 3 min when Jira rate-limits the app (429)
+  // or is failing (502/503/504, timeouts). Automatic refreshes only add load while Jira struggles.
   const circuitBreakerUntilRef = useRef(null);
   const [circuitBreakerActive, setCircuitBreakerActive] = useState(false);
 
-  const tripCircuitBreaker = useCallback(() => {
+  const tripCircuitBreaker = useCallback((reason = 'rate-limit') => {
+    if (circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current) return;
     circuitBreakerUntilRef.current = Date.now() + 180_000;
     setCircuitBreakerActive(true);
-    addNotification({ type: 'warning', title: '⏸ Rate limit detectado', description: 'Auto-refresh pausado 3 min.', duration: 10000 });
+    addNotification(reason === 'outage'
+      ? { type: 'warning', title: '⏸ Jira no está respondiendo', description: 'Actualización automática pausada 3 min para no saturarlo.', duration: 10000 }
+      : { type: 'warning', title: '⏸ Rate limit detectado', description: 'Auto-refresh pausado 3 min.', duration: 10000 });
     setTimeout(() => { circuitBreakerUntilRef.current = null; setCircuitBreakerActive(false); }, 180_000);
   }, [addNotification]);
+
+  // Classifies an invoke() failure: 'rate-limit' (429), 'outage' (5xx, timeouts) or null.
+  const jiraOverloadReason = (err) => {
+    const text = `${err?.status ?? ''} ${err?.message ?? ''}`;
+    if (/\b429\b/.test(text)) return 'rate-limit';
+    if (/\b50[234]\b|timed out|timeout|jira no est[aá] respondiendo/i.test(text)) return 'outage';
+    return null;
+  };
+  const tripOnOverload = (err) => {
+    const reason = jiraOverloadReason(err);
+    if (reason) tripCircuitBreaker(reason);
+  };
 
   const isCircuitBroken = useCallback(() =>
     !!(circuitBreakerUntilRef.current && Date.now() < circuitBreakerUntilRef.current)
@@ -1453,7 +1469,7 @@ function App() {
           safeSetCycleTests(enriched);
         }
       } catch(err) {
-        if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
+        tripOnOverload(err);
       }
     };
     const id = setInterval(tick, 60_000);
@@ -1516,7 +1532,7 @@ function App() {
                 batchMap[cid] = c.tests || c.execution || [];
               }
             } catch (err) {
-              if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
+              tripOnOverload(err);
               batchMap[cid] = c.tests || c.execution || [];
             }
           })
@@ -1540,7 +1556,7 @@ function App() {
       loadReportData(null, null, false);
     }
     const intervalId = setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || isCircuitBroken()) return;
       loadReportData(null, null, true); // Silent background auto-sync
     }, 900_000);
     return () => clearInterval(intervalId);
@@ -6257,7 +6273,7 @@ Then el sistema valida la identidad.
       }
     } catch(err) {
       console.error("loadReportData error:", err);
-      if (err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker();
+      tripOnOverload(err);
       let restoredFromSnapshot = false;
       try {
         const snapshotKey = `tp_report_snapshot_${projId}`;
