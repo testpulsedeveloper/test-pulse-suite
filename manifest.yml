@@ -42,12 +42,15 @@ modules:
         - path: executedBy.accountId
           type: user
           searchAlias: tpExecutedBy
+        - path: automation.tool
+          type: string
+          searchAlias: tpTool
   # Opción A · fase 0: Forge SQL database used as a rebuildable index of executions.
   sql:
     - key: main
       engine: mysql
   # Applies the Forge SQL schema migrations when the app is installed or upgraded.
-  # Records automation results (Tosca / IArvis) posted as comments on Test Runs.
+  # Records automation results (any tool) posted as comments on Test Runs.
   trigger:
     - key: automation-comment-trigger
       function: automationComments

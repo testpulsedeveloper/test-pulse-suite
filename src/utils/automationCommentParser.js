@@ -1,22 +1,57 @@
 /**
  * @file automationCommentParser.js
- * @description Reads the execution result that an automation tool (Tosca / IArvis) posts as a
- * comment on a Test Run issue. Contract: "Integración Tosca → Test Pulse: formato de comentario".
+ * @description Reads the execution result that ANY automation tool (Tosca, Playwright, Selenium,
+ * Cypress, Mantis, …) posts as a comment on a Test Run issue.
+ * Contract: "Integración de herramientas de automatización → Test Pulse".
  *
- * A comment is an automation result only if it contains the marker
- * `Ejecutado por: Automatización IArvis` (accents and case are ignored). Then:
- *   1. Preferred: a JSON object with a `testpulse` key, usually inside a code block
- *      (`{code:json}` in API v2 or an ADF `codeBlock` in API v3).
- *   2. Fallback: the human-readable text, with the same labels Test Pulse writes for manual
- *      executions ("Resultado de Ejecución: …", "Iteración #n [datos] — Estado: …", …).
+ * A comment is an automation result when it has EITHER:
+ *   - a JSON object with a `testpulse` key (preferred, usually inside a code block:
+ *     `{code:json}` in API v2 or an ADF `codeBlock` in API v3), OR
+ *   - the marker line `Ejecutado por: Automatización <Herramienta>` (accents and case ignored),
+ *     followed by the same human-readable labels Test Pulse writes for manual executions
+ *     ("Resultado de Ejecución: …", "Iteración #n [datos] — Estado: …", …).
+ *
+ * The tool that produced the result comes from the JSON `tool` field, otherwise from the name
+ * after "Automatización". Known tools are normalised to one spelling (see AUTOMATION_TOOLS);
+ * unknown names are accepted as written so new tools work without a code change.
  *
  * The parser is pure (no Jira calls) so it can be unit-tested with plain objects.
  */
 
 import { normalizeJiraStatus } from './statusAndAdfHelpers.js';
 
+/** Marker used by the first integration (IArvis runs Tosca); still accepted. */
 export const AUTOMATION_MARKER = 'Ejecutado por: Automatización IArvis';
+/** Generic marker prefix: `Ejecutado por: Automatización <Herramienta>`. */
+export const AUTOMATION_MARKER_PREFIX = 'Ejecutado por: Automatización';
+/** Tool name used when a result names none. */
+export const GENERIC_AUTOMATION_TOOL = 'Automatización';
+/** @deprecated kept for older callers: IArvis results without `tool` are Tosca runs. */
 export const DEFAULT_AUTOMATION_TOOL = 'Tosca';
+
+/**
+ * Canonical tool names and the spellings each one accepts (compared accent/case-insensitive,
+ * ignoring spaces, dots, dashes and underscores).
+ */
+export const AUTOMATION_TOOLS = Object.freeze([
+  { name: 'Tosca', aliases: ['tosca', 'tricentis tosca', 'tricentis', 'iarvis', 'automatizacion iarvis'] },
+  { name: 'Playwright', aliases: ['playwright', 'pw'] },
+  { name: 'Selenium', aliases: ['selenium', 'selenium webdriver', 'webdriver', 'selenium grid'] },
+  { name: 'Cypress', aliases: ['cypress'] },
+  { name: 'Mantis', aliases: ['mantis', 'mantisbt'] },
+  { name: 'Appium', aliases: ['appium'] },
+  { name: 'Postman', aliases: ['postman', 'newman'] },
+  { name: 'Katalon', aliases: ['katalon', 'katalon studio'] },
+  { name: 'Robot Framework', aliases: ['robot', 'robot framework', 'robotframework'] },
+  { name: 'JUnit', aliases: ['junit'] },
+  { name: 'TestNG', aliases: ['testng'] },
+  { name: 'Cucumber', aliases: ['cucumber', 'gherkin'] },
+  { name: 'JMeter', aliases: ['jmeter', 'apache jmeter'] },
+  { name: 'k6', aliases: ['k6'] },
+  { name: 'WebdriverIO', aliases: ['webdriverio', 'wdio'] },
+  { name: 'Pytest', aliases: ['pytest', 'py.test'] },
+  { name: 'UFT', aliases: ['uft', 'qtp', 'micro focus uft', 'opentext uft'] }
+]);
 
 const VALID_RUN_STATUSES = new Set(['Passed', 'Failed', 'Blocked', 'In Progress', 'Not Run']);
 const VALID_ITERATION_STATUSES = new Set(['Passed', 'Failed', 'Blocked', 'Not Run']);
@@ -26,7 +61,45 @@ const fold = (value) => String(value ?? '')
   .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   .toLowerCase().replace(/\s+/g, ' ').trim();
 
-const FOLDED_MARKER = fold(AUTOMATION_MARKER);
+/** Same as fold() but also drops spaces and punctuation, to compare tool names. */
+const toolKey = (value) => fold(value).replace(/[\s._\-/]+/g, '');
+
+const TOOL_BY_KEY = new Map();
+for (const tool of AUTOMATION_TOOLS) {
+  TOOL_BY_KEY.set(toolKey(tool.name), tool.name);
+  for (const alias of tool.aliases) TOOL_BY_KEY.set(toolKey(alias), tool.name);
+}
+
+/**
+ * Normalises a tool name: known tools get their canonical spelling, unknown ones are kept
+ * (trimmed, max 40 characters). Returns null for empty values.
+ *
+ * @param {unknown} raw - Tool name as written by the automation.
+ * @returns {string|null}
+ */
+export function normalizeToolName(raw) {
+  const text = String(raw ?? '').replace(/[\u0000-\u001f]/g, ' ').trim();
+  if (!text) return null;
+  return TOOL_BY_KEY.get(toolKey(text)) || text.slice(0, 40);
+}
+
+const FOLDED_MARKER_PREFIX = fold(AUTOMATION_MARKER_PREFIX);
+
+/**
+ * Finds the generic marker line and returns the tool written after "Automatización"
+ * ('' when the line has no name), or null when there is no marker.
+ */
+function findMarkerTool(lines) {
+  for (const raw of lines) {
+    const folded = fold(raw);
+    const idx = folded.indexOf(FOLDED_MARKER_PREFIX);
+    if (idx === -1) continue;
+    // Take the original text after the marker, up to the next known label on the same line.
+    const after = String(raw).slice(String(raw).length - (folded.length - idx - FOLDED_MARKER_PREFIX.length));
+    return after.split(/\s(?:💬|🔁|📊|comentario:|iteraci[oó]n|resultado de ejecuci[oó]n)/i)[0].trim();
+  }
+  return null;
+}
 
 /**
  * Turns a comment body (ADF document, ADF JSON string or plain/wiki text) into text lines
@@ -135,7 +208,7 @@ function fromJson(json) {
   return {
     format: 'json',
     status,
-    tool: json.tool ? String(json.tool) : DEFAULT_AUTOMATION_TOOL,
+    tool: normalizeToolName(json.tool),
     executedAt: json.executedAt ? String(json.executedAt) : null,
     environment: json.environment ? String(json.environment) : null,
     comment: json.comment ? String(json.comment) : '',
@@ -203,7 +276,7 @@ function fromText(rawLines) {
   return {
     format: 'text',
     status,
-    tool: DEFAULT_AUTOMATION_TOOL,
+    tool: null,
     executedAt: null,
     environment: null,
     comment,
@@ -224,18 +297,25 @@ function fromText(rawLines) {
 export function parseAutomationComment(body) {
   const { lines, codeBlocks } = extractCommentContent(body);
   const fullText = lines.join('\n');
-  if (!fold(fullText).includes(FOLDED_MARKER) && !codeBlocks.some(b => fold(b).includes(FOLDED_MARKER))) {
-    return null;
-  }
   const json = findJsonPayload(codeBlocks, fullText);
+  const markerTool = findMarkerTool(lines);
+  // Neither the Test Pulse JSON nor the marker line: an ordinary comment.
+  if (!json && markerTool === null) return null;
+
+  let parsed;
   if (json) {
-    const parsed = fromJson(json);
-    if (!parsed.error) return parsed;
+    parsed = fromJson(json);
     // An invalid JSON payload falls back to the text, as the contract describes.
-    const textParsed = fromText(lines);
-    return textParsed.error ? parsed : textParsed;
+    if (parsed.error && markerTool !== null) {
+      const textParsed = fromText(lines);
+      if (!textParsed.error) parsed = textParsed;
+    }
+  } else {
+    parsed = fromText(lines);
   }
-  return fromText(lines);
+  if (parsed.error) return parsed;
+  parsed.tool = parsed.tool || normalizeToolName(markerTool) || GENERIC_AUTOMATION_TOOL;
+  return parsed;
 }
 
 /**
@@ -246,6 +326,8 @@ export function parseAutomationComment(body) {
  */
 export function mentionsAutomationMarker(raw) {
   if (raw === undefined || raw === null) return false;
-  const text = typeof raw === 'string' ? raw : JSON.stringify(raw);
-  return fold(text).includes('iarvis');
+  const text = fold(typeof raw === 'string' ? raw : JSON.stringify(raw));
+  // ADF splits "Ejecutado por: " and "Automatización X" into separate text nodes, so look for
+  // the pieces independently; the full parser decides afterwards.
+  return text.includes('testpulse') || text.includes('automatizacion');
 }

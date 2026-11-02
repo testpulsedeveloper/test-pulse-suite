@@ -112,7 +112,7 @@ test('wiring: comment trigger, idempotent ingestion, manual comments never overw
   assert.ok(src.includes('export const automationCommentHandler = async (event) =>'));
   assert.ok(src.includes("if (ingested.includes(commentId)) return { status: 'skipped', reason: 'already-ingested' };"));
   assert.ok(src.includes("executionType: 'Automated',"));
-  assert.ok(src.includes('if (mentionsAutomationMarker(str)) return false;'), 'syncExecutionComment skips automation comments');
+  assert.ok(src.includes('if (parseAutomationComment(c.body)) return false;'), 'syncExecutionComment skips automation comments');
   assert.ok(src.includes("resolver.define('reprocessAutomationComments'"));
   assert.ok(src.includes('automation: runData.automation || null,'), 'cycle list receives the automation info');
   const m = fs.readFileSync(path.join(ROOT_DIR, 'manifest.yml'), 'utf8');
@@ -136,4 +136,53 @@ test('text copied from Jira screen with all labels on ONE line (real comment 771
     { data: 'd1', status: 'Passed', result: 'Detalles de la prueba 1', evidences: [] },
     { data: '', status: 'Passed', result: 'Detalles de la prueba 2', evidences: ['ticket.pdf'] }
   ]);
+});
+
+// ── v4.13.0: any automation tool ──
+import { normalizeToolName, AUTOMATION_TOOLS } from '../src/utils/automationCommentParser.js';
+
+test('generic marker: the tool is the name after "Automatización"', () => {
+  const cases = [
+    ['Ejecutado por: Automatización Playwright', 'Playwright'],
+    ['Ejecutado por: automatizacion SELENIUM WEBDRIVER', 'Selenium'],
+    ['Ejecutado por: Automatización Mantis', 'Mantis'],
+    ['Ejecutado por: Automatización IArvis', 'Tosca'],
+    ['Ejecutado por: Automatización MiHerramientaQA', 'MiHerramientaQA'],
+    ['Ejecutado por: Automatización', 'Automatización']
+  ];
+  for (const [marker, tool] of cases) {
+    const r = parseAutomationComment(`📊 Resultado de Ejecución: Passed\n${marker}`);
+    assert.equal(r.tool, tool, marker);
+    assert.equal(r.status, 'Passed');
+  }
+});
+
+test('JSON block alone is enough; its `tool` wins and is normalised', () => {
+  const r = parseAutomationComment('{code:json}\n{"testpulse":1,"tool":"cypress","status":"Blocked"}\n{code}');
+  assert.equal(r.format, 'json');
+  assert.equal(r.tool, 'Cypress');
+  const both = parseAutomationComment('Ejecutado por: Automatización Selenium\n{code:json}\n{"testpulse":1,"tool":"Playwright","status":"Passed"}\n{code}');
+  assert.equal(both.tool, 'Playwright');
+  const noTool = parseAutomationComment('{code:json}\n{"testpulse":1,"status":"Passed"}\n{code}');
+  assert.equal(noTool.tool, 'Automatización');
+});
+
+test('tool catalog: aliases, unknown tools kept, empty values rejected', () => {
+  assert.equal(normalizeToolName('Tricentis-Tosca'), 'Tosca');
+  assert.equal(normalizeToolName('wdio'), 'WebdriverIO');
+  assert.equal(normalizeToolName('robot_framework'), 'Robot Framework');
+  assert.equal(normalizeToolName('newman'), 'Postman');
+  assert.equal(normalizeToolName('  Herramienta Nueva  '), 'Herramienta Nueva');
+  assert.equal(normalizeToolName('x'.repeat(80)).length, 40);
+  assert.equal(normalizeToolName(''), null);
+  assert.ok(AUTOMATION_TOOLS.some(t => t.name === 'Mantis'));
+});
+
+test('manual executions and ordinary comments are never treated as automation', () => {
+  assert.equal(parseAutomationComment('📊 Resultado de Ejecución: Passed\nEjecutado por: María López'), null);
+  assert.equal(parseAutomationComment('Hablamos de automatización mañana'), null);
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('if (parseAutomationComment(c.body)) return false;'), 'manual sync only skips real automation results');
+  const m = fs.readFileSync(path.join(ROOT_DIR, 'manifest.yml'), 'utf8');
+  assert.ok(/path: automation\.tool\n\s+type: string\n\s+searchAlias: tpTool/.test(m), 'tool is searchable with JQL');
 });

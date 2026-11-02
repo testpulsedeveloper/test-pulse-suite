@@ -137,7 +137,7 @@ export default function ExecutionView({ ctx }) {
     toggleFolderSidebar
   } = ctx;
 
-  // "Reprocesar automatización": ingests Tosca / IArvis result comments posted on this cycle's
+  // "Reprocesar automatización": ingests automation result comments (any tool) posted on this cycle's
   // Test Runs before the automatic comment trigger existed (or while it failed).
   const [reprocessingAutomation, setReprocessingAutomation] = React.useState(false);
   const handleReprocessAutomation = async () => {
@@ -159,7 +159,7 @@ export default function ExecutionView({ ctx }) {
         type: 'success',
         title: 'Automatización reprocesada',
         description: recorded > 0
-          ? `Se registraron ${recorded} resultado(s) de Tosca / IArvis.`
+          ? `Se registraron ${recorded} resultado(s) de automatización.`
           : 'No se encontraron resultados de automatización nuevos en este ciclo.'
       });
     } catch (err) {
@@ -978,7 +978,7 @@ export default function ExecutionView({ ctx }) {
                           type="button"
                           onClick={handleReprocessAutomation}
                           disabled={reprocessingAutomation}
-                          title="Lee los comentarios de Tosca / IArvis en los Test Runs de este ciclo y registra sus resultados"
+                          title="Lee los comentarios de herramientas de automatización (Tosca, Playwright, Selenium…) en los Test Runs de este ciclo y registra sus resultados"
                           style={{
                             padding: '6px 12px',
                             fontSize: '12px',
@@ -1650,7 +1650,7 @@ export default function ExecutionView({ ctx }) {
                                 </span>
                               )}
 
-                              {/* Result recorded from a Tosca / IArvis comment: opens that comment */}
+                              {/* Result recorded from an automation tool comment: opens that comment */}
                               {test.automation?.commentId && test.testRunKey && (
                                 <span
                                   onClick={(e) => {
@@ -1669,7 +1669,7 @@ export default function ExecutionView({ ctx }) {
                                   }}
                                   title={`${test.automation.label || 'Automatización'}${test.executedBy?.displayName ? ` · ejecutado por ${test.executedBy.displayName}` : ''} · ver comentario de origen`}
                                 >
-                                  🤖 {test.automation.tool || 'Tosca'}
+                                  🤖 {test.automation.tool || 'Automatización'}
                                 </span>
                               )}
 

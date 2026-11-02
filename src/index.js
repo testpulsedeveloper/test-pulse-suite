@@ -5703,8 +5703,8 @@ const syncExecutionComment = async (testRunId, commentAdf) => {
       const allComments = commentsData.comments || [];
       existingTestPulseComment = allComments.find(c => {
         const str = JSON.stringify(c.body || {});
-        // Automation results (Tosca / IArvis) are records of their own: never overwrite them.
-        if (mentionsAutomationMarker(str)) return false;
+        // Automation results (any tool) are records of their own: never overwrite them.
+        if (parseAutomationComment(c.body)) return false;
         return str.includes('Resultado de Ejecución') || str.includes('Iteraciones');
       });
     }
@@ -6181,12 +6181,12 @@ registerMobileCompanionResolvers(resolver);
 export const mobileUploadHandler = modularMobileUploadHandler;
 
 // ==========================================
-// AUTOMATION RESULTS FROM COMMENTS (Tosca / IArvis)
+// AUTOMATION RESULTS FROM COMMENTS (any tool: Tosca, Playwright, Selenium, Cypress, Mantis…)
 // ==========================================
-// Contract: doc "Integración Tosca → Test Pulse: formato de comentario".
-// Tosca posts a comment on the Test Run (with the tester's own Jira account) containing the
-// marker "Ejecutado por: Automatización IArvis" and, ideally, a JSON block. Test Pulse records
-// it as an execution: the real comment author is the executor and Tosca is the tool.
+// Contract: doc "Integración de herramientas de automatización → Test Pulse".
+// A tool posts a comment on the Test Run (with any Jira account) containing the Test Pulse
+// JSON block and/or the marker "Ejecutado por: Automatización <Herramienta>". Test Pulse records
+// it as an execution: the real comment author is the executor and the tool is stored with it.
 
 const MAX_INGESTED_COMMENT_IDS = 50;
 
@@ -6238,7 +6238,7 @@ async function ingestAutomationComment(issueId, comment) {
     : null;
   const automation = {
     tool: parsed.tool,
-    label: `Automatización IArvis (${parsed.tool})`,
+    label: `Automatización · ${parsed.tool}`,
     commentId,
     format: parsed.format,
     externalId: parsed.externalId,
