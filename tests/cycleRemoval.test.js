@@ -146,3 +146,17 @@ test('Jira outage: no retries on 5xx, breaker pauses calls, UI stops auto-refres
   assert.ok(app.includes('if (document.hidden || isCircuitBroken()) return;'), 'report auto-sync respects the breaker');
   assert.ok(!app.includes("err?.message?.includes('429') || err?.status === 429) tripCircuitBreaker()"));
 });
+
+test('performance v4.14.0: one-call project bootstrap and multi-page test case loading', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes("resolver.define('getProjectBootstrap'"));
+  assert.ok(src.includes("'getProjectBootstrap',\n  'isProjectAllowed',"), 'bootstrap is reachable on disabled projects (shows the disabled screen)');
+  assert.ok(src.includes('__resolverFns.set(name, fn)'), 'resolvers are reusable in-process');
+  assert.ok(src.includes('const pagesPerCall = Math.min(5, Math.max(1, Number(payload?.pagesPerCall) || 1));'));
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(app.includes("boot = await invoke('getProjectBootstrap', { projectId: targetProjectId });"));
+  assert.ok(app.includes(": await Promise.allSettled(["), 'individual calls remain as fallback');
+  assert.ok(app.includes('pagesPerCall: 5'));
+  const qc = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/utils/queryClient.js'), 'utf8');
+  assert.ok(qc.includes('getProjectBootstrap: 120_000,'), 'bootstrap is cached like the calls it replaces');
+});

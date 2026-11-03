@@ -187,6 +187,8 @@ const TP_QUERY_RESOLVERS = {
   isProjectAllowed: 300_000,
   checkAdminPermission: 300_000,
   getConfig: 180_000,
+  // One-call project bootstrap (v4.14.0). Not preserved on any mutation: it includes cycles.
+  getProjectBootstrap: 120_000,
   getReportAutomationConfig: 180_000,
   getProjectCyclesMigrationStatus: 180_000,
   // Operational test management data (3 min strict TTL -> 0 JQL calls when re-entering)

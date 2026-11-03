@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.13.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.14.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -1000,7 +1000,8 @@ function App() {
       const MAX_PAGES = 35;
       
       while (!isLast && pagesFetched < MAX_PAGES) {
-          const res = await invoke('getTestCases', { ...args, nextPageToken: token });
+          // Up to 5 Jira pages (500 cases) per backend call: ~5x fewer round trips.
+          const res = await invoke('getTestCases', { ...args, nextPageToken: token, pagesPerCall: 5 });
           if (Array.isArray(res)) {
              if (res.length > 0 && res[0].id === '999999') {
                  if (retries > 0) {
@@ -1188,13 +1189,29 @@ function App() {
 
       if (!targetProjectId) { clearTimeout(loadTimer); setLoading(false); return; }
 
+      // One-call bootstrap (v4.14.0): the backend gathers permissions, configuration, issue
+      // types, folders, plans, cycles and report settings in parallel, instead of ~8 separate
+      // invokes queued 4 at a time by the read semaphore. If it fails, the individual calls
+      // below are used exactly as before.
+      let boot = null;
+      try {
+        boot = await invoke('getProjectBootstrap', { projectId: targetProjectId });
+      } catch (_) {
+        boot = null;
+      }
+      const settledPart = (part) => (part && part.ok)
+        ? { status: 'fulfilled', value: part.value }
+        : { status: 'rejected', reason: part?.error || 'no disponible' };
+
       // Phase 1: fast parallel (~2s total) — after this loading=false
-      const [allowedRes, adminRes, configRes, issueTypesRes] = await Promise.allSettled([
-        invoke('isProjectAllowed', { projectId: targetProjectId }),
-        invoke('checkAdminPermission', { projectId: targetProjectId }),
-        invoke('getConfig', { projectId: targetProjectId }),
-        invoke('getProjectIssueTypes', { projectId: targetProjectId }),
-      ]);
+      const [allowedRes, adminRes, configRes, issueTypesRes] = boot
+        ? [settledPart(boot.allowed), settledPart(boot.admin), settledPart(boot.config), settledPart(boot.issueTypes)]
+        : await Promise.allSettled([
+          invoke('isProjectAllowed', { projectId: targetProjectId }),
+          invoke('checkAdminPermission', { projectId: targetProjectId }),
+          invoke('getConfig', { projectId: targetProjectId }),
+          invoke('getProjectIssueTypes', { projectId: targetProjectId }),
+        ]);
 
       setIsProjectAllowed(allowedRes.status === 'fulfilled' ? (allowedRes.value?.allowed ?? true) : true);
       const adminVal = adminRes.status === 'fulfilled' ? adminRes.value : false;
@@ -1207,23 +1224,30 @@ function App() {
       setProjectIssueTypes(projectTypes);
       loadTraceabilityHierarchy(targetProjectId, config);
 
-      invoke('getReportAutomationConfig', { projectId: targetProjectId }).then(autoRes => {
+      const applyReportAutomation = (autoRes) => {
         if (autoRes && autoRes.success && autoRes.config) {
           setReportAutomationConfig(autoRes.config);
           setReportAutomationLastDispatch(autoRes.lastDispatch || null);
         }
-      }).catch(() => {});
+      };
+      if (boot && boot.reportAutomation?.ok) {
+        applyReportAutomation(boot.reportAutomation.value);
+      } else {
+        invoke('getReportAutomationConfig', { projectId: targetProjectId }).then(applyReportAutomation).catch(() => {});
+      }
 
       // ← App shell ready. Stop "Cargando entorno".
       clearTimeout(loadTimer);
       setLoading(false);
 
-      // Phase 2: parallel medium (~1.5s each)
-      const [foldersRes, plansRes, cyclesRes] = await Promise.allSettled([
-        invoke('getFolders', { projectId: targetProjectId }),
-        invoke('getTestPlans', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
-        invoke('getTestCycles', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
-      ]);
+      // Phase 2: parallel medium (~1.5s each) — already included in the bootstrap when it worked
+      const [foldersRes, plansRes, cyclesRes] = (boot && boot.folders && boot.plans && boot.cycles)
+        ? [settledPart(boot.folders), settledPart(boot.plans), settledPart(boot.cycles)]
+        : await Promise.allSettled([
+          invoke('getFolders', { projectId: targetProjectId }),
+          invoke('getTestPlans', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
+          invoke('getTestCycles', { projectId: targetProjectId, config, projectIssueTypes: projectTypes }),
+        ]);
       if (foldersRes.status === 'fulfilled') setFolders(foldersRes.value || []);
       const loadedPlans = (plansRes.status === 'fulfilled' && Array.isArray(plansRes.value)) ? plansRes.value : [];
       const loadedCycles = (cyclesRes.status === 'fulfilled' && Array.isArray(cyclesRes.value)) ? cyclesRes.value : [];

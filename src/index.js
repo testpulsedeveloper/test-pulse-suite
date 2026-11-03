@@ -366,10 +366,15 @@ async function fetchJqlPage(jql, fields, expand, properties, nextPageToken = nul
 
 const resolver = new Resolver();
 
+// Raw resolver functions by name, so one resolver can reuse others in-process
+// (see getProjectBootstrap) without an extra round trip from the browser.
+const __resolverFns = new Map();
+
 // Resolvers that must keep working while Test Pulse is DISABLED in a project, so the UI
 // can still load, show the "disabled" screen and let an admin switch it back on.
 // (Project membership is still verified for them whenever a projectId is sent.)
 const PROJECT_ENABLED_GATE_EXEMPT = new Set([
+  'getProjectBootstrap',
   'isProjectAllowed',
   'setAllowedProjects',
   'checkAdminPermission',
@@ -416,7 +421,7 @@ async function enforceProjectScope(name, req) {
 // context and log one compact line with p50/p95/maxMs when it finishes.
 {
   const __origDefine = resolver.define.bind(resolver);
-  resolver.define = (name, fn) => __origDefine(name, async (req) => {
+  resolver.define = (name, fn) => (__resolverFns.set(name, fn), __origDefine(name, async (req) => {
     const t0 = Date.now();
     const store = { calls: 0, r429: 0, startedAt: t0 };
     try {
@@ -443,7 +448,7 @@ async function enforceProjectScope(name, req) {
       const { p50, p95, maxMs } = computePercentiles(samples);
       console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}${store.paused ? ` jiraPaused=${store.paused}` : ''}`);
     }
-  });
+  }));
 }
 
 // === Folder Management (Jira Entity Properties) ===
@@ -898,6 +903,7 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   let fieldsToFetch = getTestCaseJqlFields(config, payload);
   
   let pageData = await fetchJqlPage(jql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+  let activeJql = jql;
   if (pageData.error && validTcTypes.length > 1) {
      let fallbackTypes = [tcType];
      if (projectId) {
@@ -913,15 +919,34 @@ resolver.define('getTestCases', async ({ payload, context }) => {
      }
      const retryJql = `${projectJql}issuetype in (${fallbackTypes.map(t => jqlQuote(t)).join(', ')}) ORDER BY created DESC`;
      pageData = await fetchJqlPage(retryJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+     activeJql = retryJql;
      if (pageData.error && fallbackTypes.length > 1) {
        const singleJql = `${projectJql}issuetype = ${jqlQuote(tcType)} ORDER BY created DESC`;
        pageData = await fetchJqlPage(singleJql, fieldsToFetch, null, ['testops-folder-link'], nextPageToken, 100);
+       activeJql = singleJql;
      }
   }
   if (pageData.error) {
      return [{ id: '999999', key: 'ERR-1', rawFields: { summary: pageData.error } }];
   }
-  
+
+  // Several Jira pages per invocation (`pagesPerCall`, max 5 = 500 cases) to save the browser
+  // round trip of each page. Jira pages are chained by token, so they stay sequential here;
+  // the loop stops early to stay well inside Forge's 25 s limit.
+  const pagesPerCall = Math.min(5, Math.max(1, Number(payload?.pagesPerCall) || 1));
+  const startedAt = Date.now();
+  let issues = [...(pageData.issues || [])];
+  let pageToken = pageData.nextPageToken;
+  let lastPage = pageData.isLast;
+  for (let page = 1; page < pagesPerCall && !lastPage && pageToken && Date.now() - startedAt < 12000; page++) {
+    const next = await fetchJqlPage(activeJql, fieldsToFetch, null, ['testops-folder-link'], pageToken, 100);
+    if (next.error) break;
+    issues = issues.concat(next.issues || []);
+    pageToken = next.nextPageToken;
+    lastPage = next.isLast;
+  }
+  pageData = { issues, nextPageToken: pageToken, isLast: lastPage || !pageToken };
+
   const mapped = pageData.issues.map(issue => ({
       id: issue.id,
       key: issue.key,
@@ -6445,6 +6470,54 @@ resolver.define('getExecutionIndexHealth', async ({ payload, context }) => {
     };
   }
   return result;
+});
+
+// ==========================================
+// PROJECT BOOTSTRAP (one call to open a project)
+// ==========================================
+/**
+ * Everything the app needs to open a project, in ONE invocation instead of ~8 separate ones:
+ * enablement, admin flag, configuration and issue types first (in parallel), then folders,
+ * plans, cycles and report-automation settings (in parallel, they need the configuration).
+ * Each part reuses the existing resolver code and fails independently: the page receives
+ * `{ ok: true, value }` or `{ ok: false, error }` per part and keeps working with what it got.
+ * Membership of the project is checked once by the central filter (payload.projectId).
+ */
+resolver.define('getProjectBootstrap', async ({ payload, context }) => {
+  const call = async (name, extra = {}) => {
+    const fn = __resolverFns.get(name);
+    if (!fn) return { ok: false, error: `resolver ${name} not available` };
+    try {
+      return { ok: true, value: await fn({ payload: { ...(payload || {}), ...extra }, context }) };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  };
+
+  const [allowed, admin, config, issueTypes] = await Promise.all([
+    call('isProjectAllowed'),
+    call('checkAdminPermission'),
+    call('getConfig'),
+    call('getProjectIssueTypes')
+  ]);
+
+  const cfg = config.ok && config.value ? config.value : null;
+  const types = issueTypes.ok && Array.isArray(issueTypes.value) ? issueTypes.value : [];
+  const isAllowed = allowed.ok ? allowed.value?.allowed !== false : true;
+  const isAdmin = admin.ok && admin.value === true;
+
+  // A disabled project only needs the "disabled" screen, unless the user can re-enable it.
+  let folders = null, plans = null, cycles = null, reportAutomation = null;
+  if (isAllowed || isAdmin) {
+    [folders, plans, cycles, reportAutomation] = await Promise.all([
+      call('getFolders'),
+      call('getTestPlans', { config: cfg, projectIssueTypes: types }),
+      call('getTestCycles', { config: cfg, projectIssueTypes: types }),
+      call('getReportAutomationConfig')
+    ]);
+  }
+
+  return { allowed, admin, config, issueTypes, folders, plans, cycles, reportAutomation };
 });
 
 export const handler = resolver.getDefinitions();
