@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.14.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.14.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -998,10 +998,21 @@ function App() {
       let isLast = false;
       let pagesFetched = 0;
       const MAX_PAGES = 35;
-      
+      // Up to 5 Jira pages per backend call (fewer round trips). If a call still fails because
+      // the response is too large for Forge, the rest is loaded one page at a time.
+      let pagesPerCall = 5;
+
       while (!isLast && pagesFetched < MAX_PAGES) {
-          // Up to 5 Jira pages (500 cases) per backend call: ~5x fewer round trips.
-          const res = await invoke('getTestCases', { ...args, nextPageToken: token, pagesPerCall: 5 });
+          let res;
+          try {
+            res = await invoke('getTestCases', { ...args, nextPageToken: token, pagesPerCall });
+          } catch (err) {
+            if (pagesPerCall > 1 && /too large|size/i.test(String(err?.message || err))) {
+              pagesPerCall = 1;
+              continue;
+            }
+            throw err;
+          }
           if (Array.isArray(res)) {
              if (res.length > 0 && res[0].id === '999999') {
                  if (retries > 0) {

@@ -156,7 +156,15 @@ test('performance v4.14.0: one-call project bootstrap and multi-page test case l
   const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
   assert.ok(app.includes("boot = await invoke('getProjectBootstrap', { projectId: targetProjectId });"));
   assert.ok(app.includes(": await Promise.allSettled(["), 'individual calls remain as fallback');
-  assert.ok(app.includes('pagesPerCall: 5'));
+  assert.ok(app.includes('let pagesPerCall = 5;'));
   const qc = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/utils/queryClient.js'), 'utf8');
   assert.ok(qc.includes('getProjectBootstrap: 120_000,'), 'bootstrap is cached like the calls it replaces');
+});
+
+test('hotfix v4.14.1: getTestCases respects Forge response size; UI falls back to 1 page', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes('const RESPONSE_BUDGET_CHARS = 2_500_000;'));
+  assert.ok(src.includes('if (sizeSoFar + nextSize > RESPONSE_BUDGET_CHARS) break;'));
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(app.includes("if (pagesPerCall > 1 && /too large|size/i.test(String(err?.message || err))) {"));
 });

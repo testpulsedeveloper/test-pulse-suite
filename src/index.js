@@ -931,17 +931,28 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   }
 
   // Several Jira pages per invocation (`pagesPerCall`, max 5 = 500 cases) to save the browser
-  // round trip of each page. Jira pages are chained by token, so they stay sequential here;
-  // the loop stops early to stay well inside Forge's 25 s limit.
+  // round trip of each page. Jira pages are chained by token, so they stay sequential here.
+  // The loop stops early to stay inside two Forge limits: 25 s per invocation and the maximum
+  // response size (each case carries all its fields; 500 at once exceeded it in production).
+  // A page is only added if the response stays under RESPONSE_BUDGET_CHARS; otherwise the
+  // browser asks for the rest with the returned nextPageToken, exactly as with single pages.
+  const RESPONSE_BUDGET_CHARS = 2_500_000;
   const pagesPerCall = Math.min(5, Math.max(1, Number(payload?.pagesPerCall) || 1));
   const startedAt = Date.now();
   let issues = [...(pageData.issues || [])];
   let pageToken = pageData.nextPageToken;
   let lastPage = pageData.isLast;
+  let sizeSoFar = JSON.stringify(issues).length;
   for (let page = 1; page < pagesPerCall && !lastPage && pageToken && Date.now() - startedAt < 12000; page++) {
+    // Estimate the next page from the average page size seen so far.
+    const avgPage = sizeSoFar / page;
+    if (sizeSoFar + avgPage > RESPONSE_BUDGET_CHARS) break;
     const next = await fetchJqlPage(activeJql, fieldsToFetch, null, ['testops-folder-link'], pageToken, 100);
     if (next.error) break;
+    const nextSize = JSON.stringify(next.issues || []).length;
+    if (sizeSoFar + nextSize > RESPONSE_BUDGET_CHARS) break; // keep pageToken: the browser fetches it next
     issues = issues.concat(next.issues || []);
+    sizeSoFar += nextSize;
     pageToken = next.nextPageToken;
     lastPage = next.isLast;
   }
