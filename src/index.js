@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import { jqlQuote } from './utils/jqlHelpers.js';
 import { stampRunDataV2 } from './utils/runDataContract.js';
+import { compactIssueFields } from './utils/compactIssueFields.js';
 import { parseAutomationComment, mentionsAutomationMarker } from './utils/automationCommentParser.js';
 import { applyExecutionIndexMigrations, getExecutionIndexHealth } from './sql/executionIndexSchema.js';
 import {
@@ -937,37 +938,42 @@ resolver.define('getTestCases', async ({ payload, context }) => {
   // A page is only added if the response stays under RESPONSE_BUDGET_CHARS; otherwise the
   // browser asks for the rest with the returned nextPageToken, exactly as with single pages.
   const RESPONSE_BUDGET_CHARS = 2_500_000;
-  const pagesPerCall = Math.min(5, Math.max(1, Number(payload?.pagesPerCall) || 1));
-  const startedAt = Date.now();
-  let issues = [...(pageData.issues || [])];
-  let pageToken = pageData.nextPageToken;
-  let lastPage = pageData.isLast;
-  let sizeSoFar = JSON.stringify(issues).length;
-  for (let page = 1; page < pagesPerCall && !lastPage && pageToken && Date.now() - startedAt < 12000; page++) {
-    // Estimate the next page from the average page size seen so far.
-    const avgPage = sizeSoFar / page;
-    if (sizeSoFar + avgPage > RESPONSE_BUDGET_CHARS) break;
-    const next = await fetchJqlPage(activeJql, fieldsToFetch, null, ['testops-folder-link'], pageToken, 100);
-    if (next.error) break;
-    const nextSize = JSON.stringify(next.issues || []).length;
-    if (sizeSoFar + nextSize > RESPONSE_BUDGET_CHARS) break; // keep pageToken: the browser fetches it next
-    issues = issues.concat(next.issues || []);
-    sizeSoFar += nextSize;
-    pageToken = next.nextPageToken;
-    lastPage = next.isLast;
-  }
-  pageData = { issues, nextPageToken: pageToken, isLast: lastPage || !pageToken };
-
-  const mapped = pageData.issues.map(issue => ({
+  // Each case is compacted (same shape, without the Jira data no screen uses) BEFORE it is
+  // measured, so the budget counts what is really sent to the browser.
+  const toCase = (issue) => ({
       id: issue.id,
       key: issue.key,
       summary: issue.fields?.summary || '',
       status: issue.fields?.status?.name || '',
       created: issue.fields?.created || '',
       folderId: issue.properties?.['testops-folder-link']?.folderId || null,
-      rawFields: issue.fields || {}
-  }));
-  
+      rawFields: compactIssueFields(issue.fields || {})
+  });
+  const pagesPerCall = Math.min(5, Math.max(1, Number(payload?.pagesPerCall) || 1));
+  const startedAt = Date.now();
+  let mapped = (pageData.issues || []).map(toCase);
+  let pageToken = pageData.nextPageToken;
+  let lastPage = pageData.isLast;
+  let sizeSoFar = JSON.stringify(mapped).length;
+  let pagesInCall = 1;
+  for (let page = 1; page < pagesPerCall && !lastPage && pageToken && Date.now() - startedAt < 12000; page++) {
+    // Estimate the next page from the average page size seen so far.
+    const avgPage = sizeSoFar / page;
+    if (sizeSoFar + avgPage > RESPONSE_BUDGET_CHARS) break;
+    const next = await fetchJqlPage(activeJql, fieldsToFetch, null, ['testops-folder-link'], pageToken, 100);
+    if (next.error) break;
+    const nextCases = (next.issues || []).map(toCase);
+    const nextSize = JSON.stringify(nextCases).length;
+    if (sizeSoFar + nextSize > RESPONSE_BUDGET_CHARS) break; // keep pageToken: the browser fetches it next
+    mapped = mapped.concat(nextCases);
+    sizeSoFar += nextSize;
+    pageToken = next.nextPageToken;
+    lastPage = next.isLast;
+    pagesInCall++;
+  }
+  pageData = { nextPageToken: pageToken, isLast: lastPage || !pageToken };
+  console.log(`[getTestCases] cases=${mapped.length} pages=${pagesInCall} bytes=${sizeSoFar} avgBytesPerCase=${mapped.length ? Math.round(sizeSoFar / mapped.length) : 0}`);
+
   return {
      issues: mapped,
      nextPageToken: pageData.nextPageToken,

@@ -1,11 +1,11 @@
 {
   "name": "jira-project-page-custom-ui",
-  "version": "4.14.1",
+  "version": "4.14.2",
   "main": "index.js",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node --test --experimental-test-module-mocks tests/phase3.test.js tests/authz.behavior.test.js tests/runDataContract.test.js tests/cycleRemoval.test.js tests/automationComments.test.js tests/bugEstimatedDate.test.js",
+    "test": "node --test --experimental-test-module-mocks tests/phase3.test.js tests/authz.behavior.test.js tests/runDataContract.test.js tests/cycleRemoval.test.js tests/automationComments.test.js tests/bugEstimatedDate.test.js tests/compactIssueFields.test.js",
     "build": "npm --prefix static/hello-world run build",
     "deploy": "forge deploy --non-interactive",
     "deploy:prod": "forge deploy -e production --non-interactive"
