@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.14.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.15.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -527,6 +527,9 @@ function App() {
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [folderSearchQuery, setFolderSearchQuery] = useState('');
   const [selectedDesignTestIds, setSelectedDesignTestIds] = useState(new Set());
+  // Jira's native "Delete issues" permission in the selected project: shows the permanent
+  // delete actions for Test Cases (Design) and cycles (Planning).
+  const [canDeleteIssues, setCanDeleteIssues] = useState(false);
   const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
   const [pointerDragState, setPointerDragState] = useState(null);
   const [dragOverFolderId, setDragOverFolderId] = useState(null);
@@ -1231,6 +1234,14 @@ function App() {
         : { testCaseType: 'Test Case', testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
       const projectTypes = issueTypesRes.status === 'fulfilled' ? (issueTypesRes.value || []) : [];
       setIsAdmin(adminVal);
+      if (boot && boot.permissions) {
+        setCanDeleteIssues(Boolean(boot.permissions.ok && boot.permissions.value?.canDelete));
+      } else {
+        setCanDeleteIssues(false);
+        invoke('getMyProjectPermissions', { projectId: targetProjectId })
+          .then(p => setCanDeleteIssues(Boolean(p?.canDelete)))
+          .catch(() => setCanDeleteIssues(false));
+      }
       setProjectConfig(config);
       setProjectIssueTypes(projectTypes);
       loadTraceabilityHierarchy(targetProjectId, config);
@@ -3595,6 +3606,25 @@ Then el sistema valida la identidad.
                     <option value="__ROOT__" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz)</option>
                     {folderPaths.map(f => <option key={f.id} value={f.id} style={{ color: '#000' }}>📁 {f.path}</option>)}
                   </select>
+                  {canDeleteIssues && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTestCases(Array.from(selectedDesignTestIds))}
+                      title="Eliminar permanentemente de Jira los casos seleccionados (requiere el permiso Borrar issues)"
+                      style={{
+                        background: '#C9372C',
+                        border: 'none',
+                        color: '#FFFFFF',
+                        cursor: 'pointer',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        padding: '0.35rem 0.7rem',
+                        borderRadius: '4px'
+                      }}
+                    >
+                      🗑 Eliminar de Jira
+                    </button>
+                  )}
                   <button
                     onClick={() => setSelectedDesignTestIds(new Set())}
                     style={{
@@ -5971,6 +6001,86 @@ Then el sistema valida la identidad.
     }
   };
 
+  // Permanently deletes Test Cases from Jira (Design module). Their NOT executed Test Runs are
+  // deleted too; executed ones are kept as history. Requires Jira's "Delete issues" permission.
+  const handleDeleteTestCases = (ids) => {
+    const idList = Array.from(new Set((ids || []).map(String)));
+    if (idList.length === 0 || !selectedProjectId) return;
+    const names = idList.slice(0, 5).map(id => testCases.find(t => String(t.id) === id)?.key || id).join(', ');
+    const plural = idList.length !== 1;
+    showConfirm(
+      plural ? `Eliminar ${idList.length} casos de Jira` : 'Eliminar caso de Jira',
+      `Se eliminarán permanentemente de Jira: ${names}${idList.length > 5 ? '…' : ''}.\n\n` +
+      'También se eliminan sus Test Runs que nunca se ejecutaron. Los Test Runs ya ejecutados se conservan con sus resultados y evidencias.\n\n' +
+      'Esta acción no se puede deshacer.',
+      async () => {
+        let pending = idList;
+        const deleted = [];
+        const failed = [];
+        try {
+          for (let round = 0; round < 40 && pending.length > 0; round++) {
+            const res = await invoke('deleteTestCases', { projectId: selectedProjectId, testCaseIds: pending });
+            (res?.results || []).forEach(r => (r.ok ? deleted : failed).push(r));
+            pending = res?.remaining || [];
+          }
+          const deletedIds = new Set(deleted.map(r => String(r.id)));
+          setTestCases(prev => prev.filter(t => !deletedIds.has(String(t.id))));
+          setSelectedDesignTestIds(new Set());
+          if (selectedTestCase && deletedIds.has(String(selectedTestCase.id))) setSelectedTestCase(null);
+          clearPersistentCache();
+          queryClient.invalidateQueries();
+          addNotification(failed.length > 0
+            ? { type: 'warning', title: `Se eliminaron ${deleted.length} de ${idList.length} casos`, description: failed.map(f => `${f.key || f.id}: ${f.reason}`).join(' · ') }
+            : { type: 'success', title: plural ? `${deleted.length} casos eliminados de Jira` : 'Caso eliminado de Jira' });
+        } catch (e) {
+          addNotification({ type: 'error', title: 'No se pudieron eliminar los casos', description: e?.message || String(e) });
+        }
+      },
+      { danger: true, confirmLabel: 'Eliminar de Jira' }
+    );
+  };
+
+  // Permanently deletes a cycle (Planning). NOT executed runs are deleted; executed runs are
+  // unlinked and kept. Requires Jira's "Delete issues" permission.
+  const handleDeleteCycle = (cycleId) => {
+    const cycle = testCycles.find(c => String(c.id) === String(cycleId));
+    if (!cycle || !selectedProjectId) return;
+    showConfirm(
+      'Eliminar ciclo de Jira',
+      `Se eliminará permanentemente el ciclo ${cycle.key} "${cycle.summary}".\n\n` +
+      'También se eliminan sus Test Runs que nunca se ejecutaron. Los Test Runs ya ejecutados se conservan, sin ciclo, con sus resultados y evidencias.\n\n' +
+      'Esta acción no se puede deshacer.',
+      async () => {
+        setLocalLoading(true);
+        try {
+          let res = null;
+          for (let round = 0; round < 40; round++) {
+            res = await invoke('deleteTestCycle', { projectId: selectedProjectId, cycleId: String(cycleId) });
+            if (!res?.partial) break;
+          }
+          if (res?.deleted) {
+            setTestCycles(prev => prev.filter(c => String(c.id) !== String(cycleId)));
+            if (selectedCycle && String(selectedCycle.id) === String(cycleId)) setSelectedCycle(null);
+            clearPersistentCache();
+            queryClient.invalidateQueries();
+            addNotification({
+              type: 'success',
+              title: `Ciclo ${cycle.key} eliminado de Jira`,
+              description: res.keptRuns > 0 ? `${res.keptRuns} ejecucion(es) con resultados se conservaron como historial.` : undefined
+            });
+          } else {
+            addNotification({ type: 'error', title: 'No se pudo eliminar el ciclo', description: res?.reason || 'Intenta de nuevo.' });
+          }
+        } catch (e) {
+          addNotification({ type: 'error', title: 'No se pudo eliminar el ciclo', description: e?.message || String(e) });
+        } finally {
+          setLocalLoading(false);
+        }
+      },
+      { danger: true, confirmLabel: 'Eliminar ciclo' }
+    );
+  };
+
   const handleUnlinkCycleFromPlan = async (cycleId) => {
     setLocalLoading(true);
     setTestCycles(prev => prev.map(c => c.id === cycleId ? { ...c, planId: null } : c));
@@ -7663,7 +7773,7 @@ Then el sistema valida la identidad.
 
   const renderPlanningTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Planning..." />}>
-      <PlanningView ctx={{ activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
+      <PlanningView ctx={{ activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 

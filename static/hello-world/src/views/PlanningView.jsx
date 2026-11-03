@@ -65,6 +65,8 @@ export default function PlanningView({ ctx }) {
     handleSaveCycleSchedule,
     handleSavePlanSchedule,
     handleUnlinkCycleFromPlan,
+    handleDeleteCycle,
+    canDeleteIssues,
     isAddingAll,
     isAdmin,
     isCycleInPlan,
@@ -663,6 +665,25 @@ export default function PlanningView({ ctx }) {
                                   }}
                                 >
                                   ×
+                                </button>
+                              )}
+                              {canDeleteIssues && (
+                                <button
+                                  type="button"
+                                  onClick={e => { e.stopPropagation(); handleDeleteCycle(cycle.id); }}
+                                  title="Eliminar este ciclo de Jira (permanente)"
+                                  aria-label={`Eliminar ciclo ${cycle.key}`}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: '#C9372C',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                    padding: '0 2px',
+                                    lineHeight: 1
+                                  }}
+                                >
+                                  🗑
                                 </button>
                               )}
                             </div>

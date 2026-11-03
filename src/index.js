@@ -6490,6 +6490,180 @@ resolver.define('getExecutionIndexHealth', async ({ payload, context }) => {
 });
 
 // ==========================================
+// PERMANENT DELETION OF TEST CASES AND CYCLES (v4.15.0)
+// ==========================================
+// Rules agreed with QA leads:
+//   - Only users with Jira's native "Delete issues" permission in the project may delete
+//     (checked here, and Jira checks it again because every DELETE runs as the user).
+//   - Deleting a Test Case or a cycle also deletes its NOT executed Test Runs.
+//   - EXECUTED Test Runs (status, evidences, comments, iterations or bugs) are kept as history:
+//     they carry their own snapshot of the case, so their results and evidences stay in Jira.
+// Deletion in Jira is permanent (no recycle bin); the page always asks for confirmation first.
+
+/** Same rule the cycle removal uses to decide whether a Test Run holds an execution. */
+function isRunExecuted(run) {
+  const prop = run?.properties?.['testpulse-run-data'] || {};
+  const normStatus = normalizeJiraStatus(run?.fields?.status?.name || prop.status || 'Not Run');
+  return (normStatus !== 'Not Run' && normStatus !== 'To Do') ||
+    (run?.fields?.attachment || []).length > 0 ||
+    (prop.evidences || []).length > 0 ||
+    Boolean(prop.comment && String(prop.comment).trim()) ||
+    (prop.iterations || []).length > 0 ||
+    Boolean(prop.executedBy) || Boolean(prop.executedAt) ||
+    (prop.linkedBugs || []).length > 0;
+}
+
+/** Throws FORBIDDEN unless the user has Jira's "Delete issues" permission in the project. */
+async function requireDeletePermission(projectId) {
+  const perms = await getProjectActionPermissions(projectId);
+  if (!perms.canDelete) {
+    throw new AuthorizationError('FORBIDDEN', 'Solo quien tiene el permiso "Borrar issues" de Jira en este proyecto puede eliminar.');
+  }
+  return perms;
+}
+
+/** Deletes one issue as the user. Returns true when Jira confirms it. */
+async function deleteIssueAsUser(issueId) {
+  const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?deleteSubtasks=true`, { method: 'DELETE' }).catch(() => null);
+  return Boolean(res && (res.status === 204 || res.ok));
+}
+
+/** Test Runs linked to `issueKey` (a Test Case or a cycle), with their run data. */
+async function findLinkedTestRuns(issueKey, belongsTo) {
+  const issues = await fetchAllIssues(
+    `issue in linkedIssues(${jqlQuote(issueKey)})`,
+    ['summary', 'status', 'attachment', 'issuelinks'],
+    null,
+    ['testpulse-run-data'],
+    10
+  );
+  return (issues || []).filter(r => {
+    const prop = r.properties?.['testpulse-run-data'] || {};
+    const isRun = Boolean(prop.testCaseId || prop.testCaseKey) || /^\[Run\]/i.test(r.fields?.summary || '');
+    return isRun && belongsTo(r, prop);
+  });
+}
+
+/** What the page needs to show or hide the delete actions. */
+resolver.define('getMyProjectPermissions', async ({ payload }) => {
+  return getProjectActionPermissions(payload?.projectId);
+});
+
+/**
+ * Permanently deletes Test Cases from Jira (Design module), with their NOT executed Test Runs.
+ * Works in ~18 s slices: returns `remaining` ids for the page to send again.
+ */
+resolver.define('deleteTestCases', async ({ payload }) => {
+  const { projectId } = payload || {};
+  const ids = Array.from(new Set((payload?.testCaseIds || []).map(String).filter(Boolean)));
+  if (ids.length === 0) return { results: [], remaining: [] };
+  await requireDeletePermission(projectId);
+
+  const deadlineAt = Date.now() + 18000;
+  const results = [];
+  const remaining = [];
+  const deletedRunsByCycle = new Map();
+
+  for (const id of ids) {
+    if (Date.now() > deadlineAt) { remaining.push(id); continue; }
+    const tc = await getIssueVisibleToUser(id);
+    if (!tc) { results.push({ id, ok: false, reason: 'No existe o no tienes acceso' }); continue; }
+
+    let deletedRuns = 0;
+    let keptRuns = 0;
+    const runs = await findLinkedTestRuns(tc.key, (r, prop) =>
+      String(prop.testCaseId || '') === tc.id ||
+      String(prop.testCaseKey || '').toUpperCase() === tc.key ||
+      new RegExp(`^\\[Run\\]\\s*${tc.key}:`, 'i').test(r.fields?.summary || '')
+    );
+    for (const run of runs) {
+      const prop = run.properties?.['testpulse-run-data'] || {};
+      if (!isRunExecuted(run)) {
+        if (await deleteIssueAsUser(run.id)) {
+          deletedRuns++;
+          const cycleId = prop.activeCycleId || prop.cycleId;
+          if (cycleId) {
+            if (!deletedRunsByCycle.has(String(cycleId))) deletedRunsByCycle.set(String(cycleId), new Set());
+            deletedRunsByCycle.get(String(cycleId)).add(String(run.id));
+          }
+        }
+      } else {
+        // Keep the execution; record that its Test Case no longer exists.
+        keptRuns++;
+        await api.asUser().requestJira(route`/rest/api/3/issue/${run.id}/properties/testpulse-run-data`, {
+          method: 'PUT',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(stampRunDataV2({ ...prop, testCaseDeleted: true, testCaseDeletedAt: Date.now() }, projectId))
+        }).catch(() => {});
+      }
+    }
+
+    const ok = await deleteIssueAsUser(tc.id);
+    results.push({ id, key: tc.key, ok, deletedRuns, keptRuns, reason: ok ? null : 'Jira rechazó el borrado' });
+  }
+
+  // Take the deleted (never executed) runs out of each affected cycle index.
+  for (const [cycleId, runIds] of deletedRunsByCycle) {
+    await updateLightweightIndex(cycleId, (lw) => lw.filter(e => !runIds.has(String(e.testRunId || '')))).catch(() => {});
+  }
+  await invalidateProjectReportCache(projectId || null);
+  console.log(`[delete] testCases project=${projectId} ok=${results.filter(r => r.ok).length} failed=${results.filter(r => !r.ok).length} remaining=${remaining.length}`);
+  return { results, remaining };
+});
+
+/**
+ * Permanently deletes a cycle: NOT executed runs are deleted, executed runs are unlinked and
+ * kept as history, then the cycle issue itself is deleted. Works in ~18 s slices: while
+ * `deleted` is false, the page calls again (each call continues where the previous stopped).
+ */
+resolver.define('deleteTestCycle', async ({ payload }) => {
+  const { projectId, cycleId } = payload || {};
+  if (!cycleId) return { deleted: false, reason: 'Falta el ciclo' };
+  await requireDeletePermission(projectId);
+  const cycle = await getIssueVisibleToUser(cycleId);
+  if (!cycle) return { deleted: false, reason: 'El ciclo no existe o no tienes acceso' };
+
+  const deadlineAt = Date.now() + 18000;
+  const runs = await findLinkedTestRuns(cycle.key, () => true);
+  let deletedRuns = 0;
+  let keptRuns = 0;
+  let pending = 0;
+
+  for (const run of runs) {
+    if (Date.now() > deadlineAt) { pending++; continue; }
+    const prop = run.properties?.['testpulse-run-data'] || {};
+    if (!isRunExecuted(run)) {
+      if (await deleteIssueAsUser(run.id)) deletedRuns++;
+      else pending++;
+    } else {
+      keptRuns++;
+      await unlinkIssueFromCycle(run.id, cycle.id, run.fields?.issuelinks);
+      await api.asUser().requestJira(route`/rest/api/3/issue/${run.id}/properties/testpulse-run-data`, {
+        method: 'PUT',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(stampRunDataV2({
+          ...prop,
+          cycleId: String(cycle.id),
+          unlinkedFromCycle: true,
+          unlinkedAt: Date.now(),
+          cycleDeleted: true
+        }, projectId))
+      }).catch(() => {});
+    }
+  }
+
+  if (pending > 0) {
+    return { deleted: false, partial: true, deletedRuns, keptRuns, remainingRuns: pending };
+  }
+  const deleted = await deleteIssueAsUser(cycle.id);
+  await invalidateProjectReportCache(projectId || null);
+  console.log(`[delete] cycle ${cycle.key} deleted=${deleted} runsDeleted=${deletedRuns} runsKept=${keptRuns}`);
+  return deleted
+    ? { deleted: true, key: cycle.key, deletedRuns, keptRuns }
+    : { deleted: false, reason: 'Jira rechazó el borrado del ciclo', deletedRuns, keptRuns };
+});
+
+// ==========================================
 // PROJECT BOOTSTRAP (one call to open a project)
 // ==========================================
 /**
@@ -6524,17 +6698,18 @@ resolver.define('getProjectBootstrap', async ({ payload, context }) => {
   const isAdmin = admin.ok && admin.value === true;
 
   // A disabled project only needs the "disabled" screen, unless the user can re-enable it.
-  let folders = null, plans = null, cycles = null, reportAutomation = null;
+  let folders = null, plans = null, cycles = null, reportAutomation = null, permissions = null;
   if (isAllowed || isAdmin) {
-    [folders, plans, cycles, reportAutomation] = await Promise.all([
+    [folders, plans, cycles, reportAutomation, permissions] = await Promise.all([
       call('getFolders'),
       call('getTestPlans', { config: cfg, projectIssueTypes: types }),
       call('getTestCycles', { config: cfg, projectIssueTypes: types }),
-      call('getReportAutomationConfig')
+      call('getReportAutomationConfig'),
+      call('getMyProjectPermissions')
     ]);
   }
 
-  return { allowed, admin, config, issueTypes, folders, plans, cycles, reportAutomation };
+  return { allowed, admin, config, issueTypes, folders, plans, cycles, reportAutomation, permissions };
 });
 
 export const handler = resolver.getDefinitions();

@@ -297,6 +297,8 @@ const TP_MUTATION_RESOLVERS = new Set([
   'setAllowedProjects',
   'resyncTestRunsBatch',
   'deleteProjectEntity',
+  'deleteTestCases',
+  'deleteTestCycle',
 ]);
 
 // Selective cache invalidation: preserves immutable catalogs & unrelated modules to prevent post-mutation JQL storms
