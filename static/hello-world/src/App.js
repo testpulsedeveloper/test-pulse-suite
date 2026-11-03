@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.15.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.16.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -531,6 +531,8 @@ function App() {
   // delete actions for Test Cases (Design) and cycles (Planning).
   const [canDeleteIssues, setCanDeleteIssues] = useState(false);
   const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
+  // Folder being dragged in the tree (moves the folder with its subfolders and cases).
+  const [draggedFolderId, setDraggedFolderId] = useState(null);
   const [pointerDragState, setPointerDragState] = useState(null);
   const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const [designTypeFilter, setDesignTypeFilter] = useState('all'); // 'all' | 'automated' | 'manual'
@@ -2629,6 +2631,11 @@ Then el sistema valida la identidad.
                   e.preventDefault();
                   e.stopPropagation();
                   setDragOverFolderId(null);
+                  if (draggedFolderId) {
+                    handleMoveFolder(draggedFolderId, null);
+                    setDraggedFolderId(null);
+                    return;
+                  }
                   let idsToMove = draggedDesignTestIds;
                   try {
                     const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
@@ -2730,6 +2737,15 @@ Then el sistema valida la identidad.
                           data-folder-id={folder.id}
                           className={`folder-tree-row ${isActive ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''}`}
                           onClick={() => setActiveFolder(folder.id)}
+                          draggable
+                          title="Arrastra la carpeta para moverla con sus subcarpetas y casos"
+                          onDragStart={(e) => {
+                            e.stopPropagation();
+                            setDraggedFolderId(folder.id);
+                            e.dataTransfer.effectAllowed = 'move';
+                            try { e.dataTransfer.setData('application/x-tp-folder', String(folder.id)); } catch (_) {}
+                          }}
+                          onDragEnd={() => { setDraggedFolderId(null); setDragOverFolderId(null); }}
                           onDragEnter={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -2751,6 +2767,11 @@ Then el sistema valida la identidad.
                             e.preventDefault();
                             e.stopPropagation();
                             setDragOverFolderId(null);
+                            if (draggedFolderId) {
+                              if (String(draggedFolderId) !== String(folder.id)) handleMoveFolder(draggedFolderId, folder.id);
+                              setDraggedFolderId(null);
+                              return;
+                            }
                             let idsToMove = draggedDesignTestIds;
                             try {
                               const dataStr = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
@@ -3303,6 +3324,46 @@ Then el sistema valida la identidad.
                 {selectedDesignTestIds.size} seleccionados
               </span>
             )}
+            {/* Selection actions live here (the floating bar was removed: it clipped its buttons).
+                Moving to another folder is done by dragging the cases onto a folder. */}
+            {selectedDesignTestIds.size > 0 && canDeleteIssues && (
+              <button
+                type="button"
+                onClick={() => handleDeleteTestCases(Array.from(selectedDesignTestIds))}
+                title="Eliminar permanentemente de Jira los casos seleccionados (requiere el permiso Borrar issues)"
+                style={{
+                  background: '#C9372C',
+                  border: 'none',
+                  color: '#FFFFFF',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                🗑 Eliminar de Jira
+              </button>
+            )}
+            {selectedDesignTestIds.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedDesignTestIds(new Set())}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-secondary, #626F86)',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  textDecoration: 'underline',
+                  padding: '2px 4px',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                Desmarcar
+              </button>
+            )}
           </div>
 
           {/* Type Filter Buttons & Sort Dropdown */}
@@ -3554,94 +3615,6 @@ Then el sistema valida la identidad.
               )}
             </div>
 
-            {/* Floating Batch Actions Bar */}
-            {selectedDesignTestIds.size > 0 && (
-              <div className="batch-floating-bar" style={{
-                position: 'sticky',
-                bottom: '10px',
-                margin: '10px auto 0 auto',
-                maxWidth: '650px',
-                width: '100%',
-                backgroundColor: 'var(--jira-navy, #091E42)',
-                color: '#FFFFFF',
-                borderRadius: '8px',
-                padding: '0.6rem 1.25rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                boxShadow: '0 4px 14px rgba(9, 30, 66, 0.35)',
-                zIndex: 40,
-                gap: '1rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span className="ads-lozenge ads-lozenge-brand" style={{ background: '#0C66E4', color: '#FFFFFF', border: 'none', borderRadius: '9999px', fontSize: '11px', padding: '2px 8px' }}>
-                    {selectedDesignTestIds.size} seleccionados
-                  </span>
-                  <span style={{ fontSize: '0.8rem', color: '#B3B9C4' }}>Acciones en lote disponibles</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <select
-                    onChange={(e) => {
-                      if (e.target.value !== '') {
-                        const targetFolder = e.target.value === '__ROOT__' ? null : e.target.value;
-                        const targetFolderName = targetFolder ? (folders.find(f => f.id === targetFolder)?.name || 'Carpeta') : 'Sin Carpeta (Raíz)';
-                        handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), targetFolder, targetFolderName);
-                        setSelectedDesignTestIds(new Set());
-                        e.target.value = '';
-                      }
-                    }}
-                    defaultValue=""
-                    style={{
-                      fontSize: '0.75rem',
-                      padding: '0.35rem 0.6rem',
-                      borderRadius: '4px',
-                      border: '1px solid rgba(255,255,255,0.2)',
-                      background: 'rgba(255,255,255,0.1)',
-                      color: '#FFFFFF',
-                      cursor: 'pointer',
-                      outline: 'none'
-                    }}
-                  >
-                    <option value="" disabled style={{ color: '#000' }}>📁 Mover a carpeta...</option>
-                    <option value="__ROOT__" style={{ color: '#000' }}>📁 Sin Carpeta (Raíz)</option>
-                    {folderPaths.map(f => <option key={f.id} value={f.id} style={{ color: '#000' }}>📁 {f.path}</option>)}
-                  </select>
-                  {canDeleteIssues && (
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteTestCases(Array.from(selectedDesignTestIds))}
-                      title="Eliminar permanentemente de Jira los casos seleccionados (requiere el permiso Borrar issues)"
-                      style={{
-                        background: '#C9372C',
-                        border: 'none',
-                        color: '#FFFFFF',
-                        cursor: 'pointer',
-                        fontSize: '0.75rem',
-                        fontWeight: 600,
-                        padding: '0.35rem 0.7rem',
-                        borderRadius: '4px'
-                      }}
-                    >
-                      🗑 Eliminar de Jira
-                    </button>
-                  )}
-                  <button
-                    onClick={() => setSelectedDesignTestIds(new Set())}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#B3B9C4',
-                      cursor: 'pointer',
-                      fontSize: '0.78rem',
-                      padding: '0.3rem 0.5rem',
-                      textDecoration: 'underline'
-                    }}
-                  >
-                    Desmarcar
-                  </button>
-                </div>
-              </div>
-            )}
 
             {/* Design Tab Footer: Automation Health & Pagination */}
             <div style={{
@@ -5019,6 +4992,42 @@ Then el sistema valida la identidad.
     setTestCases(prev => prev.map(t => t.id === testId ? { ...t, folderId: folderId === '' ? null : folderId } : t));
     
     await invoke('linkTestToFolder', { testId, folderId: folderId === '' ? null : folderId });
+  };
+
+  // True when `folderId` is `ancestorId` itself or one of its descendants.
+  const isSameOrDescendantFolder = (folderId, ancestorId) => {
+    let cur = folderId ? String(folderId) : null;
+    for (let hops = 0; cur && hops <= folders.length; hops++) {
+      if (cur === String(ancestorId)) return true;
+      cur = folders.find(f => String(f.id) === cur)?.parentId || null;
+      cur = cur ? String(cur) : null;
+    }
+    return false;
+  };
+
+  // Moves a folder under another one (or to the root when newParentId is null). Cases keep
+  // their folder id, so they move with it. Optimistic update, reverted if the server refuses.
+  const handleMoveFolder = async (folderId, newParentId) => {
+    if (!folderId || !selectedProjectId) return;
+    const moving = folders.find(f => String(f.id) === String(folderId));
+    if (!moving) return;
+    if (String(moving.parentId || '') === String(newParentId || '')) return;
+    if (newParentId && isSameOrDescendantFolder(newParentId, folderId)) {
+      addNotification({ type: 'warning', title: 'Movimiento no permitido', description: 'Una carpeta no puede ir dentro de sí misma ni de una de sus subcarpetas.' });
+      return;
+    }
+    const previous = folders;
+    setFolders(prev => prev.map(f => (String(f.id) === String(folderId) ? { ...f, parentId: newParentId || null } : f)));
+    if (newParentId) setExpandedFolders(prev => ({ ...prev, [newParentId]: true }));
+    try {
+      const updated = await invoke('moveFolder', { projectId: selectedProjectId, folderId, newParentId: newParentId || null });
+      if (Array.isArray(updated)) setFolders(updated);
+      const targetName = newParentId ? (folders.find(f => String(f.id) === String(newParentId))?.name || 'carpeta') : 'la raíz';
+      addNotification({ type: 'success', title: 'Carpeta movida', description: `"${moving.name}" ahora está en ${newParentId ? `"${targetName}"` : targetName}, con sus subcarpetas y casos.` });
+    } catch (err) {
+      setFolders(previous);
+      addNotification({ type: 'error', title: 'No se pudo mover la carpeta', description: err?.message || String(err) });
+    }
   };
 
   const handleBatchLinkTestsToFolder = async (testIds, folderId, folderName) => {

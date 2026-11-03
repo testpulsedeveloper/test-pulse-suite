@@ -106,6 +106,37 @@ export function registerFolderResolvers(resolver) {
     return updatedFolders;
   });
 
+  /**
+   * Moves a folder (with its subfolders and cases) under another folder, or to the root when
+   * `newParentId` is null. Cases follow automatically: they point to their folder id, and only
+   * the folder's `parentId` changes. Moving a folder into itself or one of its own subfolders
+   * is refused, because it would cut that branch off the tree.
+   */
+  resolver.define('moveFolder', async ({ payload }) => {
+    const { projectId, folderId } = payload || {};
+    const newParentId = payload?.newParentId || null;
+    // Any user with project access can reorganise folders (same rule as create/rename)
+    await verifyProjectBrowseAccess(projectId);
+    const folders = await getProjectFolders(projectId);
+    const byId = new Map(folders.map(f => [String(f.id), f]));
+    const moving = byId.get(String(folderId));
+    if (!moving) throw new Error('La carpeta que intentas mover ya no existe.');
+    if (newParentId && !byId.has(String(newParentId))) throw new Error('La carpeta destino ya no existe.');
+    if (String(moving.parentId || '') === String(newParentId || '')) return folders;
+
+    // Walk up from the destination: reaching the moving folder means it is a descendant.
+    for (let cur = newParentId ? String(newParentId) : null, hops = 0; cur && hops <= folders.length; hops++) {
+      if (cur === String(folderId)) {
+        throw new Error('No puedes mover una carpeta dentro de sí misma ni de una de sus subcarpetas.');
+      }
+      cur = byId.get(cur)?.parentId ? String(byId.get(cur).parentId) : null;
+    }
+
+    const updated = folders.map(f => (String(f.id) === String(folderId) ? { ...f, parentId: newParentId } : f));
+    await setProjectFolders(projectId, updated);
+    return updated;
+  });
+
   resolver.define('deleteFolder', async ({ payload, context }) => {
     const { projectId, folderId } = payload;
     // Only admins of this project (or Test Pulse superusers) may delete repository folders

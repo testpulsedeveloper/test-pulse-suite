@@ -32,7 +32,7 @@ test('backend: only NOT executed runs are deleted; executed runs are kept and fl
 });
 
 test('frontend: actions only with the permission, always behind a danger confirmation', () => {
-  assert.ok(app.includes('{canDeleteIssues && ('), 'Design delete button gated by permission');
+  assert.ok(app.includes('{selectedDesignTestIds.size > 0 && canDeleteIssues && ('), 'Design delete button gated by permission');
   assert.ok(planning.includes('{canDeleteIssues && ('), 'cycle delete button gated by permission');
   assert.ok(app.includes("{ danger: true, confirmLabel: 'Eliminar de Jira' }"));
   assert.ok(app.includes("{ danger: true, confirmLabel: 'Eliminar ciclo' }"));
