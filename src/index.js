@@ -6564,10 +6564,12 @@ resolver.define('deleteTestCases', async ({ payload }) => {
   const remaining = [];
   const deletedRunsByCycle = new Map();
 
-  for (const id of ids) {
-    if (Date.now() > deadlineAt) { remaining.push(id); continue; }
+  // Three cases at a time (each needs ~3 Jira calls); cases not started before the deadline
+  // are returned in `remaining` for the page to send again.
+  await mapWithConcurrency(ids, 3, async (id) => {
+    if (Date.now() > deadlineAt) { remaining.push(id); return; }
     const tc = await getIssueVisibleToUser(id);
-    if (!tc) { results.push({ id, ok: false, reason: 'No existe o no tienes acceso' }); continue; }
+    if (!tc) { results.push({ id, ok: false, reason: 'No existe o no tienes acceso' }); return; }
 
     let deletedRuns = 0;
     let keptRuns = 0;
@@ -6600,7 +6602,7 @@ resolver.define('deleteTestCases', async ({ payload }) => {
 
     const ok = await deleteIssueAsUser(tc.id);
     results.push({ id, key: tc.key, ok, deletedRuns, keptRuns, reason: ok ? null : 'Jira rechazó el borrado' });
-  }
+  });
 
   // Take the deleted (never executed) runs out of each affected cycle index.
   for (const [cycleId, runIds] of deletedRunsByCycle) {

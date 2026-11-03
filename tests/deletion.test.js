@@ -32,10 +32,17 @@ test('backend: only NOT executed runs are deleted; executed runs are kept and fl
 });
 
 test('frontend: actions only with the permission, always behind a danger confirmation', () => {
-  assert.ok(app.includes('{selectedDesignTestIds.size > 0 && canDeleteIssues && ('), 'Design delete button gated by permission');
+  assert.ok(app.includes('{selectedDesignTestIds.size > 0 && canDeleteIssues && !deleteProgress && ('), 'Design delete button gated by permission');
   assert.ok(planning.includes('{canDeleteIssues && ('), 'cycle delete button gated by permission');
   assert.ok(app.includes("{ danger: true, confirmLabel: 'Eliminar de Jira' }"));
   assert.ok(app.includes("{ danger: true, confirmLabel: 'Eliminar ciclo' }"));
   assert.ok(app.includes('Esta acción no se puede deshacer.'));
   assert.ok(src.includes("call('getMyProjectPermissions')"), 'permission arrives with the project bootstrap');
+});
+
+test('v4.16.1: deletion shows progress, removes cases as they go and works 3 cases at a time', () => {
+  assert.ok(src.includes('await mapWithConcurrency(ids, 3, async (id) => {'));
+  assert.ok(app.includes('Eliminando de Jira: {deleteProgress.done} de {deleteProgress.total}…'));
+  assert.ok(app.includes('setTestCases(prev => prev.filter(t => !doneIds.has(String(t.id))));'));
+  assert.ok(app.includes('setDeleteProgress(null);'), 'progress cleared at the end, even on error');
 });

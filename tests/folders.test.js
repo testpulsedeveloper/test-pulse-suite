@@ -65,7 +65,7 @@ test('missing folders are reported', async () => {
 test('UI: no floating bar, selection actions inline, folders draggable', () => {
   const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
   assert.ok(!app.includes('className="batch-floating-bar"'), 'floating bar removed');
-  assert.ok(app.includes('{selectedDesignTestIds.size > 0 && canDeleteIssues && ('), 'delete action next to the selection counter');
+  assert.ok(app.includes('{selectedDesignTestIds.size > 0 && canDeleteIssues && !deleteProgress && ('), 'delete action next to the selection counter');
   assert.ok(app.includes("e.dataTransfer.setData('application/x-tp-folder', String(folder.id))"));
   assert.ok(app.includes('handleMoveFolder(draggedFolderId, folder.id)') && app.includes('handleMoveFolder(draggedFolderId, null)'));
 });

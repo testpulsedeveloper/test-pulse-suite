@@ -42,7 +42,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.16.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.16.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -530,6 +530,8 @@ function App() {
   // Jira's native "Delete issues" permission in the selected project: shows the permanent
   // delete actions for Test Cases (Design) and cycles (Planning).
   const [canDeleteIssues, setCanDeleteIssues] = useState(false);
+  // Progress of a running "Eliminar de Jira" ({ done, total } | null), shown next to the selection.
+  const [deleteProgress, setDeleteProgress] = useState(null);
   const [draggedDesignTestIds, setDraggedDesignTestIds] = useState(null);
   // Folder being dragged in the tree (moves the folder with its subfolders and cases).
   const [draggedFolderId, setDraggedFolderId] = useState(null);
@@ -3326,7 +3328,15 @@ Then el sistema valida la identidad.
             )}
             {/* Selection actions live here (the floating bar was removed: it clipped its buttons).
                 Moving to another folder is done by dragging the cases onto a folder. */}
-            {selectedDesignTestIds.size > 0 && canDeleteIssues && (
+            {deleteProgress && (
+              <span
+                role="status"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#C9372C', background: '#FFECEB', borderRadius: '9999px', padding: '3px 10px', whiteSpace: 'nowrap' }}
+              >
+                <Spinner size="small" /> Eliminando de Jira: {deleteProgress.done} de {deleteProgress.total}…
+              </span>
+            )}
+            {selectedDesignTestIds.size > 0 && canDeleteIssues && !deleteProgress && (
               <button
                 type="button"
                 onClick={() => handleDeleteTestCases(Array.from(selectedDesignTestIds))}
@@ -6026,14 +6036,21 @@ Then el sistema valida la identidad.
         let pending = idList;
         const deleted = [];
         const failed = [];
+        setDeleteProgress({ done: 0, total: idList.length });
         try {
           for (let round = 0; round < 40 && pending.length > 0; round++) {
             const res = await invoke('deleteTestCases', { projectId: selectedProjectId, testCaseIds: pending });
             (res?.results || []).forEach(r => (r.ok ? deleted : failed).push(r));
             pending = res?.remaining || [];
+            // Show progress and take the deleted cases off the list as each slice finishes.
+            const doneIds = new Set((res?.results || []).filter(r => r.ok).map(r => String(r.id)));
+            if (doneIds.size > 0) {
+              setTestCases(prev => prev.filter(t => !doneIds.has(String(t.id))));
+              setSelectedDesignTestIds(prev => new Set([...prev].filter(id => !doneIds.has(String(id)))));
+            }
+            setDeleteProgress({ done: deleted.length + failed.length, total: idList.length });
           }
           const deletedIds = new Set(deleted.map(r => String(r.id)));
-          setTestCases(prev => prev.filter(t => !deletedIds.has(String(t.id))));
           setSelectedDesignTestIds(new Set());
           if (selectedTestCase && deletedIds.has(String(selectedTestCase.id))) setSelectedTestCase(null);
           clearPersistentCache();
@@ -6043,6 +6060,8 @@ Then el sistema valida la identidad.
             : { type: 'success', title: plural ? `${deleted.length} casos eliminados de Jira` : 'Caso eliminado de Jira' });
         } catch (e) {
           addNotification({ type: 'error', title: 'No se pudieron eliminar los casos', description: e?.message || String(e) });
+        } finally {
+          setDeleteProgress(null);
         }
       },
       { danger: true, confirmLabel: 'Eliminar de Jira' }
