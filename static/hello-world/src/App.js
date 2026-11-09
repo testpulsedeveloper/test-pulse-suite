@@ -22,6 +22,8 @@ import {
   formatBugCreatedDate,
   formatBugAge
 } from './utils/constants';
+// v4.16.2: keeps the overall status a tester chooses when iterations change or Stop is pressed.
+import { calculateOverallStatus, resolveStatusAfterIterationChange } from './utils/executionStatus';
 import { textToAdf, sanitizeRenderedHtml, adfToHtml, fetchAttachmentBlobData } from './utils/adfUtils';
 import {
   RichTextEditor,
@@ -42,7 +44,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.16.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.16.2'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -5064,9 +5066,31 @@ Then el sistema valida la identidad.
     }
   };
 
+  /**
+   * Updates one test of the selected cycle in BOTH the React state (`cycleTests`) and the
+   * per-cycle cache (`perCycleCacheRef`), which the execution handlers read.
+   *
+   * @param {string|number} testId
+   * @param {(test: Object) => Object} patchFn - Returns the fields to merge into the test.
+   */
+  const applyTestPatch = (testId, patchFn) => {
+    if (!selectedCycle) return;
+    const cycleIdStr = String(selectedCycle.id);
+    const patchList = (list) => (list || []).map(t =>
+      String(t.id) === String(testId) ? { ...t, ...patchFn(t) } : t
+    );
+    setCycleTests(prev => {
+      const updated = patchList(prev);
+      perCycleCacheRef.current[cycleIdStr] = updated;
+      return updated;
+    });
+  };
+
   const handleUpdateTestStatus = async (testId, status, comment) => {
     if (!selectedCycle) return;
-    const test = cycleTests.find(t => String(t.id) === String(testId));
+    const cycleIdStr = String(selectedCycle.id);
+    const test = (perCycleCacheRef.current[cycleIdStr] || cycleTests).find(t => String(t.id) === String(testId))
+      || cycleTests.find(t => String(t.id) === String(testId));
 
     // Guard: if trying to reset a locked execution to "Not Run", show confirm first
     if (status === 'Not Run' && test?.lockedAt) {
@@ -5077,14 +5101,14 @@ Then el sistema valida la identidad.
           setConfirmModal(prev => ({ ...prev, isOpen: false }));
           try {
             await invoke('updateTestStatus', {
+              projectId: selectedProjectId,
               cycleId: selectedCycle.id,
               testId,
               testRunId: test?.testRunId || test?.testRunKey,
               status: 'Not Run',
               comment
             });
-            setCycleTests(prev => prev.map(t => String(t.id) === String(testId)
-              ? { ...t, status: 'Not Run', lockedAt: null } : t));
+            applyTestPatch(testId, () => ({ status: 'Not Run', lockedAt: null }));
           } catch (e) {
             const msg = e.message || String(e);
             addNotification({ type: 'error', title: 'Error al resetear', description: msg });
@@ -5095,22 +5119,30 @@ Then el sistema valida la identidad.
       return;
     }
 
+    // Apply the chosen status locally BEFORE the save (which takes ~3 s). Both `cycleTests` and the
+    // per-cycle cache must change: the iteration editor and the Stop button read the cache, and
+    // before v4.16.2 it still held the old status, so they overwrote the tester's choice.
+    const TERMINAL = ['Pass', 'Passed', 'Fail', 'Failed', 'Blocked'];
+    const previous = test ? { status: test.status, comment: test.comment, lockedAt: test.lockedAt } : null;
+    applyTestPatch(testId, (t) => ({
+      status: status !== undefined ? status : t.status,
+      comment: comment !== undefined ? comment : t.comment,
+      lockedAt: TERMINAL.includes(status) ? (t.lockedAt || Date.now()) : t.lockedAt
+    }));
+
     try {
       const res = await invoke('updateTestStatus', {
+        projectId: selectedProjectId,
         cycleId: selectedCycle.id,
         testId,
         testRunId: test?.testRunId || test?.testRunKey,
         status,
         comment
       });
-      const TERMINAL = ['Pass', 'Passed', 'Fail', 'Failed', 'Blocked'];
-      setCycleTests(prev => prev.map(t => String(t.id) === String(testId) ? {
-        ...t,
-        status: status !== undefined ? status : t.status,
-        comment: comment !== undefined ? comment : t.comment,
-        lockedAt: (res?.lockedAt || (TERMINAL.includes(status) ? (t.lockedAt || Date.now()) : t.lockedAt))
-      } : t));
+      if (res?.lockedAt) applyTestPatch(testId, () => ({ lockedAt: res.lockedAt }));
     } catch (e) {
+      // The save failed: put back what the tester saw before choosing the status.
+      if (previous) applyTestPatch(testId, () => previous);
       const msg = e.message || String(e);
       if (msg.includes('LOCKED')) {
         addNotification({ type: 'error', title: '🔒 Ejecución protegida', description: 'Solo un administrador puede modificar esta ejecución.' });
@@ -5120,18 +5152,8 @@ Then el sistema valida la identidad.
     }
   };
 
-  const calculateOverallStatus = (iterations, fallbackStatus = 'Not Run') => {
-    if (!iterations || iterations.length === 0) return fallbackStatus;
-    const hasFailed = iterations.some(it => ['Failed', 'Fail'].includes(it.status));
-    const hasBlocked = iterations.some(it => ['Blocked', 'Block'].includes(it.status));
-    const allPassed = iterations.every(it => ['Passed', 'Pass'].includes(it.status));
-    const allNotRun = iterations.every(it => !it.status || ['Not Run', 'UNEXECUTED', 'Not_Run', 'TODO'].includes(it.status));
-    if (hasFailed) return 'Failed';
-    if (hasBlocked) return 'Blocked';
-    if (allPassed) return 'Passed';
-    if (allNotRun) return 'Not Run';
-    return 'In Progress';
-  };
+  // `calculateOverallStatus` now lives in utils/executionStatus.js (imported above) so it can be
+  // unit-tested; this alias keeps the existing prop name used by the views.
   const calculateIterationStatus = calculateOverallStatus;
 
   const handleAddIteration = async (testIdOrObj) => {
@@ -5156,12 +5178,14 @@ Then el sistema valida la identidad.
 
     const isRunning = !!runningTests[test.id];
     let latestIterationsSnapshot = [...(test.iterations || []), newIteration];
-    const calcStatus = calculateOverallStatus(latestIterationsSnapshot);
-    const currentNormStatus = normalizeUiStatus(test.status);
-    // Preserve active status ('In Progress' when Play is active, or existing non-'Not Run' status when adding a fresh 'Not Run' iteration)
-    const newStatus = isRunning
-      ? 'In Progress'
-      : (calcStatus === 'Not Run' && currentNormStatus !== 'Not Run' ? test.status : calcStatus);
+    // Keeps a result the tester chose by hand; otherwise 'In Progress' while Play is active, or the
+    // existing non-'Not Run' status when adding a fresh 'Not Run' iteration.
+    const newStatus = resolveStatusAfterIterationChange({
+      previousIterations: test.iterations || [],
+      nextIterations: latestIterationsSnapshot,
+      currentStatus: test.status,
+      isRunning
+    });
 
     setCycleTests(prev => {
       const updated = prev.map(t => {
@@ -5225,8 +5249,15 @@ Then el sistema valida la identidad.
 
     let newIterations = (test.iterations || []).filter(i => String(i.id) !== String(iterId));
     const isRunning = !!runningTests[test.id];
-    const calcStatus = calculateOverallStatus(newIterations);
-    const newStatus = isRunning ? 'In Progress' : calcStatus;
+    // Deleting an iteration must not replace a result the tester chose by hand.
+    const newStatus = resolveStatusAfterIterationChange({
+      previousIterations: test.iterations || [],
+      nextIterations: newIterations,
+      currentStatus: test.status,
+      isRunning,
+      // As before: when not running, use the value calculated from the remaining iterations.
+      isStopping: !isRunning
+    });
 
     setCycleTests(prev => {
       const updated = prev.map(t => {
@@ -5271,12 +5302,15 @@ Then el sistema valida la identidad.
     let latestIterationsSnapshot = (test.iterations || []).map(i =>
       String(i.id) === String(iterId) ? { ...i, [field]: value } : i
     );
-    const calculated = calculateOverallStatus(latestIterationsSnapshot);
-    const currentNormStatus = normalizeUiStatus(test.status);
-    // Si la prueba está en ejecución activa (Play), mantenemos 'In Progress' en la UI para evitar saltos
-    const newStatus = isRunning
-      ? 'In Progress'
-      : (calculated === 'Not Run' && currentNormStatus !== 'Not Run' ? test.status : calculated);
+    // While Play is active the status shows 'In Progress', BUT a result the tester chose by hand
+    // (e.g. Passed while the iteration is still Not Run) is kept, and a final result coming from
+    // the iterations themselves (an iteration marked Failed) is applied right away.
+    const newStatus = resolveStatusAfterIterationChange({
+      previousIterations: test.iterations || [],
+      nextIterations: latestIterationsSnapshot,
+      currentStatus: test.status,
+      isRunning
+    });
 
     setCycleTests(prev => {
       const updated = prev.map(t => {
@@ -5284,11 +5318,12 @@ Then el sistema valida la identidad.
           const baseIters = Array.isArray(t.iterations) && t.iterations.length > 0 ? t.iterations : (test.iterations || []);
           const mappedIters = baseIters.map(i => String(i.id) === String(iterId) ? { ...i, [field]: value } : i);
           latestIterationsSnapshot = mappedIters;
-          const calc = calculateOverallStatus(mappedIters);
-          const normT = normalizeUiStatus(t.status);
-          const statusToSet = isRunning
-            ? 'In Progress'
-            : (calc === 'Not Run' && normT !== 'Not Run' ? t.status : calc);
+          const statusToSet = resolveStatusAfterIterationChange({
+            previousIterations: baseIters,
+            nextIterations: mappedIters,
+            currentStatus: t.status,
+            isRunning
+          });
           return { ...t, iterations: mappedIters, status: statusToSet, _detailLoaded: true };
         }
         return t;
@@ -5348,9 +5383,17 @@ Then el sistema valida la identidad.
       || (typeof testIdOrObj === 'object' ? testIdOrObj : null);
     if (!test || !selectedCycle) return;
 
-    // Consolidar estatus final si tiene iteraciones
+    // Consolidar estatus final si tiene iteraciones. A result the tester chose by hand (Passed /
+    // Failed / Blocked) is kept even if the iterations are still "Not Run" (bug fixed in v4.16.2:
+    // pressing Stop used to reset it to "Not Run").
     if (test.iterations && test.iterations.length > 0) {
-      const finalStatus = calculateOverallStatus(test.iterations);
+      const finalStatus = resolveStatusAfterIterationChange({
+        previousIterations: test.iterations,
+        nextIterations: test.iterations,
+        currentStatus: test.status,
+        isRunning: false,
+        isStopping: true
+      });
 
       setCycleTests(prev => {
         const updated = prev.map(t => String(t.id) === String(testId) ? { ...t, status: finalStatus, _detailLoaded: true } : t);
