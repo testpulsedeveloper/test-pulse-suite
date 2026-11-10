@@ -262,8 +262,11 @@ export default function PlanningView({ ctx }) {
     const cyclesInCurrentPlan = selectedPlanId
       ? filteredTestCycles.filter(c => isCycleInPlan(c, selectedPlanId))
       : filteredTestCycles;
+    // v4.16.3: a cycle belongs to at most ONE plan, so only cycles WITHOUT a plan can be added.
+    // (A cycle whose plan was deleted counts as free: its old link points to nothing.)
+    const cycleHasLivePlan = (cycle) => (testPlans || []).some(plan => isCycleInPlan(cycle, plan.id));
     const availableUnlinkedCycles = selectedPlanId
-      ? filteredTestCycles.filter(c => !isCycleInPlan(c, selectedPlanId))
+      ? filteredTestCycles.filter(c => !cycleHasLivePlan(c))
       : [];
     const displayedSidebarCycles = (!selectedPlanId || planningShowAllCycles) ? filteredTestCycles : cyclesInCurrentPlan;
 
@@ -790,7 +793,7 @@ export default function PlanningView({ ctx }) {
                     ))}
                     {availableUnlinkedCycles.length === 0 && (
                       <div style={{ fontSize: '11px', color: '#94A3B8', fontStyle: 'italic', padding: '4px 2px' }}>
-                        Todos los ciclos están vinculados al plan.
+                        No hay ciclos sin plan. Los ciclos que ya pertenecen a otro plan no se pueden agregar.
                       </div>
                     )}
                   </div>

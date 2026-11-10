@@ -52,6 +52,7 @@ import {
 import { registerFolderResolvers } from './resolvers/folderResolvers.js';
 import { registerConfigResolvers } from './resolvers/configResolvers.js';
 import { registerBugResolvers } from './resolvers/bugResolvers.js';
+import { currentPlanRefOfCycle, isSamePlan } from './utils/planCycleRules.js';
 import {
   registerReportAutomationResolvers,
   createScheduledReportHandler
@@ -693,24 +694,53 @@ resolver.define('getTestCycles', async ({ payload }) => {
   }
 });
 
+/**
+ * Adds a Test Cycle to a Test Plan.
+ *
+ * Rule (v4.16.3): a cycle belongs to at most ONE plan. If the cycle is already linked to a
+ * different plan that still exists, the request is rejected: plans must not share or take each
+ * other's cycles, because that breaks traceability. The cycle has to be removed from its
+ * current plan first. (A link to a plan that was deleted does not block.)
+ */
 resolver.define('linkCycleToPlan', async ({ payload }) => {
-  const { cycleId, planId } = payload;
-  let existingSchedule = null;
-  try {
-    const getRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    });
-    if (getRes.ok) {
-      const data = await getRes.json();
-      existingSchedule = data?.value?.schedule || data?.schedule || null;
+  const cycleId = normalizeIssueRef(payload?.cycleId);
+  const planId = normalizeIssueRef(payload?.planId);
+  if (!cycleId || !planId) throw new Error('Ciclo o plan inválido.');
+
+  // Read, in parallel, the target plan and the cycle with everything that says which plan it is in.
+  const [planRes, cycleRes] = await Promise.all([
+    api.asUser().requestJira(route`/rest/api/3/issue/${planId}?fields=summary`),
+    api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}?fields=parent&properties=testops-plan-link,testpulse-v2`)
+  ]);
+  if (!planRes.ok) throw new Error('El plan no existe o no tienes acceso a él.');
+  if (!cycleRes.ok) throw new Error('El ciclo no existe o no tienes acceso a él.');
+  const plan = await planRes.json();
+  const cycle = await cycleRes.json();
+
+  const currentPlanRef = currentPlanRefOfCycle(cycle);
+  if (currentPlanRef && !isSamePlan(currentPlanRef, plan)) {
+    const otherRef = normalizeIssueRef(currentPlanRef);
+    const otherRes = otherRef
+      ? await api.asUser().requestJira(route`/rest/api/3/issue/${otherRef}?fields=summary`)
+      : null;
+    // 404 = the other plan was deleted, so the old link is stale and the cycle is free.
+    if (otherRes && otherRes.status !== 404) {
+      const other = otherRes.ok ? await otherRes.json() : null;
+      const otherName = other ? `${other.key}${other.fields?.summary ? ` (${other.fields.summary})` : ''}` : 'otro plan';
+      throw new Error(`Este ciclo ya pertenece al plan ${otherName}. Un ciclo solo puede estar en un plan: quítalo de ese plan antes de agregarlo a otro.`);
     }
-  } catch (e) {}
-  await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
+  }
+
+  const planLink = cycle.properties?.['testops-plan-link'];
+  const existingSchedule = planLink?.value?.schedule || planLink?.schedule || null;
+  const putRes = await api.asUser().requestJira(route`/rest/api/3/issue/${cycleId}/properties/testops-plan-link`, {
     method: 'PUT',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(existingSchedule ? { planId, schedule: existingSchedule } : { planId })
   });
+  if (!putRes.ok) {
+    throw new Error(`Jira no permitió vincular el ciclo al plan (HTTP ${putRes.status}).`);
+  }
   return true;
 });
 

@@ -44,7 +44,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.16.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.16.3'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -6049,6 +6049,18 @@ Then el sistema valida la identidad.
   }, []);
 
   const handleLinkCycleToPlan = async (cycleId, planId) => {
+    // v4.16.3: plans cannot share cycles. A cycle that already belongs to another (existing) plan
+    // is not added; the backend enforces the same rule, this only answers faster.
+    const cycle = testCycles.find(c => String(c.id) === String(cycleId));
+    const otherPlan = cycle && (testPlans || []).find(p => !isCycleInPlan(cycle, planId) && isCycleInPlan(cycle, p.id));
+    if (otherPlan) {
+      addNotification({
+        type: 'error',
+        title: 'El ciclo ya pertenece a otro plan',
+        description: `"${cycle.summary}" está en el plan ${otherPlan.key || otherPlan.summary || ''}. Quítalo de ese plan antes de agregarlo a otro.`
+      });
+      return;
+    }
     setLocalLoading(true);
     try {
       await invoke('linkCycleToPlan', { cycleId, planId });
