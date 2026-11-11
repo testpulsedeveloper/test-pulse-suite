@@ -68,6 +68,7 @@ import {
   invalidateProjectReportCache
 } from './utils/reportSnapshotCache.js';
 import { summarizeJiraError } from './utils/jiraErrors.js';
+import { partitionOrphanEntries, indexRunsByRef, runRefOf } from './utils/cycleIndexOrphans.js';
 
 // ── Enterprise Scalability Caches (Stage 3A+) ──
 // In-memory 10-minute TTL caches for `/rest/api/3/myself` and `/rest/api/3/mypermissions`
@@ -2467,6 +2468,57 @@ async function createTestRunsInJiraForCycle({ projectId, cycleId, cycleKey, test
 
 const _cycleSummaryInFlight = new Map();
 
+// At most this many orphan runs are checked per cycle read (3 bulk-fetch calls of 100).
+const MAX_ORPHAN_RUN_CHECKS = 300;
+const ORPHAN_RUNS_PER_FETCH = 100;
+
+/**
+ * Checks the Test Runs of orphan index entries directly in Jira and splits the entries into
+ * keep/drop (rules in utils/cycleIndexOrphans.js).
+ *
+ * Uses `POST /rest/api/3/issue/bulkfetch`, which reads issues by id/key WITHOUT the search
+ * index, so a run created a second ago is found while a deleted one is not. Runs as the user.
+ * If Jira cannot be asked (error, rate limit), every entry is kept: this read never loses
+ * cases, it only cleans the ones Jira proves were removed.
+ *
+ * @param {Object[]} orphans - Index entries missing from the live search.
+ * @param {string} cycleId - Cycle being read.
+ * @returns {Promise<{keep: Object[], drop: Object[]}>}
+ */
+async function verifyOrphanEntries(orphans, cycleId) {
+  if (!Array.isArray(orphans) || orphans.length === 0) return { keep: [], drop: [] };
+  const refs = Array.from(new Set(orphans.map(runRefOf).filter(Boolean))).slice(0, MAX_ORPHAN_RUN_CHECKS);
+  const chunks = [];
+  for (let i = 0; i < refs.length; i += ORPHAN_RUNS_PER_FETCH) chunks.push(refs.slice(i, i + ORPHAN_RUNS_PER_FETCH));
+
+  const checkedRefs = new Set();
+  const found = [];
+  await Promise.all(chunks.map(async (chunk) => {
+    try {
+      const res = await jiraRequester().requestJira(route`/rest/api/3/issue/bulkfetch`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          issueIdsOrKeys: chunk,
+          fields: ['status'],
+          properties: ['testpulse-run-data']
+        })
+      });
+      if (!res.ok) {
+        console.warn(`[verifyOrphanEntries] bulkfetch HTTP ${res.status} for cycle ${cycleId}; keeping ${chunk.length} entries`);
+        return; // Not checked -> kept.
+      }
+      const data = await res.json();
+      chunk.forEach(ref => checkedRefs.add(String(ref)));
+      found.push(...(data.issues || []));
+    } catch (err) {
+      console.warn(`[verifyOrphanEntries] bulkfetch failed for cycle ${cycleId}:`, err?.message);
+    }
+  }));
+
+  return partitionOrphanEntries(orphans, { checkedRefs, runsByRef: indexRunsByRef(found) }, cycleId);
+}
+
 const getCycleExecutionSummary = async (cycleId) => {
   const inflightKey = String(cycleId || '');
   if (inflightKey && _cycleSummaryInFlight.has(inflightKey)) {
@@ -2660,45 +2712,56 @@ const getCycleExecutionSummary = async (cycleId) => {
           String(e.testRunKey || '')
         ]).filter(Boolean));
 
+        // 1) Collect the "orphans": index entries whose case/run did not come back from the
+        //    live search (see utils/cycleIndexOrphans.js for why they exist).
+        const orphanEntries = [];
         for (const prev of previousIndex) {
           const prevId = String(prev.id || '');
           const prevKey = String(prev.key || prev.testCaseKey || '');
           const prevRunId = String(prev.testRunId || '');
           const prevRunKey = String(prev.testRunKey || '');
-
           if (prevId && !knownIds.has(prevId) && (!prevKey || !knownIds.has(prevKey)) && (!prevRunId || !knownIds.has(prevRunId)) && (!prevRunKey || !knownIds.has(prevRunKey))) {
-            cleanEntries.push({
-              id: prevId,
-              key: prevKey || prevId,
-              testRunId: prev.testRunId || null,
-              testRunKey: prev.testRunKey || null,
-              testCaseId: prevId,
-              testCaseKey: prevKey || prevId,
-              summary: prev.summary || '',
-              status: normalizeJiraStatus(prev.status || 'Not Run'),
-              nativeStatus: normalizeJiraStatus(prev.nativeStatus || prev.status || 'Not Run'),
-              executionType: prev.executionType || 'Manual',
-              assignee: prev.assignee || null,
-              executedBy: prev.executedBy || null,
-              executedAt: prev.executedAt || null,
-              comment: prev.comment || '',
-              iterations: prev.iterations || [],
-              evidences: filterNonIterationEvidences(prev.evidences || [], getIterationEvidenceKeys(prev.iterations)),
-              linkedBugs: prev.linkedBugs || [],
-              lockedAt: prev.lockedAt || null,
-              _detailLoaded: true
-            });
+            orphanEntries.push(prev);
+            // Register the ids now so a duplicated entry in the index is only taken once.
             knownIds.add(prevId);
             if (prevKey) knownIds.add(prevKey);
             if (prevRunId) knownIds.add(prevRunId);
             if (prevRunKey) knownIds.add(prevRunKey);
-
-            // Auto-heal missing Jira issue link to cycle
-            const targetRunRef = prev.testRunId || prev.testRunKey;
-            if (targetRunRef) {
-              await linkTwoIssues(targetRunRef, cycleId, 'Relates').catch(() => {});
-            }
           }
+        }
+
+        // 2) Check the orphans' Test Runs directly by id (no search index lag) and drop the
+        //    ones that were deleted or explicitly unlinked from this cycle. Reading a cycle
+        //    NEVER re-links anything: that used to resurrect removed cases and time out (v4.23.3).
+        const { keep: keptOrphans, drop: droppedOrphans } = await verifyOrphanEntries(orphanEntries, cycleId);
+        if (droppedOrphans.length > 0) {
+          console.log(`[getCycleExecutionSummary] cycle=${cycleId} dropped ${droppedOrphans.length} removed case(s) from the index`);
+        }
+
+        for (const prev of keptOrphans) {
+          const prevId = String(prev.id || '');
+          const prevKey = String(prev.key || prev.testCaseKey || '');
+          cleanEntries.push({
+            id: prevId,
+            key: prevKey || prevId,
+            testRunId: prev.testRunId || null,
+            testRunKey: prev.testRunKey || null,
+            testCaseId: prevId,
+            testCaseKey: prevKey || prevId,
+            summary: prev.summary || '',
+            status: normalizeJiraStatus(prev.status || 'Not Run'),
+            nativeStatus: normalizeJiraStatus(prev.nativeStatus || prev.status || 'Not Run'),
+            executionType: prev.executionType || 'Manual',
+            assignee: prev.assignee || null,
+            executedBy: prev.executedBy || null,
+            executedAt: prev.executedAt || null,
+            comment: prev.comment || '',
+            iterations: prev.iterations || [],
+            evidences: filterNonIterationEvidences(prev.evidences || [], getIterationEvidenceKeys(prev.iterations)),
+            linkedBugs: prev.linkedBugs || [],
+            lockedAt: prev.lockedAt || null,
+            _detailLoaded: true
+          });
         }
 
         // Verify any linkedBugs in this cycle against live Jira (purges bugs moved to another project or deleted)
@@ -3825,9 +3888,13 @@ resolver.define('removeManyTestsFromCycle', requestCycleRemoval);
 
 // Background worker for `cycle-removal-queue` (manifest: consumer `cycle-removal-consumer`).
 // Runs as the app (no user in async events), with a 280 s budget for 429 retries.
-const cycleRemovalWorkerResolver = new Resolver();
-cycleRemovalWorkerResolver.define('process-cycle-removal', async ({ payload }) => {
-  const job = payload || {};
+//
+// Since @forge/events 3.x pushes events with schema "app-event-2", the consumer must point to a
+// plain `function` (not a `resolver` + `method`): Forge refused every push with
+// "Schema version 2 does not support resolver" (v4.23.3). A plain function receives the
+// AsyncEvent itself, and what `Queue.push({ body })` sent is in `event.body`.
+export const cycleRemovalWorker = async (event) => {
+  const job = event?.body || {};
   const store = { calls: 0, r429: 0, startedAt: Date.now(), actAsApp: true, budgetMs: 280000 };
   try {
     const result = await __perfALS.run(store, () => performRemoveTestsFromCycle(job.cycleId, job.ids || [], {
@@ -3844,8 +3911,7 @@ cycleRemovalWorkerResolver.define('process-cycle-removal', async ({ payload }) =
   } finally {
     await clearPendingRemoval(job.cycleId, job.markerId);
   }
-});
-export const cycleRemovalWorker = cycleRemovalWorkerResolver.getDefinitions();
+};
 
 
 

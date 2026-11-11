@@ -90,7 +90,10 @@ test('removal resolvers queue the work; the worker runs as the app with the user
   assert.ok(src.includes('existing.has(`exec_${testId}`)'), 'only existing exec_ properties are deleted');
   assert.ok(src.includes('getPendingRemovalIds(cycleId)'), 'cycle list hides pending removals');
   const m = fs.readFileSync(path.join(ROOT_DIR, 'manifest.yml'), 'utf8');
-  assert.ok(m.includes('queue: cycle-removal-queue') && m.includes('method: process-cycle-removal'));
+  // Event schema v2 (@forge/events 3.x) only accepts a plain function consumer, not resolver+method.
+  assert.ok(/queue: cycle-removal-queue\n(\s+#.*\n)?\s+function: cycleRemovalWorker/.test(m), 'consumer points to the worker function');
+  assert.ok(!m.includes('method: process-cycle-removal'), 'no resolver-style consumer');
+  assert.ok(src.includes('export const cycleRemovalWorker = async (event) => {') && src.includes('const job = event?.body || {};'), 'worker reads the job from event.body');
   assert.ok(/handler: index\.cycleRemovalWorker\n\s+timeoutSeconds: 300/.test(m));
 });
 

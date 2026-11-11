@@ -67,9 +67,8 @@ modules:
   consumer:
     - key: cycle-removal-consumer
       queue: cycle-removal-queue
-      resolver:
-        function: cycleRemovalWorker
-        method: process-cycle-removal
+      # Plain function consumer: required by the event schema v2 that @forge/events 3.x pushes.
+      function: cycleRemovalWorker
   function:
     - key: resolver
       handler: index.handler

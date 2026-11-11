@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.23.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.23.3'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -140,6 +140,10 @@ function App() {
   const activeCycleIdRef = useRef(null);   // currently selected / active cycle ID
   const deletedIdsRef = useRef(new Set()); // in-session deletions (current cycle)
   const perCycleDeletedRef = useRef({});   // { [cycleId]: Set<testId> } — persists across cycle switches
+  // Single-case removals waiting to be sent, per cycle: { [cycleId]: { ids:Set, count, inFlight, timer } }.
+  // Clicking the trash icon on several rows used to fire one request per row in parallel; the
+  // requests overwrote each other's cycle index and removed cases came back (v4.23.3).
+  const removalBatchRef = useRef({});
   const perCycleCacheRef = useRef({});     // { [cycleId]: Array<TestCase> } — in-memory cache for 0ms transitions
   const deletedIterationIdsRef = useRef(new Set()); // in-session deleted iteration IDs
   const iterationSaveTimersRef = useRef({}); // debounce timers for iteration input persistence
@@ -5029,17 +5033,71 @@ Then el sistema valida la identidad.
       setSelectedCycle(c => (c && String(c.id) === cycleId ? { ...c, testCount: next.length } : c));
       return next;
     });
+    // The row is already hidden (optimistic UI). The request itself is batched: see queueCycleRemoval.
+    queueCycleRemoval(cycleId, idsToTrack);
+  };
+
+  /**
+   * Collects single-case removals for a cycle and sends them together.
+   * - Clicks within 600 ms of each other travel in ONE `removeManyTestsFromCycle` call.
+   * - Only one request per cycle is in flight; clicks made meanwhile wait and go in the next one.
+   * This keeps the server's read-modify-write of the cycle index strictly sequential.
+   *
+   * @param {string} cycleId - Cycle the cases are removed from.
+   * @param {string[]} idsToTrack - Every id/key variant of ONE removed case.
+   */
+  const queueCycleRemoval = (cycleId, idsToTrack) => {
+    const batches = removalBatchRef.current;
+    if (!batches[cycleId]) batches[cycleId] = { ids: new Set(), count: 0, inFlight: false, timer: null };
+    const batch = batches[cycleId];
+    idsToTrack.forEach(trackId => batch.ids.add(trackId));
+    batch.count += 1;
+    clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => flushCycleRemoval(cycleId), 600);
+  };
+
+  /**
+   * Sends the pending removals of a cycle (if no request for that cycle is already running).
+   * On error the cases are un-hidden and the cycle is reloaded from the server.
+   *
+   * @param {string} cycleId - Cycle whose pending removals are sent.
+   */
+  const flushCycleRemoval = async (cycleId) => {
+    const batch = removalBatchRef.current[cycleId];
+    if (!batch || batch.inFlight || batch.ids.size === 0) return;
+    const ids = Array.from(batch.ids);
+    const count = batch.count;
+    batch.ids = new Set();
+    batch.count = 0;
+    batch.inFlight = true;
     try {
-      await invoke('removeTestFromCycle', { cycleId, testId: id, testIds: Array.from(new Set(idsToTrack)) });
+      const res = await invoke('removeManyTestsFromCycle', { cycleId, testIds: ids });
+      if (res?.partial) {
+        // The server ran out of time: finish the leftover Test Runs now (a reload resumes it too).
+        let remaining = res.remainingRuns || 0;
+        for (let round = 0; round < 20 && remaining > 0; round++) {
+          const next = await invoke('resumeCycleRemoval', { cycleId }).catch(() => null);
+          if (!next) break;
+          remaining = next.remainingRuns || 0;
+        }
+      }
     } catch (err) {
-      // Rollback on error
-      idsToTrack.forEach(trackId => {
+      // Rollback on error: show the cases again and reload the cycle from the server.
+      ids.forEach(trackId => {
         deletedIdsRef.current.delete(trackId);
         perCycleDeletedRef.current[cycleId]?.delete(trackId);
       });
-      addNotification({ type: 'error', title: 'Error al eliminar caso', description: err.message });
+      addNotification({
+        type: 'error',
+        title: count > 1 ? `Error al eliminar ${count} casos` : 'Error al eliminar caso',
+        description: err.message
+      });
       const execution = await invoke('getCycleExecutionSummary', { cycleId }).catch(() => null);
       if (execution) safeSetCycleTests(execution);
+    } finally {
+      batch.inFlight = false;
+      // Clicks that arrived while this request was running go out now, in one more request.
+      if (batch.ids.size > 0) flushCycleRemoval(cycleId);
     }
   };
 
