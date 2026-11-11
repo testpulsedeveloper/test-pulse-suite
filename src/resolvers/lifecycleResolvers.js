@@ -473,10 +473,20 @@ async function computeProgress(epicKeys) {
   // `parent` and `summary` (v4.21.0) let phase 03 show each epic with its own figures.
   const epicGroups = [];
   for (let i = 0; i < epicKeys.length; i += EPICS_PER_SEARCH) epicGroups.push(epicKeys.slice(i, i + EPICS_PER_SEARCH));
-  const storyGroups = await mapLimit(epicGroups, 3, (group) => searchAll(
-    `parent in (${group.map(k => jqlQuote(k)).join(',')})`,
-    ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES_PER_SEARCH
-  ));
+  // v4.22.3: the epics themselves are also read (only their title). Before, the title was taken
+  // from the stories, so an epic WITHOUT stories appeared with no name. Both searches of a group
+  // run at the same time, so this adds requests but almost no waiting.
+  const groupResults = await mapLimit(epicGroups, 3, (group) => {
+    const keyList = group.map(k => jqlQuote(k)).join(',');
+    return Promise.all([
+      searchAll(`parent in (${keyList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES_PER_SEARCH),
+      // An epic the user cannot see, or that was deleted, is simply not returned.
+      searchAll(`key in (${keyList})`, ['summary'], EPICS_PER_SEARCH).catch(() => [])
+    ]);
+  });
+  const storyGroups = groupResults.map(([groupStories]) => groupStories);
+  const epicTitles = new Map(groupResults.flatMap(([, epicIssues]) => epicIssues)
+    .map(issue => [String(issue.key).toUpperCase(), text(issue?.fields?.summary, 160)]));
   const stories = storyGroups.flat();
   // True when some group had more stories than are read at once: the figures are then partial.
   const storiesTruncated = storyGroups.some(group => group.length >= MAX_STORIES_PER_SEARCH);
@@ -484,7 +494,7 @@ async function computeProgress(epicKeys) {
   // One entry per epic of the initiative, in the order they were added. An epic without stories
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
   // `runs` (v4.22.0) are the executions of the epic's test cases: they give its general status.
-  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: '', stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
   // Test case key → epics it belongs to, to credit each execution to its epic(s).
   const caseEpics = new Map();
   const epicCases = new Map(epicKeys.map(key => [key, new Set()]));
