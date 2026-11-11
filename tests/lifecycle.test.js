@@ -14,6 +14,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractConfluencePageId, parseFindingsReport } from '../src/utils/confluenceFindingsParser.js';
+import {
+  sanitizeLifecycleEditors,
+  isListedLifecycleEditor,
+  lifecycleEditorsKey,
+  MAX_LIFECYCLE_EDITORS
+} from '../src/utils/lifecycleEditors.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => fs.readFileSync(path.join(ROOT_DIR, file), 'utf8');
@@ -157,4 +163,39 @@ test('the Lifecycle tab is lazy-loaded and does nothing until it is opened', () 
   assert.match(app, /activeTab === 'lifecycle' && renderLifecycleTab\(\)/);
   // No lifecycle resolver is called from App.js (startup): only the view calls them.
   assert.doesNotMatch(app, /invoke\('(getLifecycle|refreshLifecycleFindings|getLifecycleProgress)'/);
+});
+
+test('lifecycle editors list is cleaned before it is stored (v4.19.0)', () => {
+  const editors = sanitizeLifecycleEditors([
+    { accountId: '712020:abc-123', displayName: '  Ana QA  ', avatarUrl: 'https://avatar.example/a.png' },
+    { accountId: '712020:abc-123', displayName: 'Duplicate' },
+    { accountId: 'bad id with spaces', displayName: 'Nope' },
+    { accountId: '5b10ac8d82e05b22cc7d4ef5', avatarUrl: 'javascript:alert(1)' },
+    null
+  ]);
+  assert.deepEqual(editors, [
+    { accountId: '712020:abc-123', displayName: 'Ana QA', avatarUrl: 'https://avatar.example/a.png' },
+    { accountId: '5b10ac8d82e05b22cc7d4ef5', displayName: '5b10ac8d82e05b22cc7d4ef5', avatarUrl: '' }
+  ]);
+  assert.deepEqual(sanitizeLifecycleEditors('not a list'), []);
+  const many = Array.from({ length: 80 }, (_, i) => ({ accountId: `user${i}` }));
+  assert.equal(sanitizeLifecycleEditors(many).length, MAX_LIFECYCLE_EDITORS);
+
+  assert.equal(isListedLifecycleEditor(editors, '712020:abc-123'), true);
+  assert.equal(isListedLifecycleEditor(editors, 'someone-else'), false);
+  assert.equal(isListedLifecycleEditor(editors, ''), false);
+  assert.equal(isListedLifecycleEditor(null, '712020:abc-123'), false);
+  // The editors key must not start with the prefix used to list initiatives ("lifecycle_<id>_").
+  assert.equal(lifecycleEditorsKey('10001').startsWith('lifecycle_'), false);
+});
+
+test('only lifecycle editors can save, and only project admins manage the list (v4.19.0)', () => {
+  const resolvers = read('src/resolvers/lifecycleResolvers.js');
+  const body = (name, next) => resolvers.slice(resolvers.indexOf(`resolver.define('${name}'`), resolvers.indexOf(`resolver.define('${next}'`));
+  assert.match(body('saveLifecycleInitiative', 'deleteLifecycleInitiative'), /await requireLifecycleEditor\(projectId, context\)/);
+  assert.match(body('saveLifecycleEditors', 'saveLifecycleInitiative'), /await requireProjectAdmin\(projectId, context\)/);
+  assert.match(body('getLifecycle', 'getLifecycleEditors'), /canEditLifecycle\(projectId, context\)/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /canEdit && !initiativeForm/);
+  assert.match(read('static/hello-world/src/views/SettingsView.jsx'), /<LifecycleEditorsCard /);
 });

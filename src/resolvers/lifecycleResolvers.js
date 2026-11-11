@@ -25,7 +25,12 @@
 
 import api, { route } from '@forge/api';
 import { kvs as storage, WhereConditions } from '@forge/kvs';
-import { requireProjectAdmin, normalizeProjectRef } from '../utils/authz.js';
+import { requireProjectAdmin, canAdministerProject, AuthorizationError, normalizeProjectRef } from '../utils/authz.js';
+import {
+  lifecycleEditorsKey,
+  sanitizeLifecycleEditors,
+  isListedLifecycleEditor
+} from '../utils/lifecycleEditors.js';
 import { jqlQuote } from '../utils/jqlHelpers.js';
 import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenceFindingsParser.js';
 
@@ -290,16 +295,73 @@ async function computeProgress(epicKeys) {
  *
  * @param {import('@forge/resolver').default} resolver - Forge Resolver instance.
  */
+/** Reads the editors list of a project (empty when nobody has been picked yet). */
+async function readLifecycleEditors(projectId) {
+  const stored = await storage.get(lifecycleEditorsKey(projectId));
+  return Array.isArray(stored?.editors) ? stored.editors : [];
+}
+
+/**
+ * Can the current user change the lifecycle of `projectId`? (v4.19.0)
+ * Project administrators and superusers always can; everybody else only when a project
+ * administrator added them to the editors list in Settings.
+ *
+ * @param {string} projectId - Project id already cleaned with projectKeyPart.
+ * @param {Object} context - Forge resolver context (`context.accountId`).
+ * @returns {Promise<boolean>}
+ */
+async function canEditLifecycle(projectId, context) {
+  if (await canAdministerProject(projectId, context)) return true;
+  return isListedLifecycleEditor(await readLifecycleEditors(projectId), context?.accountId);
+}
+
+/** Throws `AuthorizationError('FORBIDDEN')` unless the user may change the lifecycle. */
+async function requireLifecycleEditor(projectId, context) {
+  if (!(await canEditLifecycle(projectId, context))) {
+    throw new AuthorizationError('FORBIDDEN', 'Solo los editores de Lifecycle de este proyecto pueden hacer cambios. Pide a un administrador del proyecto que te agregue en Configuración.');
+  }
+}
+
 export const registerLifecycleResolvers = (resolver) => {
-  // Lists the initiatives of a project with their phases and deliverables.
-  resolver.define('getLifecycle', async ({ payload }) => {
+  // Lists the initiatives of a project with their phases and deliverables. Everybody who can use
+  // Test Pulse in the project can read it; `canEdit` tells the UI whether to show edit controls
+  // (the server checks again on every change, the flag is only for display).
+  resolver.define('getLifecycle', async ({ payload, context }) => {
     const projectId = projectKeyPart(payload.projectId);
-    return { initiatives: await listInitiatives(projectId) };
+    const [initiatives, canEdit] = await Promise.all([
+      listInitiatives(projectId),
+      canEditLifecycle(projectId, context)
+    ]);
+    return { initiatives, canEdit };
   });
 
-  // Creates or updates one initiative (any project member).
+  // Returns who may edit the lifecycle of the project, for the Settings card.
+  resolver.define('getLifecycleEditors', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    const [editors, canManage] = await Promise.all([
+      readLifecycleEditors(projectId),
+      canAdministerProject(projectId, context)
+    ]);
+    return { editors, canManage };
+  });
+
+  // Replaces the editors list of the project (project administrators only).
+  resolver.define('saveLifecycleEditors', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    await requireProjectAdmin(projectId, context);
+    const editors = sanitizeLifecycleEditors(payload.editors);
+    await storage.set(lifecycleEditorsKey(projectId), {
+      editors,
+      updatedAt: new Date().toISOString(),
+      updatedBy: context?.accountId || null
+    });
+    return { editors };
+  });
+
+  // Creates or updates one initiative (lifecycle editors only).
   resolver.define('saveLifecycleInitiative', async ({ payload, context }) => {
     const projectId = projectKeyPart(payload.projectId);
+    await requireLifecycleEditor(projectId, context);
     const raw = payload.initiative || {};
     let stored = null;
     if (raw.id) {

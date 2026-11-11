@@ -220,6 +220,9 @@ const LifecycleView = ({ ctx }) => {
 
   const [initiatives, setInitiatives] = useState([]);
   const [loading, setLoading] = useState(true);
+  // v4.19.0: everybody can see Lifecycle, only editors can change it. The backend sends this flag
+  // and checks the permission again on every save, so hiding the buttons is only for clarity.
+  const [canEdit, setCanEdit] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [progressById, setProgressById] = useState({});     // initiativeId → figures of phases 3-4
@@ -248,6 +251,7 @@ const LifecycleView = ({ ctx }) => {
         if (cancelled) return;
         const list = res?.initiatives || [];
         setInitiatives(list);
+        setCanEdit(Boolean(res?.canEdit));
         setExpandedId(list.length === 1 ? list[0].id : null);
       })
       .catch(error => { if (!cancelled) setLoadError(error?.message || String(error)); })
@@ -399,8 +403,8 @@ const LifecycleView = ({ ctx }) => {
                 {busy === deliverable.id ? 'Leyendo…' : 'Actualizar'}
               </button>
             )}
-            <button type="button" style={styles.linkBtn} onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id, deliverable })}>Editar</button>
-            <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy} onClick={() => handleRemoveDeliverable(initiative, phase.id, deliverable.id)}>Quitar</button>
+            {canEdit && <button type="button" style={styles.linkBtn} onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id, deliverable })}>Editar</button>}
+            {canEdit && <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy} onClick={() => handleRemoveDeliverable(initiative, phase.id, deliverable.id)}>Quitar</button>}
           </span>
         </div>
         {deliverable.kind === 'findings' && (
@@ -467,7 +471,7 @@ const LifecycleView = ({ ctx }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
           <strong style={{ fontSize: '0.9rem', color: 'var(--jira-text, #172B4D)' }}>{phase.number} {phase.title}</strong>
           <span style={styles.muted}>Entregable: {phase.deliverable}</span>
-          {!phase.auto && !isAdding && (
+          {canEdit && !phase.auto && !isAdding && (
             <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
               onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id })}>
               {phase.id === 'design' ? '+ Agregar documento revisado' : '+ Agregar entregable'}
@@ -533,10 +537,12 @@ const LifecycleView = ({ ctx }) => {
           </button>
           {(initiative.epicKeys || []).map(key => <span key={key} className="ads-lozenge ads-lozenge-purple" style={{ fontSize: '10px' }}>{key}</span>)}
           <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px' }}>
-            <button type="button" style={styles.linkBtn}
-              onClick={() => setInitiativeForm({ id: initiative.id, name: initiative.name, description: initiative.description || '', epicKeys: (initiative.epicKeys || []).join(', ') })}>
-              Editar iniciativa
-            </button>
+            {canEdit && (
+              <button type="button" style={styles.linkBtn}
+                onClick={() => setInitiativeForm({ id: initiative.id, name: initiative.name, description: initiative.description || '', epicKeys: (initiative.epicKeys || []).join(', ') })}>
+                Editar iniciativa
+              </button>
+            )}
             {isAdmin && confirmDeleteId !== initiative.id && (
               <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} onClick={() => setConfirmDeleteId(initiative.id)}>Eliminar</button>
             )}
@@ -568,7 +574,12 @@ const LifecycleView = ({ ctx }) => {
           <h2 style={{ margin: 0, fontSize: '1.15rem', color: 'var(--jira-text, #172B4D)' }}>Ciclo de vida de QA</h2>
           <div style={styles.muted}>Fases del marco de trabajo y entregables de cada iniciativa.</div>
         </div>
-        {!initiativeForm && (
+        {!canEdit && !loadError && (
+          <span style={{ ...styles.muted, marginLeft: 'auto' }} title="Un administrador del proyecto define quién edita en Configuración → Editores de Lifecycle.">
+            Solo lectura
+          </span>
+        )}
+        {canEdit && !initiativeForm && (
           <button type="button" className="btn-primary" style={{ marginLeft: 'auto' }}
             onClick={() => setInitiativeForm({ name: '', description: '', epicKeys: '' })}>
             + Nueva iniciativa
