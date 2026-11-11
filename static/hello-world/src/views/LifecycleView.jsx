@@ -38,6 +38,10 @@ const IMPACT_COLOR = { 'Crítico': '#AE2A19', 'Alto': '#C9372C', 'Medio': '#B65C
 // A report read from Confluence is considered fresh for 15 minutes.
 const REPORT_FRESH_MS = 15 * 60 * 1000;
 
+// Figures of phases 03 and 04 before Jira answers (or when the initiative has no epics).
+const EMPTY_RUNS = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+const EMPTY_PROGRESS = { stories: 0, storiesWithCases: 0, cases: 0, runs: EMPTY_RUNS, bugs: { total: 0, open: 0 }, epics: [], truncated: false };
+
 const emptyPhases = () => Object.fromEntries(PHASES.map(p => [p.id, { deliverables: [] }]));
 const deliverablesOf = (initiative, phaseId) => initiative?.phases?.[phaseId]?.deliverables || [];
 
@@ -84,7 +88,8 @@ const planTotals = (progress) => {
 /** Status of a phase, derived from its deliverables (or from Jira figures for automatic phases). */
 const phaseStatus = (initiative, phase, progress) => {
   if (phase.id === 'build') {
-    if (!progress || progress.cases === 0) return 'pending';
+    // Nothing is known until the epics' figures have arrived (they load apart from the plans).
+    if (!progress?.epicsLoaded || !progress.cases) return 'pending';
     return progress.stories > 0 && progress.storiesWithCases >= progress.stories ? 'delivered' : 'in_progress';
   }
   if (phase.id === 'execute') {
@@ -388,6 +393,7 @@ const LifecycleView = ({ ctx }) => {
   // Picker of epics / Test Plans (v4.22.0): { initiativeId, phaseId, loading, error, items, selected, search }
   const [picker, setPicker] = useState(null);
   const [openRows, setOpenRows] = useState({});              // "initiativeId:KEY" → expanded?
+  const progressTokenRef = useRef({});                       // initiativeId → latest request of Jira figures
   const refreshedRef = useRef(new Set());                    // initiatives auto-refreshed in this visit
 
   const notifyError = useCallback((title, error) => {
@@ -429,17 +435,54 @@ const LifecycleView = ({ ctx }) => {
     }
   }, [selectedProjectId, notifyError]);
 
+  /**
+   * Loads the Jira figures of an initiative (v4.22.1). Two things make it feel fast:
+   *   - the epics (phase 03) and the Test Plans (phase 04) are requested separately and at the
+   *     same time, so each phase appears as soon as its own answer arrives and neither waits for
+   *     the other;
+   *   - it is called directly after epics or plans are added or removed, so the phase never
+   *     stays on "Consultando Jira…".
+   * `progressTokenRef` identifies the latest request of each initiative: an answer that belongs
+   * to an older selection of epics/plans is ignored.
+   */
+  const loadProgress = useCallback((initiative) => {
+    const id = initiative.id;
+    const epicKeys = initiative.epicKeys || [];
+    const planKeys = initiative.planKeys || [];
+    const token = `${epicKeys.join(',')}|${planKeys.join(',')}`;
+    progressTokenRef.current[id] = token;
+    const apply = (patch) => {
+      if (progressTokenRef.current[id] !== token) return;
+      setProgressById(prev => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } }));
+    };
+    const message = (error) => error?.message || String(error);
+
+    // Start from a clean slate; parts with nothing to ask are complete from the beginning.
+    setProgressById(prev => ({
+      ...prev,
+      [id]: {
+        ...(epicKeys.length === 0 ? { ...EMPTY_PROGRESS, epicsLoaded: true } : {}),
+        ...(planKeys.length === 0 ? { plans: [], plansLoaded: true } : {})
+      }
+    }));
+    if (epicKeys.length > 0) {
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys, planKeys: [] })
+        .then(res => { const { plans, ...figures } = res || {}; apply({ ...EMPTY_PROGRESS, ...figures, epicsLoaded: true }); })
+        .catch(error => apply({ ...EMPTY_PROGRESS, epicsLoaded: true, epicsError: message(error) }));
+    }
+    if (planKeys.length > 0) {
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: [], planKeys })
+        .then(res => apply({ plans: res?.plans || [], plansLoaded: true }))
+        .catch(error => apply({ plans: [], plansLoaded: true, plansError: message(error) }));
+    }
+  }, [selectedProjectId]);
+
   // When an initiative is expanded: load its Jira figures and refresh stale Confluence reports.
   useEffect(() => {
     const initiative = initiatives.find(item => item.id === expandedId);
     if (!initiative) return;
 
-    const hasJiraItems = (initiative.epicKeys || []).length > 0 || (initiative.planKeys || []).length > 0;
-    if (hasJiraItems && !progressById[initiative.id]) {
-      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: initiative.epicKeys || [], planKeys: initiative.planKeys || [] })
-        .then(res => setProgressById(prev => ({ ...prev, [initiative.id]: res })))
-        .catch(error => setProgressById(prev => ({ ...prev, [initiative.id]: { error: error?.message || String(error) } })));
-    }
+    if (!progressById[initiative.id]) loadProgress(initiative);
 
     if (!refreshedRef.current.has(initiative.id)) {
       refreshedRef.current.add(initiative.id);
@@ -484,7 +527,7 @@ const LifecycleView = ({ ctx }) => {
     if (saved) {
       setInitiativeForm(null);
       setExpandedId(saved.id);
-      setProgressById(prev => { const next = { ...prev }; delete next[saved.id]; return next; });
+      loadProgress(saved);
     }
   };
 
@@ -509,10 +552,6 @@ const LifecycleView = ({ ctx }) => {
       if (target) refreshFindings(saved, target.id, false);
     }
   };
-
-  /** Forgets the Jira figures of an initiative so they are read again (after its epics or plans change). */
-  const resetProgress = (initiativeId) =>
-    setProgressById(prev => { const next = { ...prev }; delete next[initiativeId]; return next; });
 
   /**
    * Opens the picker of a phase and loads what can be added: the epics of the project (phase 03)
@@ -543,14 +582,14 @@ const LifecycleView = ({ ctx }) => {
     const saved = await saveInitiative({ ...initiative, [field]: [...current, ...chosen] }, 'keys');
     if (saved) {
       setPicker(null);
-      resetProgress(saved.id);
+      loadProgress(saved); // read the figures again with the new selection
     }
   };
 
   /** Removes an epic or a Test Plan from the initiative. Nothing is changed in Jira. */
   const handleRemoveKey = async (initiative, field, key) => {
     const saved = await saveInitiative({ ...initiative, [field]: (initiative[field] || []).filter(item => item !== key) }, `remove_${key}`);
-    if (saved) resetProgress(saved.id);
+    if (saved) loadProgress(saved);
   };
 
   const toggleRow = (initiativeId, key) =>
@@ -763,10 +802,10 @@ const LifecycleView = ({ ctx }) => {
     if (epicKeys.length === 0) {
       return <>{!form && <div style={styles.muted}>Sin épicas registradas. Agrega las épicas de la iniciativa para ver sus historias y su estado.</div>}{form}</>;
     }
-    if (!progress) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
-    if (progress.error) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>{form}</>;
+    if (!progress?.epicsLoaded) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
+    if (progress.epicsError) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.epicsError}</div>{form}</>;
     const coverage = pct(progress.storiesWithCases, progress.stories);
-    const noRuns = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+    const noRuns = EMPTY_RUNS;
     // Older cached answers have no per-epic breakdown: fall back to one row per key.
     const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns }));
     const listOpen = Boolean(openRows[`${initiative.id}:epics`]);
@@ -820,11 +859,15 @@ const LifecycleView = ({ ctx }) => {
     if (planKeys.length === 0 && !hasEpics) {
       return <>{!form && <div style={styles.muted}>Sin planes de prueba registrados. Agrega los Test Plans de Test Pulse para ver sus ciclos y su avance.</div>}{form}</>;
     }
-    if (!progress) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
-    if (progress.error) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>{form}</>;
+    // With plans, the phase only needs the plans' answer; without them it shows the figures
+    // calculated from the epics, so it waits for those instead.
+    const ready = planKeys.length > 0 ? progress?.plansLoaded : progress?.epicsLoaded;
+    if (!ready) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
+    const loadError = planKeys.length > 0 ? progress.plansError : progress.epicsError;
+    if (loadError) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{loadError}</div>{form}</>;
 
     // Top figures: the plans when there are any; otherwise the executions found through the epics.
-    const runs = planTotals(progress) || progress.runs;
+    const runs = planTotals(progress) || progress.runs || EMPTY_RUNS;
     const executed = runs.passed + runs.failed + runs.blocked;
     const bugs = progress.bugs || { total: 0, open: 0 };
     return (
@@ -840,7 +883,7 @@ const LifecycleView = ({ ctx }) => {
           <Metric value={runs.failed} label="Failed" color="#C9372C" />
           <Metric value={runs.blocked} label="Blocked" color="#B65C02" />
           <Metric value={(runs.notRun || 0) + (runs.other || 0)} label="Sin ejecutar" />
-          {hasEpics && <Metric value={`${bugs.open} / ${bugs.total}`} label="Bugs abiertos / total" color={bugs.open > 0 ? '#C9372C' : undefined} />}
+          {hasEpics && progress.epicsLoaded && !progress.epicsError && <Metric value={`${bugs.open} / ${bugs.total}`} label="Bugs abiertos / total" color={bugs.open > 0 ? '#C9372C' : undefined} />}
           <div style={{ minWidth: '150px', flex: '0 1 220px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
               <span>Avance de ejecución</span><strong style={{ color: 'var(--jira-text, #172B4D)' }}>{pct(executed, runs.total)}%</strong>

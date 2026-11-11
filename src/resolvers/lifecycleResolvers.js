@@ -36,6 +36,11 @@ import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenc
 import { readXlsx } from '../utils/xlsxReader.js';
 import { evaluateTestPlan } from '../utils/testPlanChecklist.js';
 import { currentPlanRefOfCycle, isSamePlan } from '../utils/planCycleRules.js';
+// Performance helpers (v4.22.1): bounded parallelism and a 60-second memory of expensive lists.
+import { mapLimit, createShortCache } from '../utils/asyncHelpers.js';
+
+// Shared by the resolvers of this file; entries are per user (see asyncHelpers.js).
+const cachedFor = createShortCache();
 
 // The five phases of the framework, in order. The ids are stored; the labels live in the UI.
 export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'];
@@ -259,11 +264,11 @@ const cycleCounters = (issue) => {
  * Never throws: a problem is returned as `{ key, error }`.
  *
  * @param {string} planKey - Key of the Test Plan issue, e.g. "CUQ-10".
- * @param {Map<string, Array>} [cycleCache] - Cycles already listed per project id, so several
- *        plans of the same project cost a single search.
+ * @param {string} [accountId] - Current user. With it, the cycles of a project are listed once
+ *        and shared by every plan of that project for 60 seconds (see cachedFor).
  * @returns {Promise<Object>} { key, summary, status, startDate, endDate, cycles: [...], totals }
  */
-async function readTestPulsePlanDetail(planKey, cycleCache = new Map()) {
+async function readTestPulsePlanDetail(planKey, accountId) {
   try {
     const planRes = await api.asUser().requestJira(
       route`/rest/api/3/issue/${planKey}?fields=summary,project,issuetype,status&properties=testpulse-schedule`,
@@ -274,24 +279,27 @@ async function readTestPulsePlanDetail(planKey, cycleCache = new Map()) {
     const rawSchedule = plan?.properties?.['testpulse-schedule'];
     const schedule = rawSchedule?.value && typeof rawSchedule.value === 'object' ? rawSchedule.value : (rawSchedule || {});
 
-    // Cycles of the project (listed once per project and call).
+    // Cycles of the project. Listing them is the expensive part, so it is done once per project
+    // and user, and shared between the plans read in this and the next requests.
     const projectId = String(plan?.fields?.project?.id || '');
-    let projectCycles = cycleCache.get(projectId);
-    if (!projectCycles && /^\d+$/.test(projectId)) {
-      projectCycles = [];
+    const listProjectCycles = async () => {
       // Cycle issue types of the project, by name (each project may name them differently).
       const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
       const cycleTypes = projectRes.ok
         ? ((await projectRes.json())?.issueTypes || []).map(type => String(type?.name || '')).filter(name => /cycle|ciclo/i.test(name))
         : [];
-      if (cycleTypes.length > 0) {
-        const typeList = cycleTypes.map(name => jqlQuote(name)).join(',');
-        projectCycles = await searchAll(
-          `project = ${projectId} AND issuetype in (${typeList})`,
-          ['summary', 'status', 'parent'], 1000, ['testops-plan-link', 'testpulse-v2', 'execution-meta']
-        );
-      }
-      cycleCache.set(projectId, projectCycles);
+      if (cycleTypes.length === 0) return [];
+      const typeList = cycleTypes.map(name => jqlQuote(name)).join(',');
+      return searchAll(
+        `project = ${projectId} AND issuetype in (${typeList})`,
+        ['summary', 'status', 'parent'], 1000, ['testops-plan-link', 'testpulse-v2', 'execution-meta']
+      );
+    };
+    let projectCycles = [];
+    if (/^\d+$/.test(projectId)) {
+      projectCycles = accountId
+        ? await cachedFor(`cycles:${accountId}:${projectId}`, listProjectCycles)
+        : await listProjectCycles();
     }
 
     const cycles = (projectCycles || [])
@@ -502,9 +510,13 @@ async function computeProgress(epicKeys) {
   const runs = { ...empty.runs };
   const seenRuns = new Set();
   const caseList = [...caseKeys].slice(0, 1000);
-  for (let i = 0; i < caseList.length; i += 100) {
-    const chunk = caseList.slice(i, i + 100).map(k => jqlQuote(k)).join(',');
-    const cases = await searchAll(`key in (${chunk})`, ['issuelinks'], 100);
+  // The test cases are read in groups of 100. The groups are independent, so they are requested
+  // four at a time instead of one by one (v4.22.1).
+  const chunks = [];
+  for (let i = 0; i < caseList.length; i += 100) chunks.push(caseList.slice(i, i + 100));
+  const chunkResults = await mapLimit(chunks, 4, (chunk) =>
+    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuelinks'], 100));
+  for (const cases of chunkResults) {
     for (const testCase of cases) {
       for (const linked of linkedIssues(testCase)) {
         if (isBug(linked)) { noteBug(linked); continue; }
@@ -537,6 +549,42 @@ async function computeProgress(epicKeys) {
     epics: [...epicMap.values()],
     truncated: stories.length >= MAX_STORIES || caseKeys.size > 1000
   };
+}
+
+/**
+ * Lists the epics and the Test Plans of a project for the picker of phases 03 and 04, as the
+ * current user.
+ *
+ * @param {string} projectId - Project id or key, already validated.
+ * @returns {Promise<{epics: Array, plans: Array, maxEpics: number, maxPlans: number}>}
+ */
+async function listCandidates(projectId) {
+  // The names of the issue types differ between projects ("Epic" / "Épica", "Test Plan" /
+  // "Plan de Pruebas" / "Test Set"), so they are taken from the project itself:
+  //   - epics are the types one level above stories (hierarchyLevel 1);
+  //   - Test Plans are recognized by name.
+  const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
+  if (!projectRes.ok) throw new Error(`Jira no permitió leer el proyecto (HTTP ${projectRes.status}).`);
+  const issueTypes = (await projectRes.json())?.issueTypes || [];
+  const epicTypes = issueTypes.filter(type => type?.hierarchyLevel === 1).map(type => String(type.name));
+  const planTypes = issueTypes.map(type => String(type?.name || ''))
+    .filter(name => /test ?plan|plan de prueba|test ?set|conjunto de prueba/i.test(name));
+
+  const list = async (typeNames) => {
+    if (typeNames.length === 0) return [];
+    const types = typeNames.map(name => jqlQuote(name)).join(',');
+    const issues = await searchAll(
+      `project = ${jqlQuote(projectId)} AND issuetype in (${types}) ORDER BY created DESC`,
+      ['summary', 'status'], MAX_CANDIDATES
+    );
+    return issues.map(issue => ({
+      key: issue.key,
+      summary: text(issue?.fields?.summary, 160),
+      status: text(issue?.fields?.status?.name, 40)
+    }));
+  };
+  const [epics, plans] = await Promise.all([list(epicTypes), list(planTypes)]);
+  return { epics, plans, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS };
 }
 
 /**
@@ -680,38 +728,16 @@ export const registerLifecycleResolvers = (resolver) => {
 
   // Picker of phases 03 and 04 (v4.22.0): the epics and the Test Plans of the project, so they can
   // be chosen from a list instead of typing their keys. Read as the current user.
-  resolver.define('getLifecycleCandidates', async ({ payload }) => {
+  resolver.define('getLifecycleCandidates', async ({ payload, context }) => {
     const projectId = projectKeyPart(payload.projectId);
-    // The names of the issue types differ between projects ("Epic" / "Épica", "Test Plan" /
-    // "Plan de Pruebas" / "Test Set"), so they are taken from the project itself:
-    //   - epics are the types one level above stories (hierarchyLevel 1);
-    //   - Test Plans are recognized by name.
-    const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
-    if (!projectRes.ok) throw new Error(`Jira no permitió leer el proyecto (HTTP ${projectRes.status}).`);
-    const issueTypes = (await projectRes.json())?.issueTypes || [];
-    const epicTypes = issueTypes.filter(type => type?.hierarchyLevel === 1).map(type => String(type.name));
-    const planTypes = issueTypes.map(type => String(type?.name || ''))
-      .filter(name => /test ?plan|plan de prueba|test ?set|conjunto de prueba/i.test(name));
-
-    const list = async (typeNames) => {
-      if (typeNames.length === 0) return [];
-      const types = typeNames.map(name => jqlQuote(name)).join(',');
-      const issues = await searchAll(
-        `project = ${jqlQuote(projectId)} AND issuetype in (${types}) ORDER BY created DESC`,
-        ['summary', 'status'], MAX_CANDIDATES
-      );
-      return issues.map(issue => ({
-        key: issue.key,
-        summary: text(issue?.fields?.summary, 160),
-        status: text(issue?.fields?.status?.name, 40)
-      }));
-    };
-    const [epics, plans] = await Promise.all([list(epicTypes), list(planTypes)]);
-    return { epics, plans, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS };
+    // Opening the picker twice in a minute (epics, then plans) reuses the same listing. Without
+    // a known user nothing is shared.
+    if (!context?.accountId) return listCandidates(projectId);
+    return cachedFor(`candidates:${context.accountId}:${projectId}`, () => listCandidates(projectId));
   });
 
   // Phases 3 and 4: test design and execution figures for the epics of an initiative.
-  resolver.define('getLifecycleProgress', async ({ payload }) => {
+  resolver.define('getLifecycleProgress', async ({ payload, context }) => {
     projectKeyPart(payload.projectId);
     const epicKeys = (Array.isArray(payload.epicKeys) ? payload.epicKeys : [])
       .map(k => String(k || '').trim().toUpperCase())
@@ -719,10 +745,13 @@ export const registerLifecycleResolvers = (resolver) => {
       .slice(0, MAX_EPICS);
     // v4.21.0: Test Plans followed in phase 04, each with its cycles and their progress.
     const planKeys = [...new Set((Array.isArray(payload.planKeys) ? payload.planKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_PLANS);
-    const cycleCache = new Map();
-    const plans = [];
-    for (const planKey of planKeys) plans.push(await readTestPulsePlanDetail(planKey, cycleCache));
-    return { ...(await computeProgress(epicKeys)), plans };
+    // Epics and plans are independent, so both are read at the same time; the plans go five at
+    // a time and share one listing of the project's cycles (v4.22.1).
+    const [progress, plans] = await Promise.all([
+      computeProgress(epicKeys),
+      mapLimit(planKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId))
+    ]);
+    return { ...progress, plans };
   });
 };
 

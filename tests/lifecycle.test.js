@@ -204,7 +204,7 @@ test('phases 03 and 04 take several deliverables: epics with stories, plans with
   const resolvers = read('src/resolvers/lifecycleResolvers.js');
   // Per-epic breakdown and the Test Plans with their cycles come from the same resolver.
   assert.match(resolvers, /epics: \[\.\.\.epicMap\.values\(\)\]/);
-  assert.match(resolvers, /plans\.push\(await readTestPulsePlanDetail\(planKey, cycleCache\)\)/);
+  assert.match(resolvers, /readTestPulsePlanDetail\(planKey, context\?\.accountId\)/);
   assert.match(resolvers, /\['testops-plan-link', 'testpulse-v2', 'execution-meta'\]/);
   // Plan keys are stored on the initiative, cleaned and bounded.
   assert.match(resolvers, /planKeys: \[\.\.\.new Set\(/);
@@ -214,14 +214,16 @@ test('phases 03 and 04 take several deliverables: epics with stories, plans with
   assert.match(view, /\+ Agregar épicas/);
   assert.match(view, /\+ Agregar planes de prueba/);
   assert.match(view, /handleAddSelected\(initiative, field\)/);
-  assert.match(view, /planKeys: initiative\.planKeys \|\| \[\]/);
+  assert.match(view, /const planKeys = initiative\.planKeys \|\| \[\];/);
   // Adding and removing are edit actions: only shown to lifecycle editors.
   assert.match(view, /canEdit && phase\.auto/);
 });
 
 test('epics and Test Plans are picked from the project, with a general status (v4.22.0)', () => {
   const resolvers = read('src/resolvers/lifecycleResolvers.js');
-  const body = resolvers.slice(resolvers.indexOf("resolver.define('getLifecycleCandidates'"), resolvers.indexOf("resolver.define('getLifecycleProgress'"));
+  // v4.22.1: the listing lives in listCandidates(), called by the resolver through a 60 s cache.
+  const body = resolvers.slice(resolvers.indexOf('async function listCandidates'), resolvers.indexOf('Registers the lifecycle resolvers'));
+  assert.match(resolvers, /resolver\.define\('getLifecycleCandidates'/);
   // Epic types come from the project hierarchy, plan types from their names; read as the user.
   assert.match(body, /hierarchyLevel === 1/);
   assert.match(body, /plan de prueba/);
