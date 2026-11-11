@@ -33,6 +33,8 @@ import {
 } from '../utils/lifecycleEditors.js';
 import { jqlQuote } from '../utils/jqlHelpers.js';
 import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenceFindingsParser.js';
+import { readXlsx } from '../utils/xlsxReader.js';
+import { evaluateTestPlan } from '../utils/testPlanChecklist.js';
 
 // The five phases of the framework, in order. The ids are stored; the labels live in the UI.
 export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'];
@@ -41,6 +43,14 @@ const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'delivered'];
 const MAX_INITIATIVES = 100;
 const MAX_DELIVERABLES_PER_PHASE = 30;
 const MAX_EPICS = 20;
+// Test Plan workbook (v4.20.0): the biggest Excel attachment Test Pulse will download and read.
+const MAX_TEST_PLAN_BYTES = 5 * 1024 * 1024;
+
+/** "cuq-123 " → "CUQ-123"; anything that is not a Jira issue key → ''. */
+const issueKeyOf = (value) => {
+  const key = text(value, 30).toUpperCase();
+  return /^[A-Z][A-Z0-9_]*-\d+$/.test(key) ? key : '';
+};
 
 const keyPrefix = (projectId) => `lifecycle_${projectId}_`;
 
@@ -68,7 +78,9 @@ const isSafeId = (value) => /^[a-z0-9]{6,24}$/i.test(String(value || ''));
  */
 function sanitizeDeliverable(raw, stored) {
   const url = safeUrl(raw?.url);
-  const kind = raw?.kind === 'findings' ? 'findings' : 'link';
+  // 'findings' = Shift-Left report read from Confluence; 'testplan' = Test Plan workbook attached
+  // to a Jira issue and checked against the 17 standard elements; 'link' = any other document.
+  const kind = ['findings', 'testplan'].includes(raw?.kind) ? raw.kind : 'link';
   const clean = {
     id: isSafeId(raw?.id) ? String(raw.id) : newId(),
     kind,
@@ -83,6 +95,13 @@ function sanitizeDeliverable(raw, stored) {
   // Keep the last report read from Confluence only while the link still points to the same page.
   if (kind === 'findings' && stored?.report && stored.url === url) {
     clean.report = stored.report;
+  }
+  if (kind === 'testplan') {
+    // Where the Excel is attached, and the link that covers element 16 (defect management).
+    clean.issueKey = issueKeyOf(raw?.issueKey);
+    clean.defectsUrl = safeUrl(raw?.defectsUrl);
+    // Keep the last evaluation only while it still refers to the same Jira issue.
+    if (stored?.report && stored.issueKey === clean.issueKey) clean.report = stored.report;
   }
   return clean;
 }
@@ -191,6 +210,75 @@ async function readFindingsReport(url) {
     maturitySource: parsed.maturitySource,
     error: parsed.recognized ? null : 'No se encontró la tabla de hallazgos. La tabla de detalle debe tener una columna "ID" y columnas como "Tipo de hallazgo" e "Impacto"; el estado se toma de la tabla "Estado de atención de hallazgos" (ID y Estado).'
   };
+}
+
+/**
+ * Reads the Test Plan workbook attached to a Jira issue, as the current user, and checks it
+ * against the 17 standard elements (see testPlanChecklist.js). Never throws: a problem produces
+ * `{ error }`, shown next to the deliverable while the previous evaluation is kept.
+ *
+ * Which attachment is used: the newest .xlsx of the issue; when several exist, one whose name
+ * contains "plan" is preferred. Uploading a new version to the same issue is enough to update.
+ *
+ * @param {Object} deliverable - Stored deliverable of kind 'testplan' (issueKey, defectsUrl).
+ * @param {Object} initiative - Stored initiative (its epics cover element 15).
+ * @returns {Promise<Object>}
+ */
+async function readTestPlanReport(deliverable, initiative) {
+  const fetchedAt = new Date().toISOString();
+  const base = { reportKind: 'testplan', fetchedAt, issueKey: deliverable.issueKey || '' };
+  if (!deliverable.issueKey) {
+    return { ...base, error: 'Captura la clave de la incidencia de Jira donde está adjunto el Excel del plan (por ejemplo CUQ-123).' };
+  }
+  try {
+    // 1. List the attachments of the issue (Jira checks that the user can see the issue).
+    const issueRes = await api.asUser().requestJira(route`/rest/api/3/issue/${deliverable.issueKey}?fields=attachment`, {
+      headers: { Accept: 'application/json' }
+    });
+    if (!issueRes.ok) {
+      return { ...base, error: `Jira no permitió leer la incidencia ${deliverable.issueKey} (HTTP ${issueRes.status}).` };
+    }
+    const attachments = ((await issueRes.json())?.fields?.attachment || [])
+      .filter(item => /\.xlsx$/i.test(String(item?.filename || '')))
+      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    const attachment = attachments.find(item => /plan/i.test(item.filename)) || attachments[0];
+    if (!attachment) {
+      return { ...base, error: `La incidencia ${deliverable.issueKey} no tiene ningún Excel (.xlsx) adjunto.` };
+    }
+    const fileInfo = {
+      fileName: text(attachment.filename, 255),
+      fileCreated: attachment.created || null,
+      fileAuthor: text(attachment.author?.displayName, 120)
+    };
+    if (Number(attachment.size) > MAX_TEST_PLAN_BYTES) {
+      return { ...base, ...fileInfo, error: 'El Excel adjunto pesa más de 5 MB; no se puede evaluar.' };
+    }
+
+    // 2. Download it and read its cells.
+    const contentRes = await api.asUser().requestJira(route`/rest/api/3/attachment/content/${String(attachment.id)}`);
+    if (contentRes.status !== 200) {
+      return { ...base, ...fileInfo, error: `No se pudo descargar el Excel adjunto (HTTP ${contentRes.status}).` };
+    }
+    const workbook = readXlsx(Buffer.from(await contentRes.arrayBuffer()));
+
+    // 3. Check the 17 elements.
+    const evaluation = evaluateTestPlan(workbook, {
+      epicCount: (initiative?.epicKeys || []).length,
+      defectsUrl: deliverable.defectsUrl
+    });
+    return {
+      ...base,
+      ...fileInfo,
+      recognized: evaluation.recognized,
+      elements: evaluation.elements,
+      totals: evaluation.totals,
+      compliancePct: evaluation.compliancePct,
+      error: evaluation.recognized ? null : 'El Excel no tiene la estructura de la plantilla de Plan de Pruebas (hojas "Estrategia", "Recursos", "Datos o Insumos", "Registro de riesgos" y "Planeación").'
+    };
+  } catch (e) {
+    console.warn('[lifecycle] test plan read failed:', e?.message);
+    return { ...base, error: `No se pudo leer el Excel del plan: ${e?.message || 'error desconocido'}` };
+  }
 }
 
 /** Runs one page of a JQL search as the current user. */
@@ -399,11 +487,15 @@ export const registerLifecycleResolvers = (resolver) => {
       for (const deliverable of initiative.phases?.[phase]?.deliverables || []) {
         const wanted = !payload.deliverableId || deliverable.id === payload.deliverableId;
         if (deliverable.kind === 'findings' && deliverable.url && wanted) targets.push(deliverable);
+        // v4.20.0: the Test Plan workbook attached in Jira is re-evaluated the same way.
+        if (deliverable.kind === 'testplan' && wanted) targets.push(deliverable);
       }
     }
     // At most 10 pages per call keeps the resolver well inside its time limit.
     for (const deliverable of targets.slice(0, 10)) {
-      const report = await readFindingsReport(deliverable.url);
+      const report = deliverable.kind === 'testplan'
+        ? await readTestPlanReport(deliverable, initiative)
+        : await readFindingsReport(deliverable.url);
       // A failed read keeps the previous numbers and only records the error.
       deliverable.report = report.error && deliverable.report?.totals
         ? { ...deliverable.report, error: report.error, fetchedAt: report.fetchedAt }
@@ -414,7 +506,8 @@ export const registerLifecycleResolvers = (resolver) => {
       const latest = (await storage.get(key)) || initiative;
       for (const phase of LIFECYCLE_PHASES) {
         for (const deliverable of latest.phases?.[phase]?.deliverables || []) {
-          const refreshed = targets.find(t => t.id === deliverable.id && t.url === deliverable.url);
+          // Only merge when the deliverable still points to what was read (same page or same issue).
+          const refreshed = targets.find(t => t.id === deliverable.id && t.url === deliverable.url && (t.issueKey || '') === (deliverable.issueKey || ''));
           if (refreshed) deliverable.report = refreshed.report;
         }
       }

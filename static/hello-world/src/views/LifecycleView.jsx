@@ -155,17 +155,89 @@ const FindingsSummary = ({ report }) => {
   );
 };
 
+// ── Test Plan checklist (phase 01, v4.20.0) ─────────────────────────────────────────────────
+
+// How each result of the 17-element check is shown.
+const PLAN_STATUS = {
+  complete: { label: 'Cumple', color: '#216E4E', background: '#DCFFF1' },
+  partial: { label: 'Parcial', color: '#974F0C', background: '#FFF7D6' },
+  missing: { label: 'Falta', color: '#AE2A19', background: '#FFECEB' },
+  deferred: { label: 'Más adelante', color: '#44546F', background: '#F1F2F4' }
+};
+const PLAN_PHASE_NAMES = { plan: 'Planear', design: 'Diseñar', build: 'Construir', execute: 'Ejecutar', release: 'Liberar' };
+const PLAN_SOURCE_NAMES = { excel: 'Excel', jira: 'Jira', confluence: 'Confluence', testpulse: 'Test Pulse' };
+
+/**
+ * Shows the result of checking the Test Plan workbook against the 17 standard elements: the
+ * totals, the compliance percentage, and one row per element with why it got its result.
+ * An element that is not complete yet but is only due in a later phase is shown as
+ * "Más adelante" and is not counted against the plan.
+ */
+const TestPlanSummary = ({ report }) => {
+  if (!report) return <div style={styles.muted}>Aún no se ha leído el Excel del plan de pruebas.</div>;
+  if (!report.totals) return <div style={{ ...styles.muted, color: '#AE2A19' }}>{report.error}</div>;
+  const { totals, elements = [] } = report;
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <Metric value={`${totals.complete} / ${totals.total}`} label="Elementos que cumplen" color="#216E4E" />
+        <Metric value={totals.partial} label="Parciales" color={totals.partial > 0 ? '#974F0C' : undefined} />
+        <Metric value={totals.missing} label="Faltan" color={totals.missing > 0 ? '#C9372C' : undefined} />
+        <Metric value={totals.deferred} label="Para fases posteriores" />
+        <div style={{ minWidth: '170px', flex: '0 1 220px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
+            <span>Cumplimiento a esta fase</span>
+            <strong style={{ color: 'var(--jira-text, #172B4D)' }}>{report.compliancePct}%</strong>
+          </div>
+          <Bar value={report.compliancePct} color="#1F845A" />
+        </div>
+      </div>
+      <div style={{ marginTop: '10px', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
+        {elements.map(element => {
+          const tone = PLAN_STATUS[element.deferred ? 'deferred' : element.status] || PLAN_STATUS.missing;
+          return (
+            <div key={element.number} style={{ display: 'flex', gap: '10px', alignItems: 'baseline', padding: '5px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem' }}>
+              <span style={{ flex: '0 0 22px', color: 'var(--jira-subtle, #626F86)', textAlign: 'right' }}>{element.number}</span>
+              <span style={{ flex: '0 0 96px' }}>
+                <span style={{ display: 'inline-block', fontSize: '0.72rem', fontWeight: 700, color: tone.color, background: tone.background, borderRadius: '3px', padding: '1px 6px' }}>{tone.label}</span>
+              </span>
+              <span style={{ flex: '1 1 0', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>
+                <strong>{element.name}</strong>
+                <span style={styles.muted}>
+                  {' — '}{element.detail}
+                  {element.deferred ? ` Se cubre en la fase ${PLAN_PHASE_NAMES[element.duePhase] || element.duePhase}.` : ''}
+                </span>
+              </span>
+              <span style={{ flex: '0 0 auto', ...styles.muted }}>{PLAN_SOURCE_NAMES[element.source] || ''}</span>
+            </div>
+          );
+        })}
+      </div>
+      {report.error && <div style={{ ...styles.muted, color: '#AE2A19', marginTop: '4px' }}>{report.error}</div>}
+    </div>
+  );
+};
+
 // ── Deliverable form ────────────────────────────────────────────────────────────────────────
 
 const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
   const isFindings = phase.id === 'design';
+  // v4.20.0: in phase 01 a deliverable can be THE Test Plan: an Excel attached to a Jira issue
+  // that Test Pulse checks against the 17 standard elements.
+  const canBeTestPlan = phase.id === 'plan';
   const [form, setForm] = useState(() => ({
     name: '', docType: isFindings ? 'ERF' : '', url: '', owner: '', date: '', status: 'pending', notes: '',
+    issueKey: '', defectsUrl: '',
     ...(initial || {})
   }));
+  const [isTestPlan, setIsTestPlan] = useState(canBeTestPlan && initial?.kind === 'testplan');
   const set = (field) => (event) => setForm(prev => ({ ...prev, [field]: event.target.value }));
-  const urlLooksValid = !form.url || /^https?:\/\/\S+$/i.test(form.url.trim());
-  const canSave = form.name.trim() && urlLooksValid && (!isFindings || form.url.trim());
+  const looksLikeUrl = (value) => !value || /^https?:\/\/\S+$/i.test(String(value).trim());
+  const urlLooksValid = looksLikeUrl(form.url);
+  const defectsUrlLooksValid = looksLikeUrl(form.defectsUrl);
+  const issueKeyLooksValid = /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(String(form.issueKey || '').trim());
+  const canSave = form.name.trim() && urlLooksValid && (!isFindings || form.url.trim()) &&
+    (!isTestPlan || (issueKeyLooksValid && defectsUrlLooksValid));
 
   return (
     <div style={{ ...styles.card, padding: '12px', background: 'var(--jira-bg-app, #F7F8F9)', marginTop: '8px' }}>
@@ -187,6 +259,28 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
           <input style={styles.input} value={form.url} onChange={set('url')} maxLength={1000} placeholder="https://liverpooldigital.atlassian.net/wiki/spaces/…/pages/…" />
           {!urlLooksValid && <div style={{ ...styles.muted, color: '#AE2A19' }}>El enlace debe empezar con https://</div>}
         </div>
+        {canBeTestPlan && (
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={{ ...styles.label, display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={isTestPlan} onChange={(event) => setIsTestPlan(event.target.checked)} />
+              Es el Plan de pruebas: evaluar el Excel adjunto en Jira contra los 17 elementos estándar
+            </label>
+          </div>
+        )}
+        {isTestPlan && (
+          <div>
+            <label style={styles.label}>Incidencia de Jira con el Excel adjunto *</label>
+            <input style={styles.input} value={form.issueKey} onChange={set('issueKey')} maxLength={30} placeholder="CUQ-123" />
+            {form.issueKey && !issueKeyLooksValid && <div style={{ ...styles.muted, color: '#AE2A19' }}>Usa la clave de la incidencia, por ejemplo CUQ-123.</div>}
+          </div>
+        )}
+        {isTestPlan && (
+          <div style={{ gridColumn: 'span 2' }}>
+            <label style={styles.label}>Enlace a Gestión de defectos en Confluence (elemento 16)</label>
+            <input style={styles.input} value={form.defectsUrl} onChange={set('defectsUrl')} maxLength={1000} placeholder="https://liverpooldigital.atlassian.net/wiki/spaces/…/pages/…" />
+            {!defectsUrlLooksValid && <div style={{ ...styles.muted, color: '#AE2A19' }}>El enlace debe empezar con https://</div>}
+          </div>
+        )}
         <div>
           <label style={styles.label}>Responsable</label>
           <input style={styles.input} value={form.owner} onChange={set('owner')} maxLength={120} />
@@ -205,7 +299,14 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
       <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' }}>
         <button type="button" className="btn-secondary" onClick={onCancel} disabled={saving}>Cancelar</button>
         <button type="button" className="btn-primary" disabled={!canSave || saving}
-          onClick={() => onSave({ ...form, name: form.name.trim(), url: form.url.trim(), kind: isFindings ? 'findings' : 'link' })}>
+          onClick={() => onSave({
+            ...form,
+            name: form.name.trim(),
+            url: form.url.trim(),
+            issueKey: isTestPlan ? String(form.issueKey || '').trim().toUpperCase() : '',
+            defectsUrl: isTestPlan ? String(form.defectsUrl || '').trim() : '',
+            kind: isFindings ? 'findings' : (isTestPlan ? 'testplan' : 'link')
+          })}>
           {saving ? 'Guardando…' : 'Guardar'}
         </button>
       </div>
@@ -265,7 +366,7 @@ const LifecycleView = ({ ctx }) => {
       const res = await invoke('refreshLifecycleFindings', { projectId: selectedProjectId, initiativeId: initiative.id, deliverableId });
       if (res?.initiative) replaceInitiative(res.initiative);
     } catch (error) {
-      if (!silent) notifyError('No se pudo actualizar desde Confluence', error);
+      if (!silent) notifyError('No se pudo actualizar el entregable', error);
     } finally {
       setBusy('');
     }
@@ -284,9 +385,11 @@ const LifecycleView = ({ ctx }) => {
 
     if (!refreshedRef.current.has(initiative.id)) {
       refreshedRef.current.add(initiative.id);
-      const stale = deliverablesOf(initiative, 'design').some(d =>
-        d.kind === 'findings' && d.url && (!d.report?.fetchedAt || Date.now() - new Date(d.report.fetchedAt).getTime() > REPORT_FRESH_MS)
-      );
+      // Findings reports (Confluence) and the Test Plan workbook (Jira attachment) are re-read
+      // when what is stored is older than 15 minutes.
+      const isStale = (d) => !d.report?.fetchedAt || Date.now() - new Date(d.report.fetchedAt).getTime() > REPORT_FRESH_MS;
+      const stale = deliverablesOf(initiative, 'design').some(d => d.kind === 'findings' && d.url && isStale(d)) ||
+        deliverablesOf(initiative, 'plan').some(d => d.kind === 'testplan' && d.issueKey && isStale(d));
       if (stale) refreshFindings(initiative, undefined, true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -338,6 +441,13 @@ const LifecycleView = ({ ctx }) => {
     // A new or re-linked findings report is read from Confluence right away.
     if (deliverable.kind === 'findings') {
       const target = deliverablesOf(saved, phaseId).find(item => item.url === deliverable.url && !item.report);
+      if (target) refreshFindings(saved, target.id, false);
+    }
+    // The Test Plan is evaluated again after every save: the Jira issue or the defect-management
+    // link (element 16) may have changed.
+    if (deliverable.kind === 'testplan') {
+      const target = deliverablesOf(saved, phaseId).find(item =>
+        item.kind === 'testplan' && (deliverable.id ? item.id === deliverable.id : item.issueKey === deliverable.issueKey && !item.report));
       if (target) refreshFindings(saved, target.id, false);
     }
   };
@@ -398,7 +508,7 @@ const LifecycleView = ({ ctx }) => {
           </span>
           <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px' }}>
             {deliverable.url && <button type="button" style={styles.linkBtn} onClick={() => openLink(deliverable.url)}>{deliverable.kind === 'findings' ? 'Abrir en Confluence ↗' : 'Abrir ↗'}</button>}
-            {deliverable.kind === 'findings' && (
+            {(deliverable.kind === 'findings' || deliverable.kind === 'testplan') && (
               <button type="button" style={styles.linkBtn} disabled={!!busy} onClick={() => refreshFindings(initiative, deliverable.id, false)}>
                 {busy === deliverable.id ? 'Leyendo…' : 'Actualizar'}
               </button>
@@ -407,6 +517,19 @@ const LifecycleView = ({ ctx }) => {
             {canEdit && <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy} onClick={() => handleRemoveDeliverable(initiative, phase.id, deliverable.id)}>Quitar</button>}
           </span>
         </div>
+        {deliverable.kind === 'testplan' && (
+          <div style={{ marginTop: '10px' }}>
+            <TestPlanSummary report={deliverable.report} />
+            {deliverable.report?.fetchedAt && (
+              <div style={{ ...styles.muted, marginTop: '4px' }}>
+                {deliverable.report.fileName ? `Excel evaluado: ${deliverable.report.fileName} (adjunto en ${deliverable.report.issueKey}` : `Incidencia: ${deliverable.report.issueKey}`}
+                {deliverable.report.fileCreated ? `, subido el ${formatDateTime(deliverable.report.fileCreated)}` : ''}
+                {deliverable.report.fileName ? ')' : ''}
+                {` · Evaluado: ${formatDateTime(deliverable.report.fetchedAt)}`}
+              </div>
+            )}
+          </div>
+        )}
         {deliverable.kind === 'findings' && (
           <div style={{ marginTop: '10px' }}>
             <FindingsSummary report={deliverable.report} />
