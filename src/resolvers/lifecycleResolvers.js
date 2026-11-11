@@ -44,6 +44,8 @@ const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'delivered'];
 const MAX_INITIATIVES = 100;
 const MAX_DELIVERABLES_PER_PHASE = 30;
 const MAX_EPICS = 20;
+// v4.21.0: Test Plans of Test Pulse an initiative can follow in phase 04 (Ejecutar).
+const MAX_PLANS = 20;
 // Test Plan workbook (v4.20.0): the biggest Excel attachment Test Pulse will download and read.
 const MAX_TEST_PLAN_BYTES = 5 * 1024 * 1024;
 
@@ -131,6 +133,8 @@ function sanitizeInitiative(raw, stored, accountId) {
     name: text(raw?.name, 120) || 'Iniciativa sin nombre',
     description: text(raw?.description, 600),
     epicKeys: [...new Set(epicKeys)].slice(0, MAX_EPICS),
+    // v4.21.0: Test Plans followed in phase 04. Each one is shown with its cycles and progress.
+    planKeys: [...new Set((Array.isArray(raw?.planKeys) ? raw.planKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_PLANS),
     phases,
     createdAt: stored?.createdAt || now,
     createdBy: stored?.createdBy || accountId || null,
@@ -216,23 +220,48 @@ async function readFindingsReport(url) {
 }
 
 /**
- * Reads from Test Pulse what covers element 14 of the Test Plan check ("Periodo y ciclos"),
- * as the current user (v4.20.1):
- *   - the period is the schedule saved on the Test Plan issue (property `testpulse-schedule`,
- *     set in Planning → calendar of the plan);
- *   - the cycles are the Test Cycles of the same project linked to that plan. The link lives in
- *     an issue property, which JQL cannot search, so the cycles of the project are listed and
- *     matched with the same rule Planning uses (planCycleRules.js).
+ * Reads a `{ total, passed, failed, blocked, notRun, other }` summary from the `execution-meta`
+ * property of a Test Cycle. Test Pulse writes that summary every time the cycle changes, so the
+ * progress of a cycle is known without reading its executions one by one.
+ */
+const cycleCounters = (issue) => {
+  const raw = issue?.properties?.['execution-meta'];
+  const meta = raw?.value && typeof raw.value === 'object' ? raw.value : raw;
+  const number = (value) => Math.max(0, Number(value) || 0);
+  return {
+    total: number(meta?.total),
+    passed: number(meta?.passed),
+    failed: number(meta?.failed),
+    blocked: number(meta?.blocked),
+    notRun: number(meta?.notRun),
+    other: number(meta?.other)
+  };
+};
+
+/**
+ * Reads one Test Plan of Test Pulse with its children (the Test Cycles linked to it) and the
+ * progress of each cycle, as the current user. Used by:
+ *   - phase 04 "Ejecutar" of an initiative (v4.21.0), to show plans → cycles → progress;
+ *   - element 14 of the Test Plan check ("Periodo y ciclos", v4.20.1).
  *
- * Never throws: a problem is returned as `{ key, error }` and shown in the checklist.
+ * How it is read:
+ *   - the period is the schedule saved on the plan (property `testpulse-schedule`, set in
+ *     Planning → calendar of the plan);
+ *   - the link cycle → plan lives in an issue property, which JQL cannot search, so the cycles of
+ *     the project are listed once and matched with the rule Planning uses (planCycleRules.js);
+ *   - the counters of each cycle come from its `execution-meta` property.
+ *
+ * Never throws: a problem is returned as `{ key, error }`.
  *
  * @param {string} planKey - Key of the Test Plan issue, e.g. "CUQ-10".
- * @returns {Promise<{key: string, startDate?: string, endDate?: string, cycles?: number, error?: string}>}
+ * @param {Map<string, Array>} [cycleCache] - Cycles already listed per project id, so several
+ *        plans of the same project cost a single search.
+ * @returns {Promise<Object>} { key, summary, status, startDate, endDate, cycles: [...], totals }
  */
-async function readTestPulsePlan(planKey) {
+async function readTestPulsePlanDetail(planKey, cycleCache = new Map()) {
   try {
     const planRes = await api.asUser().requestJira(
-      route`/rest/api/3/issue/${planKey}?fields=summary,project,issuetype&properties=testpulse-schedule`,
+      route`/rest/api/3/issue/${planKey}?fields=summary,project,issuetype,status&properties=testpulse-schedule`,
       { headers: { Accept: 'application/json' } }
     );
     if (!planRes.ok) return { key: planKey, error: `No se pudo leer el plan ${planKey} en Jira (HTTP ${planRes.status}).` };
@@ -240,33 +269,66 @@ async function readTestPulsePlan(planKey) {
     const rawSchedule = plan?.properties?.['testpulse-schedule'];
     const schedule = rawSchedule?.value && typeof rawSchedule.value === 'object' ? rawSchedule.value : (rawSchedule || {});
 
-    // Cycle issue types of the project, by name (each project may name them differently).
-    let cycles = 0;
+    // Cycles of the project (listed once per project and call).
     const projectId = String(plan?.fields?.project?.id || '');
-    if (/^\d+$/.test(projectId)) {
+    let projectCycles = cycleCache.get(projectId);
+    if (!projectCycles && /^\d+$/.test(projectId)) {
+      projectCycles = [];
+      // Cycle issue types of the project, by name (each project may name them differently).
       const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
       const cycleTypes = projectRes.ok
         ? ((await projectRes.json())?.issueTypes || []).map(type => String(type?.name || '')).filter(name => /cycle|ciclo/i.test(name))
         : [];
       if (cycleTypes.length > 0) {
         const typeList = cycleTypes.map(name => jqlQuote(name)).join(',');
-        const cycleIssues = await searchAll(
+        projectCycles = await searchAll(
           `project = ${projectId} AND issuetype in (${typeList})`,
-          ['parent'], 1000, ['testops-plan-link', 'testpulse-v2']
+          ['summary', 'status', 'parent'], 1000, ['testops-plan-link', 'testpulse-v2', 'execution-meta']
         );
-        cycles = cycleIssues.filter(issue => isSamePlan(currentPlanRefOfCycle(issue), { id: plan.id, key: plan.key })).length;
       }
+      cycleCache.set(projectId, projectCycles);
     }
+
+    const cycles = (projectCycles || [])
+      .filter(issue => isSamePlan(currentPlanRefOfCycle(issue), { id: plan.id, key: plan.key }))
+      .map(issue => ({
+        key: issue.key,
+        summary: text(issue?.fields?.summary, 160),
+        status: text(issue?.fields?.status?.name, 40),
+        ...cycleCounters(issue)
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+
+    // Totals of the plan = sum of its cycles.
+    const totals = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+    for (const cycle of cycles) for (const field of Object.keys(totals)) totals[field] += cycle[field];
+
     return {
       key: plan.key || planKey,
+      summary: text(plan?.fields?.summary, 160),
+      status: text(plan?.fields?.status?.name, 40),
       startDate: text(schedule.startDate, 10),
       endDate: text(schedule.endDate, 10),
-      cycles
+      cycles,
+      totals
     };
   } catch (e) {
     console.warn('[lifecycle] Test Pulse plan read failed:', e?.message);
     return { key: planKey, error: `No se pudo leer el plan ${planKey} de Test Pulse.` };
   }
+}
+
+/**
+ * What element 14 of the Test Plan check needs from a Test Pulse plan: its period and how many
+ * cycles it has.
+ *
+ * @param {string} planKey
+ * @returns {Promise<{key: string, startDate?: string, endDate?: string, cycles?: number, error?: string}>}
+ */
+async function readTestPulsePlan(planKey) {
+  const detail = await readTestPulsePlanDetail(planKey);
+  if (detail.error) return detail;
+  return { key: detail.key, startDate: detail.startDate, endDate: detail.endDate, cycles: detail.cycles.length };
 }
 
 /**
@@ -384,11 +446,17 @@ const linkedIssues = (issue) => (issue?.fields?.issuelinks || []).map(l => l.out
  * @returns {Promise<Object>}
  */
 async function computeProgress(epicKeys) {
-  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 }, bugs: { total: 0, open: 0 }, truncated: false };
+  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 }, bugs: { total: 0, open: 0 }, epics: [], truncated: false };
   if (!epicKeys.length) return empty;
 
   const epicList = epicKeys.map(k => jqlQuote(k)).join(',');
-  const stories = await searchAll(`parent in (${epicList})`, ['issuetype', 'issuelinks', 'status'], 300);
+  // `parent` and `summary` (v4.21.0) let phase 03 show each epic with its own stories.
+  const stories = await searchAll(`parent in (${epicList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], 300);
+
+  // One entry per epic of the initiative, in the order they were added. An epic without stories
+  // still appears (with zeros) so it is visible that nothing has been built for it yet.
+  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: '', stories: 0, storiesWithCases: 0, cases: 0, storyList: [] }]));
+  const epicCases = new Map(epicKeys.map(key => [key, new Set()]));
 
   const caseKeys = new Set();
   const bugs = new Map(); // key → is it open?
@@ -403,7 +471,24 @@ async function computeProgress(epicKeys) {
     if (storyCases.length > 0) storiesWithCases++;
     storyCases.forEach(c => caseKeys.add(c.key));
     links.filter(isBug).forEach(noteBug);
+
+    // Per-epic breakdown.
+    const parentKey = String(story?.fields?.parent?.key || '').toUpperCase();
+    const epic = epicMap.get(parentKey);
+    if (epic) {
+      epic.summary = epic.summary || text(story?.fields?.parent?.fields?.summary, 160);
+      epic.stories++;
+      if (storyCases.length > 0) epic.storiesWithCases++;
+      storyCases.forEach(c => epicCases.get(parentKey).add(c.key));
+      epic.storyList.push({
+        key: story.key,
+        summary: text(story?.fields?.summary, 160),
+        status: text(story?.fields?.status?.name, 40),
+        cases: storyCases.length
+      });
+    }
   }
+  for (const epic of epicMap.values()) epic.cases = epicCases.get(epic.key).size;
   const storyCount = stories.filter(s => !isTestCase(s) && !isTestRun(s) && !isBug(s)).length;
 
   // Executions: every Test Run is linked to its Test Case, and the link carries the run's status.
@@ -435,6 +520,7 @@ async function computeProgress(epicKeys) {
     cases: caseKeys.size,
     runs,
     bugs: { total: bugs.size, open: [...bugs.values()].filter(Boolean).length },
+    epics: [...epicMap.values()],
     truncated: stories.length >= 300 || caseKeys.size > 1000
   };
 }
@@ -585,7 +671,12 @@ export const registerLifecycleResolvers = (resolver) => {
       .map(k => String(k || '').trim().toUpperCase())
       .filter(k => /^[A-Z][A-Z0-9_]*-\d+$/.test(k))
       .slice(0, MAX_EPICS);
-    return computeProgress(epicKeys);
+    // v4.21.0: Test Plans followed in phase 04, each with its cycles and their progress.
+    const planKeys = [...new Set((Array.isArray(payload.planKeys) ? payload.planKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_PLANS);
+    const cycleCache = new Map();
+    const plans = [];
+    for (const planKey of planKeys) plans.push(await readTestPulsePlanDetail(planKey, cycleCache));
+    return { ...(await computeProgress(epicKeys)), plans };
   });
 };
 

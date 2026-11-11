@@ -24,8 +24,8 @@ import { invoke } from '../utils/queryClient';
 const PHASES = [
   { id: 'plan', number: '01', title: 'Planear', subtitle: 'Estrategia', deliverable: 'Plan de QA' },
   { id: 'design', number: '02', title: 'Diseñar', subtitle: 'Shift-Left', deliverable: 'Reportes de hallazgos' },
-  { id: 'build', number: '03', title: 'Construir', subtitle: 'Preparación', deliverable: 'Casos vinculados a historias', auto: true },
-  { id: 'execute', number: '04', title: 'Ejecutar', subtitle: 'Validación', deliverable: 'Avance de ejecución y bugs', auto: true },
+  { id: 'build', number: '03', title: 'Construir', subtitle: 'Preparación', deliverable: 'Épicas e historias con sus casos de prueba', auto: true },
+  { id: 'execute', number: '04', title: 'Ejecutar', subtitle: 'Validación', deliverable: 'Planes de prueba con sus ciclos y avance', auto: true },
   { id: 'release', number: '05', title: 'Liberar', subtitle: 'Certificación', deliverable: 'Dictamen Go / No-Go' }
 ];
 
@@ -41,6 +41,18 @@ const REPORT_FRESH_MS = 15 * 60 * 1000;
 const emptyPhases = () => Object.fromEntries(PHASES.map(p => [p.id, { deliverables: [] }]));
 const deliverablesOf = (initiative, phaseId) => initiative?.phases?.[phaseId]?.deliverables || [];
 
+/**
+ * Sum of the counters of every Test Plan added to phase 04, or null when there are none.
+ * Plans that could not be read (`error`) are skipped.
+ */
+const planTotals = (progress) => {
+  const plans = (progress?.plans || []).filter(plan => plan && !plan.error && plan.totals);
+  if (plans.length === 0) return null;
+  const totals = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+  for (const plan of plans) for (const field of Object.keys(totals)) totals[field] += plan.totals[field] || 0;
+  return totals;
+};
+
 /** Status of a phase, derived from its deliverables (or from Jira figures for automatic phases). */
 const phaseStatus = (initiative, phase, progress) => {
   if (phase.id === 'build') {
@@ -48,10 +60,13 @@ const phaseStatus = (initiative, phase, progress) => {
     return progress.stories > 0 && progress.storiesWithCases >= progress.stories ? 'delivered' : 'in_progress';
   }
   if (phase.id === 'execute') {
-    if (!progress || progress.runs.total === 0) return 'pending';
-    const executed = progress.runs.passed + progress.runs.failed + progress.runs.blocked;
+    // v4.21.0: when Test Plans were added to the phase, their cycles decide the status;
+    // otherwise the executions found through the epics do.
+    const runs = planTotals(progress) || progress?.runs;
+    if (!runs || runs.total === 0) return 'pending';
+    const executed = runs.passed + runs.failed + runs.blocked;
     if (executed === 0) return 'pending';
-    return progress.runs.passed === progress.runs.total ? 'delivered' : 'in_progress';
+    return runs.passed === runs.total ? 'delivered' : 'in_progress';
   }
   const list = deliverablesOf(initiative, phase.id);
   if (list.length === 0) return 'pending';
@@ -341,6 +356,9 @@ const LifecycleView = ({ ctx }) => {
   const [editing, setEditing] = useState(null);              // { initiativeId, phaseId, deliverable? }
   const [initiativeForm, setInitiativeForm] = useState(null); // { id?, name, description, epicKeys }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  // v4.21.0: phases 03 and 04 take several deliverables (epics / Test Plans), added by issue key.
+  const [quickAdd, setQuickAdd] = useState(null);            // { initiativeId, phaseId, value }
+  const [openRows, setOpenRows] = useState({});              // "initiativeId:KEY" → expanded?
   const refreshedRef = useRef(new Set());                    // initiatives auto-refreshed in this visit
 
   const notifyError = useCallback((title, error) => {
@@ -387,8 +405,9 @@ const LifecycleView = ({ ctx }) => {
     const initiative = initiatives.find(item => item.id === expandedId);
     if (!initiative) return;
 
-    if ((initiative.epicKeys || []).length > 0 && !progressById[initiative.id]) {
-      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: initiative.epicKeys })
+    const hasJiraItems = (initiative.epicKeys || []).length > 0 || (initiative.planKeys || []).length > 0;
+    if (hasJiraItems && !progressById[initiative.id]) {
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: initiative.epicKeys || [], planKeys: initiative.planKeys || [] })
         .then(res => setProgressById(prev => ({ ...prev, [initiative.id]: res })))
         .catch(error => setProgressById(prev => ({ ...prev, [initiative.id]: { error: error?.message || String(error) } })));
     }
@@ -461,6 +480,41 @@ const LifecycleView = ({ ctx }) => {
       if (target) refreshFindings(saved, target.id, false);
     }
   };
+
+  /** Forgets the Jira figures of an initiative so they are read again (after its epics or plans change). */
+  const resetProgress = (initiativeId) =>
+    setProgressById(prev => { const next = { ...prev }; delete next[initiativeId]; return next; });
+
+  /**
+   * Adds an epic (phase 03) or a Test Plan (phase 04) to an initiative by its Jira key.
+   * `field` is the list that stores them: 'epicKeys' or 'planKeys'.
+   */
+  const handleAddKey = async (initiative, field) => {
+    const key = String(quickAdd?.value || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(key)) {
+      addNotification({ type: 'error', title: 'Clave inválida', description: 'Usa la clave de la incidencia de Jira, por ejemplo CUQ-123.' });
+      return;
+    }
+    const current = initiative[field] || [];
+    if (current.includes(key)) {
+      addNotification({ type: 'info', title: `${key} ya está en esta iniciativa` });
+      return;
+    }
+    const saved = await saveInitiative({ ...initiative, [field]: [...current, key] }, 'keys');
+    if (saved) {
+      setQuickAdd(null);
+      resetProgress(saved.id);
+    }
+  };
+
+  /** Removes an epic or a Test Plan from the initiative. Nothing is changed in Jira. */
+  const handleRemoveKey = async (initiative, field, key) => {
+    const saved = await saveInitiative({ ...initiative, [field]: (initiative[field] || []).filter(item => item !== key) }, `remove_${key}`);
+    if (saved) resetProgress(saved.id);
+  };
+
+  const toggleRow = (initiativeId, key) =>
+    setOpenRows(prev => ({ ...prev, [`${initiativeId}:${key}`]: !prev[`${initiativeId}:${key}`] }));
 
   const handleRemoveDeliverable = (initiative, phaseId, deliverableId) =>
     saveInitiative({
@@ -555,16 +609,76 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
-  const renderAutoPhase = (initiative, phase, progress) => {
-    if ((initiative.epicKeys || []).length === 0) {
-      return <div style={styles.muted}>Vincula las épicas de la iniciativa (botón "Editar iniciativa") para ver esta fase.</div>;
+  /** Row header shared by epics and Test Plans: expand arrow, key (opens Jira), title, and "Quitar". */
+  const renderItemHeader = (initiative, field, item, children, extra) => {
+    const open = Boolean(openRows[`${initiative.id}:${item.key}`]);
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <button type="button" onClick={() => toggleRow(initiative.id, item.key)} aria-expanded={open}
+          title={open ? 'Ocultar detalle' : 'Ver detalle'}
+          style={{ ...styles.linkBtn, color: 'var(--jira-subtle, #626F86)', width: '14px' }}>
+          {open ? '▾' : '▸'}
+        </button>
+        <button type="button" style={{ ...styles.linkBtn, fontWeight: 700 }} onClick={() => openLink(`/browse/${item.key}`)}>{item.key}</button>
+        <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{item.summary || ''}</strong>
+        {extra}
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px', alignItems: 'center' }}>
+          {children}
+          {canEdit && (
+            <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
+              onClick={() => handleRemoveKey(initiative, field, item.key)}>Quitar</button>
+          )}
+        </span>
+      </div>
+    );
+  };
+
+  /** Small inline form to add an epic or a Test Plan by its Jira key. */
+  const renderQuickAdd = (initiative, phase, field, placeholder) => {
+    if (!quickAdd || quickAdd.initiativeId !== initiative.id || quickAdd.phaseId !== phase.id) return null;
+    return (
+      <div style={{ ...styles.card, padding: '10px 12px', marginTop: '8px', background: 'var(--jira-bg-app, #F7F8F9)', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <input style={{ ...styles.input, width: '220px' }} autoFocus value={quickAdd.value} maxLength={30} placeholder={placeholder}
+          onChange={(event) => setQuickAdd({ ...quickAdd, value: event.target.value })}
+          onKeyDown={(event) => { if (event.key === 'Enter') handleAddKey(initiative, field); }} />
+        <button type="button" className="btn-primary" disabled={!quickAdd.value.trim() || busy === 'keys'} onClick={() => handleAddKey(initiative, field)}>
+          {busy === 'keys' ? 'Agregando…' : 'Agregar'}
+        </button>
+        <button type="button" className="btn-secondary" disabled={busy === 'keys'} onClick={() => setQuickAdd(null)}>Cancelar</button>
+      </div>
+    );
+  };
+
+  /** Coloured bar of executions: passed / failed / blocked over the total. */
+  const renderRunsBar = (runs) => {
+    const total = runs.total || 0;
+    const width = (value) => `${total > 0 ? (value / total) * 100 : 0}%`;
+    return (
+      <div style={{ display: 'flex', height: '6px', borderRadius: '3px', overflow: 'hidden', background: 'var(--jira-bg-subtle, #F1F2F4)', minWidth: '120px', flex: '1 1 160px' }}
+        title={`Passed ${runs.passed} · Failed ${runs.failed} · Blocked ${runs.blocked} · Sin ejecutar ${(runs.notRun || 0) + (runs.other || 0)}`}>
+        <div style={{ width: width(runs.passed), background: '#1F845A' }} />
+        <div style={{ width: width(runs.failed), background: '#C9372C' }} />
+        <div style={{ width: width(runs.blocked), background: '#B65C02' }} />
+      </div>
+    );
+  };
+
+  // Phase 03 "Construir": one deliverable per epic, each with its stories and their test cases.
+  const renderBuildPhase = (initiative, phase, progress) => {
+    const epicKeys = initiative.epicKeys || [];
+    const form = renderQuickAdd(initiative, phase, 'epicKeys', 'Clave de la épica, p. ej. CUQ-100');
+    if (epicKeys.length === 0) {
+      return <>{!form && <div style={styles.muted}>Sin épicas registradas. Agrega las épicas de la iniciativa para ver sus historias y casos de prueba.</div>}{form}</>;
     }
-    if (!progress) return <div style={styles.muted}>Consultando Jira…</div>;
-    if (progress.error) return <div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>;
-    if (phase.id === 'build') {
-      const coverage = pct(progress.storiesWithCases, progress.stories);
-      return (
+    if (!progress) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
+    if (progress.error) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>{form}</>;
+    const coverage = pct(progress.storiesWithCases, progress.stories);
+    // Older cached answers have no per-epic breakdown: fall back to one row per key.
+    const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, storyList: [] }));
+    return (
+      <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <Metric value={epics.length} label="Épicas" />
           <Metric value={progress.stories} label="Historias" />
           <Metric value={progress.storiesWithCases} label="Con casos" />
           <Metric value={progress.cases} label="Casos de prueba" />
@@ -575,27 +689,128 @@ const LifecycleView = ({ ctx }) => {
             <Bar value={coverage} />
           </div>
         </div>
-      );
-    }
-    const { runs, bugs } = progress;
-    const executed = runs.passed + runs.failed + runs.blocked;
-    return (
-      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <Metric value={runs.total} label="Ejecuciones" />
-        <Metric value={runs.passed} label="Passed" color="#216E4E" />
-        <Metric value={runs.failed} label="Failed" color="#C9372C" />
-        <Metric value={runs.blocked} label="Blocked" color="#B65C02" />
-        <Metric value={runs.notRun + runs.other} label="Sin ejecutar" />
-        <Metric value={`${bugs.open} / ${bugs.total}`} label="Bugs abiertos / total" color={bugs.open > 0 ? '#C9372C' : undefined} />
-        <div style={{ minWidth: '150px', flex: '0 1 220px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
-            <span>Avance de ejecución</span><strong style={{ color: 'var(--jira-text, #172B4D)' }}>{pct(executed, runs.total)}%</strong>
-          </div>
-          <Bar value={pct(executed, runs.total)} />
-        </div>
-      </div>
+        {epics.map(epic => {
+          const open = Boolean(openRows[`${initiative.id}:${epic.key}`]);
+          const epicCoverage = pct(epic.storiesWithCases, epic.stories);
+          return (
+            <div key={epic.key} style={{ ...styles.card, padding: '10px 12px', marginTop: '8px' }}>
+              {renderItemHeader(initiative, 'epicKeys', epic, (
+                <span style={styles.muted}>{epic.stories} historias · {epic.storiesWithCases} con casos · {epic.cases} casos · {epicCoverage}%</span>
+              ))}
+              <div style={{ marginTop: '6px' }}><Bar value={epicCoverage} /></div>
+              {open && (
+                <div style={{ marginTop: '8px', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
+                  {(epic.storyList || []).length === 0 && <div style={{ ...styles.muted, padding: '6px 0' }}>Esta épica aún no tiene historias.</div>}
+                  {(epic.storyList || []).map(story => (
+                    <div key={story.key} style={{ display: 'flex', gap: '10px', alignItems: 'baseline', padding: '5px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem' }}>
+                      <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto' }} onClick={() => openLink(`/browse/${story.key}`)}>{story.key}</button>
+                      <span style={{ flex: '1 1 0', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{story.summary}</span>
+                      <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.status}</span>
+                      <span style={{ flex: '0 0 auto', fontWeight: 600, color: story.cases > 0 ? '#216E4E' : '#AE2A19' }}>
+                        {story.cases > 0 ? `${story.cases} ${story.cases === 1 ? 'caso' : 'casos'}` : 'Sin casos'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {progress.truncated && <div style={{ ...styles.muted, marginTop: '6px' }}>Se muestran las primeras 300 historias.</div>}
+        {form}
+      </>
     );
   };
+
+  // Phase 04 "Ejecutar": one deliverable per Test Plan, each with its cycles (children) and progress.
+  const renderExecutePhase = (initiative, phase, progress) => {
+    const planKeys = initiative.planKeys || [];
+    const hasEpics = (initiative.epicKeys || []).length > 0;
+    const form = renderQuickAdd(initiative, phase, 'planKeys', 'Clave del Test Plan, p. ej. CUQ-10');
+    if (planKeys.length === 0 && !hasEpics) {
+      return <>{!form && <div style={styles.muted}>Sin planes de prueba registrados. Agrega los Test Plans de Test Pulse para ver sus ciclos y su avance.</div>}{form}</>;
+    }
+    if (!progress) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
+    if (progress.error) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>{form}</>;
+
+    // Top figures: the plans when there are any; otherwise the executions found through the epics.
+    const runs = planTotals(progress) || progress.runs;
+    const executed = runs.passed + runs.failed + runs.blocked;
+    const bugs = progress.bugs || { total: 0, open: 0 };
+    return (
+      <>
+        <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          {planKeys.length > 0 && <Metric value={planKeys.length} label="Planes" />}
+          <Metric value={runs.total} label="Ejecuciones" />
+          <Metric value={runs.passed} label="Passed" color="#216E4E" />
+          <Metric value={runs.failed} label="Failed" color="#C9372C" />
+          <Metric value={runs.blocked} label="Blocked" color="#B65C02" />
+          <Metric value={(runs.notRun || 0) + (runs.other || 0)} label="Sin ejecutar" />
+          {hasEpics && <Metric value={`${bugs.open} / ${bugs.total}`} label="Bugs abiertos / total" color={bugs.open > 0 ? '#C9372C' : undefined} />}
+          <div style={{ minWidth: '150px', flex: '0 1 220px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
+              <span>Avance de ejecución</span><strong style={{ color: 'var(--jira-text, #172B4D)' }}>{pct(executed, runs.total)}%</strong>
+            </div>
+            <Bar value={pct(executed, runs.total)} />
+          </div>
+        </div>
+        {planKeys.length === 0 && (
+          <div style={{ ...styles.muted, marginTop: '6px' }}>Cifras calculadas a partir de las épicas. Agrega los Test Plans para ver el avance por plan y por ciclo.</div>
+        )}
+        {planKeys.map(planKey => {
+          const plan = (progress.plans || []).find(item => item.key === planKey) || { key: planKey, cycles: [], totals: { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 } };
+          const open = Boolean(openRows[`${initiative.id}:${plan.key}`]);
+          if (plan.error) {
+            return (
+              <div key={planKey} style={{ ...styles.card, padding: '10px 12px', marginTop: '8px' }}>
+                {renderItemHeader(initiative, 'planKeys', plan, null)}
+                <div style={{ ...styles.muted, color: '#AE2A19', marginTop: '4px' }}>{plan.error}</div>
+              </div>
+            );
+          }
+          const planExecuted = plan.totals.passed + plan.totals.failed + plan.totals.blocked;
+          return (
+            <div key={planKey} style={{ ...styles.card, padding: '10px 12px', marginTop: '8px' }}>
+              {renderItemHeader(initiative, 'planKeys', plan, (
+                <span style={styles.muted}>
+                  {plan.cycles.length} {plan.cycles.length === 1 ? 'ciclo' : 'ciclos'} · {planExecuted} de {plan.totals.total} ejecutados · {pct(planExecuted, plan.totals.total)}%
+                </span>
+              ), (
+                <span style={styles.muted}>
+                  {plan.startDate && plan.endDate ? `${plan.startDate} → ${plan.endDate}` : 'Sin fechas en Planning'}
+                </span>
+              ))}
+              <div style={{ display: 'flex', marginTop: '6px' }}>{renderRunsBar(plan.totals)}</div>
+              {open && (
+                <div style={{ marginTop: '8px', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
+                  {plan.cycles.length === 0 && <div style={{ ...styles.muted, padding: '6px 0' }}>Este plan aún no tiene ciclos asociados.</div>}
+                  {plan.cycles.map(cycle => {
+                    const cycleExecuted = cycle.passed + cycle.failed + cycle.blocked;
+                    return (
+                      <div key={cycle.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+                        <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto' }} onClick={() => openLink(`/browse/${cycle.key}`)}>{cycle.key}</button>
+                        <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{cycle.summary}</span>
+                        <span style={{ flex: '0 0 auto', ...styles.muted }}>
+                          {cycle.passed} Passed · {cycle.failed} Failed · {cycle.blocked} Blocked · {(cycle.notRun || 0) + (cycle.other || 0)} sin ejecutar
+                        </span>
+                        {renderRunsBar(cycle)}
+                        <strong style={{ flex: '0 0 44px', textAlign: 'right', color: 'var(--jira-text, #172B4D)' }}>{pct(cycleExecuted, cycle.total)}%</strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {form}
+      </>
+    );
+  };
+
+  const renderAutoPhase = (initiative, phase, progress) => (phase.id === 'build'
+    ? renderBuildPhase(initiative, phase, progress)
+    : renderExecutePhase(initiative, phase, progress));
 
   const renderPhase = (initiative, phase, progress) => {
     const isAdding = editing && editing.initiativeId === initiative.id && editing.phaseId === phase.id && !editing.deliverable;
@@ -604,6 +819,12 @@ const LifecycleView = ({ ctx }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
           <strong style={{ fontSize: '0.9rem', color: 'var(--jira-text, #172B4D)' }}>{phase.number} {phase.title}</strong>
           <span style={styles.muted}>Entregable: {phase.deliverable}</span>
+          {canEdit && phase.auto && !(quickAdd && quickAdd.initiativeId === initiative.id && quickAdd.phaseId === phase.id) && (
+            <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
+              onClick={() => setQuickAdd({ initiativeId: initiative.id, phaseId: phase.id, value: '' })}>
+              {phase.id === 'build' ? '+ Agregar épica' : '+ Agregar plan de pruebas'}
+            </button>
+          )}
           {canEdit && !phase.auto && !isAdding && (
             <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
               onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id })}>

@@ -199,3 +199,22 @@ test('only lifecycle editors can save, and only project admins manage the list (
   assert.match(view, /canEdit && !initiativeForm/);
   assert.match(read('static/hello-world/src/views/SettingsView.jsx'), /<LifecycleEditorsCard /);
 });
+
+test('phases 03 and 04 take several deliverables: epics with stories, plans with cycles (v4.21.0)', () => {
+  const resolvers = read('src/resolvers/lifecycleResolvers.js');
+  // Per-epic breakdown and the Test Plans with their cycles come from the same resolver.
+  assert.match(resolvers, /epics: \[\.\.\.epicMap\.values\(\)\]/);
+  assert.match(resolvers, /plans\.push\(await readTestPulsePlanDetail\(planKey, cycleCache\)\)/);
+  assert.match(resolvers, /\['testops-plan-link', 'testpulse-v2', 'execution-meta'\]/);
+  // Plan keys are stored on the initiative, cleaned and bounded.
+  assert.match(resolvers, /planKeys: \[\.\.\.new Set\(/);
+  assert.match(resolvers, /slice\(0, MAX_PLANS\)/);
+
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /\+ Agregar épica/);
+  assert.match(view, /\+ Agregar plan de pruebas/);
+  assert.match(view, /handleAddKey\(initiative, field\)/);
+  assert.match(view, /planKeys: initiative\.planKeys \|\| \[\]/);
+  // Adding and removing are edit actions: only shown to lifecycle editors.
+  assert.match(view, /canEdit && phase\.auto/);
+});
