@@ -42,6 +42,34 @@ const emptyPhases = () => Object.fromEntries(PHASES.map(p => [p.id, { deliverabl
 const deliverablesOf = (initiative, phaseId) => initiative?.phases?.[phaseId]?.deliverables || [];
 
 /**
+ * General status of a group of executions (an epic, a Test Plan or a whole phase), v4.22.0.
+ * The worst situation wins: failures, then blocks; "Aprobado" only when everything passed.
+ *
+ * @param {{total: number, passed: number, failed: number, blocked: number}} runs
+ * @returns {{label: string, color: string, background: string}}
+ */
+const executionState = (runs) => {
+  const total = runs?.total || 0;
+  const executed = (runs?.passed || 0) + (runs?.failed || 0) + (runs?.blocked || 0);
+  if (total === 0) return { label: 'Sin ejecuciones', color: '#44546F', background: '#F1F2F4' };
+  if (executed === 0) return { label: 'Sin iniciar', color: '#44546F', background: '#F1F2F4' };
+  if (runs.failed > 0) return { label: 'Con fallas', color: '#AE2A19', background: '#FFECEB' };
+  if (runs.blocked > 0) return { label: 'Con bloqueos', color: '#974F0C', background: '#FFF7D6' };
+  if (runs.passed === total) return { label: 'Aprobado', color: '#216E4E', background: '#DCFFF1' };
+  return { label: 'En ejecución', color: '#0055CC', background: '#E9F2FF' };
+};
+
+/** Small coloured tag with the general status of a group of executions. */
+const StateTag = ({ runs }) => {
+  const state = executionState(runs);
+  return (
+    <span style={{ display: 'inline-block', fontSize: '0.72rem', fontWeight: 700, color: state.color, background: state.background, borderRadius: '3px', padding: '1px 6px', whiteSpace: 'nowrap' }}>
+      {state.label}
+    </span>
+  );
+};
+
+/**
  * Sum of the counters of every Test Plan added to phase 04, or null when there are none.
  * Plans that could not be read (`error`) are skipped.
  */
@@ -357,7 +385,8 @@ const LifecycleView = ({ ctx }) => {
   const [initiativeForm, setInitiativeForm] = useState(null); // { id?, name, description, epicKeys }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   // v4.21.0: phases 03 and 04 take several deliverables (epics / Test Plans), added by issue key.
-  const [quickAdd, setQuickAdd] = useState(null);            // { initiativeId, phaseId, value }
+  // Picker of epics / Test Plans (v4.22.0): { initiativeId, phaseId, loading, error, items, selected, search }
+  const [picker, setPicker] = useState(null);
   const [openRows, setOpenRows] = useState({});              // "initiativeId:KEY" → expanded?
   const refreshedRef = useRef(new Set());                    // initiatives auto-refreshed in this visit
 
@@ -486,23 +515,34 @@ const LifecycleView = ({ ctx }) => {
     setProgressById(prev => { const next = { ...prev }; delete next[initiativeId]; return next; });
 
   /**
-   * Adds an epic (phase 03) or a Test Plan (phase 04) to an initiative by its Jira key.
-   * `field` is the list that stores them: 'epicKeys' or 'planKeys'.
+   * Opens the picker of a phase and loads what can be added: the epics of the project (phase 03)
+   * or its Test Plans (phase 04). They come from Jira, so nobody has to type keys.
    */
-  const handleAddKey = async (initiative, field) => {
-    const key = String(quickAdd?.value || '').trim().toUpperCase();
-    if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(key)) {
-      addNotification({ type: 'error', title: 'Clave inválida', description: 'Usa la clave de la incidencia de Jira, por ejemplo CUQ-123.' });
-      return;
+  const openPicker = async (initiative, phase) => {
+    const base = { initiativeId: initiative.id, phaseId: phase.id, loading: true, error: '', items: [], selected: [], search: '', max: 0 };
+    setPicker(base);
+    try {
+      const res = await invoke('getLifecycleCandidates', { projectId: selectedProjectId });
+      const isBuild = phase.id === 'build';
+      setPicker(prev => (prev && prev.initiativeId === base.initiativeId && prev.phaseId === base.phaseId
+        ? { ...prev, loading: false, items: (isBuild ? res?.epics : res?.plans) || [], max: (isBuild ? res?.maxEpics : res?.maxPlans) || 20 }
+        : prev));
+    } catch (error) {
+      setPicker(prev => (prev ? { ...prev, loading: false, error: error?.message || String(error) } : prev));
     }
+  };
+
+  /**
+   * Adds the items chosen in the picker to the initiative.
+   * `field` is the list that stores them: 'epicKeys' (phase 03) or 'planKeys' (phase 04).
+   */
+  const handleAddSelected = async (initiative, field) => {
     const current = initiative[field] || [];
-    if (current.includes(key)) {
-      addNotification({ type: 'info', title: `${key} ya está en esta iniciativa` });
-      return;
-    }
-    const saved = await saveInitiative({ ...initiative, [field]: [...current, key] }, 'keys');
+    const chosen = (picker?.selected || []).filter(key => !current.includes(key));
+    if (chosen.length === 0) return;
+    const saved = await saveInitiative({ ...initiative, [field]: [...current, ...chosen] }, 'keys');
     if (saved) {
-      setQuickAdd(null);
+      setPicker(null);
       resetProgress(saved.id);
     }
   };
@@ -633,18 +673,69 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
-  /** Small inline form to add an epic or a Test Plan by its Jira key. */
-  const renderQuickAdd = (initiative, phase, field, placeholder) => {
-    if (!quickAdd || quickAdd.initiativeId !== initiative.id || quickAdd.phaseId !== phase.id) return null;
+  /**
+   * Picker to add epics (phase 03) or Test Plans (phase 04): a searchable list with checkboxes
+   * and "select all". Items already in the initiative are not offered again.
+   */
+  const renderPicker = (initiative, phase, field, noun) => {
+    if (!picker || picker.initiativeId !== initiative.id || picker.phaseId !== phase.id) return null;
+    const current = initiative[field] || [];
+    const search = picker.search.trim().toLowerCase();
+    const available = picker.items.filter(item => !current.includes(item.key));
+    const visible = available.filter(item => !search || `${item.key} ${item.summary}`.toLowerCase().includes(search));
+    const room = Math.max(0, (picker.max || 0) - current.length);
+    const allVisibleSelected = visible.length > 0 && visible.every(item => picker.selected.includes(item.key));
+    const toggle = (key) => setPicker(prev => ({
+      ...prev,
+      selected: prev.selected.includes(key) ? prev.selected.filter(item => item !== key) : [...prev.selected, key]
+    }));
+    // "Select all" works on what the search shows, and never goes over the limit of the initiative.
+    const toggleAll = () => setPicker(prev => {
+      const visibleKeys = visible.map(item => item.key);
+      if (allVisibleSelected) return { ...prev, selected: prev.selected.filter(key => !visibleKeys.includes(key)) };
+      return { ...prev, selected: [...new Set([...prev.selected, ...visibleKeys])].slice(0, room) };
+    });
+    const overLimit = picker.selected.length > room;
     return (
-      <div style={{ ...styles.card, padding: '10px 12px', marginTop: '8px', background: 'var(--jira-bg-app, #F7F8F9)', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <input style={{ ...styles.input, width: '220px' }} autoFocus value={quickAdd.value} maxLength={30} placeholder={placeholder}
-          onChange={(event) => setQuickAdd({ ...quickAdd, value: event.target.value })}
-          onKeyDown={(event) => { if (event.key === 'Enter') handleAddKey(initiative, field); }} />
-        <button type="button" className="btn-primary" disabled={!quickAdd.value.trim() || busy === 'keys'} onClick={() => handleAddKey(initiative, field)}>
-          {busy === 'keys' ? 'Agregando…' : 'Agregar'}
-        </button>
-        <button type="button" className="btn-secondary" disabled={busy === 'keys'} onClick={() => setQuickAdd(null)}>Cancelar</button>
+      <div style={{ ...styles.card, padding: '12px', marginTop: '8px', background: 'var(--jira-bg-app, #F7F8F9)' }}>
+        {picker.loading && <div style={styles.muted}>Consultando {noun} del proyecto…</div>}
+        {picker.error && <div style={{ ...styles.muted, color: '#AE2A19' }}>No se pudo consultar Jira: {picker.error}</div>}
+        {!picker.loading && !picker.error && (
+          <>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' }}>
+              <input style={{ ...styles.input, width: '260px' }} autoFocus value={picker.search} placeholder={`Buscar ${noun} por clave o nombre`}
+                onChange={(event) => setPicker(prev => ({ ...prev, search: event.target.value }))} />
+              <label style={{ ...styles.muted, display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: visible.length ? 'pointer' : 'default' }}>
+                <input type="checkbox" checked={allVisibleSelected} disabled={visible.length === 0} onChange={toggleAll} />
+                Seleccionar todas ({visible.length})
+              </label>
+              <span style={{ ...styles.muted, marginLeft: 'auto' }}>{picker.selected.length} seleccionadas · máximo {picker.max} por iniciativa</span>
+            </div>
+            <div style={{ maxHeight: '240px', overflowY: 'auto', border: '1px solid var(--jira-border, #DCDFE4)', borderRadius: '6px', background: 'var(--jira-surface, #FFFFFF)' }}>
+              {visible.length === 0 && (
+                <div style={{ ...styles.muted, padding: '10px' }}>
+                  {available.length === 0 ? `No hay más ${noun} en el proyecto para agregar.` : 'Nada coincide con la búsqueda.'}
+                </div>
+              )}
+              {visible.map(item => (
+                <label key={item.key} style={{ display: 'flex', gap: '8px', alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={picker.selected.includes(item.key)} onChange={() => toggle(item.key)} />
+                  <strong style={{ flex: '0 0 auto', color: 'var(--jira-blue, #0C66E4)' }}>{item.key}</strong>
+                  <span style={{ flex: '1 1 0', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{item.summary}</span>
+                  <span style={{ flex: '0 0 auto', ...styles.muted }}>{item.status}</span>
+                </label>
+              ))}
+            </div>
+            {overLimit && <div style={{ ...styles.muted, color: '#AE2A19', marginTop: '6px' }}>Solo caben {room} más en esta iniciativa. Quita algunas de la selección.</div>}
+          </>
+        )}
+        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '10px' }}>
+          <button type="button" className="btn-secondary" disabled={busy === 'keys'} onClick={() => setPicker(null)}>Cancelar</button>
+          <button type="button" className="btn-primary" disabled={picker.loading || picker.selected.length === 0 || overLimit || busy === 'keys'}
+            onClick={() => handleAddSelected(initiative, field)}>
+            {busy === 'keys' ? 'Agregando…' : `Agregar ${picker.selected.length || ''} ${noun}`.replace('  ', ' ')}
+          </button>
+        </div>
       </div>
     );
   };
@@ -663,25 +754,32 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
-  // Phase 03 "Construir": one deliverable per epic, each with its stories and their test cases.
+  // Phase 03 "Construir": the epics chosen for the initiative. The phase shows the totals (epics,
+  // stories, test cases) and a general status based on the executions linked to them; the list
+  // of epics is one compact line each, without story detail.
   const renderBuildPhase = (initiative, phase, progress) => {
     const epicKeys = initiative.epicKeys || [];
-    const form = renderQuickAdd(initiative, phase, 'epicKeys', 'Clave de la épica, p. ej. CUQ-100');
+    const form = renderPicker(initiative, phase, 'epicKeys', 'épicas');
     if (epicKeys.length === 0) {
-      return <>{!form && <div style={styles.muted}>Sin épicas registradas. Agrega las épicas de la iniciativa para ver sus historias y casos de prueba.</div>}{form}</>;
+      return <>{!form && <div style={styles.muted}>Sin épicas registradas. Agrega las épicas de la iniciativa para ver sus historias y su estado.</div>}{form}</>;
     }
     if (!progress) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
     if (progress.error) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.error}</div>{form}</>;
     const coverage = pct(progress.storiesWithCases, progress.stories);
+    const noRuns = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
     // Older cached answers have no per-epic breakdown: fall back to one row per key.
-    const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, storyList: [] }));
+    const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns }));
+    const listOpen = Boolean(openRows[`${initiative.id}:epics`]);
     return (
       <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <Metric value={epics.length} label="Épicas" />
           <Metric value={progress.stories} label="Historias" />
-          <Metric value={progress.storiesWithCases} label="Con casos" />
           <Metric value={progress.cases} label="Casos de prueba" />
+          <div style={{ minWidth: '120px' }}>
+            <div style={{ marginBottom: '4px' }}><StateTag runs={progress.runs} /></div>
+            <div style={styles.muted}>Estado general</div>
+          </div>
           <div style={{ minWidth: '150px', flex: '0 1 220px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
               <span>Historias con casos</span><strong style={{ color: 'var(--jira-text, #172B4D)' }}>{coverage}%</strong>
@@ -689,34 +787,26 @@ const LifecycleView = ({ ctx }) => {
             <Bar value={coverage} />
           </div>
         </div>
-        {epics.map(epic => {
-          const open = Boolean(openRows[`${initiative.id}:${epic.key}`]);
-          const epicCoverage = pct(epic.storiesWithCases, epic.stories);
-          return (
-            <div key={epic.key} style={{ ...styles.card, padding: '10px 12px', marginTop: '8px' }}>
-              {renderItemHeader(initiative, 'epicKeys', epic, (
-                <span style={styles.muted}>{epic.stories} historias · {epic.storiesWithCases} con casos · {epic.cases} casos · {epicCoverage}%</span>
-              ))}
-              <div style={{ marginTop: '6px' }}><Bar value={epicCoverage} /></div>
-              {open && (
-                <div style={{ marginTop: '8px', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
-                  {(epic.storyList || []).length === 0 && <div style={{ ...styles.muted, padding: '6px 0' }}>Esta épica aún no tiene historias.</div>}
-                  {(epic.storyList || []).map(story => (
-                    <div key={story.key} style={{ display: 'flex', gap: '10px', alignItems: 'baseline', padding: '5px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem' }}>
-                      <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto' }} onClick={() => openLink(`/browse/${story.key}`)}>{story.key}</button>
-                      <span style={{ flex: '1 1 0', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{story.summary}</span>
-                      <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.status}</span>
-                      <span style={{ flex: '0 0 auto', fontWeight: 600, color: story.cases > 0 ? '#216E4E' : '#AE2A19' }}>
-                        {story.cases > 0 ? `${story.cases} ${story.cases === 1 ? 'caso' : 'casos'}` : 'Sin casos'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {progress.truncated && <div style={{ ...styles.muted, marginTop: '6px' }}>Se muestran las primeras 300 historias.</div>}
+        <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={listOpen} onClick={() => toggleRow(initiative.id, 'epics')}>
+          {listOpen ? '▾ Ocultar épicas' : `▸ Ver las ${epics.length} épicas`}
+        </button>
+        {listOpen && (
+          <div style={{ ...styles.card, marginTop: '6px', padding: '0 12px' }}>
+            {epics.map(epic => (
+              <div key={epic.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+                <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${epic.key}`)}>{epic.key}</button>
+                <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{epic.summary || ''}</span>
+                <span style={{ flex: '0 0 auto', ...styles.muted }}>{epic.stories} {epic.stories === 1 ? 'historia' : 'historias'} · {epic.cases} casos</span>
+                <StateTag runs={epic.runs || noRuns} />
+                {canEdit && (
+                  <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
+                    onClick={() => handleRemoveKey(initiative, 'epicKeys', epic.key)}>Quitar</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {progress.truncated && <div style={{ ...styles.muted, marginTop: '6px' }}>Hay más historias de las que se pueden leer de una vez; las cifras son parciales.</div>}
         {form}
       </>
     );
@@ -726,7 +816,7 @@ const LifecycleView = ({ ctx }) => {
   const renderExecutePhase = (initiative, phase, progress) => {
     const planKeys = initiative.planKeys || [];
     const hasEpics = (initiative.epicKeys || []).length > 0;
-    const form = renderQuickAdd(initiative, phase, 'planKeys', 'Clave del Test Plan, p. ej. CUQ-10');
+    const form = renderPicker(initiative, phase, 'planKeys', 'planes');
     if (planKeys.length === 0 && !hasEpics) {
       return <>{!form && <div style={styles.muted}>Sin planes de prueba registrados. Agrega los Test Plans de Test Pulse para ver sus ciclos y su avance.</div>}{form}</>;
     }
@@ -741,6 +831,10 @@ const LifecycleView = ({ ctx }) => {
       <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
           {planKeys.length > 0 && <Metric value={planKeys.length} label="Planes" />}
+          <div style={{ minWidth: '120px' }}>
+            <div style={{ marginBottom: '4px' }}><StateTag runs={runs} /></div>
+            <div style={styles.muted}>Estado general</div>
+          </div>
           <Metric value={runs.total} label="Ejecuciones" />
           <Metric value={runs.passed} label="Passed" color="#216E4E" />
           <Metric value={runs.failed} label="Failed" color="#C9372C" />
@@ -776,9 +870,12 @@ const LifecycleView = ({ ctx }) => {
                   {plan.cycles.length} {plan.cycles.length === 1 ? 'ciclo' : 'ciclos'} · {planExecuted} de {plan.totals.total} ejecutados · {pct(planExecuted, plan.totals.total)}%
                 </span>
               ), (
-                <span style={styles.muted}>
-                  {plan.startDate && plan.endDate ? `${plan.startDate} → ${plan.endDate}` : 'Sin fechas en Planning'}
-                </span>
+                <>
+                  <StateTag runs={plan.totals} />
+                  <span style={styles.muted}>
+                    {plan.startDate && plan.endDate ? `${plan.startDate} → ${plan.endDate}` : 'Sin fechas en Planning'}
+                  </span>
+                </>
               ))}
               <div style={{ display: 'flex', marginTop: '6px' }}>{renderRunsBar(plan.totals)}</div>
               {open && (
@@ -819,10 +916,9 @@ const LifecycleView = ({ ctx }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
           <strong style={{ fontSize: '0.9rem', color: 'var(--jira-text, #172B4D)' }}>{phase.number} {phase.title}</strong>
           <span style={styles.muted}>Entregable: {phase.deliverable}</span>
-          {canEdit && phase.auto && !(quickAdd && quickAdd.initiativeId === initiative.id && quickAdd.phaseId === phase.id) && (
-            <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
-              onClick={() => setQuickAdd({ initiativeId: initiative.id, phaseId: phase.id, value: '' })}>
-              {phase.id === 'build' ? '+ Agregar épica' : '+ Agregar plan de pruebas'}
+          {canEdit && phase.auto && !(picker && picker.initiativeId === initiative.id && picker.phaseId === phase.id) && (
+            <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }} onClick={() => openPicker(initiative, phase)}>
+              {phase.id === 'build' ? '+ Agregar épicas' : '+ Agregar planes de prueba'}
             </button>
           )}
           {canEdit && !phase.auto && !isAdding && (

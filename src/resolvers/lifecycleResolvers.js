@@ -43,7 +43,12 @@ export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'
 const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'delivered'];
 const MAX_INITIATIVES = 100;
 const MAX_DELIVERABLES_PER_PHASE = 30;
-const MAX_EPICS = 20;
+// v4.22.0: epics are picked from the project list ("select all"), so the limit is higher.
+const MAX_EPICS = 60;
+// Stories read for the epics of one initiative.
+const MAX_STORIES = 600;
+// Epics / Test Plans offered by the picker of phases 03 and 04.
+const MAX_CANDIDATES = 300;
 // v4.21.0: Test Plans of Test Pulse an initiative can follow in phase 04 (Ejecutar).
 const MAX_PLANS = 20;
 // Test Plan workbook (v4.20.0): the biggest Excel attachment Test Pulse will download and read.
@@ -446,16 +451,20 @@ const linkedIssues = (issue) => (issue?.fields?.issuelinks || []).map(l => l.out
  * @returns {Promise<Object>}
  */
 async function computeProgress(epicKeys) {
-  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 }, bugs: { total: 0, open: 0 }, epics: [], truncated: false };
+  const noRuns = () => ({ total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 });
+  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns(), bugs: { total: 0, open: 0 }, epics: [], truncated: false };
   if (!epicKeys.length) return empty;
 
   const epicList = epicKeys.map(k => jqlQuote(k)).join(',');
   // `parent` and `summary` (v4.21.0) let phase 03 show each epic with its own stories.
-  const stories = await searchAll(`parent in (${epicList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], 300);
+  const stories = await searchAll(`parent in (${epicList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES);
 
   // One entry per epic of the initiative, in the order they were added. An epic without stories
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
-  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: '', stories: 0, storiesWithCases: 0, cases: 0, storyList: [] }]));
+  // `runs` (v4.22.0) are the executions of the epic's test cases: they give its general status.
+  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: '', stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  // Test case key → epics it belongs to, to credit each execution to its epic(s).
+  const caseEpics = new Map();
   const epicCases = new Map(epicKeys.map(key => [key, new Set()]));
 
   const caseKeys = new Set();
@@ -479,12 +488,10 @@ async function computeProgress(epicKeys) {
       epic.summary = epic.summary || text(story?.fields?.parent?.fields?.summary, 160);
       epic.stories++;
       if (storyCases.length > 0) epic.storiesWithCases++;
-      storyCases.forEach(c => epicCases.get(parentKey).add(c.key));
-      epic.storyList.push({
-        key: story.key,
-        summary: text(story?.fields?.summary, 160),
-        status: text(story?.fields?.status?.name, 40),
-        cases: storyCases.length
+      storyCases.forEach(c => {
+        epicCases.get(parentKey).add(c.key);
+        if (!caseEpics.has(c.key)) caseEpics.set(c.key, new Set());
+        caseEpics.get(c.key).add(parentKey);
       });
     }
   }
@@ -504,12 +511,19 @@ async function computeProgress(epicKeys) {
         if (!isTestRun(linked) || seenRuns.has(linked.key)) continue;
         seenRuns.add(linked.key);
         const status = String(linked?.fields?.status?.name || '').toLowerCase();
+        let bucket = 'other';
+        if (status.startsWith('pass')) bucket = 'passed';
+        else if (status.startsWith('fail')) bucket = 'failed';
+        else if (status.startsWith('block')) bucket = 'blocked';
+        else if (status === 'not run' || status === 'to do') bucket = 'notRun';
         runs.total++;
-        if (status.startsWith('pass')) runs.passed++;
-        else if (status.startsWith('fail')) runs.failed++;
-        else if (status.startsWith('block')) runs.blocked++;
-        else if (status === 'not run' || status === 'to do') runs.notRun++;
-        else runs.other++;
+        runs[bucket]++;
+        // The same execution also counts for the epic(s) of its test case.
+        for (const epicKey of caseEpics.get(testCase.key) || []) {
+          const epicRuns = epicMap.get(epicKey).runs;
+          epicRuns.total++;
+          epicRuns[bucket]++;
+        }
       }
     }
   }
@@ -521,7 +535,7 @@ async function computeProgress(epicKeys) {
     runs,
     bugs: { total: bugs.size, open: [...bugs.values()].filter(Boolean).length },
     epics: [...epicMap.values()],
-    truncated: stories.length >= 300 || caseKeys.size > 1000
+    truncated: stories.length >= MAX_STORIES || caseKeys.size > 1000
   };
 }
 
@@ -662,6 +676,38 @@ export const registerLifecycleResolvers = (resolver) => {
       return { initiative: latest, refreshed: Math.min(targets.length, 10) };
     }
     return { initiative, refreshed: 0 };
+  });
+
+  // Picker of phases 03 and 04 (v4.22.0): the epics and the Test Plans of the project, so they can
+  // be chosen from a list instead of typing their keys. Read as the current user.
+  resolver.define('getLifecycleCandidates', async ({ payload }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    // The names of the issue types differ between projects ("Epic" / "Épica", "Test Plan" /
+    // "Plan de Pruebas" / "Test Set"), so they are taken from the project itself:
+    //   - epics are the types one level above stories (hierarchyLevel 1);
+    //   - Test Plans are recognized by name.
+    const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
+    if (!projectRes.ok) throw new Error(`Jira no permitió leer el proyecto (HTTP ${projectRes.status}).`);
+    const issueTypes = (await projectRes.json())?.issueTypes || [];
+    const epicTypes = issueTypes.filter(type => type?.hierarchyLevel === 1).map(type => String(type.name));
+    const planTypes = issueTypes.map(type => String(type?.name || ''))
+      .filter(name => /test ?plan|plan de prueba|test ?set|conjunto de prueba/i.test(name));
+
+    const list = async (typeNames) => {
+      if (typeNames.length === 0) return [];
+      const types = typeNames.map(name => jqlQuote(name)).join(',');
+      const issues = await searchAll(
+        `project = ${jqlQuote(projectId)} AND issuetype in (${types}) ORDER BY created DESC`,
+        ['summary', 'status'], MAX_CANDIDATES
+      );
+      return issues.map(issue => ({
+        key: issue.key,
+        summary: text(issue?.fields?.summary, 160),
+        status: text(issue?.fields?.status?.name, 40)
+      }));
+    };
+    const [epics, plans] = await Promise.all([list(epicTypes), list(planTypes)]);
+    return { epics, plans, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS };
   });
 
   // Phases 3 and 4: test design and execution figures for the epics of an initiative.

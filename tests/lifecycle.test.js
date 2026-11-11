@@ -211,10 +211,28 @@ test('phases 03 and 04 take several deliverables: epics with stories, plans with
   assert.match(resolvers, /slice\(0, MAX_PLANS\)/);
 
   const view = read('static/hello-world/src/views/LifecycleView.jsx');
-  assert.match(view, /\+ Agregar épica/);
-  assert.match(view, /\+ Agregar plan de pruebas/);
-  assert.match(view, /handleAddKey\(initiative, field\)/);
+  assert.match(view, /\+ Agregar épicas/);
+  assert.match(view, /\+ Agregar planes de prueba/);
+  assert.match(view, /handleAddSelected\(initiative, field\)/);
   assert.match(view, /planKeys: initiative\.planKeys \|\| \[\]/);
   // Adding and removing are edit actions: only shown to lifecycle editors.
   assert.match(view, /canEdit && phase\.auto/);
+});
+
+test('epics and Test Plans are picked from the project, with a general status (v4.22.0)', () => {
+  const resolvers = read('src/resolvers/lifecycleResolvers.js');
+  const body = resolvers.slice(resolvers.indexOf("resolver.define('getLifecycleCandidates'"), resolvers.indexOf("resolver.define('getLifecycleProgress'"));
+  // Epic types come from the project hierarchy, plan types from their names; read as the user.
+  assert.match(body, /hierarchyLevel === 1/);
+  assert.match(body, /plan de prueba/);
+  assert.match(body, /api\.asUser\(\)\.requestJira/);
+  assert.match(body, /MAX_CANDIDATES/);
+  // Each epic gets the executions of its own test cases.
+  assert.match(resolvers, /for \(const epicKey of caseEpics\.get\(testCase\.key\) \|\| \[\]\)/);
+
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /invoke\('getLifecycleCandidates'/);
+  assert.match(view, /Seleccionar todas/);
+  assert.match(view, /<StateTag runs=\{progress\.runs\} \/>/);
+  assert.match(view, /<StateTag runs=\{plan\.totals\} \/>/);
 });
