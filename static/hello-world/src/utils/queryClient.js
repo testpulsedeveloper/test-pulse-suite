@@ -266,6 +266,7 @@ const TP_MUTATION_RESOLVERS = new Set([
   'bulkCreateTestCases',
   'bulkLinkToFolder',
   'saveTestCaseDetails',
+  'saveTestCase',
   'linkCaseToFolder',
   'linkCasesToRequirement',
   'createFolder',

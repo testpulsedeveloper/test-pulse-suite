@@ -44,7 +44,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.22.3'}`;
+const APP_VERSION = `v${packageJson.version || '4.23.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -55,6 +55,8 @@ const ReportsView = React.lazy(() => import('./views/ReportsView'));
 const SettingsView = React.lazy(() => import('./views/SettingsView'));
 // v4.17.0: QA lifecycle (phases and deliverables per initiative). Loaded only when its tab opens.
 const LifecycleView = React.lazy(() => import('./views/LifecycleView'));
+// v4.23.0: form to create and edit Test Cases inside Design (replaces Jira's own screens).
+const TestCaseEditor = React.lazy(() => import('./components/TestCaseEditor'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
 
 function App() {
@@ -355,6 +357,8 @@ function App() {
   // Modal State
   const [context, setContext] = useState(null);
   const [selectedTestCase, setSelectedTestCase] = useState(null);
+  // v4.23.0: the create/edit form of Design. null = closed, { mode: 'create' } or { mode: 'edit', testCase }.
+  const [testCaseEditor, setTestCaseEditor] = useState(null);
   const [selectedTestCaseDescription, setSelectedTestCaseDescription] = useState(null);
   const [loadingDescription, setLoadingDescription] = useState(false);
 
@@ -2998,9 +3002,9 @@ Then el sistema valida la identidad.
             </p>
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            <button className="btn-primary" onClick={handleCreateIssue} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '0.45rem 0.85rem' }}>
+            <button className="btn-primary" onClick={() => setTestCaseEditor({ mode: 'create' })} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '0.45rem 0.85rem' }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              <span>+ Create Test Case</span>
+              <span>Nuevo caso de prueba</span>
             </button>
             <button
               className="btn-secondary"
@@ -3779,6 +3783,66 @@ Then el sistema valida la identidad.
     // Refresh case list to show any potential updates (though this is mainly props)
   };
 
+  /**
+   * Called by the Test Case form (v4.23.0) after Jira accepted a create or an edit.
+   * To stay fast it patches what is already on screen instead of reloading every Test Case;
+   * the full list is only read again when a case was created or its requirement changed,
+   * because those change the folders/traceability shown in the list.
+   */
+  const handleTestCaseSaved = async (saved) => {
+    setTestCaseEditor(null);
+    if (!saved) return;
+
+    if (!saved.created) {
+      const patch = (tc) => {
+        if (!tc || String(tc.id) !== String(saved.id)) return tc;
+        const rawFields = { ...(tc.rawFields || {}), ...(saved.customFields || {}) };
+        if (saved.priority) rawFields.priority = { ...(tc.rawFields?.priority || {}), id: saved.priority.id, name: saved.priority.name, iconUrl: undefined };
+        return { ...tc, summary: saved.summary, rawFields };
+      };
+      setTestCases(prev => (prev || []).map(patch));
+      // A new object makes the side panel read the description again (its cache was cleared by the save).
+      setSelectedTestCase(prev => patch(prev));
+    }
+
+    if (saved.created || saved.requirementChanged) {
+      try {
+        const projectId = selectedProjectId || context?.extension?.project?.id;
+        const fetchedTests = await fetchAllTestCases({ folderId: null, projectId, config: projectConfig });
+        setTestCases(fetchedTests || []);
+        if (!saved.created) {
+          const refreshed = (fetchedTests || []).find(tc => String(tc.id) === String(saved.id));
+          if (refreshed) setSelectedTestCase(refreshed);
+        }
+      } catch (e) {
+        console.warn('[handleTestCaseSaved] could not refresh the test case list:', e?.message);
+      }
+    }
+  };
+
+  /** Renders the create/edit form of Design when it is open. */
+  const renderTestCaseEditor = () => {
+    if (!testCaseEditor) return null;
+    const editing = testCaseEditor.mode === 'edit' ? testCaseEditor.testCase : null;
+    return (
+      <Suspense fallback={null}>
+        <TestCaseEditor
+          mode={testCaseEditor.mode}
+          projectId={selectedProjectId || context?.extension?.project?.id}
+          projectConfig={projectConfig}
+          testCase={editing}
+          currentRequirementKey={editing ? (extractEpicAndRequirement(editing, projectConfig, requirementsMap).reqKey || '') : ''}
+          requirementsMap={requirementsMap}
+          folderPaths={folderPaths}
+          defaultFolderId={activeFolder || ''}
+          addNotification={addNotification}
+          onClose={() => setTestCaseEditor(null)}
+          onSaved={handleTestCaseSaved}
+        />
+      </Suspense>
+    );
+  };
+
   const renderSlidePanel = () => {
     if (!selectedTestCase) return null;
 
@@ -3874,14 +3938,11 @@ Then el sistema valida la identidad.
                 </span>
                 <span style={{ color: '#DCDFE4' }}>/</span>
                 
-                {/* Issue Key link */}
-                <span 
-                  onClick={() => router.open('/browse/' + selectedTestCase.key)}
-                  style={{ fontWeight: 700, fontSize: '0.82rem', color: '#0C66E4', cursor: 'pointer', fontFamily: 'monospace', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                  title="Abrir Caso de Prueba en Jira"
+                {/* Issue key (v4.23.0: plain text, it no longer opens Jira) */}
+                <span
+                  style={{ fontWeight: 700, fontSize: '0.82rem', color: '#0C66E4', fontFamily: 'monospace', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                 >
                   {selectedTestCase.key}
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
                 </span>
 
                 {/* Jira Status Lozenge */}
@@ -4032,11 +4093,11 @@ Then el sistema valida la identidad.
                       Descripción del Escenario
                     </span>
                     <button 
-                      onClick={() => router.open('/browse/' + selectedTestCase.key)}
+                      onClick={() => setTestCaseEditor({ mode: 'edit', testCase: selectedTestCase })}
                       style={{ background: 'none', border: 'none', color: '#0C66E4', fontSize: '11px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
-                      title="Editar en Jira"
+                      title="Editar el caso de prueba"
                     >
-                      Editar en Jira ↗
+                      ✎ Editar
                     </button>
                   </div>
 
@@ -4046,7 +4107,7 @@ Then el sistema valida la identidad.
                       <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
                         <div className="spinner" style={{ margin: '0 auto 1rem auto', width: '28px', height: '28px', border: '3px solid #DCDFE4', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
                         <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-                        <span>Cargando descripción desde Jira...</span>
+                        <span>Cargando descripción...</span>
                       </div>
                     ) : selectedTestCaseDescription ? (
                       <div 
@@ -4056,7 +4117,7 @@ Then el sistema valida la identidad.
                       />
                     ) : (
                       <div style={{ padding: '2rem', textAlign: 'center', color: '#626F86', backgroundColor: '#F7F8F9', borderRadius: '4px', border: '1px dashed #DCDFE4' }}>
-                        <p style={{ margin: 0, fontStyle: 'italic', fontSize: '0.82rem' }}>Este caso de prueba no contiene descripción en Jira.</p>
+                        <p style={{ margin: 0, fontStyle: 'italic', fontSize: '0.82rem' }}>Este caso de prueba aún no tiene descripción. Usa "Editar" para agregarla.</p>
                       </div>
                     )}
                   </div>
@@ -4094,7 +4155,7 @@ Then el sistema valida la identidad.
                   {/* Estado en Jira */}
                   <div>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '4px' }}>
-                      Estado en Jira
+                      Estado
                     </label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <span className={`ads-lozenge ${statusBadgeClass}`} style={{ fontSize: '10px' }}>
@@ -4279,11 +4340,10 @@ Then el sistema valida la identidad.
               </button>
               <button 
                 className="btn-primary"
-                onClick={() => router.open('/browse/' + selectedTestCase.key)}
+                onClick={() => setTestCaseEditor({ mode: 'edit', testCase: selectedTestCase })}
                 style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
               >
-                <span>Abrir en Jira</span>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                <span>Editar caso</span>
               </button>
             </div>
           </div>
@@ -8113,6 +8173,7 @@ Then el sistema valida la identidad.
       </div>
       {renderModal()}
       {renderSlidePanel()}
+      {renderTestCaseEditor()}
       {previewModalData && (
         <div className="modal-overlay" style={{zIndex: 9999}} onClick={() => {
           setPreviewModalData(null);
