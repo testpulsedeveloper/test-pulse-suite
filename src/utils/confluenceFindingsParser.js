@@ -110,7 +110,43 @@ const mapColumns = (headerCells) => {
 };
 
 // Words that mean a finding needs no further action.
-const CLOSED_PATTERN = /\b(cerrad[oa]s?|corregid[oa]s?|resuelt[oa]s?|atendid[oa]s?|solucionad[oa]s?|closed|done|fixed)\b/;
+// "Aclarado" is the status the team writes in section 9 ("Estado de atención de hallazgos") when
+// the document owner has answered the finding, so it also counts as attended.
+const CLOSED_PATTERN = /\b(cerrad[oa]s?|corregid[oa]s?|resuelt[oa]s?|atendid[oa]s?|solucionad[oa]s?|aclarad[oa]s?|closed|done|fixed)\b/;
+
+/**
+ * Makes finding IDs comparable between tables: "H01", "h-01" and "H 01" are the same finding.
+ */
+const normalizeFindingId = (id) => normalize(id).replace(/[^a-z0-9]/g, '');
+
+/**
+ * Reads the table of section 9, "Estado de atención de hallazgos" (v4.18.1). That table has one
+ * row per finding with the columns ID | Estado | Respuesta funcional | Ajuste requerido en
+ * documento, and it is where the team records what happened to each finding. It is told apart
+ * from the detail table of section 5 because it has "ID" and "Estado" but none of the detail
+ * columns (type, description, impact).
+ *
+ * @param {string[]} tables - Every `<table>` of the page, as storage-format HTML.
+ * @returns {Map<string, string>|null} normalized finding ID → status text; null when the page has
+ *          no such table.
+ */
+const readAttentionStatuses = (tables) => {
+  for (const table of tables) {
+    const rows = tableRows(table);
+    if (rows.length < 1) continue;
+    const columns = mapColumns(rows[0]);
+    const isAttentionTable = columns.id !== undefined && columns.status !== undefined &&
+      columns.type === undefined && columns.description === undefined && columns.impact === undefined;
+    if (!isAttentionTable) continue;
+    const statuses = new Map();
+    rows.slice(1).forEach(row => {
+      const id = normalizeFindingId(row[columns.id] || '');
+      if (id) statuses.set(id, String(row[columns.status] || '').slice(0, 40));
+    });
+    return statuses;
+  }
+  return null;
+};
 
 /** "alto " → "Alto"; anything unknown or empty → "Sin clasificar". */
 const normalizeImpact = (value) => {
@@ -180,6 +216,7 @@ export function extractConfluencePageId(urlOrId) {
  * @returns {{
  *   recognized: boolean,          // false when no findings table was found
  *   hasStatusColumn: boolean,     // false → closed findings were inferred from the "Tipo" column
+ *   statusSource: 'attention-table'|'findings-table'|'type-column'|null,
  *   general: Object,              // documentType, documentName, version, initiative, analyst, analysisDate, overallResult
  *   findings: Array<Object>,      // id, type, section, impact, owner, status, closed
  *   totals: { total: number, open: number, closed: number, byImpact: Object, openByImpact: Object, byType: Object },
@@ -196,7 +233,14 @@ export function parseFindingsReport(storageHtml) {
   let findings = [];
   let hasStatusColumn = false;
   let recognized = false;
-  for (const table of html.match(/<table\b[\s\S]*?<\/table>/gi) || []) {
+  const tables = html.match(/<table\b[\s\S]*?<\/table>/gi) || [];
+  // Section 9 ("Estado de atención de hallazgos"), when present, is the source of truth for the
+  // status of every finding.
+  const attentionStatuses = readAttentionStatuses(tables);
+  // Where the status of the findings came from: 'attention-table' (section 9), 'findings-table'
+  // (an "Estado" column in the detail table) or 'type-column' (old reports, inferred).
+  let statusSource = null;
+  for (const table of tables) {
     const rows = tableRows(table);
     if (rows.length < 1) continue;
     const columns = mapColumns(rows[0]);
@@ -205,14 +249,21 @@ export function parseFindingsReport(storageHtml) {
     if (!isFindingsTable) continue;
 
     recognized = true;
-    hasStatusColumn = columns.status !== undefined;
+    hasStatusColumn = attentionStatuses !== null || columns.status !== undefined;
+    statusSource = attentionStatuses !== null
+      ? 'attention-table'
+      : (columns.status !== undefined ? 'findings-table' : 'type-column');
     const cell = (row, field) => (columns[field] === undefined ? '' : (row[columns[field]] || ''));
     findings = rows.slice(1)
       .filter(row => cell(row, 'id') || cell(row, 'description'))
       .slice(0, MAX_FINDINGS)
       .map(row => {
         const type = cell(row, 'type');
-        const status = cell(row, 'status');
+        // With section 9, a finding that is missing from it (or has an empty status there) has
+        // not been attended yet, so it stays open.
+        const status = attentionStatuses !== null
+          ? (attentionStatuses.get(normalizeFindingId(cell(row, 'id'))) || '')
+          : cell(row, 'status');
         const closed = hasStatusColumn
           ? CLOSED_PATTERN.test(normalize(status))
           : CLOSED_PATTERN.test(normalize(type));
@@ -242,7 +293,10 @@ export function parseFindingsReport(storageHtml) {
     closed: findings.length - open.length,
     byImpact: count(findings, f => f.impact),
     openByImpact: count(open, f => f.impact),
-    byType: count(findings, f => f.type)
+    byType: count(findings, f => f.type),
+    // How many findings are in each status, as written in the report ("Aclarado", "Abierto"…).
+    // Only meaningful when the report records a status; "Sin estado" groups the empty ones.
+    byStatus: hasStatusColumn ? count(findings, f => f.status || 'Sin estado') : {}
   };
 
   // Maturity: what the document states wins; otherwise closed / total.
@@ -257,5 +311,5 @@ export function parseFindingsReport(storageHtml) {
     maturitySource = 'calculated';
   }
 
-  return { recognized, hasStatusColumn, general, findings, totals, maturityPct, maturitySource };
+  return { recognized, hasStatusColumn, statusSource, general, findings, totals, maturityPct, maturitySource };
 }

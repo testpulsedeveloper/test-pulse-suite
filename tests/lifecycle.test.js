@@ -80,6 +80,35 @@ test('the real report structure is read into general data, findings and totals',
   assert.equal(report.maturitySource, 'document');
 });
 
+test('section 9 "Estado de atención de hallazgos" decides the status of each finding (v4.18.1)', () => {
+  // Same shape as the real report: detail table (section 5) without status, and the attention
+  // table (section 9) with ID | Estado | Respuesta funcional | Ajuste requerido en documento.
+  const page = `<h2>5. Detalle de hallazgos</h2><table><tbody>
+    ${row(['ID', 'Tipo de hallazgo', 'Descripción', 'Impacto'], 'th')}
+    ${row(['H01', 'Contradicción', 'x', 'Alto'])}
+    ${row(['H02', 'Ambigüedad', 'x', 'Alto'])}
+    ${row(['H03', 'Vacío', 'x', 'Medio'])}
+    ${row(['H04', 'Cerrado', 'x', 'Bajo'])}
+  </tbody></table>
+  <h2>9. Estado de atención de hallazgos</h2><table><tbody>
+    ${row(['ID', 'Estado', 'Respuesta funcional', 'Ajuste requerido en documento'], 'th')}
+    ${row(['H-01', 'Aclarado', 'Se cambia cancelación por anulación', 'SI'])}
+    ${row(['h02', 'En revisión', 'Negocio aún no define', 'SI'])}
+    ${row(['H03', '', '', ''])}
+  </tbody></table>`;
+  const report = parseFindingsReport(page);
+  assert.equal(report.recognized, true);
+  assert.equal(report.hasStatusColumn, true);
+  assert.equal(report.statusSource, 'attention-table');
+  assert.deepEqual(report.findings.map(f => f.status), ['Aclarado', 'En revisión', '', '']);
+  // Only H01 is attended. H04 says "Cerrado" in the type column but is not in section 9 → open.
+  assert.deepEqual(report.findings.map(f => f.closed), [true, false, false, false]);
+  assert.equal(report.totals.closed, 1);
+  assert.equal(report.totals.open, 3);
+  assert.deepEqual(report.totals.byStatus, { Aclarado: 1, 'En revisión': 1, 'Sin estado': 2 });
+  assert.equal(report.maturityPct, 25);
+});
+
 test('an "Estado" column decides what is closed, whatever the column order', () => {
   const page = `<table><tbody>
     ${row(['Estado', 'Impacto', 'ID', 'Tipo de hallazgo'], 'th')}

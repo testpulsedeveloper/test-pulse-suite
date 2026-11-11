@@ -176,13 +176,15 @@ async function readFindingsReport(url) {
     pageUpdatedAt: page?.version?.createdAt || null,
     recognized: parsed.recognized,
     hasStatusColumn: parsed.hasStatusColumn,
+    // 'attention-table' = statuses read from section 9, "Estado de atención de hallazgos".
+    statusSource: parsed.statusSource,
     general: parsed.general,
     totals: parsed.totals,
     // Only what the UI lists: no descriptions, the full text stays in Confluence.
     findings: parsed.findings.map(f => ({ id: f.id, type: f.type, impact: f.impact, owner: f.owner, status: f.status, closed: f.closed })),
     maturityPct: parsed.maturityPct,
     maturitySource: parsed.maturitySource,
-    error: parsed.recognized ? null : 'No se encontró la tabla de hallazgos. La tabla debe tener una columna "ID" y columnas como "Tipo de hallazgo", "Impacto" y "Estado".'
+    error: parsed.recognized ? null : 'No se encontró la tabla de hallazgos. La tabla de detalle debe tener una columna "ID" y columnas como "Tipo de hallazgo" e "Impacto"; el estado se toma de la tabla "Estado de atención de hallazgos" (ID y Estado).'
   };
 }
 

@@ -129,9 +129,25 @@ const FindingsSummary = ({ report }) => {
       <div style={{ ...styles.muted, marginTop: '8px' }}>
         {[general.overallResult && `Resultado: ${general.overallResult}`, general.version && `Versión: ${general.version}`, general.analyst && `Analista: ${general.analyst}`, general.analysisDate && `Análisis: ${general.analysisDate}`].filter(Boolean).join(' · ')}
       </div>
+      {/* Status of the findings as written in the report (section 9), one chip per status. */}
+      {totals.byStatus && Object.keys(totals.byStatus).length > 0 && (
+        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginTop: '8px' }}>
+          <span style={styles.muted}>Estado de atención:</span>
+          {Object.entries(totals.byStatus).map(([status, amount]) => (
+            <span key={status} style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--jira-text, #172B4D)', background: 'var(--jira-bg-subtle, #F1F2F4)', borderRadius: '10px', padding: '1px 8px' }}>
+              {status}: {amount}
+            </span>
+          ))}
+        </div>
+      )}
+      {report.statusSource === 'attention-table' && (
+        <div style={{ ...styles.muted, marginTop: '4px' }}>
+          Estados tomados de la sección "Estado de atención de hallazgos". Un hallazgo sin estado ahí cuenta como abierto.
+        </div>
+      )}
       {!report.hasStatusColumn && totals.total > 0 && (
         <div style={{ ...styles.muted, marginTop: '4px' }}>
-          La tabla no tiene columna "Estado": los cerrados se toman de la columna "Tipo de hallazgo".
+          El reporte no tiene la tabla "Estado de atención de hallazgos": los cerrados se toman de la columna "Tipo de hallazgo".
         </div>
       )}
       {report.error && <div style={{ ...styles.muted, color: '#AE2A19', marginTop: '4px' }}>{report.error}</div>}
