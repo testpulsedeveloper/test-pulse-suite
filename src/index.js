@@ -52,6 +52,7 @@ import {
 import { registerFolderResolvers } from './resolvers/folderResolvers.js';
 import { registerConfigResolvers } from './resolvers/configResolvers.js';
 import { registerBugResolvers } from './resolvers/bugResolvers.js';
+import { registerLifecycleResolvers } from './resolvers/lifecycleResolvers.js';
 import { currentPlanRefOfCycle, isSamePlan } from './utils/planCycleRules.js';
 import {
   registerReportAutomationResolvers,
@@ -458,6 +459,9 @@ registerFolderResolvers(resolver);
 
 // === Project Management, Configuration, Permissions, Bulk Mapping & Attachments ===
 registerConfigResolvers(resolver);
+
+// === Ciclo de vida: initiatives, phases, deliverables and Confluence findings reports (v4.17.0) ===
+registerLifecycleResolvers(resolver);
 
 // === Test Issue Queries ===
 function filterValidIssueTypes(candidates, projectIssueTypes, primaryType) {

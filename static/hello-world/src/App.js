@@ -44,7 +44,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.16.3'}`;
+const APP_VERSION = `v${packageJson.version || '4.17.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -53,6 +53,8 @@ const PlanningView = React.lazy(() => import('./views/PlanningView'));
 const ExecutionView = React.lazy(() => import('./views/ExecutionView'));
 const ReportsView = React.lazy(() => import('./views/ReportsView'));
 const SettingsView = React.lazy(() => import('./views/SettingsView'));
+// v4.17.0: QA lifecycle (phases and deliverables per initiative). Loaded only when its tab opens.
+const LifecycleView = React.lazy(() => import('./views/LifecycleView'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
 
 function App() {
@@ -2262,6 +2264,30 @@ Then el sistema valida la identidad.
             >
               <span>Reports</span>
               {activeTab === 'reports' && <div className="tab-indicator" />}
+            </button>
+
+            {/* v4.17.0: phases of the QA framework and their deliverables, per initiative */}
+            <button
+              className={`nav-tab ${activeTab === 'lifecycle' ? 'active' : ''}`}
+              onClick={() => setActiveTab('lifecycle')}
+              title="Fases del marco de trabajo de QA y sus entregables"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                position: 'relative',
+                padding: '0 0.85rem',
+                height: '100%',
+                border: 'none',
+                background: 'none',
+                cursor: 'pointer',
+                fontWeight: activeTab === 'lifecycle' ? 700 : 500,
+                color: activeTab === 'lifecycle' ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)',
+                fontSize: '0.88rem'
+              }}
+            >
+              <span>Lifecycle</span>
+              {activeTab === 'lifecycle' && <div className="tab-indicator" />}
             </button>
 
             {isAdmin && (
@@ -7872,6 +7898,12 @@ Then el sistema valida la identidad.
     </Suspense>
   );
 
+  const renderLifecycleTab = () => (
+    <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
+      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId }} />
+    </Suspense>
+  );
+
   const renderConfigTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando Configuración..." />}>
       <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
@@ -8048,6 +8080,7 @@ Then el sistema valida la identidad.
             {activeTab === 'execution' && renderExecutionTab()}
             {renderAssignModal()}
             {activeTab === 'reports' && renderReportsTab()}
+            {activeTab === 'lifecycle' && renderLifecycleTab()}
             {activeTab === 'config' && isAdmin && renderConfigTab()}
           </>
         )}

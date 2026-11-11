@@ -94,6 +94,9 @@ permissions:
     - read:jira-user
     - manage:jira-project
     - storage:app
+    # Ciclo de vida (v4.17.0): read-only access to Confluence pages, used to read the Shift-Left
+    # findings reports. Requires the app to be installed in Confluence as well.
+    - read:page:confluence
 app:
   runtime:
     name: nodejs24.x

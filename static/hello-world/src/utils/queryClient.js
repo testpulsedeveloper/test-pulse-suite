@@ -198,6 +198,8 @@ const TP_QUERY_RESOLVERS = {
   getTestCases: 180_000,
   getRequirements: 180_000,
   getTraceabilityHierarchy: 180_000,
+  // Ciclo de vida (v4.17.0): figures of phases 3 and 4 for the epics of an initiative.
+  getLifecycleProgress: 180_000,
   getExecutionReport: 180_000,
   getProjectUnlinkedBugs: 180_000,
   getCycleExecutionSummary: 120_000,
