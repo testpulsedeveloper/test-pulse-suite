@@ -176,6 +176,30 @@ test('the case is edited in its side panel: title, description, properties, stor
   for (const label of ['Estado', 'Prioridad', 'Nivel de Prueba', 'Tipo de Prueba', 'Tipo de Ejecución', 'Historia que prueba', 'Épica']) {
     assert.ok(inline.includes(label), `the panel edits "${label}"`);
   }
-  // The edit data is loaded after a short wait, so quick browsing costs nothing.
-  assert.match(inline, /setTimeout\(\(\) => load\(caseId\), LOAD_DELAY_MS\)/);
+});
+
+test('nothing becomes editable or is written until "Editar" and "Guardar" are pressed (v4.23.2)', () => {
+  const inline = read('static/hello-world/src/components/TestCaseInlineEdit.jsx');
+  // Opening a case makes no request to prepare editing: the data is read when "Editar" is pressed.
+  assert.doesNotMatch(inline, /setTimeout/);
+  assert.match(inline, /const startPropertiesEdit = async \(\) => \{\s*const loaded = await ensureLoaded\('properties'\)/);
+  assert.match(inline, /const startDescriptionEdit = async \(\) => \{\s*const loaded = await ensureLoaded\('description'\)/);
+  // Changing a list only updates the draft; saveTestCase is called from save() alone, and the
+  // properties are saved by savePropertiesEdit with the changed fields only.
+  assert.equal((inline.match(/invoke\('saveTestCase'/g) || []).length, 1);
+  assert.match(inline, /onChange=\{\(id\) => edit\.setProp\('priorityId', id\)\}/);
+  assert.match(inline, /const changed = changedProps\(\);\s*if \(changed\.length === 0\) \{ setPropsDraft\(null\); return; \}/);
+  // The current value is always offered, so opening the editor never shows a value the case lacks.
+  assert.match(inline, /currentMissing && <option value=\{current\.id\}>/);
+
+  const app = read('static/hello-world/src/App.js');
+  assert.match(app, /\{caseEdit\.propsEditing \? \(/);
+  assert.match(app, /<EditLink onClick=\{caseEdit\.startPropertiesEdit\}/);
+  assert.match(app, /<EditLink onClick=\{caseEdit\.startDescriptionEdit\}/);
+  assert.doesNotMatch(app, /caseEdit\.ready/);
+
+  // The backend returns the label of each current value (needed to show it).
+  const resolvers = read('src/resolvers/testCaseResolvers.js');
+  assert.match(resolvers, /priorityName: String\(fields\.priority\?\.name \|\| ''\)/);
+  assert.match(resolvers, /return \{ optionId: String\(value\.id \?\? ''\), label, multiple: false \}/);
 });

@@ -45,12 +45,17 @@ const issueKeyOf = (value) => {
  * The id of the option currently selected in a select-list custom field.
  * Jira returns `{id, value}` for a single select and `[{id, value}, …]` for a multi select.
  *
- * @returns {{optionId: string, multiple: boolean}}
+ * `label` (v4.23.2) is the text of that option, so the screen can always show the current value
+ * even when Jira does not offer it among the options this user may choose.
+ *
+ * @returns {{optionId: string, label: string, multiple: boolean}}
  */
 const currentOption = (value) => {
-  if (Array.isArray(value)) return { optionId: String(value[0]?.id ?? ''), multiple: true };
-  if (value && typeof value === 'object') return { optionId: String(value.id ?? ''), multiple: false };
-  return { optionId: '', multiple: false };
+  const first = Array.isArray(value) ? value[0] : value;
+  const label = first && typeof first === 'object' ? String(first.value || first.name || '') : '';
+  if (Array.isArray(value)) return { optionId: String(value[0]?.id ?? ''), label, multiple: true };
+  if (value && typeof value === 'object') return { optionId: String(value.id ?? ''), label, multiple: false };
+  return { optionId: '', label: '', multiple: false };
 };
 
 /**
@@ -98,6 +103,7 @@ export const registerTestCaseResolvers = (resolver) => {
       // True when the description has tables, images, links… that the text box cannot keep.
       hasRichDescription: description.hasRichContent,
       priorityId: String(fields.priority?.id ?? ''),
+      priorityName: String(fields.priority?.name || ''),
       testLevel: currentOption(fields[fieldIds.testLevel]),
       testType: currentOption(fields[fieldIds.testType]),
       executionType: currentOption(fields[fieldIds.executionType]),

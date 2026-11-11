@@ -1,176 +1,228 @@
 /**
  * @file TestCaseInlineEdit.jsx
- * @description Editing a Test Case directly in the side panel of Design (v4.23.1): the title,
- * the description and the "Propiedades del caso" (Estado, Prioridad, Nivel de Prueba, Tipo de
- * Prueba, Tipo de Ejecución, Historia y Épica). Each change is saved at once; there is no
- * separate window and no trip to Jira.
+ * @description Editing a Test Case directly in the side panel of Design: the title, the
+ * description and the "Propiedades del caso" (Estado, Prioridad, Nivel de Prueba, Tipo de
+ * Prueba, Tipo de Ejecución, Historia y Épica).
+ *
+ * v4.23.2 — NOTHING is editable until the tester asks for it:
+ *   - the panel opens read-only, exactly as before, and makes no request to prepare editing;
+ *   - each part has its own "Editar" (the pencil of the title, "Editar" of the description and
+ *     "Editar" of the properties);
+ *   - while editing, changes are only a draft on screen. Jira is written only when "Guardar" is
+ *     pressed, and only the fields whose value actually changed are sent. "Cancelar" discards
+ *     the draft without touching anything.
+ *   (v4.23.1 saved every list the moment its value changed, so browsing a list rewrote the case.)
  *
  * Pieces:
- *   - useTestCaseInlineEdit  → the logic: loads what is needed to edit, saves one field at a
- *                              time, and tells Design what to refresh on screen.
- *   - EditableCaseTitle      → the title, with a pencil to edit it.
- *   - EditableCaseDescription→ the text box of the description (Pre-conditions / Test Script).
- *   - EditableCaseProperties → the lists of the properties column.
+ *   - useTestCaseInlineEdit   → the logic: loads what is needed to edit (on demand), keeps the
+ *                               drafts, saves, and tells Design what to refresh on screen.
+ *   - EditableCaseTitle       → the title, with a pencil to edit it.
+ *   - EditableCaseDescription → the text box of the description (Pre-conditions / Test Script).
+ *   - EditableCaseProperties  → the lists of the properties column, with Guardar / Cancelar.
  *
  * Performance:
- *   - What is needed to edit (current values, list options, allowed statuses) is ONE request,
- *     made 400 ms after the panel opens. Somebody who is only browsing cases quickly does not
- *     trigger it; until it arrives the panel shows the values read-only, exactly as before.
- *   - Saving sends only the field that changed (1 request; 2-3 when the story changes).
+ *   - Opening a case costs nothing extra. The data needed to edit (current values, list options,
+ *     allowed statuses) is ONE request, made when "Editar" is pressed.
+ *   - "Guardar" of the properties sends every changed property in ONE request (2-3 when the
+ *     story changes, because the old link is removed and the new one created).
  *   - After saving, Design patches what is on screen instead of reloading every Test Case.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../utils/queryClient';
 import { SearchableSelect } from './CommonComponents';
-
-// Wait before loading the edit data, so quick browsing between cases costs nothing.
-const LOAD_DELAY_MS = 400;
 
 const isEpicType = (typeName) => {
   const name = String(typeName || '').toLowerCase();
   return name.includes('epic') || name.includes('épica') || name.includes('epica');
 };
 
+// Properties edited together with "Editar" → "Guardar".
+const LIST_FIELDS = [
+  { name: 'testLevel', label: 'Nivel de Prueba', configKey: 'testLevelFieldId', defaultId: 'customfield_10530' },
+  { name: 'testType', label: 'Tipo de Prueba', configKey: 'testTypeFieldId', defaultId: 'customfield_10535' },
+  { name: 'executionType', label: 'Tipo de Ejecución', configKey: 'executionTypeFieldId', defaultId: 'customfield_10534' }
+];
+
 /**
  * @param {Object} params
- * @param {Object|null} params.testCase            - Case open in the panel (id, key, summary).
+ * @param {Object|null} params.testCase    - Case open in the panel (id, key, summary).
  * @param {string} params.projectId
- * @param {Object} params.projectConfig            - Test Pulse configuration of the project.
- * @param {Object} params.requirementsMap          - key → { key, summary, issueType, epicKey, epicSummary }.
- * @param {string} params.currentStoryKey          - Story the case is linked to today ('' = none).
+ * @param {Object} params.projectConfig    - Test Pulse configuration of the project.
+ * @param {Object} params.requirementsMap  - key → { key, summary, issueType, epicKey, epicSummary }.
+ * @param {string} params.currentStoryKey  - Story the case is linked to today ('' = none).
  * @param {Function} params.addNotification
- * @param {Function} params.onPatched              - Receives what changed, to refresh the screen.
+ * @param {Function} params.onPatched      - Receives what changed, to refresh the screen.
  * @returns {Object} State and actions used by the components below.
  */
 export function useTestCaseInlineEdit({ testCase, projectId, projectConfig, requirementsMap, currentStoryKey, addNotification, onPatched }) {
   const caseId = testCase ? String(testCase.id) : '';
-  const [data, setData] = useState(null);            // answer of getTestCaseForEdit for `caseId`
-  const [savingField, setSavingField] = useState(''); // name of the field being saved
-  const [titleDraft, setTitleDraft] = useState(null); // null = not editing the title
-  const [descDraft, setDescDraft] = useState(null);   // null = not editing the description
+  const [data, setData] = useState(null);             // answer of getTestCaseForEdit for `caseId`
+  const [opening, setOpening] = useState('');         // part whose edit data is loading
+  const [savingPart, setSavingPart] = useState('');   // 'title' | 'description' | 'properties'
+  const [titleDraft, setTitleDraft] = useState(null); // null = not editing
+  const [descDraft, setDescDraft] = useState(null);   // null = not editing
+  const [propsDraft, setPropsDraft] = useState(null); // null = not editing
   const [replaceRich, setReplaceRich] = useState(false);
-  // Identifies the latest case asked for, so a slow answer for a previous case is ignored.
+  // Identifies the case open in the panel, so a slow answer for a previous case is ignored.
   const wantedRef = useRef('');
 
-  const load = useCallback(async (id) => {
-    if (!id) return;
-    try {
-      const res = await invoke('getTestCaseForEdit', { projectId, caseId: id, config: projectConfig });
-      if (wantedRef.current === id && res && !res.error) setData(res);
-    } catch (_) {
-      // Editing simply stays unavailable; the panel keeps showing the values read-only.
-    }
-  }, [projectId, projectConfig]);
-
-  // A different case in the panel: forget the previous one and load this one after a short wait.
+  // A different case in the panel: close every editor and forget the previous edit data.
   useEffect(() => {
     wantedRef.current = caseId;
     setData(null);
+    setOpening('');
     setTitleDraft(null);
     setDescDraft(null);
+    setPropsDraft(null);
     setReplaceRich(false);
-    if (!caseId) return undefined;
-    const timer = setTimeout(() => load(caseId), LOAD_DELAY_MS);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId]);
 
-  const ready = Boolean(data && data.id === caseId);
+  /** The edit data of the open case: from memory, or one request to Jira. Null on failure. */
+  const ensureLoaded = async (part) => {
+    if (data && data.id === caseId) return data;
+    const id = caseId;
+    setOpening(part);
+    try {
+      const res = await invoke('getTestCaseForEdit', { projectId, caseId: id, config: projectConfig });
+      if (wantedRef.current !== id) return null;
+      if (!res || res.error) {
+        addNotification({ type: 'error', title: 'No se pudo abrir la edición', description: res?.error || '' });
+        return null;
+      }
+      setData(res);
+      return res;
+    } catch (error) {
+      if (wantedRef.current === id) addNotification({ type: 'error', title: 'No se pudo abrir la edición', description: error?.message || String(error) });
+      return null;
+    } finally {
+      if (wantedRef.current === id) setOpening('');
+    }
+  };
 
   /**
-   * Sends one change to Jira. `request` is the extra part of the saveTestCase payload
-   * (`changes`, `transitionId` or `requirement`); `screenPatch` is what Design must refresh.
-   * Returns true when Jira accepted it.
+   * Sends one save to Jira. `request` is the extra part of the saveTestCase payload.
+   * `screenPatch` is what Design must refresh. Returns true when Jira accepted it.
    */
-  const save = async (fieldName, request, localPatch, screenPatch, successTitle) => {
-    setSavingField(fieldName);
+  const save = async (part, request, screenPatch, successTitle) => {
+    const id = caseId;
+    setSavingPart(part);
     try {
-      const res = await invoke('saveTestCase', { projectId, caseId, config: projectConfig, ...request });
+      const res = await invoke('saveTestCase', { projectId, caseId: id, config: projectConfig, ...request });
       if (!res || res.error) {
-        addNotification({ type: 'error', title: 'No se pudo guardar el cambio', description: res?.error || '' });
+        addNotification({ type: 'error', title: 'No se pudo guardar', description: res?.error || '' });
         return false;
       }
-      if (wantedRef.current === caseId) setData(prev => (prev ? { ...prev, ...localPatch } : prev));
-      onPatched({ id: caseId, ...screenPatch });
+      // What was loaded no longer matches Jira (status, links…): the next "Editar" reads it again.
+      if (wantedRef.current === id) setData(null);
+      onPatched({ id, ...screenPatch });
       if (res.warning) addNotification({ type: 'warning', title: 'Guardado con una advertencia', description: res.warning });
       else addNotification({ type: 'success', title: successTitle });
       return true;
     } catch (error) {
-      addNotification({ type: 'error', title: 'No se pudo guardar el cambio', description: error?.message || String(error) });
+      addNotification({ type: 'error', title: 'No se pudo guardar', description: error?.message || String(error) });
       return false;
     } finally {
-      setSavingField('');
+      setSavingPart('');
     }
   };
 
-  const labelOf = (options, id) => (options || []).find(option => option.id === id)?.label || '';
+  // ── Title (needs nothing from Jira: the panel already has it) ────────────────────────────
 
-  // ── Actions ──────────────────────────────────────────────────────────────────────────────
-
+  const startTitleEdit = () => setTitleDraft(String(testCase?.summary || ''));
+  const cancelTitleEdit = () => setTitleDraft(null);
   const saveTitle = async () => {
     const summary = String(titleDraft ?? '').replace(/\s+/g, ' ').trim();
-    if (!summary || summary === data.summary) { setTitleDraft(null); return; }
-    if (await save('summary', { changes: { summary } }, { summary }, { summary }, 'Título actualizado')) setTitleDraft(null);
+    if (!summary || summary === String(testCase?.summary || '').trim()) { setTitleDraft(null); return; }
+    if (await save('title', { changes: { summary } }, { summary }, 'Título actualizado')) setTitleDraft(null);
   };
 
+  // ── Description ──────────────────────────────────────────────────────────────────────────
+
+  const startDescriptionEdit = async () => {
+    const loaded = await ensureLoaded('description');
+    if (loaded) { setReplaceRich(false); setDescDraft(loaded.descriptionText || ''); }
+  };
+  const cancelDescriptionEdit = () => { setDescDraft(null); setReplaceRich(false); };
   const saveDescription = async () => {
-    if (descDraft === data.descriptionText) { setDescDraft(null); return; }
-    const ok = await save('descriptionText', { changes: { descriptionText: descDraft } },
-      { descriptionText: descDraft, hasRichDescription: false }, { descriptionChanged: true }, 'Descripción actualizada');
-    if (ok) { setDescDraft(null); setReplaceRich(false); }
+    if (!data || descDraft === data.descriptionText) { cancelDescriptionEdit(); return; }
+    const ok = await save('description', { changes: { descriptionText: descDraft } }, { descriptionChanged: true }, 'Descripción actualizada');
+    if (ok) cancelDescriptionEdit();
   };
 
-  const savePriority = (priorityId) => {
-    if (!priorityId || priorityId === data.priorityId) return;
-    const name = labelOf(data.options.priority.options, priorityId);
-    save('priorityId', { changes: { priorityId } }, { priorityId }, { priority: { id: priorityId, name } }, `Prioridad: ${name}`);
+  // ── Properties ───────────────────────────────────────────────────────────────────────────
+
+  /** The values the case has now, in the shape of the draft. */
+  const originalProps = (loaded) => ({
+    transitionId: '', // '' = keep the current status
+    priorityId: loaded.priorityId || '',
+    testLevel: loaded.testLevel?.optionId || '',
+    testType: loaded.testType?.optionId || '',
+    executionType: loaded.executionType?.optionId || '',
+    storyKey: currentStoryKey || '',
+    epicKey: loaded.epic?.key || ''
+  });
+
+  const startPropertiesEdit = async () => {
+    const loaded = await ensureLoaded('properties');
+    if (loaded) setPropsDraft(originalProps(loaded));
+  };
+  const cancelPropertiesEdit = () => setPropsDraft(null);
+  const setProp = (name, value) => setPropsDraft(prev => (prev ? { ...prev, [name]: value || '' } : prev));
+
+  const labelOf = (options, id) => (options || []).find(option => option.id === id)?.label || '';
+
+  /** Names of the properties whose draft value differs from what the case has now. */
+  const changedProps = () => {
+    if (!data || !propsDraft) return [];
+    const original = originalProps(data);
+    return Object.keys(propsDraft).filter(name => propsDraft[name] !== original[name]);
   };
 
-  /** `name` is 'testLevel', 'testType' or 'executionType'; `label` is how the field is called. */
-  const saveList = (name, label, optionId) => {
-    if (optionId === data[name]?.optionId) return;
-    const field = data.options[name];
-    const fieldId = {
-      testLevel: projectConfig?.testLevelFieldId || 'customfield_10530',
-      testType: projectConfig?.testTypeFieldId || 'customfield_10535',
-      executionType: projectConfig?.executionTypeFieldId || 'customfield_10534'
-    }[name];
-    const optionLabel = labelOf(field.options, optionId);
-    save(name, { changes: { [name]: { optionId, multiple: field.multiple } } },
-      { [name]: { optionId, multiple: field.multiple } },
-      { customFields: { [fieldId]: optionId ? { id: optionId, value: optionLabel } : null } },
-      `${label}: ${optionLabel || 'sin especificar'}`);
-  };
+  /** Sends every changed property in one request. Untouched properties are never sent. */
+  const savePropertiesEdit = async () => {
+    const changed = changedProps();
+    if (changed.length === 0) { setPropsDraft(null); return; }
+    const draft = propsDraft;
+    const request = { changes: {} };
+    const screenPatch = { customFields: {} };
+    const done = [];
 
-  const saveStatus = async (transitionId) => {
-    const transition = (data.transitions || []).find(item => item.id === transitionId);
-    if (!transition) return;
-    const ok = await save('status', { transitionId }, { statusName: transition.toName }, { status: transition.toName }, `Estado: ${transition.toName}`);
-    // The statuses reachable from the new one are different: read them again.
-    if (ok) load(caseId);
-  };
+    if (changed.includes('transitionId')) {
+      const transition = (data.transitions || []).find(item => item.id === draft.transitionId);
+      request.transitionId = draft.transitionId;
+      screenPatch.status = transition?.toName || '';
+      done.push('Estado');
+    }
+    if (changed.includes('priorityId') && draft.priorityId) {
+      request.changes.priorityId = draft.priorityId;
+      screenPatch.priority = { id: draft.priorityId, name: labelOf(data.options.priority.options, draft.priorityId) };
+      done.push('Prioridad');
+    }
+    for (const field of LIST_FIELDS) {
+      if (!changed.includes(field.name)) continue;
+      const optionId = draft[field.name];
+      const multiple = Boolean(data.options[field.name]?.multiple || data[field.name]?.multiple);
+      request.changes[field.name] = { optionId, multiple };
+      const fieldId = projectConfig?.[field.configKey] || field.defaultId;
+      screenPatch.customFields[fieldId] = optionId ? { id: optionId, value: labelOf(data.options[field.name].options, optionId) } : null;
+      done.push(field.label);
+    }
+    if (changed.includes('epicKey')) {
+      request.changes.epicKey = draft.epicKey;
+      const summary = epicOptions.find(option => option.value === draft.epicKey)?.summary || '';
+      screenPatch.epic = draft.epicKey ? { key: draft.epicKey, summary } : null;
+      done.push('Épica');
+    }
+    if (changed.includes('storyKey')) {
+      const previousKey = currentStoryKey || '';
+      const previousLink = (data.links || []).find(link => link.key === previousKey);
+      request.requirement = { key: draft.storyKey, removeLinkId: previousLink?.linkId || '', linkType: projectConfig?.requirementLinkType || 'ANY' };
+      screenPatch.story = { key: draft.storyKey, summary: requirementsMap?.[draft.storyKey]?.summary || '', previousKey };
+      done.push('Historia');
+    }
 
-  const saveStory = (storyKey) => {
-    const previousKey = currentStoryKey || '';
-    if ((storyKey || '') === previousKey) return;
-    const previousLink = (data.links || []).find(link => link.key === previousKey);
-    const story = requirementsMap?.[storyKey];
-    save('story',
-      { requirement: { key: storyKey || '', removeLinkId: previousLink?.linkId || '', linkType: projectConfig?.requirementLinkType || 'ANY' } },
-      { links: (data.links || []).filter(link => link.key !== previousKey) },
-      { story: { key: storyKey || '', summary: story?.summary || '', previousKey } },
-      storyKey ? `Historia: ${storyKey}` : 'Historia desvinculada'
-    ).then(ok => { if (ok) load(caseId); }); // the new link gets its id from Jira
-  };
-
-  const saveEpic = (epicKey) => {
-    if ((epicKey || '') === (data.epic?.key || '')) return;
-    const summary = epicOptions.find(option => option.value === epicKey)?.summary || '';
-    save('epic', { changes: { epicKey: epicKey || '' } },
-      { epic: epicKey ? { key: epicKey, summary } : null },
-      { epic: epicKey ? { key: epicKey, summary } : null },
-      epicKey ? `Épica: ${epicKey}` : 'Épica propia quitada');
+    if (await save('properties', request, screenPatch, `Actualizado: ${done.join(', ')}`)) setPropsDraft(null);
   };
 
   // ── Lists of stories and epics of the project (already loaded by Design) ─────────────────
@@ -195,16 +247,15 @@ export function useTestCaseInlineEdit({ testCase, projectId, projectConfig, requ
   }, [requirementsMap]);
 
   return {
-    ready, data, savingField, currentStoryKey: currentStoryKey || '',
-    storyOptions, epicOptions,
+    data, opening, savingPart, storyOptions, epicOptions,
     // title
-    titleDraft, setTitleDraft, saveTitle,
+    titleDraft, setTitleDraft, titleEditing: titleDraft !== null, startTitleEdit, cancelTitleEdit, saveTitle,
     // description
-    descDraft, setDescDraft, replaceRich, setReplaceRich, saveDescription,
-    descEditing: descDraft !== null,
-    startDescriptionEdit: () => { if (data) setDescDraft(data.descriptionText || ''); },
+    descDraft, setDescDraft, replaceRich, setReplaceRich,
+    descEditing: descDraft !== null && Boolean(data), startDescriptionEdit, cancelDescriptionEdit, saveDescription,
     // properties
-    savePriority, saveList, saveStatus, saveStory, saveEpic
+    propsDraft, propsEditing: propsDraft !== null && Boolean(data), setProp,
+    startPropertiesEdit, cancelPropertiesEdit, savePropertiesEdit, changedProps
   };
 }
 
@@ -214,32 +265,38 @@ const labelStyle = { display: 'block', fontSize: '11px', fontWeight: 600, color:
 const selectStyle = { width: '100%', boxSizing: 'border-box', height: '30px', padding: '0 6px', border: '1px solid #8590A2', borderRadius: '4px', fontSize: '0.82rem', color: '#172B4D', background: '#FFFFFF' };
 const mutedStyle = { fontSize: '11px', color: '#626F86' };
 const smallBtn = { fontSize: '0.78rem', padding: '0.3rem 0.7rem' };
+const linkBtn = { border: 'none', background: 'none', color: '#0C66E4', fontSize: '11px', fontWeight: 600, cursor: 'pointer', padding: 0 };
+
+/** "✎ Editar" link used by the description and the properties. */
+export const EditLink = ({ onClick, loading, disabled, title }) => (
+  <button type="button" onClick={onClick} disabled={disabled || loading} title={title} style={{ ...linkBtn, opacity: disabled ? 0.5 : 1 }}>
+    {loading ? 'Abriendo…' : '✎ Editar'}
+  </button>
+);
 
 // ── Title ───────────────────────────────────────────────────────────────────────────────────
 
-/** The title of the case. With the edit data loaded, a pencil turns it into a text box. */
+/** The title of the case. The pencil turns it into a text box; nothing changes until "Guardar". */
 export const EditableCaseTitle = ({ edit, summary }) => {
   const titleStyle = { fontSize: '1.05rem', fontWeight: 700, color: '#172B4D', margin: 0, lineHeight: 1.35 };
-  if (edit.titleDraft === null) {
+  if (!edit.titleEditing) {
     return (
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
         <h2 style={titleStyle}>{summary}</h2>
-        {edit.ready && (
-          <button type="button" onClick={() => edit.setTitleDraft(edit.data.summary || summary || '')} title="Editar el título" aria-label="Editar el título"
-            style={{ border: 'none', background: 'none', color: '#0C66E4', cursor: 'pointer', fontSize: '0.9rem', padding: '2px' }}>✎</button>
-        )}
+        <button type="button" onClick={edit.startTitleEdit} title="Editar el título" aria-label="Editar el título"
+          style={{ border: 'none', background: 'none', color: '#0C66E4', cursor: 'pointer', fontSize: '0.9rem', padding: '2px' }}>✎</button>
       </div>
     );
   }
-  const saving = edit.savingField === 'summary';
+  const saving = edit.savingPart === 'title';
   return (
     <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
       <input autoFocus value={edit.titleDraft} maxLength={255} disabled={saving}
         onChange={(event) => edit.setTitleDraft(event.target.value)}
-        onKeyDown={(event) => { if (event.key === 'Enter') edit.saveTitle(); if (event.key === 'Escape') edit.setTitleDraft(null); }}
+        onKeyDown={(event) => { if (event.key === 'Enter') edit.saveTitle(); if (event.key === 'Escape') edit.cancelTitleEdit(); }}
         style={{ ...selectStyle, flex: '1 1 320px', height: '34px', fontSize: '0.95rem', fontWeight: 600 }} />
       <button type="button" className="btn-primary" style={smallBtn} disabled={saving || !edit.titleDraft.trim()} onClick={edit.saveTitle}>{saving ? 'Guardando…' : 'Guardar'}</button>
-      <button type="button" className="btn-secondary" style={smallBtn} disabled={saving} onClick={() => edit.setTitleDraft(null)}>Cancelar</button>
+      <button type="button" className="btn-secondary" style={smallBtn} disabled={saving} onClick={edit.cancelTitleEdit}>Cancelar</button>
     </div>
   );
 };
@@ -248,7 +305,7 @@ export const EditableCaseTitle = ({ edit, summary }) => {
 
 /** Text box of the description, shown in place of the rendered description while editing. */
 export const EditableCaseDescription = ({ edit }) => {
-  const saving = edit.savingField === 'descriptionText';
+  const saving = edit.savingPart === 'description';
   const changed = edit.descDraft !== edit.data.descriptionText;
   // A description with tables, images or links would be flattened to plain text.
   const blocked = edit.data.hasRichDescription && changed && !edit.replaceRich;
@@ -270,7 +327,7 @@ export const EditableCaseDescription = ({ edit }) => {
         </div>
       )}
       <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-        <button type="button" className="btn-secondary" style={smallBtn} disabled={saving} onClick={() => { edit.setDescDraft(null); edit.setReplaceRich(false); }}>Cancelar</button>
+        <button type="button" className="btn-secondary" style={smallBtn} disabled={saving} onClick={edit.cancelDescriptionEdit}>Cancelar</button>
         <button type="button" className="btn-primary" style={smallBtn} disabled={saving || blocked || !changed} onClick={edit.saveDescription}>{saving ? 'Guardando…' : 'Guardar descripción'}</button>
       </div>
     </div>
@@ -279,62 +336,80 @@ export const EditableCaseDescription = ({ edit }) => {
 
 // ── Properties ──────────────────────────────────────────────────────────────────────────────
 
-/** One list of the properties column. A field Jira does not let the user edit is shown locked. */
-const PropertyList = ({ label, field, value, saving, onChange, emptyLabel = 'Sin especificar' }) => (
-  <div>
-    <label style={labelStyle}>{label}</label>
-    <select style={{ ...selectStyle, opacity: saving ? 0.6 : 1 }} value={value || ''} disabled={saving || !field?.available || field.options.length === 0}
-      title={!field?.available ? 'Jira no permite editar este campo en este caso' : undefined}
-      onChange={(event) => onChange(event.target.value)}>
-      {(!field?.required || !value) && <option value="">{emptyLabel}</option>}
-      {(field?.options || []).map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-    </select>
-  </div>
-);
+/**
+ * One list of the properties. Its value is the draft; it starts as the value the case has now.
+ * The current value is always listed, even when Jira does not offer it among the options, so
+ * opening the editor never shows (or saves) a value the case does not have.
+ */
+const PropertyList = ({ label, field, value, current, disabled, onChange, allowEmpty = true }) => {
+  const options = field?.options || [];
+  const currentMissing = current?.id && !options.some(option => option.id === current.id);
+  return (
+    <div>
+      <label style={labelStyle}>{label}</label>
+      <select style={selectStyle} value={value || ''} disabled={disabled || !field?.available}
+        title={!field?.available ? 'Jira no permite editar este campo en este caso' : undefined}
+        onChange={(event) => onChange(event.target.value)}>
+        {(allowEmpty || !value) && <option value="">Sin especificar</option>}
+        {currentMissing && <option value={current.id}>{current.label || current.id}</option>}
+        {options.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+      </select>
+    </div>
+  );
+};
 
 /**
- * The editable "Propiedades del caso": Estado, Prioridad, Nivel de Prueba, Tipo de Prueba,
- * Tipo de Ejecución, Historia y Épica. Choosing a value saves it immediately.
+ * The properties while "Editar" is active: Estado, Prioridad, Nivel de Prueba, Tipo de Prueba,
+ * Tipo de Ejecución, Historia y Épica. Changes are a draft until "Guardar".
  */
 export const EditableCaseProperties = ({ edit, derivedEpicKey }) => {
-  const { data, savingField } = edit;
-  const busy = Boolean(savingField);
+  const { data, propsDraft: draft } = edit;
+  const saving = edit.savingPart === 'properties';
+  const changedCount = edit.changedProps().length;
   return (
     <>
-      {/* Estado: the current one plus the statuses the workflow allows from it. */}
+      {/* Estado: keep the current one, or move to a status the workflow allows. */}
       <div>
         <label style={labelStyle}>Estado</label>
-        <select style={{ ...selectStyle, opacity: savingField === 'status' ? 0.6 : 1 }} value="" disabled={busy || (data.transitions || []).length === 0}
-          onChange={(event) => edit.saveStatus(event.target.value)}>
-          <option value="">{data.statusName || 'Sin estado'}</option>
+        <select style={selectStyle} value={draft.transitionId} disabled={saving || (data.transitions || []).length === 0}
+          onChange={(event) => edit.setProp('transitionId', event.target.value)}>
+          <option value="">{data.statusName || 'Sin estado'} (actual)</option>
           {(data.transitions || []).map(transition => <option key={transition.id} value={transition.id}>→ {transition.toName}</option>)}
         </select>
       </div>
 
-      <PropertyList label="Prioridad" field={{ ...data.options.priority, required: true }} value={data.priorityId} saving={busy} onChange={edit.savePriority} />
-      <PropertyList label="Nivel de Prueba" field={data.options.testLevel} value={data.testLevel?.optionId} saving={busy} onChange={(id) => edit.saveList('testLevel', 'Nivel de Prueba', id)} />
-      <PropertyList label="Tipo de Prueba" field={data.options.testType} value={data.testType?.optionId} saving={busy} onChange={(id) => edit.saveList('testType', 'Tipo de Prueba', id)} />
-      <PropertyList label="Tipo de Ejecución" field={data.options.executionType} value={data.executionType?.optionId} saving={busy} onChange={(id) => edit.saveList('executionType', 'Tipo de Ejecución', id)} />
+      <PropertyList label="Prioridad" field={data.options.priority} value={draft.priorityId} allowEmpty={false}
+        current={{ id: data.priorityId, label: data.priorityName }} disabled={saving} onChange={(id) => edit.setProp('priorityId', id)} />
+      {LIST_FIELDS.map(field => (
+        <PropertyList key={field.name} label={field.label} field={data.options[field.name]} value={draft[field.name]}
+          current={{ id: data[field.name]?.optionId, label: data[field.name]?.label }} disabled={saving}
+          onChange={(id) => edit.setProp(field.name, id)} />
+      ))}
 
       {/* Historia: the requirement this case tests ("is tested by"). */}
-      <div style={{ opacity: savingField === 'story' ? 0.6 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+      <div style={{ pointerEvents: saving ? 'none' : 'auto', opacity: saving ? 0.6 : 1 }}>
         <label style={labelStyle}>Historia que prueba</label>
-        <SearchableSelect value={edit.currentStoryKey} options={edit.storyOptions} placeholder="Sin historia" onChange={(value) => edit.saveStory(value || '')} />
+        <SearchableSelect value={draft.storyKey} options={edit.storyOptions} placeholder="Sin historia" onChange={(value) => edit.setProp('storyKey', value)} />
       </div>
 
-      {/* Épica: the case's own epic. Without one, the epic of its story is the one shown. */}
+      {/* Épica: the case's own epic. Without one, the epic of its story applies. */}
       <div>
         <label style={labelStyle}>Épica</label>
-        <select style={{ ...selectStyle, opacity: savingField === 'epic' ? 0.6 : 1 }} value={data.epic?.key || ''} disabled={busy || !data.options.epic.available}
+        <select style={selectStyle} value={draft.epicKey} disabled={saving || !data.options.epic.available}
           title={!data.options.epic.available ? 'Jira no permite asignar una épica a este caso' : undefined}
-          onChange={(event) => edit.saveEpic(event.target.value)}>
+          onChange={(event) => edit.setProp('epicKey', event.target.value)}>
           <option value="">{derivedEpicKey && !data.epic ? `La de su historia (${derivedEpicKey})` : 'Sin épica'}</option>
-          {/* The current epic is listed even when it is not among the project's known epics. */}
           {data.epic && !edit.epicOptions.some(option => option.value === data.epic.key) && (
             <option value={data.epic.key}>{data.epic.key} — {data.epic.summary}</option>
           )}
           {edit.epicOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ ...mutedStyle, marginRight: 'auto' }}>{changedCount === 0 ? 'Sin cambios' : `${changedCount} ${changedCount === 1 ? 'cambio' : 'cambios'} sin guardar`}</span>
+        <button type="button" className="btn-secondary" style={smallBtn} disabled={saving} onClick={edit.cancelPropertiesEdit}>Cancelar</button>
+        <button type="button" className="btn-primary" style={smallBtn} disabled={saving || changedCount === 0} onClick={edit.savePropertiesEdit}>{saving ? 'Guardando…' : 'Guardar'}</button>
       </div>
     </>
   );

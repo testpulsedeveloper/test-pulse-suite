@@ -41,12 +41,12 @@ import {
 import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
 // v4.23.1: editing a Test Case directly in the side panel of Design.
-import { useTestCaseInlineEdit, EditableCaseTitle, EditableCaseDescription, EditableCaseProperties } from './components/TestCaseInlineEdit';
+import { useTestCaseInlineEdit, EditableCaseTitle, EditableCaseDescription, EditableCaseProperties, EditLink } from './components/TestCaseInlineEdit';
 import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockSplitCssWidth, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './components/PanelDockSwitcher';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.23.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.23.2'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -4127,19 +4127,15 @@ Then el sistema valida la identidad.
                     <span style={{ fontSize: '11px', fontWeight: 700, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                       Descripción del Escenario
                     </span>
-                    <button 
-                      onClick={caseEdit.startDescriptionEdit}
-                      style={{ background: 'none', border: 'none', color: '#0C66E4', fontSize: '11px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
-                      title="Editar la descripción"
-                      disabled={!caseEdit.ready || caseEdit.descEditing}
-                    >
-                      ✎ Editar
-                    </button>
+                    {/* v4.23.2: the description becomes editable only after pressing "Editar". */}
+                    {!caseEdit.descEditing && (
+                      <EditLink onClick={caseEdit.startDescriptionEdit} loading={caseEdit.opening === 'description'} title="Editar la descripción" />
+                    )}
                   </div>
 
                   {/* Scrollable content container for Description */}
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '8px', paddingBottom: '2.5rem' }}>
-                    {caseEdit.ready && caseEdit.descEditing ? (
+                    {caseEdit.descEditing ? (
                       <EditableCaseDescription edit={caseEdit} />
                     ) : loadingDescription ? (
                       <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
@@ -4164,7 +4160,13 @@ Then el sistema valida la identidad.
                 {/* Right Column (35%): Properties Sidebar (Fixed & Pinned) */}
                 <div style={{ backgroundColor: '#FFFFFF', borderRadius: '6px', border: '1px solid #DCDFE4', padding: '1.25rem 1.25rem 2.5rem 1.25rem', boxShadow: '0 1px 2px rgba(9,30,66,0.04)', display: 'flex', flexDirection: 'column', gap: '0.9rem', height: '100%', minHeight: 0, overflowY: 'auto' }}>
                   <h3 style={{ fontSize: '11px', fontWeight: 700, color: '#172B4D', textTransform: 'uppercase', letterSpacing: '0.04em', margin: 0, paddingBottom: '0.5rem', borderBottom: '1px solid #F1F2F4', flexShrink: 0 }}>
-                    Propiedades del Caso
+                    <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                      <span>Propiedades del Caso</span>
+                      {/* v4.23.2: the properties are read-only until "Editar" is pressed. */}
+                      {!caseEdit.propsEditing && (
+                        <EditLink onClick={caseEdit.startPropertiesEdit} loading={caseEdit.opening === 'properties'} title="Editar las propiedades del caso" />
+                      )}
+                    </span>
                   </h3>
 
                   {/* Suite / Folder Selector */}
@@ -4190,9 +4192,9 @@ Then el sistema valida la identidad.
                     </select>
                   </div>
 
-                  {/* v4.23.1: once the edit data has arrived the properties are lists that save on change;
-                      until then (and if it cannot be loaded) they are shown read-only as before. */}
-                  {caseEdit.ready ? (
+                  {/* While "Editar" is active the properties are lists (a draft saved with "Guardar");
+                      otherwise they are shown read-only. */}
+                  {caseEdit.propsEditing ? (
                     <EditableCaseProperties edit={caseEdit} derivedEpicKey={selectedCaseTrace?.epicKey || ''} />
                   ) : (<>
                   {/* Estado */}
