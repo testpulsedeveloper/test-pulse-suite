@@ -227,7 +227,7 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
   const canBeTestPlan = phase.id === 'plan';
   const [form, setForm] = useState(() => ({
     name: '', docType: isFindings ? 'ERF' : '', url: '', owner: '', date: '', status: 'pending', notes: '',
-    issueKey: '', defectsUrl: '',
+    issueKey: '', defectsUrl: '', planKey: '',
     ...(initial || {})
   }));
   const [isTestPlan, setIsTestPlan] = useState(canBeTestPlan && initial?.kind === 'testplan');
@@ -236,8 +236,10 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
   const urlLooksValid = looksLikeUrl(form.url);
   const defectsUrlLooksValid = looksLikeUrl(form.defectsUrl);
   const issueKeyLooksValid = /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(String(form.issueKey || '').trim());
+  // Optional: Test Plan of Test Pulse whose dates and cycles cover element 14.
+  const planKeyLooksValid = !String(form.planKey || '').trim() || /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(String(form.planKey).trim());
   const canSave = form.name.trim() && urlLooksValid && (!isFindings || form.url.trim()) &&
-    (!isTestPlan || (issueKeyLooksValid && defectsUrlLooksValid));
+    (!isTestPlan || (issueKeyLooksValid && defectsUrlLooksValid && planKeyLooksValid));
 
   return (
     <div style={{ ...styles.card, padding: '12px', background: 'var(--jira-bg-app, #F7F8F9)', marginTop: '8px' }}>
@@ -275,6 +277,13 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
           </div>
         )}
         {isTestPlan && (
+          <div>
+            <label style={styles.label}>Plan en Test Pulse (elemento 14: periodo y ciclos)</label>
+            <input style={styles.input} value={form.planKey} onChange={set('planKey')} maxLength={30} placeholder="Clave del Test Plan, p. ej. CUQ-10" />
+            {!planKeyLooksValid && <div style={{ ...styles.muted, color: '#AE2A19' }}>Usa la clave del Test Plan, por ejemplo CUQ-10.</div>}
+          </div>
+        )}
+        {isTestPlan && (
           <div style={{ gridColumn: 'span 2' }}>
             <label style={styles.label}>Enlace a Gestión de defectos en Confluence (elemento 16)</label>
             <input style={styles.input} value={form.defectsUrl} onChange={set('defectsUrl')} maxLength={1000} placeholder="https://liverpooldigital.atlassian.net/wiki/spaces/…/pages/…" />
@@ -305,6 +314,7 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
             url: form.url.trim(),
             issueKey: isTestPlan ? String(form.issueKey || '').trim().toUpperCase() : '',
             defectsUrl: isTestPlan ? String(form.defectsUrl || '').trim() : '',
+            planKey: isTestPlan ? String(form.planKey || '').trim().toUpperCase() : '',
             kind: isFindings ? 'findings' : (isTestPlan ? 'testplan' : 'link')
           })}>
           {saving ? 'Guardando…' : 'Guardar'}

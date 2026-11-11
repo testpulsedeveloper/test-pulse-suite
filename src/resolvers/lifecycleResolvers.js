@@ -35,6 +35,7 @@ import { jqlQuote } from '../utils/jqlHelpers.js';
 import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenceFindingsParser.js';
 import { readXlsx } from '../utils/xlsxReader.js';
 import { evaluateTestPlan } from '../utils/testPlanChecklist.js';
+import { currentPlanRefOfCycle, isSamePlan } from '../utils/planCycleRules.js';
 
 // The five phases of the framework, in order. The ids are stored; the labels live in the UI.
 export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'];
@@ -100,6 +101,8 @@ function sanitizeDeliverable(raw, stored) {
     // Where the Excel is attached, and the link that covers element 16 (defect management).
     clean.issueKey = issueKeyOf(raw?.issueKey);
     clean.defectsUrl = safeUrl(raw?.defectsUrl);
+    // v4.20.1: Test Plan of Test Pulse whose schedule and cycles cover element 14.
+    clean.planKey = issueKeyOf(raw?.planKey);
     // Keep the last evaluation only while it still refers to the same Jira issue.
     if (stored?.report && stored.issueKey === clean.issueKey) clean.report = stored.report;
   }
@@ -213,6 +216,60 @@ async function readFindingsReport(url) {
 }
 
 /**
+ * Reads from Test Pulse what covers element 14 of the Test Plan check ("Periodo y ciclos"),
+ * as the current user (v4.20.1):
+ *   - the period is the schedule saved on the Test Plan issue (property `testpulse-schedule`,
+ *     set in Planning → calendar of the plan);
+ *   - the cycles are the Test Cycles of the same project linked to that plan. The link lives in
+ *     an issue property, which JQL cannot search, so the cycles of the project are listed and
+ *     matched with the same rule Planning uses (planCycleRules.js).
+ *
+ * Never throws: a problem is returned as `{ key, error }` and shown in the checklist.
+ *
+ * @param {string} planKey - Key of the Test Plan issue, e.g. "CUQ-10".
+ * @returns {Promise<{key: string, startDate?: string, endDate?: string, cycles?: number, error?: string}>}
+ */
+async function readTestPulsePlan(planKey) {
+  try {
+    const planRes = await api.asUser().requestJira(
+      route`/rest/api/3/issue/${planKey}?fields=summary,project,issuetype&properties=testpulse-schedule`,
+      { headers: { Accept: 'application/json' } }
+    );
+    if (!planRes.ok) return { key: planKey, error: `No se pudo leer el plan ${planKey} en Jira (HTTP ${planRes.status}).` };
+    const plan = await planRes.json();
+    const rawSchedule = plan?.properties?.['testpulse-schedule'];
+    const schedule = rawSchedule?.value && typeof rawSchedule.value === 'object' ? rawSchedule.value : (rawSchedule || {});
+
+    // Cycle issue types of the project, by name (each project may name them differently).
+    let cycles = 0;
+    const projectId = String(plan?.fields?.project?.id || '');
+    if (/^\d+$/.test(projectId)) {
+      const projectRes = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}`, { headers: { Accept: 'application/json' } });
+      const cycleTypes = projectRes.ok
+        ? ((await projectRes.json())?.issueTypes || []).map(type => String(type?.name || '')).filter(name => /cycle|ciclo/i.test(name))
+        : [];
+      if (cycleTypes.length > 0) {
+        const typeList = cycleTypes.map(name => jqlQuote(name)).join(',');
+        const cycleIssues = await searchAll(
+          `project = ${projectId} AND issuetype in (${typeList})`,
+          ['parent'], 1000, ['testops-plan-link', 'testpulse-v2']
+        );
+        cycles = cycleIssues.filter(issue => isSamePlan(currentPlanRefOfCycle(issue), { id: plan.id, key: plan.key })).length;
+      }
+    }
+    return {
+      key: plan.key || planKey,
+      startDate: text(schedule.startDate, 10),
+      endDate: text(schedule.endDate, 10),
+      cycles
+    };
+  } catch (e) {
+    console.warn('[lifecycle] Test Pulse plan read failed:', e?.message);
+    return { key: planKey, error: `No se pudo leer el plan ${planKey} de Test Pulse.` };
+  }
+}
+
+/**
  * Reads the Test Plan workbook attached to a Jira issue, as the current user, and checks it
  * against the 17 standard elements (see testPlanChecklist.js). Never throws: a problem produces
  * `{ error }`, shown next to the deliverable while the previous evaluation is kept.
@@ -264,7 +321,9 @@ async function readTestPlanReport(deliverable, initiative) {
     // 3. Check the 17 elements.
     const evaluation = evaluateTestPlan(workbook, {
       epicCount: (initiative?.epicKeys || []).length,
-      defectsUrl: deliverable.defectsUrl
+      defectsUrl: deliverable.defectsUrl,
+      // Element 14 comes from Test Pulse when a plan was captured on the deliverable.
+      testPulsePlan: deliverable.planKey ? await readTestPulsePlan(deliverable.planKey) : null
     });
     return {
       ...base,
@@ -282,8 +341,10 @@ async function readTestPlanReport(deliverable, initiative) {
 }
 
 /** Runs one page of a JQL search as the current user. */
-async function searchPage(jql, fields, nextPageToken) {
+async function searchPage(jql, fields, nextPageToken, properties) {
   const body = { jql, fields, maxResults: 100 };
+  // Issue properties to return with each issue (Jira accepts at most 5 per search).
+  if (properties?.length) body.properties = properties;
   if (nextPageToken) body.nextPageToken = nextPageToken;
   const response = await api.asUser().requestJira(route`/rest/api/3/search/jql`, {
     method: 'POST',
@@ -295,11 +356,11 @@ async function searchPage(jql, fields, nextPageToken) {
 }
 
 /** Runs a JQL search up to `maxIssues` issues. */
-async function searchAll(jql, fields, maxIssues) {
+async function searchAll(jql, fields, maxIssues, properties) {
   const issues = [];
   let token;
   do {
-    const page = await searchPage(jql, fields, token);
+    const page = await searchPage(jql, fields, token, properties);
     issues.push(...(page.issues || []));
     token = page.nextPageToken;
   } while (token && issues.length < maxIssues);

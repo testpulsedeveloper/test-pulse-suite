@@ -124,6 +124,32 @@ test('filling period and cycles completes element 14', () => {
   assert.equal(e[14].deferred, false);
 });
 
+test('period and cycles can come from the Test Plan in Test Pulse (v4.20.1)', () => {
+  const evaluate = (testPulsePlan) => byNumber(evaluateTestPlan(realisticWorkbook(), { testPulsePlan }))[14];
+
+  const full = evaluate({ key: 'CUQ-10', startDate: '2026-06-01', endDate: '2026-12-15', cycles: 4 });
+  assert.equal(full.status, 'complete');
+  assert.equal(full.source, 'testpulse');
+  assert.equal(full.deferred, false);
+  assert.match(full.detail, /CUQ-10.*4 ciclo/);
+
+  assert.equal(evaluate({ key: 'CUQ-10', startDate: '2026-06-01', endDate: '2026-12-15', cycles: 0 }).status, 'partial');
+  assert.equal(evaluate({ key: 'CUQ-10', startDate: '', endDate: '', cycles: 2 }).status, 'partial');
+  const none = evaluate({ key: 'CUQ-10', startDate: '', endDate: '', cycles: 0 });
+  assert.equal(none.status, 'missing');
+  assert.equal(none.deferred, true); // still due only in "Construir"
+  assert.match(evaluate({ key: 'CUQ-10', error: 'No se pudo leer el plan CUQ-10 en Jira (HTTP 404).' }).detail, /404/);
+
+  // Without a Test Pulse plan the Excel is used, with a hint about the other source.
+  const fromExcel = evaluate(null);
+  assert.equal(fromExcel.source, 'excel');
+  assert.match(fromExcel.detail, /plan de Test Pulse/);
+
+  const resolvers = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(resolvers, /testPulsePlan: deliverable\.planKey \? await readTestPulsePlan\(deliverable\.planKey\) : null/);
+  assert.match(resolvers, /isSamePlan\(currentPlanRefOfCycle\(issue\)/);
+});
+
 test('a workbook that is not the template is not recognized and nothing breaks', () => {
   const result = evaluateTestPlan({ sheets: [sheet('Hoja1', { A1: 'hola' })] });
   assert.equal(result.recognized, false);

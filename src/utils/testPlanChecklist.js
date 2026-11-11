@@ -20,6 +20,9 @@
  * Where each element is read from (`source`):
  *   - 'excel'      → the Test Plan workbook (template "TI-SE TPL Plan de Pruebas")
  *   - 'jira'       → 15: the epics linked to the initiative
+ *   - 'testpulse'  → 14: the period and the cycles also live in Test Pulse (schedule of the Test
+ *                    Plan and the cycles linked to it); when a Test Pulse plan is captured on the
+ *                    deliverable it is used, and the Excel is only the fallback (v4.20.1)
  *   - 'confluence' → 16: the link to the defect-management page, captured on the deliverable
  *   - 'testpulse'  → 17: metrics and reports are the Reports module of Test Pulse itself
  *
@@ -261,6 +264,23 @@ function checkPeriodAndCycles(strategy) {
   return missing('No se han definido el periodo ni los ciclos.');
 }
 
+/**
+ * Element 14 from Test Pulse (v4.20.1): the period is the schedule of the Test Plan (start and
+ * end dates set in Planning) and the cycles are the Test Cycles linked to that plan.
+ *
+ * @param {{key: string, startDate: string, endDate: string, cycles: number, error?: string}} plan
+ */
+function checkPeriodAndCyclesInTestPulse(plan) {
+  if (plan.error) return missing(plan.error);
+  const hasPeriod = Boolean(plan.startDate && plan.endDate);
+  const cycles = Math.max(0, Number(plan.cycles) || 0);
+  const period = hasPeriod ? `periodo del ${plan.startDate} al ${plan.endDate}` : '';
+  if (hasPeriod && cycles > 0) return complete(`Plan ${plan.key} en Test Pulse: ${period}, ${cycles} ciclo(s).`);
+  if (hasPeriod) return partial(`Plan ${plan.key} en Test Pulse: ${period}, pero aún no tiene ciclos.`);
+  if (cycles > 0) return partial(`Plan ${plan.key} en Test Pulse: ${cycles} ciclo(s), pero falta definir sus fechas de inicio y fin en Planning.`);
+  return missing(`El plan ${plan.key} en Test Pulse aún no tiene fechas ni ciclos.`);
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────────────────────
 
 // Order of the lifecycle phases, to know whether an element is due later than "Planear".
@@ -274,6 +294,8 @@ export const PHASE_NAMES = { plan: 'Planear', design: 'Diseñar', build: 'Constr
  * @param {Object} [context]
  * @param {number} [context.epicCount=0]   - Epics linked to the initiative (element 15).
  * @param {string} [context.defectsUrl=''] - Link to the defect-management page (element 16).
+ * @param {Object} [context.testPulsePlan] - Test Plan of Test Pulse captured on the deliverable
+ *        ({key, startDate, endDate, cycles} or {key, error}); covers element 14 when present.
  * @returns {{
  *   recognized: boolean,
  *   elements: Array<{number: number, name: string, status: 'complete'|'partial'|'missing',
@@ -293,6 +315,7 @@ export function evaluateTestPlan(workbook, context = {}) {
 
   const epicCount = Math.max(0, Number(context.epicCount) || 0);
   const defectsUrl = String(context.defectsUrl || '').trim();
+  const testPulsePlan = context.testPulsePlan && context.testPulsePlan.key ? context.testPulsePlan : null;
 
   const definitions = [
     [1, 'Identificación del proyecto y responsable', 'plan', 'excel', () => checkIdentification(strategy, planning)],
@@ -308,7 +331,18 @@ export function evaluateTestPlan(workbook, context = {}) {
     [11, 'Datos e insumos', 'design', 'excel', () => checkInputs(inputs)],
     [12, 'Riesgos', 'plan', 'excel', () => checkRisks(risks)],
     [13, 'Calendario', 'plan', 'excel', () => checkSchedule(planning)],
-    [14, 'Periodo y ciclos', 'build', 'excel', () => checkPeriodAndCycles(strategy)],
+    // 14: Test Pulse is the source when a plan was captured; otherwise the Excel is read. If the
+    // Excel already has both, that is accepted too (whichever source is complete wins).
+    [14, 'Periodo y ciclos', 'build', testPulsePlan ? 'testpulse' : 'excel', () => {
+      const fromExcel = checkPeriodAndCycles(strategy);
+      if (!testPulsePlan) {
+        return fromExcel.status === 'complete'
+          ? fromExcel
+          : { ...fromExcel, detail: `${fromExcel.detail} También se puede cubrir capturando el plan de Test Pulse en este entregable.` };
+      }
+      const fromTestPulse = checkPeriodAndCyclesInTestPulse(testPulsePlan);
+      return fromTestPulse.status !== 'complete' && fromExcel.status === 'complete' ? fromExcel : fromTestPulse;
+    }],
     [15, 'Entregables de prueba', 'build', 'jira', () => (epicCount > 0
       ? complete(`${epicCount} épica(s) vinculada(s) a la iniciativa; sus historias, matrices y casos se ven en la fase Construir.`)
       : missing('Aún no hay épicas vinculadas a la iniciativa.'))],
