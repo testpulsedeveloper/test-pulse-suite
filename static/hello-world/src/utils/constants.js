@@ -37,6 +37,9 @@ export const REMOVED_WIDGET_TYPES = ['general_status', 'manual_vs_auto', 'cycles
 
 export const DEFAULT_DASHBOARD_WIDGETS = [
   { id: 'w_kpi_scorecard', type: 'kpi_scorecard', title: 'Métricas Clave (Bento Grid)', width: 'full', visible: true },
+  // v4.17.0: QA KPIs (blocked-cases rate and MTTR per severity). Only new layouts get it
+  // automatically; dashboards saved earlier add it from the widget catalog.
+  { id: 'w_qa_kpis', type: 'qa_kpis', title: 'KPIs de Calidad QA', width: 'full', visible: true },
   { id: 'w_tester_stats', type: 'tester_stats', title: 'Estado por QA Tester', width: 'half', visible: true },
   { id: 'w_module_stats', type: 'module_stats', title: 'Estado por Módulo / Funcionalidad', width: 'half', visible: true },
 ];
@@ -77,6 +80,15 @@ export const AVAILABLE_WIDGET_CATALOG = [
     icon: '🐞',
     defaultWidth: 'half',
     description: 'Conteo y proporciones de bugs clasificados en Bloqueante, Crítico, Mayor, Menor y Sin Definir.'
+  },
+  {
+    type: 'qa_kpis',
+    title: 'KPIs de Calidad QA',
+    category: 'Métricas',
+    categoryColor: '#0C66E4',
+    icon: '🎯',
+    defaultWidth: 'full',
+    description: 'Tasa de casos bloqueados (límite 10%, suspensión 30%) y MTTR por severidad contra el SLA acordado (24 h, 48 h, 5 días hábiles).'
   },
   {
     type: 'automation_health',

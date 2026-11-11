@@ -36,8 +36,43 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+import {
+  blockedRate,
+  mttrBySeverity,
+  formatBusinessDuration,
+  BLOCKED_LIMIT_PCT,
+  BLOCKED_FUSE_PCT
+} from '../utils/qaKpis';
 
 const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
+
+// ─── Cache of business hours per bug, used by the QA KPIs widget (v4.17.0) ────────────────────
+// formatBugAge walks the calendar minute by minute to count business time, which is expensive
+// for bugs that have been open for weeks. The Reports view re-renders often (filters, hover,
+// background sync), so the result is kept here. The key includes everything that can change the
+// answer; for open bugs it also includes the current hour, so their age is refreshed hourly.
+const bugBusinessHoursCache = new Map();
+const BUG_HOURS_CACHE_MAX = 3000;
+
+function cachedBugBusinessHours(bug) {
+  if (!bug) return 0;
+  const created = bug.created || bug.rawFields?.created || '';
+  const resolved = bug.resolutiondate || bug.rawFields?.resolutiondate || '';
+  const isDone = Boolean(bug.isDone);
+  const hourBucket = isDone ? '' : Math.floor(Date.now() / 3600000);
+  const cacheKey = [
+    bug.key || bug.id || '', created, resolved, isDone, bug.status || '',
+    bug.lastTerminalAt || '', bug.reopenedAt || '', bug.onHoldSince || '',
+    bug.resolutionBusinessHours ?? '', bug.activeBusinessHours ?? '', bug.onHoldBusinessHours ?? '',
+    hourBucket
+  ].join('|');
+  if (bugBusinessHoursCache.has(cacheKey)) return bugBusinessHoursCache.get(cacheKey);
+  const hours = formatBugAge(created, resolved, isDone, bug)?.hours || 0;
+  // Simple bound: the cache is small and cheap to rebuild, so it is emptied when it grows too much.
+  if (bugBusinessHoursCache.size >= BUG_HOURS_CACHE_MAX) bugBusinessHoursCache.clear();
+  bugBusinessHoursCache.set(cacheKey, hours);
+  return hours;
+}
 
 export default function ReportsView({ ctx }) {
   const {
@@ -1330,6 +1365,35 @@ export default function ReportsView({ ctx }) {
     const nPct = allTotal > 0 ? (notRun / allTotal) * 100 : (allTotal === 0 ? 100 : 0);
 
     const avgResolutionHours = resolvedCount > 0 ? (totalResolutionHours / resolvedCount).toFixed(1) : '0';
+
+    // ─── QA KPIs (v4.17.0) ───────────────────────────────────────────────────────────────────
+    // Both KPIs are calculated only from data this view has already loaded (the execution
+    // counters and the bugs of the selected cycles), so they add no requests to Jira.
+    //   - blockedKpi: Blocked cases / total cases in scope, with the 10 % limit and 30 % "fuse".
+    //   - mttrKpi: mean time to repair per severity against the agreed SLA. formatBugAge gives
+    //     the business hours of each bug with On Hold pauses and reopenings already discounted.
+    const blockedKpi = blockedRate(blocked, allTotal);
+    // Performance: the MTTR table is only calculated when the KPI widget is on the dashboard and
+    // the Runs sub-view is open, and the business hours of each bug are cached (see
+    // cachedBugBusinessHours above) so re-renders do not repeat the calendar walk.
+    const qaKpisWidgetVisible = dashboardSubView === 'runs' &&
+      (dashboardWidgets || []).some(w => w && w.type === 'qa_kpis' && w.visible !== false);
+    const mttrKpi = qaKpisWidgetVisible
+      ? mttrBySeverity(cycleAllBugsList.map(bug => ({
+          severity: bug.severity,
+          isDone: Boolean(bug.isDone),
+          hours: cachedBugBusinessHours(bug)
+        })))
+      : [];
+    // Colours shared by the KPI widget and the fuse banner, one set per traffic-light level.
+    const KPI_TONES = {
+      ok: { fg: '#006644', bg: '#E3FCEF', border: '#ABF5D1' },
+      warning: { fg: '#974F00', bg: '#FFFAE6', border: '#FFE380' },
+      fuse: { fg: '#BF2600', bg: '#FFEBE6', border: '#FFBDAD' },
+      breach: { fg: '#BF2600', bg: '#FFEBE6', border: '#FFBDAD' },
+      neutral: { fg: '#626F86', bg: '#F1F2F4', border: '#DCDFE4' },
+      empty: { fg: '#626F86', bg: '#F1F2F4', border: '#DCDFE4' }
+    };
     const ctxProj = context?.extension?.project;
     const currentProjectObj = projects.find(p => String(p.id) === String(selectedProjectId) || String(p.key) === String(selectedProjectId));
     
@@ -4664,6 +4728,35 @@ export default function ReportsView({ ctx }) {
               </div>
             )}
 
+            {/* Fuse banner (v4.17.0): shown whenever 30 % or more of the cases in scope are Blocked,
+                whether or not the KPI widget is on the dashboard, because it is the agreed trigger
+                to suspend the QA cycle. */}
+            {blockedKpi.level === 'fuse' && (
+              <div
+                role="alert"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  background: KPI_TONES.fuse.bg,
+                  border: `1px solid ${KPI_TONES.fuse.border}`,
+                  borderLeft: '4px solid #DE350B',
+                  borderRadius: '8px',
+                  padding: '12px 16px'
+                }}
+              >
+                <span style={{ fontSize: '20px' }}>⛔</span>
+                <div>
+                  <div style={{ fontSize: '13px', fontWeight: 700, color: '#BF2600' }}>
+                    Fusible activado: {blockedKpi.pct.toFixed(1)}% de casos bloqueados ({blockedKpi.blocked} de {blockedKpi.total})
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#44546F', marginTop: '2px' }}>
+                    La tasa alcanzó el umbral de suspensión del {BLOCKED_FUSE_PCT}%. Según el acuerdo de co-responsabilidad, el ciclo de QA debe congelarse hasta recibir un hotfix estable o restablecer el ambiente.
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Dynamic Grid of Configured Widgets */}
               <div className="dashboard-widgets-grid">
                 {dashboardWidgets
@@ -5070,6 +5163,89 @@ export default function ReportsView({ ctx }) {
                             </div>
                           );
                         })()}
+
+                        {widget.type === 'qa_kpis' && (
+                          <div className="dashboard-card" style={{ height: '100%' }}>
+                            <div className="dashboard-card-header">
+                              <div className="dashboard-card-title">
+                                <span>🎯</span>
+                                <span>KPIs de Calidad QA</span>
+                              </div>
+                              <span style={{ fontSize: '11px', background: '#E9F2FF', color: '#0C66E4', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                                Horas hábiles
+                              </span>
+                            </div>
+
+                            {/* Two KPI blocks side by side when the widget is wide, stacked when it is narrow. */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.85rem 1.25rem', padding: '0.4rem 0', alignItems: 'start' }}>
+                              {/* KPI 1: blocked-cases rate with its two thresholds */}
+                              <div style={{ background: KPI_TONES[blockedKpi.level].bg, border: `1px solid ${KPI_TONES[blockedKpi.level].border}`, borderRadius: '8px', padding: '12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    Tasa de casos bloqueados
+                                  </span>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: KPI_TONES[blockedKpi.level].fg }}>
+                                    {blockedKpi.level === 'empty' && 'Sin casos en alcance'}
+                                    {blockedKpi.level === 'ok' && 'Dentro del límite'}
+                                    {blockedKpi.level === 'warning' && 'Sobre el límite operativo'}
+                                    {blockedKpi.level === 'fuse' && 'Fusible: suspender ciclo'}
+                                  </span>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '6px 0' }}>
+                                  <span style={{ fontSize: '28px', fontWeight: 800, color: KPI_TONES[blockedKpi.level].fg, letterSpacing: '-0.02em' }}>
+                                    {blockedKpi.pct.toFixed(1)}%
+                                  </span>
+                                  <span style={{ fontSize: '12px', color: '#44546F' }}>
+                                    {blockedKpi.blocked} de {blockedKpi.total} casos
+                                  </span>
+                                </div>
+                                {/* Scale from 0 to 40 % so both thresholds are visible; the bar is capped at the end. */}
+                                <div style={{ position: 'relative', height: '8px', background: '#FFFFFF', borderRadius: '9999px', border: '1px solid #DCDFE4' }}>
+                                  <div style={{ width: `${Math.min(100, (blockedKpi.pct / 40) * 100)}%`, height: '100%', background: KPI_TONES[blockedKpi.level].fg, borderRadius: '9999px', transition: 'width 0.4s ease' }} />
+                                  <div title={`Límite operativo ${BLOCKED_LIMIT_PCT}%`} style={{ position: 'absolute', top: '-3px', left: `${(BLOCKED_LIMIT_PCT / 40) * 100}%`, width: '2px', height: '14px', background: '#974F00' }} />
+                                  <div title={`Umbral de suspensión ${BLOCKED_FUSE_PCT}%`} style={{ position: 'absolute', top: '-3px', left: `${(BLOCKED_FUSE_PCT / 40) * 100}%`, width: '2px', height: '14px', background: '#BF2600' }} />
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#626F86', marginTop: '6px' }}>
+                                  <span>Límite operativo &lt; {BLOCKED_LIMIT_PCT}%</span>
+                                  <span>Suspensión ≥ {BLOCKED_FUSE_PCT}%</span>
+                                </div>
+                              </div>
+
+                              {/* KPI 2: MTTR per severity against the SLA */}
+                              <div>
+                                <div style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>
+                                  MTTR por severidad vs SLA
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.4fr) repeat(4, minmax(60px, 1fr))', gap: '4px 8px', fontSize: '12px', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Severidad</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>MTTR</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>SLA</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>En SLA</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>Vencidos</span>
+                                  {mttrKpi.map(group => (
+                                    <React.Fragment key={group.key}>
+                                      <span style={{ fontWeight: 600, color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.label}</span>
+                                      <span style={{ textAlign: 'right', fontWeight: 700, color: KPI_TONES[group.level].fg, borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {formatBusinessDuration(group.avgHours)}
+                                      </span>
+                                      <span style={{ textAlign: 'right', color: '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.targetLabel}</span>
+                                      <span style={{ textAlign: 'right', color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {group.compliancePct === null ? '—' : `${group.compliancePct.toFixed(0)}% (${group.withinSla}/${group.closed})`}
+                                      </span>
+                                      <span style={{ textAlign: 'right', fontWeight: group.openOverdue > 0 ? 700 : 400, color: group.openOverdue > 0 ? '#BF2600' : '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {group.targetHours === null ? '—' : `${group.openOverdue} de ${group.open}`}
+                                      </span>
+                                    </React.Fragment>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div style={{ gridColumn: '1 / -1', fontSize: '11px', color: 'var(--jira-subtle, #626F86)', borderTop: '1px solid #F1F2F4', paddingTop: '6px' }}>
+                                "En SLA" cuenta los defectos cerrados dentro del objetivo. "Vencidos" son los defectos aún abiertos que ya superaron su SLA. Se miden en horas hábiles (1 día hábil = 10 h) sobre los defectos de los ciclos seleccionados.
+                              </div>
+                            </div>
+                          </div>
+                        )}
 
                         {widget.type === 'automation_health' && (() => {
                           const autoCasesCount = execStats.auto.total;
