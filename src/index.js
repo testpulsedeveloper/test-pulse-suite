@@ -3803,6 +3803,11 @@ async function requestCycleRemoval({ payload, context }) {
     throw new AuthorizationError('FORBIDDEN', 'No tienes permiso para editar issues en este proyecto.');
   }
 
+  // Audit trail (v4.23.4): who removed what, readable with `forge logs`. Only the Atlassian
+  // accountId is logged (no name or email); look it up in Jira's user directory if needed.
+  const requestedBy = context?.accountId || 'n/a';
+  console.log(`[cycleRemoval] requested cycle=${cycle.id} cases=${ids.length} requestedBy=${requestedBy} ids=${ids.slice(0, 20).join(',')}${ids.length > 20 ? ',…' : ''}`);
+
   const removedEntries = await removeCasesFromCycleIndex(cycle.id, new Set(ids));
   const { knownRunIds, everyEntryHasRun } = knownRunsOf(removedEntries);
   const markerId = randomUUID();
@@ -3819,15 +3824,16 @@ async function requestCycleRemoval({ payload, context }) {
       markerId,
       requestedBy: context?.accountId || null
     });
-    console.log(`[cycleRemoval] queued cycle=${cycle.id} ids=${ids.length} runs=${knownRunIds.length} job=${jobId}`);
+    console.log(`[cycleRemoval] queued cycle=${cycle.id} ids=${ids.length} runs=${knownRunIds.length} job=${jobId} requestedBy=${requestedBy}`);
     return { success: true, removed: ids.length, queued: true, jobId };
   } catch (err) {
-    console.warn(`[cycleRemoval] queue unavailable, cleaning up in this invocation: ${err?.message} code=${err?.code ?? 'n/a'} details=${JSON.stringify(err?.details ?? null)}`);
+    console.warn(`[cycleRemoval] queue unavailable, cleaning up in this invocation (requestedBy=${requestedBy}): ${err?.message} code=${err?.code ?? 'n/a'} details=${JSON.stringify(err?.details ?? null)}`);
     // Stop at ~18 s so this 25-second invocation never times out. Leftover runs are kept in
     // the marker (cases stay hidden) and finished by `resumeCycleRemoval`.
     const result = await performRemoveTestsFromCycle(cycle.id, ids, {
       skipIndex: true, knownRunIds, everyEntryHasRun, perms, deadlineAt: Date.now() + 18000
     });
+    console.log(`[cycleRemoval] inline cycle=${cycle.id} cases=${ids.length} partial=${Boolean(result.partial)} remainingRuns=${result.remainingRunIds?.length || 0} requestedBy=${requestedBy}`);
     if (result.partial) {
       await saveRemainingRuns(cycle.id, markerId, ids, result.remainingRunIds);
       return { success: true, partial: true, remainingRuns: result.remainingRunIds.length, removed: ids.length, queued: false };
@@ -3844,7 +3850,7 @@ async function requestCycleRemoval({ payload, context }) {
  *
  * @returns {Promise<{remainingRuns: number, processedRuns: number}>}
  */
-resolver.define('resumeCycleRemoval', async ({ payload }) => {
+resolver.define('resumeCycleRemoval', async ({ payload, context }) => {
   const cycleId = normalizeIssueRef(payload?.cycleId);
   if (!cycleId) return { remainingRuns: 0, processedRuns: 0 };
   const markers = (await listPendingRemovals(cycleId))
@@ -3878,7 +3884,7 @@ resolver.define('resumeCycleRemoval', async ({ payload }) => {
       await clearPendingRemoval(cycle.id, markerId);
     }
   }
-  console.log(`[cycleRemoval] resumed cycle=${cycle.id} processed=${processedRuns} remaining=${remainingRuns}`);
+  console.log(`[cycleRemoval] resumed cycle=${cycle.id} processed=${processedRuns} remaining=${remainingRuns} requestedBy=${context?.accountId || 'n/a'}`);
   return { remainingRuns, processedRuns };
 });
 

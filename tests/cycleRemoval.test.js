@@ -171,3 +171,12 @@ test('hotfix v4.14.1: getTestCases respects Forge response size; UI falls back t
   const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
   assert.ok(app.includes("if (pagesPerCall > 1 && /too large|size/i.test(String(err?.message || err))) {"));
 });
+
+test('every removal logs the accountId of who asked for it (v4.23.4)', () => {
+  const src = fs.readFileSync(path.join(ROOT_DIR, 'src/index.js'), 'utf8');
+  assert.ok(src.includes("const requestedBy = context?.accountId || 'n/a';"), 'requester read from the invocation context');
+  assert.ok(src.includes('[cycleRemoval] requested cycle=${cycle.id} cases=${ids.length} requestedBy=${requestedBy}'), 'request logged with requester');
+  assert.ok(src.includes('job=${jobId} requestedBy=${requestedBy}'), 'queued job logged with requester');
+  assert.ok(src.includes('[cycleRemoval] inline cycle=${cycle.id}') && src.includes('requestedBy=${requestedBy}`);'), 'inline fallback logged with requester');
+  assert.ok(src.includes("remaining=${remainingRuns} requestedBy=${context?.accountId || 'n/a'}"), 'resume logged with requester');
+});
