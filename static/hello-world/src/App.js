@@ -40,11 +40,13 @@ import {
 } from './components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
+// v4.23.1: editing a Test Case directly in the side panel of Design.
+import { useTestCaseInlineEdit, EditableCaseTitle, EditableCaseDescription, EditableCaseProperties } from './components/TestCaseInlineEdit';
 import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockSplitCssWidth, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from './components/PanelDockSwitcher';
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.23.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.23.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -357,10 +359,12 @@ function App() {
   // Modal State
   const [context, setContext] = useState(null);
   const [selectedTestCase, setSelectedTestCase] = useState(null);
-  // v4.23.0: the create/edit form of Design. null = closed, { mode: 'create' } or { mode: 'edit', testCase }.
+  // The "new Test Case" form of Design: null = closed, { mode: 'create' } = open.
   const [testCaseEditor, setTestCaseEditor] = useState(null);
   const [selectedTestCaseDescription, setSelectedTestCaseDescription] = useState(null);
   const [loadingDescription, setLoadingDescription] = useState(false);
+  // v4.23.1: increased after the description is edited in the panel, to read it again.
+  const [descriptionReloadKey, setDescriptionReloadKey] = useState(0);
 
   useEffect(() => {
     if (!selectedTestCase) {
@@ -380,7 +384,10 @@ function App() {
       if (!cancelled) setLoadingDescription(false);
     });
     return () => { cancelled = true; };
-  }, [selectedTestCase]);
+    // Depends on the case ID, not on the object: editing a property in the panel replaces the
+    // object, and that must not cost another read of the description (v4.23.1).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTestCase?.id, descriptionReloadKey]);
 
   const [testCaseDetails, setTestCaseDetails] = useState({ type: 'traditional', content: [] });
   const [testCaseDetailsLoading, setTestCaseDetailsLoading] = useState(false);
@@ -3784,54 +3791,84 @@ Then el sistema valida la identidad.
   };
 
   /**
-   * Called by the Test Case form (v4.23.0) after Jira accepted a create or an edit.
-   * To stay fast it patches what is already on screen instead of reloading every Test Case;
-   * the full list is only read again when a case was created or its requirement changed,
-   * because those change the folders/traceability shown in the list.
+   * Called by the "new Test Case" form after Jira created the case: the list is read again so
+   * the new case appears in its folder.
    */
   const handleTestCaseSaved = async (saved) => {
     setTestCaseEditor(null);
     if (!saved) return;
-
-    if (!saved.created) {
-      const patch = (tc) => {
-        if (!tc || String(tc.id) !== String(saved.id)) return tc;
-        const rawFields = { ...(tc.rawFields || {}), ...(saved.customFields || {}) };
-        if (saved.priority) rawFields.priority = { ...(tc.rawFields?.priority || {}), id: saved.priority.id, name: saved.priority.name, iconUrl: undefined };
-        return { ...tc, summary: saved.summary, rawFields };
-      };
-      setTestCases(prev => (prev || []).map(patch));
-      // A new object makes the side panel read the description again (its cache was cleared by the save).
-      setSelectedTestCase(prev => patch(prev));
-    }
-
-    if (saved.created || saved.requirementChanged) {
-      try {
-        const projectId = selectedProjectId || context?.extension?.project?.id;
-        const fetchedTests = await fetchAllTestCases({ folderId: null, projectId, config: projectConfig });
-        setTestCases(fetchedTests || []);
-        if (!saved.created) {
-          const refreshed = (fetchedTests || []).find(tc => String(tc.id) === String(saved.id));
-          if (refreshed) setSelectedTestCase(refreshed);
-        }
-      } catch (e) {
-        console.warn('[handleTestCaseSaved] could not refresh the test case list:', e?.message);
-      }
+    try {
+      const projectId = selectedProjectId || context?.extension?.project?.id;
+      const fetchedTests = await fetchAllTestCases({ folderId: null, projectId, config: projectConfig });
+      setTestCases(fetchedTests || []);
+    } catch (e) {
+      console.warn('[handleTestCaseSaved] could not refresh the test case list:', e?.message);
     }
   };
 
-  /** Renders the create/edit form of Design when it is open. */
+  /**
+   * Called after a change made in the side panel of Design was saved (v4.23.1). To stay fast it
+   * patches the case that is already on screen (in the list and in the panel) instead of reading
+   * every Test Case again from Jira.
+   *
+   * @param {Object} patch - { id, summary?, priority?, customFields?, status?, story?, epic?, descriptionChanged? }
+   */
+  const handleTestCasePatched = (patch) => {
+    const apply = (tc) => {
+      if (!tc || String(tc.id) !== String(patch.id)) return tc;
+      const rawFields = { ...(tc.rawFields || {}), ...(patch.customFields || {}) };
+      const next = { ...tc, rawFields };
+      if (patch.summary !== undefined) next.summary = patch.summary;
+      if (patch.priority) rawFields.priority = { id: patch.priority.id, name: patch.priority.name };
+      if (patch.status) {
+        next.status = patch.status;
+        rawFields.status = { ...(rawFields.status || {}), name: patch.status };
+      }
+      if (patch.story) {
+        // Drop the link to the previous story and point the case to the new one.
+        const touches = (link, key) => key && (link?.inwardIssue?.key === key || link?.outwardIssue?.key === key);
+        rawFields.issuelinks = (rawFields.issuelinks || []).filter(link => !touches(link, patch.story.previousKey));
+        next.storyKey = patch.story.key || undefined;
+        next.storySummary = patch.story.key ? patch.story.summary : undefined;
+        next.userStory = undefined;
+        next.requirement = undefined;
+        next.requirementSummary = undefined;
+      }
+      if (patch.epic !== undefined) {
+        // The epic of a case is its Jira parent.
+        rawFields.parent = patch.epic ? { key: patch.epic.key, fields: { summary: patch.epic.summary, issuetype: { name: 'Epic' } } } : null;
+        next.epicKey = patch.epic ? patch.epic.key : undefined;
+        next.epicSummary = patch.epic ? patch.epic.summary : undefined;
+        next.epic = undefined;
+        next.epicName = undefined;
+      }
+      return next;
+    };
+    setTestCases(prev => (prev || []).map(apply));
+    setSelectedTestCase(prev => apply(prev));
+    if (patch.descriptionChanged) setDescriptionReloadKey(key => key + 1);
+  };
+
+  // Editing in the side panel of Design: title, description and "Propiedades del caso".
+  const selectedCaseTrace = selectedTestCase ? extractEpicAndRequirement(selectedTestCase, projectConfig, requirementsMap) : null;
+  const caseEdit = useTestCaseInlineEdit({
+    testCase: selectedTestCase,
+    projectId: selectedProjectId || context?.extension?.project?.id,
+    projectConfig,
+    requirementsMap,
+    currentStoryKey: selectedCaseTrace?.reqKey || '',
+    addNotification,
+    onPatched: handleTestCasePatched
+  });
+
+  /** Renders the "new Test Case" form of Design when it is open. */
   const renderTestCaseEditor = () => {
     if (!testCaseEditor) return null;
-    const editing = testCaseEditor.mode === 'edit' ? testCaseEditor.testCase : null;
     return (
       <Suspense fallback={null}>
         <TestCaseEditor
-          mode={testCaseEditor.mode}
           projectId={selectedProjectId || context?.extension?.project?.id}
           projectConfig={projectConfig}
-          testCase={editing}
-          currentRequirementKey={editing ? (extractEpicAndRequirement(editing, projectConfig, requirementsMap).reqKey || '') : ''}
           requirementsMap={requirementsMap}
           folderPaths={folderPaths}
           defaultFolderId={activeFolder || ''}
@@ -4028,9 +4065,7 @@ Then el sistema valida la identidad.
               <span style={{ display: 'block', fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' }}>
                 Título del Caso de Prueba
               </span>
-              <h2 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#172B4D', margin: 0, lineHeight: 1.35 }}>
-                {selectedTestCase.summary}
-              </h2>
+              <EditableCaseTitle edit={caseEdit} summary={selectedTestCase.summary} />
             </div>
 
             {/* Sub-tabs Header */}
@@ -4093,9 +4128,10 @@ Then el sistema valida la identidad.
                       Descripción del Escenario
                     </span>
                     <button 
-                      onClick={() => setTestCaseEditor({ mode: 'edit', testCase: selectedTestCase })}
+                      onClick={caseEdit.startDescriptionEdit}
                       style={{ background: 'none', border: 'none', color: '#0C66E4', fontSize: '11px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
-                      title="Editar el caso de prueba"
+                      title="Editar la descripción"
+                      disabled={!caseEdit.ready || caseEdit.descEditing}
                     >
                       ✎ Editar
                     </button>
@@ -4103,7 +4139,9 @@ Then el sistema valida la identidad.
 
                   {/* Scrollable content container for Description */}
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '8px', paddingBottom: '2.5rem' }}>
-                    {loadingDescription ? (
+                    {caseEdit.ready && caseEdit.descEditing ? (
+                      <EditableCaseDescription edit={caseEdit} />
+                    ) : loadingDescription ? (
                       <div style={{ padding: '3rem', textAlign: 'center', color: '#626F86' }}>
                         <div className="spinner" style={{ margin: '0 auto 1rem auto', width: '28px', height: '28px', border: '3px solid #DCDFE4', borderTop: '3px solid #0C66E4', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
                         <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
@@ -4152,7 +4190,12 @@ Then el sistema valida la identidad.
                     </select>
                   </div>
 
-                  {/* Estado en Jira */}
+                  {/* v4.23.1: once the edit data has arrived the properties are lists that save on change;
+                      until then (and if it cannot be loaded) they are shown read-only as before. */}
+                  {caseEdit.ready ? (
+                    <EditableCaseProperties edit={caseEdit} derivedEpicKey={selectedCaseTrace?.epicKey || ''} />
+                  ) : (<>
+                  {/* Estado */}
                   <div>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#626F86', marginBottom: '4px' }}>
                       Estado
@@ -4220,6 +4263,8 @@ Then el sistema valida la identidad.
                       )}
                     </div>
                   </div>
+
+                  </>)}
 
                   {/* Creador / Autor */}
                   <div>
@@ -4337,13 +4382,6 @@ Then el sistema valida la identidad.
                 style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem' }}
               >
                 Cerrar
-              </button>
-              <button 
-                className="btn-primary"
-                onClick={() => setTestCaseEditor({ mode: 'edit', testCase: selectedTestCase })}
-                style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
-              >
-                <span>Editar caso</span>
               </button>
             </div>
           </div>

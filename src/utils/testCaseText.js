@@ -135,6 +135,7 @@ const isCustomFieldId = (value) => /^customfield_\d{3,10}$/.test(String(value ??
  *        descriptionText?: string
  *        priorityId?: string                                  ('' = leave Jira's default)
  *        testLevel?/testType?/executionType?: {optionId: string, multiple: boolean}
+ *        epicKey?: string                                     ('' = no epic of its own)
  * @param {{testLevel: string, testType: string, executionType: string}} fieldIds - Custom field
  *        ids of the project (from customFieldConfig.js).
  * @returns {{fields: Object, errors: string[]}} `errors` lists what the form sent wrong.
@@ -183,5 +184,48 @@ export function buildTestCaseFields(changes, fieldIds) {
     }
   }
 
+  // Epic of the Test Case (v4.23.1). In Jira Cloud the epic of an issue is its `parent`.
+  if (input.epicKey !== undefined) {
+    const epicKey = String(input.epicKey ?? '').trim().toUpperCase();
+    if (!epicKey) fields.parent = null;
+    else if (/^[A-Z][A-Z0-9_]*-\d+$/.test(epicKey)) fields.parent = { key: epicKey };
+    else errors.push('La épica seleccionada no es válida.');
+  }
+
   return { fields, errors };
+}
+
+/**
+ * Turns the field metadata Jira returns (create or edit metadata) into what the Design screens
+ * need to draw their lists: the options of Prioridad, Nivel de Prueba, Tipo de Prueba and Tipo de
+ * Ejecución, whether each list accepts several values, and whether it is mandatory.
+ *
+ * @param {Object} metaFields - Jira metadata indexed by field id (`{ priority: {...}, customfield_1: {...} }`).
+ * @param {{testLevel: string, testType: string, executionType: string}} fieldIds
+ * @returns {{priority: Object, testLevel: Object, testType: Object, executionType: Object, epic: Object}}
+ *          Each entry: { available, required, multiple, options: [{id, label}] }.
+ */
+export function buildFormOptions(metaFields, fieldIds) {
+  const meta = metaFields && typeof metaFields === 'object' ? metaFields : {};
+  const describe = (fieldId) => {
+    const field = fieldId ? meta[fieldId] : null;
+    const options = (Array.isArray(field?.allowedValues) ? field.allowedValues : [])
+      .filter(option => option && option.id !== undefined && option.disabled !== true)
+      .map(option => ({ id: String(option.id), label: String(option.value || option.name || option.id) }));
+    return {
+      // "available" = Jira lets this user set the field on this screen.
+      available: Boolean(field),
+      required: Boolean(field?.required),
+      multiple: field?.schema?.type === 'array',
+      options
+    };
+  };
+  return {
+    priority: describe('priority'),
+    testLevel: describe(fieldIds?.testLevel),
+    testType: describe(fieldIds?.testType),
+    executionType: describe(fieldIds?.executionType),
+    // The epic is the `parent` field; it has no list of options in the metadata.
+    epic: { available: Boolean(meta.parent), required: false, multiple: false, options: [] }
+  };
 }

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { adfToPlainText, plainTextToAdf, buildTestCaseFields, MAX_DESCRIPTION_CHARS } from '../src/utils/testCaseText.js';
+import { adfToPlainText, plainTextToAdf, buildTestCaseFields, buildFormOptions, MAX_DESCRIPTION_CHARS } from '../src/utils/testCaseText.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => fs.readFileSync(path.join(ROOT_DIR, file), 'utf8');
@@ -123,13 +123,59 @@ test('Design creates and edits cases in Test Pulse and no longer sends testers t
   const app = read('static/hello-world/src/App.js');
   assert.match(app, /React\.lazy\(\(\) => import\('\.\/components\/TestCaseEditor'\)\)/);
   assert.match(app, /setTestCaseEditor\(\{ mode: 'create' \}\)/);
-  assert.match(app, /setTestCaseEditor\(\{ mode: 'edit', testCase: selectedTestCase \}\)/);
   // No link in App.js (Design and its side panel) opens the Jira issue view any more.
   assert.doesNotMatch(app, /\/browse\//);
   assert.doesNotMatch(app, /Abrir en Jira|Editar en Jira/);
 
   const editor = read('static/hello-world/src/components/TestCaseEditor.jsx');
-  for (const label of ['Resumen', 'Descripción', 'is tested by', 'Nivel de Prueba', 'Tipo de Prueba', 'Tipo de Ejecución', 'Prioridad']) {
+  for (const label of ['Resumen', 'Descripción', 'is tested by', 'Épica', 'Nivel de Prueba', 'Tipo de Prueba', 'Tipo de Ejecución', 'Prioridad', 'Carpeta']) {
     assert.ok(editor.includes(label), `the form has the field "${label}"`);
   }
+});
+
+test('list options come from Jira metadata; disabled options and missing fields are handled (v4.23.1)', () => {
+  const options = buildFormOptions({
+    priority: { required: false, allowedValues: [{ id: '1', name: 'High' }, { id: '2', name: 'Medium' }] },
+    customfield_10530: { required: true, schema: { type: 'option' }, allowedValues: [{ id: '9', value: 'Integración SIT' }, { id: '8', value: 'Viejo', disabled: true }] },
+    customfield_10534: { schema: { type: 'array' }, allowedValues: [{ id: '5', value: 'Manual' }] },
+    parent: {}
+  }, FIELD_IDS);
+  assert.deepEqual(options.priority.options, [{ id: '1', label: 'High' }, { id: '2', label: 'Medium' }]);
+  assert.deepEqual(options.testLevel, { available: true, required: true, multiple: false, options: [{ id: '9', label: 'Integración SIT' }] });
+  assert.equal(options.executionType.multiple, true);
+  // A field Jira does not offer on this screen is reported as not available, with no options.
+  assert.deepEqual(options.testType, { available: false, required: false, multiple: false, options: [] });
+  assert.equal(options.epic.available, true);
+  assert.equal(buildFormOptions(null, FIELD_IDS).priority.available, false);
+});
+
+test('the epic of a case is its Jira parent (v4.23.1)', () => {
+  assert.deepEqual(buildTestCaseFields({ epicKey: 'demo-12' }, FIELD_IDS).fields, { parent: { key: 'DEMO-12' } });
+  assert.deepEqual(buildTestCaseFields({ epicKey: '' }, FIELD_IDS).fields, { parent: null });
+  assert.match(buildTestCaseFields({ epicKey: 'no es clave' }, FIELD_IDS).errors[0], /épica/);
+});
+
+test('the case is edited in its side panel: title, description, properties, story and epic (v4.23.1)', () => {
+  const resolvers = read('src/resolvers/testCaseResolvers.js');
+  // One request brings values, list options and allowed statuses.
+  assert.match(resolvers, /expand=editmeta,transitions/);
+  // Jira Cloud names the create metadata `issueTypes` / `fields`; every page of fields is read.
+  assert.match(resolvers, /typesData\.issueTypes \|\| typesData\.values/);
+  assert.match(resolvers, /data\.fields \|\| data\.values/);
+  assert.match(resolvers, /\/transitions`, \{\s*method: 'POST'/);
+
+  const app = read('static/hello-world/src/App.js');
+  assert.match(app, /useTestCaseInlineEdit\(\{/);
+  assert.match(app, /<EditableCaseTitle edit=\{caseEdit\}/);
+  assert.match(app, /<EditableCaseDescription edit=\{caseEdit\} \/>/);
+  assert.match(app, /<EditableCaseProperties edit=\{caseEdit\}/);
+  // Editing a property must not re-read the description: the effect depends on the case id.
+  assert.match(app, /\[selectedTestCase\?\.id, descriptionReloadKey\]/);
+
+  const inline = read('static/hello-world/src/components/TestCaseInlineEdit.jsx');
+  for (const label of ['Estado', 'Prioridad', 'Nivel de Prueba', 'Tipo de Prueba', 'Tipo de Ejecución', 'Historia que prueba', 'Épica']) {
+    assert.ok(inline.includes(label), `the panel edits "${label}"`);
+  }
+  // The edit data is loaded after a short wait, so quick browsing costs nothing.
+  assert.match(inline, /setTimeout\(\(\) => load\(caseId\), LOAD_DELAY_MS\)/);
 });
