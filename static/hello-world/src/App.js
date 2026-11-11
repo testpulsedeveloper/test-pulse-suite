@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.23.4'}`;
+const APP_VERSION = `v${packageJson.version || '4.23.5'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));

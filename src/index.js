@@ -69,6 +69,7 @@ import {
 } from './utils/reportSnapshotCache.js';
 import { summarizeJiraError } from './utils/jiraErrors.js';
 import { partitionOrphanEntries, indexRunsByRef, runRefOf } from './utils/cycleIndexOrphans.js';
+import { wikiPanelsToHtml, plainTextToAdfWithPanels } from './utils/wikiPanels.js';
 
 // ── Enterprise Scalability Caches (Stage 3A+) ──
 // In-memory 10-minute TTL caches for `/rest/api/3/myself` and `/rest/api/3/mypermissions`
@@ -4550,7 +4551,8 @@ resolver.define('getIssueDescription', async ({ payload }) => {
     const data = await response.json();
 
     const withSections = (issueData) => {
-      const base = issueData.renderedFields?.description || '';
+      // The description can also carry wiki `{panel}` text pasted from old Jira tickets.
+      const base = wikiPanelsToHtml(issueData.renderedFields?.description || '');
       const sections = buildSnapshotSections(fieldMap, issueData.fields, issueData.renderedFields);
       const html = base + sections.html;
       return html || issueData.fields?.description || null;
@@ -5407,11 +5409,9 @@ const _fieldValueToAdfNodes = (val) => {
     return val.content.length > 0 ? val.content : [];
   }
   if (typeof val === 'string') {
-    const t = val.trim();
-    if (!t) return [];
-    return t.split(/\r?\n/).map(line => line.trim()
-      ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
-      : { type: 'paragraph', content: [] });
+    // Plain-text fields: one paragraph per line, and Jira wiki `{panel}` blocks become ADF
+    // panels instead of literal "{panel:bgColor=…}" text (v4.23.5).
+    return plainTextToAdfWithPanels(val);
   }
   if (typeof val === 'object' && (val.value || val.name)) {
     return [{ type: 'paragraph', content: [{ type: 'text', text: String(val.value || val.name) }] }];
@@ -5432,7 +5432,8 @@ const buildSnapshotSections = (fieldMap, fields, renderedFields) => {
       const bodyHtml = (typeof rendered === 'string' && rendered.trim())
         ? rendered
         : (typeof fields?.[f.id] === 'string' ? `<p>${_escHtml(fields[f.id]).replace(/\r?\n/g, '<br/>')}</p>` : '');
-      html += `<h3>${def.title}</h3><div>${bodyHtml}</div>`;
+      // Plain-text fields come back with wiki `{panel}` markers as literal text: draw them as boxes.
+      html += `<h3>${def.title}</h3><div>${wikiPanelsToHtml(bodyHtml)}</div>`;
       included.push({ section: def.key, fieldId: f.id, fieldName: f.name });
       break; // one field per section is enough
     }
@@ -5466,7 +5467,7 @@ const getTestCaseSnapshot = async (testCaseIdOrKey) => {
       const mergedAdf = sections.adfNodes.length > 0
         ? { type: 'doc', version: 1, content: [...(hasOwnDesc ? (baseAdf.content || []) : []), ...sections.adfNodes] }
         : baseAdf;
-      const baseHtml = tcData.renderedFields?.description || '';
+      const baseHtml = wikiPanelsToHtml(tcData.renderedFields?.description || '');
       const mergedHtml = (baseHtml + sections.html) || null;
 
       return {
