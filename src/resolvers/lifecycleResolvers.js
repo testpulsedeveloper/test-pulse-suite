@@ -48,12 +48,17 @@ export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'
 const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'delivered'];
 const MAX_INITIATIVES = 100;
 const MAX_DELIVERABLES_PER_PHASE = 30;
-// v4.22.0: epics are picked from the project list ("select all"), so the limit is higher.
-const MAX_EPICS = 60;
-// Stories read for the epics of one initiative.
-const MAX_STORIES = 600;
+// v4.22.2: an initiative may take every epic of a project, so there is no functional limit.
+// These numbers are only safety ceilings that keep one initiative inside what Forge storage and
+// the 25-second resolver limit can handle; a real project is far below them.
+const MAX_EPICS = 500;
+// Epics per JQL search ("parent in (…)"): keeps each query short and lets them run in parallel.
+const EPICS_PER_SEARCH = 50;
+// Stories read per group of epics, and test cases whose executions are read, per initiative.
+const MAX_STORIES_PER_SEARCH = 1000;
+const MAX_CASES = 3000;
 // Epics / Test Plans offered by the picker of phases 03 and 04.
-const MAX_CANDIDATES = 300;
+const MAX_CANDIDATES = 1000;
 // v4.21.0: Test Plans of Test Pulse an initiative can follow in phase 04 (Ejecutar).
 const MAX_PLANS = 20;
 // Test Plan workbook (v4.20.0): the biggest Excel attachment Test Pulse will download and read.
@@ -463,9 +468,18 @@ async function computeProgress(epicKeys) {
   const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns(), bugs: { total: 0, open: 0 }, epics: [], truncated: false };
   if (!epicKeys.length) return empty;
 
-  const epicList = epicKeys.map(k => jqlQuote(k)).join(',');
-  // `parent` and `summary` (v4.21.0) let phase 03 show each epic with its own stories.
-  const stories = await searchAll(`parent in (${epicList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES);
+  // The epics are searched in groups of 50, three groups at a time (v4.22.2): an initiative with
+  // hundreds of epics costs a few parallel searches instead of one huge, slow query.
+  // `parent` and `summary` (v4.21.0) let phase 03 show each epic with its own figures.
+  const epicGroups = [];
+  for (let i = 0; i < epicKeys.length; i += EPICS_PER_SEARCH) epicGroups.push(epicKeys.slice(i, i + EPICS_PER_SEARCH));
+  const storyGroups = await mapLimit(epicGroups, 3, (group) => searchAll(
+    `parent in (${group.map(k => jqlQuote(k)).join(',')})`,
+    ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES_PER_SEARCH
+  ));
+  const stories = storyGroups.flat();
+  // True when some group had more stories than are read at once: the figures are then partial.
+  const storiesTruncated = storyGroups.some(group => group.length >= MAX_STORIES_PER_SEARCH);
 
   // One entry per epic of the initiative, in the order they were added. An epic without stories
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
@@ -509,7 +523,7 @@ async function computeProgress(epicKeys) {
   // Executions: every Test Run is linked to its Test Case, and the link carries the run's status.
   const runs = { ...empty.runs };
   const seenRuns = new Set();
-  const caseList = [...caseKeys].slice(0, 1000);
+  const caseList = [...caseKeys].slice(0, MAX_CASES);
   // The test cases are read in groups of 100. The groups are independent, so they are requested
   // four at a time instead of one by one (v4.22.1).
   const chunks = [];
@@ -547,7 +561,7 @@ async function computeProgress(epicKeys) {
     runs,
     bugs: { total: bugs.size, open: [...bugs.values()].filter(Boolean).length },
     epics: [...epicMap.values()],
-    truncated: stories.length >= MAX_STORIES || caseKeys.size > 1000
+    truncated: storiesTruncated || caseKeys.size > MAX_CASES
   };
 }
 

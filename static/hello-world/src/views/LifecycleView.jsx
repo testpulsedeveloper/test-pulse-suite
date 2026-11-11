@@ -387,7 +387,7 @@ const LifecycleView = ({ ctx }) => {
   const [progressById, setProgressById] = useState({});     // initiativeId → figures of phases 3-4
   const [busy, setBusy] = useState('');                      // id of what is being saved/refreshed
   const [editing, setEditing] = useState(null);              // { initiativeId, phaseId, deliverable? }
-  const [initiativeForm, setInitiativeForm] = useState(null); // { id?, name, description, epicKeys }
+  const [initiativeForm, setInitiativeForm] = useState(null); // { id?, name, description }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   // v4.21.0: phases 03 and 04 take several deliverables (epics / Test Plans), added by issue key.
   // Picker of epics / Test Plans (v4.22.0): { initiativeId, phaseId, loading, error, items, selected, search }
@@ -515,14 +515,14 @@ const LifecycleView = ({ ctx }) => {
 
   const handleSaveInitiativeForm = async () => {
     const form = initiativeForm;
-    const epicKeys = String(form.epicKeys || '').split(/[\s,;]+/).map(k => k.trim().toUpperCase()).filter(Boolean);
     const existing = initiatives.find(item => item.id === form.id);
     const saved = await saveInitiative({
       ...(existing || { phases: emptyPhases() }),
       id: form.id,
       name: form.name.trim(),
-      description: form.description.trim(),
-      epicKeys
+      description: form.description.trim()
+      // Epics and Test Plans are not part of this form (v4.22.2): they keep whatever the
+      // initiative already has and are managed in phases 03 and 04.
     }, 'initiative');
     if (saved) {
       setInitiativeForm(null);
@@ -748,7 +748,7 @@ const LifecycleView = ({ ctx }) => {
                 <input type="checkbox" checked={allVisibleSelected} disabled={visible.length === 0} onChange={toggleAll} />
                 Seleccionar todas ({visible.length})
               </label>
-              <span style={{ ...styles.muted, marginLeft: 'auto' }}>{picker.selected.length} seleccionadas · máximo {picker.max} por iniciativa</span>
+              <span style={{ ...styles.muted, marginLeft: 'auto' }}>{picker.selected.length} seleccionadas</span>
             </div>
             <div style={{ maxHeight: '240px', overflowY: 'auto', border: '1px solid var(--jira-border, #DCDFE4)', borderRadius: '6px', background: 'var(--jira-surface, #FFFFFF)' }}>
               {visible.length === 0 && (
@@ -995,18 +995,13 @@ const LifecycleView = ({ ctx }) => {
           <input style={styles.input} value={initiativeForm.name} maxLength={120} placeholder="Tarjetas Internas"
             onChange={(e) => setInitiativeForm(prev => ({ ...prev, name: e.target.value }))} />
         </div>
-        <div>
-          <label style={styles.label}>Épicas vinculadas (claves separadas por coma)</label>
-          <input style={styles.input} value={initiativeForm.epicKeys} placeholder="CUQ-120, CUQ-121"
-            onChange={(e) => setInitiativeForm(prev => ({ ...prev, epicKeys: e.target.value }))} />
-        </div>
         <div style={{ gridColumn: '1 / -1' }}>
           <label style={styles.label}>Descripción</label>
           <input style={styles.input} value={initiativeForm.description} maxLength={600}
             onChange={(e) => setInitiativeForm(prev => ({ ...prev, description: e.target.value }))} />
         </div>
       </div>
-      <div style={{ ...styles.muted, marginTop: '6px' }}>Las épicas pueden agregarse después: la fase Shift-Left ocurre antes de que existan.</div>
+      <div style={{ ...styles.muted, marginTop: '6px' }}>Las épicas y los planes de prueba se agregan dentro de la iniciativa, en las fases 03 Construir y 04 Ejecutar.</div>
       <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '10px' }}>
         <button type="button" className="btn-secondary" onClick={() => setInitiativeForm(null)} disabled={busy === 'initiative'}>Cancelar</button>
         <button type="button" className="btn-primary" disabled={!initiativeForm.name.trim() || busy === 'initiative'} onClick={handleSaveInitiativeForm}>
@@ -1028,11 +1023,11 @@ const LifecycleView = ({ ctx }) => {
             <span style={{ color: 'var(--jira-subtle, #626F86)' }}>{expanded ? '▾' : '▸'}</span>
             <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>{initiative.name}</span>
           </button>
-          {(initiative.epicKeys || []).map(key => <span key={key} className="ads-lozenge ads-lozenge-purple" style={{ fontSize: '10px' }}>{key}</span>)}
+          {/* v4.22.2: the epics are no longer listed here; they live in phase 03 "Construir". */}
           <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px' }}>
             {canEdit && (
               <button type="button" style={styles.linkBtn}
-                onClick={() => setInitiativeForm({ id: initiative.id, name: initiative.name, description: initiative.description || '', epicKeys: (initiative.epicKeys || []).join(', ') })}>
+                onClick={() => setInitiativeForm({ id: initiative.id, name: initiative.name, description: initiative.description || '' })}>
                 Editar iniciativa
               </button>
             )}
@@ -1074,7 +1069,7 @@ const LifecycleView = ({ ctx }) => {
         )}
         {canEdit && !initiativeForm && (
           <button type="button" className="btn-primary" style={{ marginLeft: 'auto' }}
-            onClick={() => setInitiativeForm({ name: '', description: '', epicKeys: '' })}>
+            onClick={() => setInitiativeForm({ name: '', description: '' })}>
             + Nueva iniciativa
           </button>
         )}

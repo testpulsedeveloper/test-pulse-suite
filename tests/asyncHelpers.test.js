@@ -60,6 +60,19 @@ test('createShortCache shares one load, expires, and forgets failures', async ()
   assert.equal(await cachedFor('k', flaky), 'ok');
 });
 
+test('epics have no functional limit and are searched in parallel groups (v4.22.2)', () => {
+  const resolvers = read('src/resolvers/lifecycleResolvers.js');
+  const limit = Number((resolvers.match(/const MAX_EPICS = (\d+);/) || [])[1]);
+  assert.ok(limit >= 500, 'MAX_EPICS is only a safety ceiling');
+  assert.match(resolvers, /mapLimit\(epicGroups, 3,/);
+  assert.match(resolvers, /truncated: storiesTruncated \|\| caseKeys\.size > MAX_CASES/);
+
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  // The initiative header no longer lists the epic keys, and the form no longer edits them.
+  assert.doesNotMatch(view, /ads-lozenge-purple/);
+  assert.doesNotMatch(view, /initiativeForm\.epicKeys/);
+});
+
 test('Lifecycle uses the helpers and loads epics and plans apart', () => {
   const resolvers = read('src/resolvers/lifecycleResolvers.js');
   assert.match(resolvers, /mapLimit\(chunks, 4,/);
