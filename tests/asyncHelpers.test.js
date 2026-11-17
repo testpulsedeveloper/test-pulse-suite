@@ -66,7 +66,7 @@ test('epics have no functional limit and are searched in parallel groups (v4.22.
   assert.ok(limit >= 500, 'MAX_EPICS is only a safety ceiling');
   assert.match(resolvers, /mapLimit\(epicGroups, 3,/);
   // v4.22.3: epic titles are read from the epics themselves, so an epic without stories has a name.
-  assert.match(resolvers, /searchAll\(`key in \(\$\{keyList\}\)`, \['summary'\], EPICS_PER_SEARCH\)/);
+  assert.match(resolvers, /searchAll\(`key in \(\$\{keyList\}\)`, \['summary', 'reporter'\], EPICS_PER_SEARCH\)/);
   assert.match(resolvers, /summary: epicTitles\.get\(key\) \|\| ''/);
   assert.match(resolvers, /truncated: storiesTruncated \|\| caseKeys\.size > MAX_CASES/);
 

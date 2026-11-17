@@ -139,3 +139,36 @@ test('the picker offers stories without epic and phase 03 reads them', () => {
   assert.match(view, /openPicker\(initiative, phase, 'storyKeys'\)/);
   assert.match(view, /renderGroupedDeliverables\(initiative, phase\)/);
 });
+
+// ── v4.25.0: team lists apart from editors, reporter decides the team in phase 03 ────────────
+
+import { sanitizeLifecycleTeamMembers, mergeLifecyclePeople, lifecycleTeamsKey } from '../src/utils/lifecycleEditors.js';
+
+test('team members need a valid team and team lists win over the editors list', () => {
+  const members = sanitizeLifecycleTeamMembers([
+    { accountId: 'acc-1', displayName: 'Ana Demo', team: 'dev' },
+    { accountId: 'acc-2', displayName: 'Beto Demo', team: '' },
+    { accountId: 'acc-3', displayName: 'Ceci Demo', team: 'otro' }
+  ]);
+  assert.deepEqual(members.map(m => m.accountId), ['acc-1']);
+  const people = mergeLifecyclePeople(members, [
+    { accountId: 'acc-1', displayName: 'Ana Demo', team: 'qa' },
+    { accountId: 'acc-4', displayName: 'Dani Demo', team: 'uat' }
+  ]);
+  assert.equal(people.find(p => p.accountId === 'acc-1').team, 'dev');
+  assert.equal(people.find(p => p.accountId === 'acc-4').team, 'uat');
+  // Must not collide with the prefix used to list initiatives.
+  assert.equal(lifecycleTeamsKey('10001').startsWith('lifecycle_'), false);
+});
+
+test('teams are managed by admins and phase 03 groups by the Jira reporter', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(server, /resolver\.define\('saveLifecycleTeams'[\s\S]*?await requireProjectAdmin\(projectId, context\)/);
+  assert.match(server, /\['summary', 'reporter'\]/);
+  assert.match(server, /loose\.reporter = reporterOf\(story\)/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /teamOf: \(item\) => teamOfPerson\(item\.reporter\?\.accountId\)/);
+  assert.match(view, /toggleGroup\(key\)/);
+  const settings = read('static/hello-world/src/views/SettingsView.jsx');
+  assert.match(settings, /<LifecycleTeamsCard /);
+});

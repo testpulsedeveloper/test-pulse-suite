@@ -96,6 +96,13 @@ const planTotals = (progress) => {
   return totals;
 };
 
+/** Adds the executions of several epics / stories, for the status of a group (v4.25.0). */
+const sumRuns = (items) => {
+  const totals = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+  for (const item of items) for (const field of Object.keys(totals)) totals[field] += item?.runs?.[field] || 0;
+  return totals;
+};
+
 /** Status of a phase, derived from its deliverables (or from Jira figures for automatic phases). */
 const phaseStatus = (initiative, phase, progress) => {
   if (phase.id === 'build') {
@@ -408,7 +415,9 @@ const LifecycleView = ({ ctx }) => {
   // current user, both from getLifecycle. Used to group reports and to pre-fill the team.
   const [people, setPeople] = useState([]);
   const [myTeam, setMyTeam] = useState('');
-  // How phase 02 lists its reports: 'team', 'user' or 'none' (remembered in this browser).
+  // v4.25.0: groups the user closed in phases 02/03 ("initiative:phase:mode:group" → true).
+  const [collapsedGroups, setCollapsedGroups] = useState({});
+  // How phases 02 and 03 group their items: 'team', 'user' or 'none' (remembered in this browser).
   const [groupMode, setGroupMode] = useState(() => {
     try { return localStorage.getItem('tp_lifecycle_group') || 'team'; } catch (e) { return 'team'; }
   });
@@ -777,39 +786,52 @@ const LifecycleView = ({ ctx }) => {
     try { localStorage.setItem('tp_lifecycle_group', mode); } catch (e) { /* private window: not remembered */ }
   };
 
+  /** Team of a person from the team lists in Settings ('' when unknown). */
+  const teamOfPerson = (accountId) => (accountId ? (people.find(person => person.accountId === accountId)?.team || '') : '');
+
+  /** Opens or closes one group of a phase. Groups are open until the user closes them. */
+  const toggleGroup = (key) => setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
   /**
-   * Phase 02 (v4.24.0): the reviewed documents, grouped by team (Dev, QA, UAT, Sin equipo), by
-   * the user who added them, or as one list. Each group shows how many reports it has.
+   * Lists the items of a phase grouped by team, by user, or not at all (v4.24.0; collapsible and
+   * shared by phases 02 and 03 since v4.25.0). The same "Agrupar por" choice applies to both.
+   *
+   * @param {Object} initiative
+   * @param {string} phaseId - Used to remember which groups are closed.
+   * @param {Object[]} items - What to list.
+   * @param {Object} options
+   * @param {(item) => string} options.teamOf - Team id of an item ('' = no team).
+   * @param {(item) => {id: string, label: string}} options.userOf - Person of an item.
+   * @param {(item) => JSX.Element} options.renderItem - One row/card.
+   * @param {string} options.noun / options.nounPlural - "reporte" / "reportes", shown in headers.
+   * @param {(items) => JSX.Element} [options.groupExtra] - Extra info in a group header.
    */
-  const renderGroupedDeliverables = (initiative, phase) => {
-    const list = deliverablesOf(initiative, phase.id);
-    if (list.length === 0) return null;
+  const renderGroups = (initiative, phaseId, items, { teamOf, userOf, renderItem, noun, nounPlural, groupExtra }) => {
+    if (items.length === 0) return null;
     const groups = new Map();
-    const add = (id, label, deliverable) => {
+    const add = (id, label, item) => {
       if (!groups.has(id)) groups.set(id, { id, label, items: [] });
-      groups.get(id).items.push(deliverable);
+      groups.get(id).items.push(item);
     };
-    if (groupMode === 'team') {
-      for (const deliverable of list) {
-        const team = TEAM_LABELS[deliverable.team] ? deliverable.team : '';
-        add(team, team ? TEAM_LABELS[team] : 'Sin equipo', deliverable);
+    for (const item of items) {
+      if (groupMode === 'team') {
+        const team = TEAM_LABELS[teamOf(item)] ? teamOf(item) : '';
+        add(team, team ? TEAM_LABELS[team] : 'Sin equipo', item);
+      } else if (groupMode === 'user') {
+        const user = userOf(item);
+        add(user.id, user.label, item);
+      } else {
+        add('all', '', item);
       }
-    } else if (groupMode === 'user') {
-      for (const deliverable of list) {
-        const name = authorName(deliverable.createdBy);
-        add(deliverable.createdBy || '', name || 'Sin registro de quién lo agregó', deliverable);
-      }
-    } else {
-      list.forEach(deliverable => add('all', '', deliverable));
     }
-    let ordered = [...groups.values()];
+    const ordered = [...groups.values()];
     if (groupMode === 'team') ordered.sort((a, b) => TEAM_ORDER.indexOf(a.id) - TEAM_ORDER.indexOf(b.id));
-    // Users alphabetically; reports without author at the end.
+    // People alphabetically; items without a known person at the end.
     if (groupMode === 'user') ordered.sort((a, b) => (!a.id) - (!b.id) || a.label.localeCompare(b.label));
 
     return (
       <>
-        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 4px' }}>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', margin: '8px 0 4px' }}>
           <span style={styles.muted}>Agrupar por:</span>
           {GROUP_MODES.map(mode => (
             <button key={mode.id} type="button" onClick={() => changeGroupMode(mode.id)} aria-pressed={groupMode === mode.id}
@@ -819,19 +841,35 @@ const LifecycleView = ({ ctx }) => {
             </button>
           ))}
         </div>
-        {ordered.map(group => (
-          <div key={group.id || 'none'} style={{ marginTop: group.label ? '10px' : 0 }}>
-            {group.label && (
-              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
-                {group.label} <span style={styles.muted}>({group.items.length} {group.items.length === 1 ? 'reporte' : 'reportes'})</span>
-              </div>
-            )}
-            {group.items.map(deliverable => renderDeliverable(initiative, phase, deliverable))}
-          </div>
-        ))}
+        {ordered.map(group => {
+          if (!group.label) return <div key="all">{group.items.map(renderItem)}</div>;
+          const key = `${initiative.id}:${phaseId}:${groupMode}:${group.id || 'none'}`;
+          const open = !collapsedGroups[key];
+          return (
+            <div key={key} style={{ marginTop: '8px' }}>
+              <button type="button" onClick={() => toggleGroup(key)} aria-expanded={open}
+                style={{ border: 'none', background: 'none', padding: '2px 0', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
+                <span style={{ color: 'var(--jira-subtle, #626F86)', width: '12px' }}>{open ? '▾' : '▸'}</span>
+                {group.label}
+                <span style={{ ...styles.muted, fontWeight: 400 }}>({group.items.length} {group.items.length === 1 ? noun : nounPlural})</span>
+              </button>
+              {groupExtra && <span style={{ marginLeft: '8px' }}>{groupExtra(group.items)}</span>}
+              {open && group.items.map(renderItem)}
+            </div>
+          );
+        })}
       </>
     );
   };
+
+  /** Phase 02: the reviewed documents, grouped by the team chosen on each one or by who added it. */
+  const renderGroupedDeliverables = (initiative, phase) => renderGroups(initiative, phase.id, deliverablesOf(initiative, phase.id), {
+    teamOf: (deliverable) => deliverable.team || '',
+    userOf: (deliverable) => ({ id: deliverable.createdBy || '', label: authorName(deliverable.createdBy) || 'Sin registro de quién lo agregó' }),
+    renderItem: (deliverable) => renderDeliverable(initiative, phase, deliverable),
+    noun: 'reporte',
+    nounPlural: 'reportes'
+  });
 
   /** Row header shared by epics and Test Plans: expand arrow, key (opens Jira), title, and "Quitar". */
   const renderItemHeader = (initiative, field, item, children, extra) => {
@@ -956,8 +994,30 @@ const LifecycleView = ({ ctx }) => {
     const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns }));
     // v4.24.0: stories without an epic, one row each.
     const looseStories = (progress.looseStories && progress.looseStories.length > 0) ? progress.looseStories : storyKeys.map(key => ({ key, cases: 0, runs: noRuns }));
-    const listOpen = Boolean(openRows[`${initiative.id}:epics`]);
-    const storiesOpen = Boolean(openRows[`${initiative.id}:looseStories`]);
+    // One list for phase 03: epics first, then the stories added without an epic.
+    const buildItems = [
+      ...epics.map(epic => ({ ...epic, kind: 'epic' })),
+      ...looseStories.map(story => ({ ...story, kind: 'story' }))
+    ];
+    /** One row of phase 03: an epic (with its stories) or a story without epic. */
+    const renderBuildItem = (item) => (
+      <div key={`${item.kind}:${item.key}`} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0 7px 18px', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+        <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', flex: '0 0 auto' }}>{item.kind === 'epic' ? 'Épica' : 'Historia'}</span>
+        <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${item.key}`)}>{item.key}</button>
+        <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{item.summary || ''}</span>
+        <span style={{ flex: '0 0 auto', ...styles.muted }}>
+          {item.kind === 'epic'
+            ? `${item.stories} ${item.stories === 1 ? 'historia' : 'historias'} · ${item.cases} casos`
+            : `${item.status ? `${item.status} · ` : ''}${item.cases} ${item.cases === 1 ? 'caso' : 'casos'}`}
+        </span>
+        {groupMode !== 'user' && item.reporter?.displayName && <span style={{ flex: '0 0 auto', ...styles.muted }}>Informador: {item.reporter.displayName}</span>}
+        <StateTag runs={item.runs || noRuns} />
+        {canEdit && (
+          <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
+            onClick={() => handleRemoveKey(initiative, item.kind === 'epic' ? 'epicKeys' : 'storyKeys', item.key)}>Quitar</button>
+        )}
+      </div>
+    );
     return (
       <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -976,50 +1036,16 @@ const LifecycleView = ({ ctx }) => {
             <Bar value={coverage} />
           </div>
         </div>
-        {epicKeys.length > 0 && (
-          <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={listOpen} onClick={() => toggleRow(initiative.id, 'epics')}>
-            {listOpen ? '▾ Ocultar épicas' : `▸ Ver las ${epics.length} épicas`}
-          </button>
-        )}
-        {listOpen && epicKeys.length > 0 && (
-          <div style={{ ...styles.card, marginTop: '6px', padding: '0 12px' }}>
-            {epics.map(epic => (
-              <div key={epic.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
-                <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${epic.key}`)}>{epic.key}</button>
-                <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{epic.summary || ''}</span>
-                <span style={{ flex: '0 0 auto', ...styles.muted }}>{epic.stories} {epic.stories === 1 ? 'historia' : 'historias'} · {epic.cases} casos</span>
-                <StateTag runs={epic.runs || noRuns} />
-                {canEdit && (
-                  <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
-                    onClick={() => handleRemoveKey(initiative, 'epicKeys', epic.key)}>Quitar</button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {storyKeys.length > 0 && (
-          <div>
-            <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={storiesOpen} onClick={() => toggleRow(initiative.id, 'looseStories')}>
-              {storiesOpen ? '▾ Ocultar historias sin épica' : `▸ Ver las ${looseStories.length} historias sin épica`}
-            </button>
-          </div>
-        )}
-        {storiesOpen && storyKeys.length > 0 && (
-          <div style={{ ...styles.card, marginTop: '6px', padding: '0 12px' }}>
-            {looseStories.map(story => (
-              <div key={story.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
-                <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${story.key}`)}>{story.key}</button>
-                <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{story.summary || ''}</span>
-                <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.status ? `${story.status} · ` : ''}{story.cases} {story.cases === 1 ? 'caso' : 'casos'}</span>
-                <StateTag runs={story.runs || noRuns} />
-                {canEdit && (
-                  <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
-                    onClick={() => handleRemoveKey(initiative, 'storyKeys', story.key)}>Quitar</button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {/* v4.25.0: epics and stories without epic in one list, grouped by the team (or the
+            person) of their Jira reporter. Each group can be opened and closed. */}
+        {renderGroups(initiative, phase.id, buildItems, {
+          teamOf: (item) => teamOfPerson(item.reporter?.accountId),
+          userOf: (item) => ({ id: item.reporter?.accountId || '', label: item.reporter?.displayName || 'Sin informador' }),
+          renderItem: renderBuildItem,
+          noun: 'elemento',
+          nounPlural: 'elementos',
+          groupExtra: (items) => <StateTag runs={sumRuns(items)} />
+        })}
         {progress.truncated && <div style={{ ...styles.muted, marginTop: '6px' }}>Hay más historias de las que se pueden leer de una vez; las cifras son parciales.</div>}
         {form}
       </>

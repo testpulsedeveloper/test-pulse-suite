@@ -39,6 +39,46 @@ export function teamOfEditor(editors, accountId) {
 // Upper bound of the list: a QA team, not a whole company.
 export const MAX_LIFECYCLE_EDITORS = 50;
 
+// v4.25.0: people per team (Dev, QA, UAT). Separate from the editors list: being in a team
+// does NOT allow editing Lifecycle; it only says which team the reports, epics and stories of
+// that person belong to (for stories and epics, the Jira reporter is the person).
+export const MAX_LIFECYCLE_TEAM_MEMBERS = 300;
+
+/** Storage key of the team members list of one project. */
+export const lifecycleTeamsKey = (projectId) => `lifecycleTeams_${projectId}`;
+
+/**
+ * Cleans the team members list sent by the browser: same rules as the editors list, and every
+ * member must have one of the teams.
+ *
+ * @param {Array<{accountId: string, displayName?: string, avatarUrl?: string, team: string}>} rawMembers
+ * @returns {Array<{accountId: string, displayName: string, avatarUrl: string, team: string}>}
+ */
+export function sanitizeLifecycleTeamMembers(rawMembers) {
+  return sanitizeLifecycleEditors(rawMembers, MAX_LIFECYCLE_TEAM_MEMBERS).filter(member => member.team);
+}
+
+/**
+ * Team of every known person: the team lists first, then (for teams assigned in v4.24.0) the
+ * team stored on the editors list.
+ *
+ * @param {Array} members - Team members list.
+ * @param {Array} editors - Editors list.
+ * @returns {Array<{accountId: string, displayName: string, team: string}>}
+ */
+export function mergeLifecyclePeople(members, editors) {
+  const byId = new Map();
+  for (const editor of Array.isArray(editors) ? editors : []) {
+    if (editor?.accountId) byId.set(editor.accountId, { accountId: editor.accountId, displayName: editor.displayName || editor.accountId, team: cleanLifecycleTeam(editor.team) });
+  }
+  for (const member of Array.isArray(members) ? members : []) {
+    const team = cleanLifecycleTeam(member?.team);
+    if (!member?.accountId || !team) continue;
+    byId.set(member.accountId, { accountId: member.accountId, displayName: member.displayName || member.accountId, team });
+  }
+  return [...byId.values()];
+}
+
 /** Storage key of the editors list of one project. */
 export const lifecycleEditorsKey = (projectId) => `lifecycleEditors_${projectId}`;
 
@@ -52,7 +92,7 @@ const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
  * @param {Array<{accountId: string, displayName?: string, avatarUrl?: string}>} rawEditors
  * @returns {Array<{accountId: string, displayName: string, avatarUrl: string, team: string}>}
  */
-export function sanitizeLifecycleEditors(rawEditors) {
+export function sanitizeLifecycleEditors(rawEditors, max = MAX_LIFECYCLE_EDITORS) {
   const seen = new Set();
   const editors = [];
   for (const raw of Array.isArray(rawEditors) ? rawEditors : []) {
@@ -67,7 +107,7 @@ export function sanitizeLifecycleEditors(rawEditors) {
       // v4.24.0: Dev, QA or UAT, chosen by a project administrator in Settings.
       team: cleanLifecycleTeam(raw?.team)
     });
-    if (editors.length >= MAX_LIFECYCLE_EDITORS) break;
+    if (editors.length >= max) break;
   }
   return editors;
 }

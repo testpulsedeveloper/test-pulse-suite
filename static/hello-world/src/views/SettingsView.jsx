@@ -7,6 +7,7 @@ import Button from '@atlaskit/button';
 import Spinner from '@atlaskit/spinner';
 import TestPulseLoader from '../components/TestPulseLoader';
 import LifecycleEditorsCard from '../components/LifecycleEditorsCard';
+import LifecycleTeamsCard from '../components/LifecycleTeamsCard';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from '../assets/liverpool-logo-b64';
 import packageJson from '../../package.json';
 import { generateQrSvg, generateQrDataUrl } from '../utils/qrCodeGenerator';
@@ -2051,6 +2052,9 @@ export default function SettingsView({ ctx }) {
               {/* Card: who may edit the Lifecycle module (v4.19.0). Everybody sees Lifecycle; this
                   list decides who can also change it. */}
               <LifecycleEditorsCard projectId={selectedProjectId} addNotification={addNotification} />
+
+              {/* Card: Dev / QA / UAT teams used by Lifecycle to group its content (v4.25.0). */}
+              <LifecycleTeamsCard projectId={selectedProjectId} addNotification={addNotification} />
 
               {/* Card 4: Widgets y Métricas del Tablero */}
               <div className="glass" style={{

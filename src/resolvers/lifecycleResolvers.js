@@ -31,7 +31,9 @@ import {
   sanitizeLifecycleEditors,
   isListedLifecycleEditor,
   cleanLifecycleTeam,
-  teamOfEditor
+  lifecycleTeamsKey,
+  sanitizeLifecycleTeamMembers,
+  mergeLifecyclePeople
 } from '../utils/lifecycleEditors.js';
 import { jqlQuote } from '../utils/jqlHelpers.js';
 import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenceFindingsParser.js';
@@ -471,6 +473,14 @@ const typeName = (issue) => String(issue?.fields?.issuetype?.name || '').toLower
 const isTestCase = (issue) => { const t = typeName(issue); return t.includes('test case') || t.includes('caso de prueba'); };
 const isTestRun = (issue) => typeName(issue).includes('test run');
 const isBug = (issue) => { const t = typeName(issue); return t === 'bug' || t === 'error' || t.includes('defect'); };
+/**
+ * Reporter ("Informador") of an issue: { accountId, displayName } or null (v4.25.0). The
+ * reporter decides the team an epic or a story belongs to in phase 03.
+ */
+const reporterOf = (issue) => {
+  const reporter = issue?.fields?.reporter;
+  return reporter?.accountId ? { accountId: String(reporter.accountId), displayName: text(reporter.displayName, 120) } : null;
+};
 const linkedIssues = (issue) => (issue?.fields?.issuelinks || []).map(l => l.outwardIssue || l.inwardIssue).filter(Boolean);
 
 /**
@@ -504,12 +514,14 @@ async function computeProgress(epicKeys, storyKeys = []) {
     return Promise.all([
       searchAll(`parent in (${keyList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES_PER_SEARCH),
       // An epic the user cannot see, or that was deleted, is simply not returned.
-      searchAll(`key in (${keyList})`, ['summary'], EPICS_PER_SEARCH).catch(() => [])
+      // v4.25.0: `reporter` says which team the epic belongs to.
+      searchAll(`key in (${keyList})`, ['summary', 'reporter'], EPICS_PER_SEARCH).catch(() => [])
     ]);
   });
   const storyGroups = groupResults.map(([groupStories]) => groupStories);
-  const epicTitles = new Map(groupResults.flatMap(([, epicIssues]) => epicIssues)
-    .map(issue => [String(issue.key).toUpperCase(), text(issue?.fields?.summary, 160)]));
+  const epicIssuesByKey = new Map(groupResults.flatMap(([, epicIssues]) => epicIssues)
+    .map(issue => [String(issue.key).toUpperCase(), issue]));
+  const epicTitles = new Map([...epicIssuesByKey].map(([key, issue]) => [key, text(issue?.fields?.summary, 160)]));
   const epicStories = storyGroups.flat();
 
   // v4.24.0: stories added without an epic, read by key in groups of 50 (same fields). A story
@@ -517,7 +529,7 @@ async function computeProgress(epicKeys, storyKeys = []) {
   const storyChunks = [];
   for (let i = 0; i < storyKeys.length; i += EPICS_PER_SEARCH) storyChunks.push(storyKeys.slice(i, i + EPICS_PER_SEARCH));
   const looseIssues = (await mapLimit(storyChunks, 3, (chunk) =>
-    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], EPICS_PER_SEARCH).catch(() => [])
+    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent', 'reporter'], EPICS_PER_SEARCH).catch(() => [])
   )).flat();
   const seenStoryKeys = new Set(epicStories.map(issue => String(issue.key).toUpperCase()));
   const stories = [...epicStories, ...looseIssues.filter(issue => !seenStoryKeys.has(String(issue.key).toUpperCase()))];
@@ -527,10 +539,10 @@ async function computeProgress(epicKeys, storyKeys = []) {
   // One entry per epic of the initiative, in the order they were added. An epic without stories
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
   // `runs` (v4.22.0) are the executions of the epic's test cases: they give its general status.
-  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', reporter: reporterOf(epicIssuesByKey.get(key)), stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
   // v4.24.0: one entry per story without epic, in the order they were added. A story the user
   // cannot see (or that was deleted) still appears, with zeros, so it can be removed.
-  const looseMap = new Map(storyKeys.map(key => [key, { key, summary: '', status: '', stories: 1, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  const looseMap = new Map(storyKeys.map(key => [key, { key, summary: '', status: '', reporter: null, stories: 1, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
   // Test case key → groups (epic or loose-story entries) it belongs to, to credit each
   // execution to its group(s).
   const caseGroups = new Map();
@@ -562,6 +574,7 @@ async function computeProgress(epicKeys, storyKeys = []) {
     if (loose) {
       loose.summary = text(story?.fields?.summary, 160);
       loose.status = text(story?.fields?.status?.name, 40);
+      loose.reporter = reporterOf(story);
     }
     const group = epic || loose;
     if (group) {
@@ -680,6 +693,12 @@ async function readLifecycleEditors(projectId) {
   return Array.isArray(stored?.editors) ? stored.editors : [];
 }
 
+/** Reads the team members list of a project (v4.25.0; empty until an admin fills it). */
+async function readLifecycleTeams(projectId) {
+  const stored = await storage.get(lifecycleTeamsKey(projectId));
+  return Array.isArray(stored?.members) ? stored.members : [];
+}
+
 /**
  * Can the current user change the lifecycle of `projectId`? (v4.19.0)
  * Project administrators and superusers always can; everybody else only when a project
@@ -707,15 +726,18 @@ export const registerLifecycleResolvers = (resolver) => {
   // (the server checks again on every change, the flag is only for display).
   resolver.define('getLifecycle', async ({ payload, context }) => {
     const projectId = projectKeyPart(payload.projectId);
-    const [initiatives, canEdit, editors] = await Promise.all([
+    const [initiatives, canEdit, editors, members] = await Promise.all([
       listInitiatives(projectId),
       canEditLifecycle(projectId, context),
-      readLifecycleEditors(projectId)
+      readLifecycleEditors(projectId),
+      readLifecycleTeams(projectId)
     ]);
-    // v4.24.0: names and teams of the editors, so the page can group findings reports by team or
-    // by the person who added them, and pre-select the team of whoever adds a new report.
-    const people = editors.map(editor => ({ accountId: editor.accountId, displayName: editor.displayName, team: cleanLifecycleTeam(editor.team) }));
-    return { initiatives, canEdit, people, myTeam: teamOfEditor(editors, context?.accountId) };
+    // Names and teams of the known people (v4.24.0; team lists since v4.25.0), so the page can
+    // group reports, epics and stories by team or by person, and pre-select the team of whoever
+    // adds a new report.
+    const people = mergeLifecyclePeople(members, editors);
+    const me = people.find(person => person.accountId === context?.accountId);
+    return { initiatives, canEdit, people, myTeam: me?.team || '' };
   });
 
   // Returns who may edit the lifecycle of the project, for the Settings card.
@@ -739,6 +761,29 @@ export const registerLifecycleResolvers = (resolver) => {
       updatedBy: context?.accountId || null
     });
     return { editors };
+  });
+
+  // v4.25.0: who belongs to the Dev, QA and UAT teams. Everybody can read it; only project
+  // administrators change it (same rule as the editors list).
+  resolver.define('getLifecycleTeams', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    const [members, canManage] = await Promise.all([
+      readLifecycleTeams(projectId),
+      canAdministerProject(projectId, context)
+    ]);
+    return { members, canManage };
+  });
+
+  resolver.define('saveLifecycleTeams', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    await requireProjectAdmin(projectId, context);
+    const members = sanitizeLifecycleTeamMembers(payload.members);
+    await storage.set(lifecycleTeamsKey(projectId), {
+      members,
+      updatedAt: new Date().toISOString(),
+      updatedBy: context?.accountId || null
+    });
+    return { members };
   });
 
   // Creates or updates one initiative (lifecycle editors only).
