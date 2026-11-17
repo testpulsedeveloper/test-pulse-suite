@@ -85,7 +85,7 @@ test('Lifecycle uses the helpers and loads epics and plans apart', () => {
   assert.match(resolvers, /cachedFor\(`candidates:\$\{context\.accountId\}:\$\{projectId\}`/);
 
   const view = read('static/hello-world/src/views/LifecycleView.jsx');
-  assert.match(view, /epicKeys, planKeys: \[\] \}\)/);
+  assert.match(view, /epicKeys, storyKeys, planKeys: \[\] \}\)/);
   assert.match(view, /epicKeys: \[\], planKeys \}\)/);
   // Figures are reloaded right after epics or plans change (no stuck "Consultando Jira…").
   assert.match(view, /loadProgress\(saved\); \/\/ read the figures again/);

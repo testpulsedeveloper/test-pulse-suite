@@ -34,7 +34,7 @@ const SAMPLE_PAGE = `
 <p><strong>Nombre del documento:</strong> ERF Tarjetas Internas- BRD-26-004-Tenders-cards</p>
 <p><strong>Versi&oacute;n:</strong> BRD 20/08/2026 / ERF 20/08/2026</p>
 <p><strong>Proyecto / Iniciativa:</strong> Comercio Unificado</p>
-<p><strong>Analista QA:</strong> David Hern&aacute;ndez Santos</p>
+<p><strong>Analista QA:</strong> Laura P&eacute;rez Ruiz</p>
 <p><strong>Fecha del an&aacute;lisis:</strong> 21/08/2026</p>
 <p><strong>Fuente del documento:</strong></p>
 <p><strong>Resultado general:</strong></p>
@@ -44,8 +44,8 @@ const SAMPLE_PAGE = `
 <h2>5. Detalle de hallazgos</h2>
 <table><tbody>
 ${row(HEADERS, 'th')}
-${row(['H01', 'Contradicción', 'ERF (UJ Internas) vs BRD (REQ-CT-04)', 'El ERF prohíbe cancelaciones parciales.', 'Alto', 'Definir que la anulación sí permite parciales.', 'William Ari Santamaria (BA)'])}
-${row(['H02', 'Ambigüedad', 'ERF (SAP RH) vs BRD (REQ-MP-03)', 'ID de empleado de 8 vs 36 dígitos.', 'Alto', 'Especificar el envío de 36 dígitos.', 'William Ari Santamaria (BA)'])}
+${row(['H01', 'Contradicción', 'ERF (UJ Internas) vs BRD (REQ-CT-04)', 'El ERF prohíbe cancelaciones parciales.', 'Alto', 'Definir que la anulación sí permite parciales.', 'Mario Gómez Torres (BA)'])}
+${row(['H02', 'Ambigüedad', 'ERF (SAP RH) vs BRD (REQ-MP-03)', 'ID de empleado de 8 vs 36 dígitos.', 'Alto', 'Especificar el envío de 36 dígitos.', 'Mario Gómez Torres (BA)'])}
 ${row(['H03', 'Vacío', 'ERF (Carga de bines)', 'No define alertas por Timeout.', 'Bajo', 'Definir el umbral de alertas.', ''])}
 ${row(['H04', 'Información Faltante', 'BRD (REQ-HC-08)', 'No especifica la fecha de servidor.', 'Medio', 'Usar la fecha del servidor.', ''])}
 ${row(['H05', 'Cerrado', 'ERF (Control de Versiones)', 'La carga de llaves se movió a precondición.', 'N/A', 'Hallazgo cerrado exitosamente.', ''])}
@@ -67,14 +67,14 @@ test('the real report structure is read into general data, findings and totals',
 
   assert.equal(report.general.documentType, 'ERF / BRD');
   assert.equal(report.general.initiative, 'Comercio Unificado');
-  assert.equal(report.general.analyst, 'David Hernández Santos');
+  assert.equal(report.general.analyst, 'Laura Pérez Ruiz');
   assert.equal(report.general.analysisDate, '21/08/2026');
   // The status lozenge sits on the line below its label; its colour parameter is not text.
   assert.equal(report.general.overallResult, 'CORREGIDO');
 
   assert.equal(report.findings.length, 5);
   assert.deepEqual(report.findings.map(f => f.id), ['H01', 'H02', 'H03', 'H04', 'H05']);
-  assert.equal(report.findings[0].owner, 'William Ari Santamaria (BA)');
+  assert.equal(report.findings[0].owner, 'Mario Gómez Torres (BA)');
 
   assert.deepEqual(report.totals.byImpact, { Alto: 2, Bajo: 1, Medio: 1, 'N/A': 1 });
   // Without an "Estado" column, H05 ("Cerrado" in the type column) is the closed one.
@@ -174,8 +174,8 @@ test('lifecycle editors list is cleaned before it is stored (v4.19.0)', () => {
     null
   ]);
   assert.deepEqual(editors, [
-    { accountId: '712020:abc-123', displayName: 'Ana QA', avatarUrl: 'https://avatar.example/a.png' },
-    { accountId: '5b10ac8d82e05b22cc7d4ef5', displayName: '5b10ac8d82e05b22cc7d4ef5', avatarUrl: '' }
+    { accountId: '712020:abc-123', displayName: 'Ana QA', avatarUrl: 'https://avatar.example/a.png', team: '' },
+    { accountId: '5b10ac8d82e05b22cc7d4ef5', displayName: '5b10ac8d82e05b22cc7d4ef5', avatarUrl: '', team: '' }
   ]);
   assert.deepEqual(sanitizeLifecycleEditors('not a list'), []);
   const many = Array.from({ length: 80 }, (_, i) => ({ accountId: `user${i}` }));
@@ -229,8 +229,8 @@ test('epics and Test Plans are picked from the project, with a general status (v
   assert.match(body, /plan de prueba/);
   assert.match(body, /api\.asUser\(\)\.requestJira/);
   assert.match(body, /MAX_CANDIDATES/);
-  // Each epic gets the executions of its own test cases.
-  assert.match(resolvers, /for \(const epicKey of caseEpics\.get\(testCase\.key\) \|\| \[\]\)/);
+  // Each epic (and, since v4.24.0, each story without epic) gets the executions of its own test cases.
+  assert.match(resolvers, /for \(const group of caseGroups\.get\(testCase\.key\) \|\| \[\]\)/);
 
   const view = read('static/hello-world/src/views/LifecycleView.jsx');
   assert.match(view, /invoke\('getLifecycleCandidates'/);

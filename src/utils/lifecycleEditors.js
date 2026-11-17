@@ -13,6 +13,29 @@
  * This file has no imports so it can be unit-tested with plain Node (tests/lifecycle.test.js).
  */
 
+// v4.24.0: the team each editor belongs to. Findings reports are grouped by these teams in
+// Lifecycle; '' means "no team yet". The labels shown to people live in the UI.
+export const LIFECYCLE_TEAMS = ['dev', 'qa', 'uat'];
+
+/** Returns the team id when it is one of LIFECYCLE_TEAMS, otherwise ''. */
+export const cleanLifecycleTeam = (value) => {
+  const team = String(value || '').trim().toLowerCase();
+  return LIFECYCLE_TEAMS.includes(team) ? team : '';
+};
+
+/**
+ * Team of a person according to the stored editors list ('' when not listed or without team).
+ *
+ * @param {Array<{accountId: string, team?: string}>} editors
+ * @param {string} accountId
+ * @returns {string}
+ */
+export function teamOfEditor(editors, accountId) {
+  if (!accountId) return '';
+  const editor = (Array.isArray(editors) ? editors : []).find(item => item?.accountId === accountId);
+  return cleanLifecycleTeam(editor?.team);
+}
+
 // Upper bound of the list: a QA team, not a whole company.
 export const MAX_LIFECYCLE_EDITORS = 50;
 
@@ -27,7 +50,7 @@ const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
  * no duplicates, bounded texts, and only https avatar URLs.
  *
  * @param {Array<{accountId: string, displayName?: string, avatarUrl?: string}>} rawEditors
- * @returns {Array<{accountId: string, displayName: string, avatarUrl: string}>}
+ * @returns {Array<{accountId: string, displayName: string, avatarUrl: string, team: string}>}
  */
 export function sanitizeLifecycleEditors(rawEditors) {
   const seen = new Set();
@@ -40,7 +63,9 @@ export function sanitizeLifecycleEditors(rawEditors) {
     editors.push({
       accountId,
       displayName: String(raw?.displayName || '').trim().slice(0, 120) || accountId,
-      avatarUrl: /^https:\/\/[^\s]+$/i.test(avatarUrl) ? avatarUrl : ''
+      avatarUrl: /^https:\/\/[^\s]+$/i.test(avatarUrl) ? avatarUrl : '',
+      // v4.24.0: Dev, QA or UAT, chosen by a project administrator in Settings.
+      team: cleanLifecycleTeam(raw?.team)
     });
     if (editors.length >= MAX_LIFECYCLE_EDITORS) break;
   }

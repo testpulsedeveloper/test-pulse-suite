@@ -87,3 +87,55 @@ test('traceability counts a test case once even when known by key and id', () =>
   // An id with no known key still counts as one case.
   assert.equal(countDistinctCases(['999'], idToKey), 1);
 });
+
+// ── v4.24.0: teams, authors and stories without epic ─────────────────────────────────────────
+
+import { sanitizeLifecycleEditors, teamOfEditor, cleanLifecycleTeam } from '../src/utils/lifecycleEditors.js';
+
+test('editors keep only the Dev, QA and UAT teams', () => {
+  const editors = sanitizeLifecycleEditors([
+    { accountId: 'acc-1', displayName: 'Ana Demo', team: 'QA' },
+    { accountId: 'acc-2', displayName: 'Beto Demo', team: 'negocio' },
+    { accountId: 'acc-3', displayName: 'Ceci Demo' }
+  ]);
+  assert.deepEqual(editors.map(e => e.team), ['qa', '', '']);
+  assert.equal(teamOfEditor(editors, 'acc-1'), 'qa');
+  assert.equal(teamOfEditor(editors, 'nobody'), '');
+  assert.equal(cleanLifecycleTeam('UAT'), 'uat');
+});
+
+test('stories without epic are added and removed like epics', () => {
+  const stored = storedWith(report('d1', 'Uno'));
+  const added = applyLifecycleOperation(stored, { type: 'addKeys', field: 'storyKeys', keys: ['DEMO-5', 'DEMO-6'] });
+  assert.deepEqual(added.storyKeys, ['DEMO-5', 'DEMO-6']);
+  assert.deepEqual(applyLifecycleOperation(added, { type: 'removeKey', field: 'storyKeys', key: 'DEMO-5' }).storyKeys, ['DEMO-6']);
+});
+
+test('the server records team and author of new deliverables and keeps them on edits', async () => {
+  const { __test } = await import('../src/resolvers/lifecycleResolvers.js');
+  const stored = storedWith();
+  const raw = applyLifecycleOperation(stored, { type: 'upsertDeliverable', phaseId: 'design', deliverable: { ...report(undefined, 'Nuevo'), team: 'dev', createdBy: 'forged-by-browser' } });
+  const saved = __test.sanitizeInitiative({ ...raw, storyKeys: ['demo-7', 'bad key'] }, stored, 'acc-author');
+  const created = saved.phases.design.deliverables[0];
+  assert.equal(created.team, 'dev');
+  // The author comes from the server context, never from the browser.
+  assert.equal(created.createdBy, 'acc-author');
+  assert.deepEqual(saved.storyKeys, ['DEMO-7']);
+
+  // Another person edits it later: the author stays the original one.
+  const edited = __test.sanitizeInitiative(
+    applyLifecycleOperation(saved, { type: 'upsertDeliverable', phaseId: 'design', deliverable: { id: created.id, team: 'uat' } }),
+    saved, 'acc-other');
+  assert.equal(edited.phases.design.deliverables[0].createdBy, 'acc-author');
+  assert.equal(edited.phases.design.deliverables[0].team, 'uat');
+});
+
+test('the picker offers stories without epic and phase 03 reads them', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(server, /list\(storyTypes, ' AND parent is EMPTY'\)/);
+  assert.match(server, /computeProgress\(epicKeys, storyKeys\)/);
+  assert.match(server, /looseStories: \[\.\.\.looseMap\.values\(\)\]/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /openPicker\(initiative, phase, 'storyKeys'\)/);
+  assert.match(view, /renderGroupedDeliverables\(initiative, phase\)/);
+});

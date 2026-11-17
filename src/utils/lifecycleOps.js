@@ -22,8 +22,9 @@
 // Phases that hold deliverables. Kept in sync with LIFECYCLE_PHASES in lifecycleResolvers.js.
 const PHASES = ['plan', 'design', 'build', 'execute', 'release'];
 
-// Lists of Jira keys an initiative keeps: epics (phase 03) and Test Plans (phase 04).
-const KEY_FIELDS = ['epicKeys', 'planKeys'];
+// Lists of Jira keys an initiative keeps: epics and stories without epic (phase 03, the
+// stories since v4.24.0) and Test Plans (phase 04).
+const KEY_FIELDS = ['epicKeys', 'storyKeys', 'planKeys'];
 
 /**
  * Builds a deep-enough copy of the stored initiative so the original object is never mutated.
@@ -40,6 +41,7 @@ function cloneInitiative(stored) {
     ...stored,
     epicKeys: [...(stored?.epicKeys || [])],
     planKeys: [...(stored?.planKeys || [])],
+    storyKeys: [...(stored?.storyKeys || [])],
     phases
   };
 }
@@ -51,7 +53,7 @@ function cloneInitiative(stored) {
  *   - { type: 'info', name, description }               → renames / re-describes the initiative
  *   - { type: 'upsertDeliverable', phaseId, deliverable } → adds (no id) or updates (with id)
  *   - { type: 'removeDeliverable', phaseId, deliverableId }
- *   - { type: 'addKeys', field, keys }                   → field = 'epicKeys' | 'planKeys'
+ *   - { type: 'addKeys', field, keys }                   → field = 'epicKeys' | 'storyKeys' | 'planKeys'
  *   - { type: 'removeKey', field, key }
  *
  * @param {Object} stored - Initiative currently stored (the latest version).

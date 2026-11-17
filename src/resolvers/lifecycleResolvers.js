@@ -29,7 +29,9 @@ import { requireProjectAdmin, canAdministerProject, AuthorizationError, normaliz
 import {
   lifecycleEditorsKey,
   sanitizeLifecycleEditors,
-  isListedLifecycleEditor
+  isListedLifecycleEditor,
+  cleanLifecycleTeam,
+  teamOfEditor
 } from '../utils/lifecycleEditors.js';
 import { jqlQuote } from '../utils/jqlHelpers.js';
 import { extractConfluencePageId, parseFindingsReport } from '../utils/confluenceFindingsParser.js';
@@ -56,6 +58,8 @@ const MAX_DELIVERABLES_PER_PHASE = 200;
 // These numbers are only safety ceilings that keep one initiative inside what Forge storage and
 // the 25-second resolver limit can handle; a real project is far below them.
 const MAX_EPICS = 500;
+// v4.24.0: stories WITHOUT an epic added directly to phase 03 (same kind of safety ceiling).
+const MAX_LOOSE_STORIES = 500;
 // Epics per JQL search ("parent in (…)"): keeps each query short and lets them run in parallel.
 const EPICS_PER_SEARCH = 50;
 // Stories read per group of epics, and test cases whose executions are read, per initiative.
@@ -98,9 +102,10 @@ const isSafeId = (value) => /^[a-z0-9]{6,24}$/i.test(String(value || ''));
  *
  * @param {Object} raw - Deliverable as sent by the UI.
  * @param {Object} [stored] - The same deliverable as currently stored, if it exists.
+ * @param {string} [accountId] - Who is saving; recorded as the author of NEW deliverables.
  * @returns {Object}
  */
-function sanitizeDeliverable(raw, stored) {
+function sanitizeDeliverable(raw, stored, accountId) {
   const url = safeUrl(raw?.url);
   // 'findings' = Shift-Left report read from Confluence; 'testplan' = Test Plan workbook attached
   // to a Jira issue and checked against the 17 standard elements; 'link' = any other document.
@@ -114,7 +119,13 @@ function sanitizeDeliverable(raw, stored) {
     owner: text(raw?.owner, 120),
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(raw?.date || '')) ? String(raw.date) : '',
     status: DELIVERABLE_STATUSES.includes(raw?.status) ? raw.status : 'pending',
-    notes: text(raw?.notes, 600)
+    notes: text(raw?.notes, 600),
+    // v4.24.0: team that produced it (Dev, QA, UAT or ''), used to group findings reports.
+    team: cleanLifecycleTeam(raw?.team),
+    // v4.24.0: who added it and when. Set once by the server, never taken from the browser.
+    // Deliverables created before this version have no author (null).
+    createdBy: stored ? (stored.createdBy || null) : (accountId || null),
+    createdAt: stored ? (stored.createdAt || null) : new Date().toISOString()
   };
   // Keep the last report read from Confluence only while the link still points to the same page.
   if (kind === 'findings' && stored?.report && stored.url === url) {
@@ -141,7 +152,7 @@ function sanitizeInitiative(raw, stored, accountId) {
     const rawList = Array.isArray(raw?.phases?.[phase]?.deliverables) ? raw.phases[phase].deliverables : [];
     phases[phase] = {
       deliverables: rawList.slice(0, MAX_DELIVERABLES_PER_PHASE).map(d =>
-        sanitizeDeliverable(d, storedList.find(s => s.id === d?.id))
+        sanitizeDeliverable(d, storedList.find(s => s.id === d?.id), accountId)
       )
     };
   }
@@ -156,6 +167,8 @@ function sanitizeInitiative(raw, stored, accountId) {
     epicKeys: [...new Set(epicKeys)].slice(0, MAX_EPICS),
     // v4.21.0: Test Plans followed in phase 04. Each one is shown with its cycles and progress.
     planKeys: [...new Set((Array.isArray(raw?.planKeys) ? raw.planKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_PLANS),
+    // v4.24.0: stories without an epic shown in phase 03 next to the epics.
+    storyKeys: [...new Set((Array.isArray(raw?.storyKeys) ? raw.storyKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_LOOSE_STORIES),
     phases,
     createdAt: stored?.createdAt || now,
     createdBy: stored?.createdBy || accountId || null,
@@ -466,13 +479,17 @@ const linkedIssues = (issue) => (issue?.fields?.issuelinks || []).map(l => l.out
  *
  * Costs 2 searches for a typical initiative (stories, then test cases), read as the user.
  *
+ * v4.24.0: `storyKeys` are stories WITHOUT an epic added directly to the initiative. They are
+ * read by key, counted in the same totals and returned one by one in `looseStories`.
+ *
  * @param {string[]} epicKeys
+ * @param {string[]} [storyKeys]
  * @returns {Promise<Object>}
  */
-async function computeProgress(epicKeys) {
+async function computeProgress(epicKeys, storyKeys = []) {
   const noRuns = () => ({ total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 });
-  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns(), bugs: { total: 0, open: 0 }, epics: [], truncated: false };
-  if (!epicKeys.length) return empty;
+  const empty = { stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns(), bugs: { total: 0, open: 0 }, epics: [], looseStories: [], truncated: false };
+  if (!epicKeys.length && !storyKeys.length) return empty;
 
   // The epics are searched in groups of 50, three groups at a time (v4.22.2): an initiative with
   // hundreds of epics costs a few parallel searches instead of one huge, slow query.
@@ -493,7 +510,17 @@ async function computeProgress(epicKeys) {
   const storyGroups = groupResults.map(([groupStories]) => groupStories);
   const epicTitles = new Map(groupResults.flatMap(([, epicIssues]) => epicIssues)
     .map(issue => [String(issue.key).toUpperCase(), text(issue?.fields?.summary, 160)]));
-  const stories = storyGroups.flat();
+  const epicStories = storyGroups.flat();
+
+  // v4.24.0: stories added without an epic, read by key in groups of 50 (same fields). A story
+  // that is ALSO under one of the initiative's epics is counted only once, under its epic.
+  const storyChunks = [];
+  for (let i = 0; i < storyKeys.length; i += EPICS_PER_SEARCH) storyChunks.push(storyKeys.slice(i, i + EPICS_PER_SEARCH));
+  const looseIssues = (await mapLimit(storyChunks, 3, (chunk) =>
+    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], EPICS_PER_SEARCH).catch(() => [])
+  )).flat();
+  const seenStoryKeys = new Set(epicStories.map(issue => String(issue.key).toUpperCase()));
+  const stories = [...epicStories, ...looseIssues.filter(issue => !seenStoryKeys.has(String(issue.key).toUpperCase()))];
   // True when some group had more stories than are read at once: the figures are then partial.
   const storiesTruncated = storyGroups.some(group => group.length >= MAX_STORIES_PER_SEARCH);
 
@@ -501,9 +528,13 @@ async function computeProgress(epicKeys) {
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
   // `runs` (v4.22.0) are the executions of the epic's test cases: they give its general status.
   const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
-  // Test case key → epics it belongs to, to credit each execution to its epic(s).
-  const caseEpics = new Map();
-  const epicCases = new Map(epicKeys.map(key => [key, new Set()]));
+  // v4.24.0: one entry per story without epic, in the order they were added. A story the user
+  // cannot see (or that was deleted) still appears, with zeros, so it can be removed.
+  const looseMap = new Map(storyKeys.map(key => [key, { key, summary: '', status: '', stories: 1, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  // Test case key → groups (epic or loose-story entries) it belongs to, to credit each
+  // execution to its group(s).
+  const caseGroups = new Map();
+  const groupCases = new Map();
 
   const caseKeys = new Set();
   const bugs = new Map(); // key → is it open?
@@ -519,21 +550,31 @@ async function computeProgress(epicKeys) {
     storyCases.forEach(c => caseKeys.add(c.key));
     links.filter(isBug).forEach(noteBug);
 
-    // Per-epic breakdown.
+    // Per-group breakdown: the story's epic, or the story itself when it was added on its own.
     const parentKey = String(story?.fields?.parent?.key || '').toUpperCase();
+    const storyKey = String(story?.key || '').toUpperCase();
     const epic = epicMap.get(parentKey);
+    const loose = epic ? null : looseMap.get(storyKey);
     if (epic) {
       epic.summary = epic.summary || text(story?.fields?.parent?.fields?.summary, 160);
       epic.stories++;
-      if (storyCases.length > 0) epic.storiesWithCases++;
+    }
+    if (loose) {
+      loose.summary = text(story?.fields?.summary, 160);
+      loose.status = text(story?.fields?.status?.name, 40);
+    }
+    const group = epic || loose;
+    if (group) {
+      if (storyCases.length > 0) group.storiesWithCases++;
+      if (!groupCases.has(group)) groupCases.set(group, new Set());
       storyCases.forEach(c => {
-        epicCases.get(parentKey).add(c.key);
-        if (!caseEpics.has(c.key)) caseEpics.set(c.key, new Set());
-        caseEpics.get(c.key).add(parentKey);
+        groupCases.get(group).add(c.key);
+        if (!caseGroups.has(c.key)) caseGroups.set(c.key, new Set());
+        caseGroups.get(c.key).add(group);
       });
     }
   }
-  for (const epic of epicMap.values()) epic.cases = epicCases.get(epic.key).size;
+  for (const group of [...epicMap.values(), ...looseMap.values()]) group.cases = groupCases.get(group)?.size || 0;
   const storyCount = stories.filter(s => !isTestCase(s) && !isTestRun(s) && !isBug(s)).length;
 
   // Executions: every Test Run is linked to its Test Case, and the link carries the run's status.
@@ -560,11 +601,10 @@ async function computeProgress(epicKeys) {
         else if (status === 'not run' || status === 'to do') bucket = 'notRun';
         runs.total++;
         runs[bucket]++;
-        // The same execution also counts for the epic(s) of its test case.
-        for (const epicKey of caseEpics.get(testCase.key) || []) {
-          const epicRuns = epicMap.get(epicKey).runs;
-          epicRuns.total++;
-          epicRuns[bucket]++;
+        // The same execution also counts for the epic(s) / loose stories of its test case.
+        for (const group of caseGroups.get(testCase.key) || []) {
+          group.runs.total++;
+          group.runs[bucket]++;
         }
       }
     }
@@ -577,16 +617,17 @@ async function computeProgress(epicKeys) {
     runs,
     bugs: { total: bugs.size, open: [...bugs.values()].filter(Boolean).length },
     epics: [...epicMap.values()],
+    looseStories: [...looseMap.values()],
     truncated: storiesTruncated || caseKeys.size > MAX_CASES
   };
 }
 
 /**
  * Lists the epics and the Test Plans of a project for the picker of phases 03 and 04, as the
- * current user.
+ * current user. v4.24.0: also the stories that have NO epic, for phase 03.
  *
  * @param {string} projectId - Project id or key, already validated.
- * @returns {Promise<{epics: Array, plans: Array, maxEpics: number, maxPlans: number}>}
+ * @returns {Promise<{epics: Array, plans: Array, stories: Array, maxEpics: number, maxPlans: number, maxStories: number}>}
  */
 async function listCandidates(projectId) {
   // The names of the issue types differ between projects ("Epic" / "Épica", "Test Plan" /
@@ -599,12 +640,19 @@ async function listCandidates(projectId) {
   const epicTypes = issueTypes.filter(type => type?.hierarchyLevel === 1).map(type => String(type.name));
   const planTypes = issueTypes.map(type => String(type?.name || ''))
     .filter(name => /test ?plan|plan de prueba|test ?set|conjunto de prueba/i.test(name));
+  // Requirement types: the standard level (hierarchyLevel 0) whose name says story/requirement
+  // ("Historia", "Story", "Enhancement"…). Tasks, bugs and the test types are left out.
+  const storyTypes = issueTypes
+    .filter(type => type?.hierarchyLevel === 0)
+    .map(type => String(type?.name || ''))
+    .filter(name => /histori|story|enhancement|mejora|requerim|requirement/i.test(name));
 
-  const list = async (typeNames) => {
+  // `extra` narrows the search, e.g. "parent is EMPTY" for stories without an epic.
+  const list = async (typeNames, extra = '') => {
     if (typeNames.length === 0) return [];
     const types = typeNames.map(name => jqlQuote(name)).join(',');
     const issues = await searchAll(
-      `project = ${jqlQuote(projectId)} AND issuetype in (${types}) ORDER BY created DESC`,
+      `project = ${jqlQuote(projectId)} AND issuetype in (${types})${extra} ORDER BY created DESC`,
       ['summary', 'status'], MAX_CANDIDATES
     );
     return issues.map(issue => ({
@@ -613,8 +661,12 @@ async function listCandidates(projectId) {
       status: text(issue?.fields?.status?.name, 40)
     }));
   };
-  const [epics, plans] = await Promise.all([list(epicTypes), list(planTypes)]);
-  return { epics, plans, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS };
+  const [epics, plans, stories] = await Promise.all([
+    list(epicTypes),
+    list(planTypes),
+    list(storyTypes, ' AND parent is EMPTY')
+  ]);
+  return { epics, plans, stories, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS, maxStories: MAX_LOOSE_STORIES };
 }
 
 /**
@@ -655,11 +707,15 @@ export const registerLifecycleResolvers = (resolver) => {
   // (the server checks again on every change, the flag is only for display).
   resolver.define('getLifecycle', async ({ payload, context }) => {
     const projectId = projectKeyPart(payload.projectId);
-    const [initiatives, canEdit] = await Promise.all([
+    const [initiatives, canEdit, editors] = await Promise.all([
       listInitiatives(projectId),
-      canEditLifecycle(projectId, context)
+      canEditLifecycle(projectId, context),
+      readLifecycleEditors(projectId)
     ]);
-    return { initiatives, canEdit };
+    // v4.24.0: names and teams of the editors, so the page can group findings reports by team or
+    // by the person who added them, and pre-select the team of whoever adds a new report.
+    const people = editors.map(editor => ({ accountId: editor.accountId, displayName: editor.displayName, team: cleanLifecycleTeam(editor.team) }));
+    return { initiatives, canEdit, people, myTeam: teamOfEditor(editors, context?.accountId) };
   });
 
   // Returns who may edit the lifecycle of the project, for the Settings card.
@@ -797,10 +853,12 @@ export const registerLifecycleResolvers = (resolver) => {
       .slice(0, MAX_EPICS);
     // v4.21.0: Test Plans followed in phase 04, each with its cycles and their progress.
     const planKeys = [...new Set((Array.isArray(payload.planKeys) ? payload.planKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_PLANS);
+    // v4.24.0: stories without an epic, added directly to phase 03.
+    const storyKeys = [...new Set((Array.isArray(payload.storyKeys) ? payload.storyKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_LOOSE_STORIES);
     // Epics and plans are independent, so both are read at the same time; the plans go five at
     // a time and share one listing of the project's cycles (v4.22.1).
     const [progress, plans] = await Promise.all([
-      computeProgress(epicKeys),
+      computeProgress(epicKeys, storyKeys),
       mapLimit(planKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId))
     ]);
     return { ...progress, plans };

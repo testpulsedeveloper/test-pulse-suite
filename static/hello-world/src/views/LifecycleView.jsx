@@ -40,7 +40,18 @@ const REPORT_FRESH_MS = 15 * 60 * 1000;
 
 // Figures of phases 03 and 04 before Jira answers (or when the initiative has no epics).
 const EMPTY_RUNS = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
-const EMPTY_PROGRESS = { stories: 0, storiesWithCases: 0, cases: 0, runs: EMPTY_RUNS, bugs: { total: 0, open: 0 }, epics: [], truncated: false };
+const EMPTY_PROGRESS = { stories: 0, storiesWithCases: 0, cases: 0, runs: EMPTY_RUNS, bugs: { total: 0, open: 0 }, epics: [], looseStories: [], truncated: false };
+
+// v4.24.0: teams of the findings reports. Who belongs to each team is set in Settings →
+// "Editores de Lifecycle"; a report keeps the team chosen when it was added (editable).
+const TEAM_LABELS = { dev: 'Dev', qa: 'QA', uat: 'UAT' };
+const TEAM_ORDER = ['dev', 'qa', 'uat', ''];
+// How the reviewed documents of phase 02 are listed.
+const GROUP_MODES = [
+  { id: 'team', label: 'Equipo' },
+  { id: 'user', label: 'Usuario' },
+  { id: 'none', label: 'Sin agrupar' }
+];
 
 const emptyPhases = () => Object.fromEntries(PHASES.map(p => [p.id, { deliverables: [] }]));
 const deliverablesOf = (initiative, phaseId) => initiative?.phases?.[phaseId]?.deliverables || [];
@@ -268,7 +279,7 @@ const TestPlanSummary = ({ report }) => {
 
 // ── Deliverable form ────────────────────────────────────────────────────────────────────────
 
-const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
+const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam = '' }) => {
   const isFindings = phase.id === 'design';
   // v4.20.0: in phase 01 a deliverable can be THE Test Plan: an Excel attached to a Jira issue
   // that Test Pulse checks against the 17 standard elements.
@@ -276,6 +287,8 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
   const [form, setForm] = useState(() => ({
     name: '', docType: isFindings ? 'ERF' : '', url: '', owner: '', date: '', status: 'pending', notes: '',
     issueKey: '', defectsUrl: '', planKey: '',
+    // v4.24.0: a new report starts with the team of the person adding it (from Settings).
+    team: initial ? (initial.team || '') : defaultTeam,
     ...(initial || {})
   }));
   const [isTestPlan, setIsTestPlan] = useState(canBeTestPlan && initial?.kind === 'testplan');
@@ -301,6 +314,15 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving }) => {
             <label style={styles.label}>Tipo de documento</label>
             <select style={styles.input} value={form.docType} onChange={set('docType')}>
               {DOC_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
+            </select>
+          </div>
+        )}
+        {isFindings && (
+          <div>
+            <label style={styles.label}>Equipo</label>
+            <select style={styles.input} value={form.team || ''} onChange={set('team')}>
+              <option value="">Sin equipo</option>
+              {Object.entries(TEAM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </div>
         )}
@@ -382,6 +404,14 @@ const LifecycleView = ({ ctx }) => {
   // v4.19.0: everybody can see Lifecycle, only editors can change it. The backend sends this flag
   // and checks the permission again on every save, so hiding the buttons is only for clarity.
   const [canEdit, setCanEdit] = useState(false);
+  // v4.24.0: editors with their team (accountId → { displayName, team }) and the team of the
+  // current user, both from getLifecycle. Used to group reports and to pre-fill the team.
+  const [people, setPeople] = useState([]);
+  const [myTeam, setMyTeam] = useState('');
+  // How phase 02 lists its reports: 'team', 'user' or 'none' (remembered in this browser).
+  const [groupMode, setGroupMode] = useState(() => {
+    try { return localStorage.getItem('tp_lifecycle_group') || 'team'; } catch (e) { return 'team'; }
+  });
   const [loadError, setLoadError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [progressById, setProgressById] = useState({});     // initiativeId → figures of phases 3-4
@@ -433,6 +463,8 @@ const LifecycleView = ({ ctx }) => {
         const list = res?.initiatives || [];
         setInitiatives(list);
         setCanEdit(Boolean(res?.canEdit));
+        setPeople(Array.isArray(res?.people) ? res.people : []);
+        setMyTeam(res?.myTeam || '');
         setExpandedId(list.length === 1 ? list[0].id : null);
       })
       .catch(error => { if (!cancelled) setLoadError(error?.message || String(error)); })
@@ -468,7 +500,10 @@ const LifecycleView = ({ ctx }) => {
     const id = initiative.id;
     const epicKeys = initiative.epicKeys || [];
     const planKeys = initiative.planKeys || [];
-    const token = `${epicKeys.join(',')}|${planKeys.join(',')}`;
+    // v4.24.0: stories without an epic travel with the epics (both feed phase 03).
+    const storyKeys = initiative.storyKeys || [];
+    const hasBuildKeys = epicKeys.length > 0 || storyKeys.length > 0;
+    const token = `${epicKeys.join(',')}|${storyKeys.join(',')}|${planKeys.join(',')}`;
     progressTokenRef.current[id] = token;
     const apply = (patch) => {
       if (progressTokenRef.current[id] !== token) return;
@@ -480,12 +515,12 @@ const LifecycleView = ({ ctx }) => {
     setProgressById(prev => ({
       ...prev,
       [id]: {
-        ...(epicKeys.length === 0 ? { ...EMPTY_PROGRESS, epicsLoaded: true } : {}),
+        ...(!hasBuildKeys ? { ...EMPTY_PROGRESS, epicsLoaded: true } : {}),
         ...(planKeys.length === 0 ? { plans: [], plansLoaded: true } : {})
       }
     }));
-    if (epicKeys.length > 0) {
-      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys, planKeys: [] })
+    if (hasBuildKeys) {
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys, storyKeys, planKeys: [] })
         .then(res => { const { plans, ...figures } = res || {}; apply({ ...EMPTY_PROGRESS, ...figures, epicsLoaded: true }); })
         .catch(error => apply({ ...EMPTY_PROGRESS, epicsLoaded: true, epicsError: message(error) }));
     }
@@ -596,14 +631,20 @@ const LifecycleView = ({ ctx }) => {
    * Opens the picker of a phase and loads what can be added: the epics of the project (phase 03)
    * or its Test Plans (phase 04). They come from Jira, so nobody has to type keys.
    */
-  const openPicker = async (initiative, phase) => {
-    const base = { initiativeId: initiative.id, phaseId: phase.id, loading: true, error: '', items: [], selected: [], search: '', max: 0 };
+  const openPicker = async (initiative, phase, field) => {
+    // `field` (v4.24.0) is the list being filled: 'epicKeys' or 'storyKeys' in phase 03,
+    // 'planKeys' in phase 04.
+    const base = { initiativeId: initiative.id, phaseId: phase.id, field, loading: true, error: '', items: [], selected: [], search: '', max: 0 };
     setPicker(base);
     try {
       const res = await invoke('getLifecycleCandidates', { projectId: selectedProjectId });
-      const isBuild = phase.id === 'build';
-      setPicker(prev => (prev && prev.initiativeId === base.initiativeId && prev.phaseId === base.phaseId
-        ? { ...prev, loading: false, items: (isBuild ? res?.epics : res?.plans) || [], max: (isBuild ? res?.maxEpics : res?.maxPlans) || 20 }
+      const source = {
+        epicKeys: [res?.epics, res?.maxEpics],
+        storyKeys: [res?.stories, res?.maxStories],
+        planKeys: [res?.plans, res?.maxPlans]
+      }[field] || [[], 0];
+      setPicker(prev => (prev && prev.initiativeId === base.initiativeId && prev.phaseId === base.phaseId && prev.field === field
+        ? { ...prev, loading: false, items: source[0] || [], max: source[1] || 20 }
         : prev));
     } catch (error) {
       setPicker(prev => (prev ? { ...prev, loading: false, error: error?.message || String(error) } : prev));
@@ -612,7 +653,7 @@ const LifecycleView = ({ ctx }) => {
 
   /**
    * Adds the items chosen in the picker to the initiative.
-   * `field` is the list that stores them: 'epicKeys' (phase 03) or 'planKeys' (phase 04).
+   * `field` is the list that stores them: 'epicKeys' / 'storyKeys' (phase 03) or 'planKeys' (phase 04).
    */
   const handleAddSelected = async (initiative, field) => {
     const current = initiative[field] || [];
@@ -681,6 +722,7 @@ const LifecycleView = ({ ctx }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{deliverable.name}</strong>
           {deliverable.docType && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{deliverable.docType}</span>}
+          {deliverable.team && TEAM_LABELS[deliverable.team] && <span className="ads-lozenge ads-lozenge-brand" style={{ fontSize: '10px' }}>{TEAM_LABELS[deliverable.team]}</span>}
           <Lozenge status={deliverable.status} />
           <span style={styles.muted}>
             {[deliverable.owner, deliverable.date].filter(Boolean).join(' · ')}
@@ -724,6 +766,73 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
+  /** Name of the person who added a deliverable, from the editors list (v4.24.0). */
+  const authorName = (accountId) => {
+    if (!accountId) return '';
+    return people.find(person => person.accountId === accountId)?.displayName || 'Otro usuario';
+  };
+
+  const changeGroupMode = (mode) => {
+    setGroupMode(mode);
+    try { localStorage.setItem('tp_lifecycle_group', mode); } catch (e) { /* private window: not remembered */ }
+  };
+
+  /**
+   * Phase 02 (v4.24.0): the reviewed documents, grouped by team (Dev, QA, UAT, Sin equipo), by
+   * the user who added them, or as one list. Each group shows how many reports it has.
+   */
+  const renderGroupedDeliverables = (initiative, phase) => {
+    const list = deliverablesOf(initiative, phase.id);
+    if (list.length === 0) return null;
+    const groups = new Map();
+    const add = (id, label, deliverable) => {
+      if (!groups.has(id)) groups.set(id, { id, label, items: [] });
+      groups.get(id).items.push(deliverable);
+    };
+    if (groupMode === 'team') {
+      for (const deliverable of list) {
+        const team = TEAM_LABELS[deliverable.team] ? deliverable.team : '';
+        add(team, team ? TEAM_LABELS[team] : 'Sin equipo', deliverable);
+      }
+    } else if (groupMode === 'user') {
+      for (const deliverable of list) {
+        const name = authorName(deliverable.createdBy);
+        add(deliverable.createdBy || '', name || 'Sin registro de quién lo agregó', deliverable);
+      }
+    } else {
+      list.forEach(deliverable => add('all', '', deliverable));
+    }
+    let ordered = [...groups.values()];
+    if (groupMode === 'team') ordered.sort((a, b) => TEAM_ORDER.indexOf(a.id) - TEAM_ORDER.indexOf(b.id));
+    // Users alphabetically; reports without author at the end.
+    if (groupMode === 'user') ordered.sort((a, b) => (!a.id) - (!b.id) || a.label.localeCompare(b.label));
+
+    return (
+      <>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 4px' }}>
+          <span style={styles.muted}>Agrupar por:</span>
+          {GROUP_MODES.map(mode => (
+            <button key={mode.id} type="button" onClick={() => changeGroupMode(mode.id)} aria-pressed={groupMode === mode.id}
+              className={groupMode === mode.id ? 'ads-lozenge ads-lozenge-brand' : 'ads-lozenge ads-lozenge-subtle'}
+              style={{ border: 'none', cursor: 'pointer', fontSize: '11px' }}>
+              {mode.label}
+            </button>
+          ))}
+        </div>
+        {ordered.map(group => (
+          <div key={group.id || 'none'} style={{ marginTop: group.label ? '10px' : 0 }}>
+            {group.label && (
+              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
+                {group.label} <span style={styles.muted}>({group.items.length} {group.items.length === 1 ? 'reporte' : 'reportes'})</span>
+              </div>
+            )}
+            {group.items.map(deliverable => renderDeliverable(initiative, phase, deliverable))}
+          </div>
+        ))}
+      </>
+    );
+  };
+
   /** Row header shared by epics and Test Plans: expand arrow, key (opens Jira), title, and "Quitar". */
   const renderItemHeader = (initiative, field, item, children, extra) => {
     const open = Boolean(openRows[`${initiative.id}:${item.key}`]);
@@ -753,7 +862,7 @@ const LifecycleView = ({ ctx }) => {
    * and "select all". Items already in the initiative are not offered again.
    */
   const renderPicker = (initiative, phase, field, noun) => {
-    if (!picker || picker.initiativeId !== initiative.id || picker.phaseId !== phase.id) return null;
+    if (!picker || picker.initiativeId !== initiative.id || picker.phaseId !== phase.id || picker.field !== field) return null;
     const current = initiative[field] || [];
     const search = picker.search.trim().toLowerCase();
     const available = picker.items.filter(item => !current.includes(item.key));
@@ -834,9 +943,10 @@ const LifecycleView = ({ ctx }) => {
   // of epics is one compact line each, without story detail.
   const renderBuildPhase = (initiative, phase, progress) => {
     const epicKeys = initiative.epicKeys || [];
-    const form = renderPicker(initiative, phase, 'epicKeys', 'épicas');
-    if (epicKeys.length === 0) {
-      return <>{!form && <div style={styles.muted}>Sin épicas registradas. Agrega las épicas de la iniciativa para ver sus historias y su estado.</div>}{form}</>;
+    const storyKeys = initiative.storyKeys || [];
+    const form = renderPicker(initiative, phase, 'epicKeys', 'épicas') || renderPicker(initiative, phase, 'storyKeys', 'historias');
+    if (epicKeys.length === 0 && storyKeys.length === 0) {
+      return <>{!form && <div style={styles.muted}>Sin épicas ni historias registradas. Agrega las épicas de la iniciativa, o las historias que no tienen épica, para ver su estado.</div>}{form}</>;
     }
     if (!progress?.epicsLoaded) return <><div style={styles.muted}>Consultando Jira…</div>{form}</>;
     if (progress.epicsError) return <><div style={{ ...styles.muted, color: '#AE2A19' }}>{progress.epicsError}</div>{form}</>;
@@ -844,11 +954,15 @@ const LifecycleView = ({ ctx }) => {
     const noRuns = EMPTY_RUNS;
     // Older cached answers have no per-epic breakdown: fall back to one row per key.
     const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns }));
+    // v4.24.0: stories without an epic, one row each.
+    const looseStories = (progress.looseStories && progress.looseStories.length > 0) ? progress.looseStories : storyKeys.map(key => ({ key, cases: 0, runs: noRuns }));
     const listOpen = Boolean(openRows[`${initiative.id}:epics`]);
+    const storiesOpen = Boolean(openRows[`${initiative.id}:looseStories`]);
     return (
       <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <Metric value={epics.length} label="Épicas" />
+          <Metric value={epicKeys.length} label="Épicas" />
+          {storyKeys.length > 0 && <Metric value={storyKeys.length} label="Historias sin épica" />}
           <Metric value={progress.stories} label="Historias" />
           <Metric value={progress.cases} label="Casos de prueba" />
           <div style={{ minWidth: '120px' }}>
@@ -862,10 +976,12 @@ const LifecycleView = ({ ctx }) => {
             <Bar value={coverage} />
           </div>
         </div>
-        <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={listOpen} onClick={() => toggleRow(initiative.id, 'epics')}>
-          {listOpen ? '▾ Ocultar épicas' : `▸ Ver las ${epics.length} épicas`}
-        </button>
-        {listOpen && (
+        {epicKeys.length > 0 && (
+          <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={listOpen} onClick={() => toggleRow(initiative.id, 'epics')}>
+            {listOpen ? '▾ Ocultar épicas' : `▸ Ver las ${epics.length} épicas`}
+          </button>
+        )}
+        {listOpen && epicKeys.length > 0 && (
           <div style={{ ...styles.card, marginTop: '6px', padding: '0 12px' }}>
             {epics.map(epic => (
               <div key={epic.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
@@ -881,6 +997,29 @@ const LifecycleView = ({ ctx }) => {
             ))}
           </div>
         )}
+        {storyKeys.length > 0 && (
+          <div>
+            <button type="button" style={{ ...styles.linkBtn, marginTop: '8px' }} aria-expanded={storiesOpen} onClick={() => toggleRow(initiative.id, 'looseStories')}>
+              {storiesOpen ? '▾ Ocultar historias sin épica' : `▸ Ver las ${looseStories.length} historias sin épica`}
+            </button>
+          </div>
+        )}
+        {storiesOpen && storyKeys.length > 0 && (
+          <div style={{ ...styles.card, marginTop: '6px', padding: '0 12px' }}>
+            {looseStories.map(story => (
+              <div key={story.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+                <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${story.key}`)}>{story.key}</button>
+                <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{story.summary || ''}</span>
+                <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.status ? `${story.status} · ` : ''}{story.cases} {story.cases === 1 ? 'caso' : 'casos'}</span>
+                <StateTag runs={story.runs || noRuns} />
+                {canEdit && (
+                  <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
+                    onClick={() => handleRemoveKey(initiative, 'storyKeys', story.key)}>Quitar</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {progress.truncated && <div style={{ ...styles.muted, marginTop: '6px' }}>Hay más historias de las que se pueden leer de una vez; las cifras son parciales.</div>}
         {form}
       </>
@@ -890,7 +1029,8 @@ const LifecycleView = ({ ctx }) => {
   // Phase 04 "Ejecutar": one deliverable per Test Plan, each with its cycles (children) and progress.
   const renderExecutePhase = (initiative, phase, progress) => {
     const planKeys = initiative.planKeys || [];
-    const hasEpics = (initiative.epicKeys || []).length > 0;
+    // v4.24.0: stories without an epic also feed the executions shown here.
+    const hasEpics = (initiative.epicKeys || []).length > 0 || (initiative.storyKeys || []).length > 0;
     const form = renderPicker(initiative, phase, 'planKeys', 'planes');
     if (planKeys.length === 0 && !hasEpics) {
       return <>{!form && <div style={styles.muted}>Sin planes de prueba registrados. Agrega los Test Plans de Test Pulse para ver sus ciclos y su avance.</div>}{form}</>;
@@ -996,9 +1136,17 @@ const LifecycleView = ({ ctx }) => {
           <strong style={{ fontSize: '0.9rem', color: 'var(--jira-text, #172B4D)' }}>{phase.number} {phase.title}</strong>
           <span style={styles.muted}>Entregable: {phase.deliverable}</span>
           {canEdit && phase.auto && !(picker && picker.initiativeId === initiative.id && picker.phaseId === phase.id) && (
-            <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }} onClick={() => openPicker(initiative, phase)}>
-              {phase.id === 'build' ? '+ Agregar épicas' : '+ Agregar planes de prueba'}
-            </button>
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '14px' }}>
+              {phase.id === 'build' ? (
+                <>
+                  <button type="button" style={styles.linkBtn} onClick={() => openPicker(initiative, phase, 'epicKeys')}>+ Agregar épicas</button>
+                  {/* v4.24.0: stories that have no epic can be followed too. */}
+                  <button type="button" style={styles.linkBtn} onClick={() => openPicker(initiative, phase, 'storyKeys')}>+ Agregar historias sin épica</button>
+                </>
+              ) : (
+                <button type="button" style={styles.linkBtn} onClick={() => openPicker(initiative, phase, 'planKeys')}>+ Agregar planes de prueba</button>
+              )}
+            </span>
           )}
           {canEdit && !phase.auto && !isAdding && (
             <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
@@ -1012,9 +1160,11 @@ const LifecycleView = ({ ctx }) => {
           : (
             <>
               {deliverablesOf(initiative, phase.id).length === 0 && !isAdding && <div style={styles.muted}>Sin entregables registrados.</div>}
-              {deliverablesOf(initiative, phase.id).map(deliverable => renderDeliverable(initiative, phase, deliverable))}
+              {phase.id === 'design'
+                ? renderGroupedDeliverables(initiative, phase)
+                : deliverablesOf(initiative, phase.id).map(deliverable => renderDeliverable(initiative, phase, deliverable))}
               {isAdding && (
-                <DeliverableForm phase={phase} saving={busy === 'deliverable'} onCancel={() => setEditing(null)}
+                <DeliverableForm phase={phase} saving={busy === 'deliverable'} onCancel={() => setEditing(null)} defaultTeam={myTeam}
                   onSave={(form) => handleSaveDeliverable(initiative, phase.id, form)} />
               )}
             </>

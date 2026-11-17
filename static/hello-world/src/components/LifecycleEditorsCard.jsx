@@ -12,6 +12,8 @@
  *     resolver (the same one used to assign testers), 300 ms after the last keystroke.
  *   - Adding or removing a person saves the whole list at once with `saveLifecycleEditors`.
  *     The backend checks again that the caller administers the project.
+ *   - v4.24.0: each editor belongs to a team (Dev, QA or UAT). Lifecycle groups the findings
+ *     reports by these teams and pre-selects the team of whoever adds a report.
  */
 
 import React, { useEffect, useRef, useState } from 'react';
@@ -26,6 +28,13 @@ const cardStyle = {
   boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
 };
 const mutedStyle = { color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem' };
+
+// Teams an editor can belong to (v4.24.0). The ids are stored; the labels are only for display.
+export const LIFECYCLE_TEAM_OPTIONS = [
+  { id: 'dev', label: 'Dev' },
+  { id: 'qa', label: 'QA' },
+  { id: 'uat', label: 'UAT' }
+];
 
 /** Small round avatar; falls back to the first letter of the name when there is no picture. */
 const Avatar = ({ user }) => (user.avatarUrl
@@ -104,10 +113,18 @@ export default function LifecycleEditorsCard({ projectId, addNotification }) {
     setQuery('');
     setResults([]);
     saveEditors(
-      [...editors, { accountId: user.accountId, displayName: user.displayName, avatarUrl: user.avatarUrl || '' }],
+      [...editors, { accountId: user.accountId, displayName: user.displayName, avatarUrl: user.avatarUrl || '', team: '' }],
       `${user.displayName} ahora puede editar Lifecycle`
     );
   };
+
+  /** Moves an editor to another team ('' = no team). */
+  const changeTeam = (user, team) => saveEditors(
+    editors.map(editor => (editor.accountId === user.accountId ? { ...editor, team } : editor)),
+    team
+      ? `${user.displayName} ahora está en el equipo ${LIFECYCLE_TEAM_OPTIONS.find(option => option.id === team)?.label || team}`
+      : `${user.displayName} ya no tiene equipo`
+  );
 
   const removeEditor = (user) => saveEditors(
     editors.filter(editor => editor.accountId !== user.accountId),
@@ -128,7 +145,8 @@ export default function LifecycleEditorsCard({ projectId, addNotification }) {
       <p style={{ margin: '0 0 1rem 0', ...mutedStyle }}>
         Todos los usuarios del proyecto pueden ver la pestaña Lifecycle. Solo las personas de esta lista,
         los administradores del proyecto y los superusuarios de Test Pulse pueden crear iniciativas y
-        agregar o editar entregables.
+        agregar o editar entregables. El equipo de cada persona (Dev, QA o UAT) sirve para agrupar
+        los reportes de hallazgos en Lifecycle.
       </p>
 
       {loading ? (
@@ -143,6 +161,20 @@ export default function LifecycleEditorsCard({ projectId, addNotification }) {
               <span key={editor.accountId} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 8px 4px 4px', borderRadius: '16px', border: '1px solid var(--ds-border, #30363d)', color: 'var(--text-primary, #e6edf3)', fontSize: '0.85rem' }}>
                 <Avatar user={editor} />
                 {editor.displayName}
+                {canManage ? (
+                  <select
+                    value={editor.team || ''}
+                    onChange={(event) => changeTeam(editor, event.target.value)}
+                    disabled={saving}
+                    aria-label={`Equipo de ${editor.displayName}`}
+                    style={{ border: '1px solid var(--ds-border, #30363d)', borderRadius: '10px', background: 'transparent', color: 'var(--text-primary, #e6edf3)', fontSize: '0.78rem', padding: '1px 4px' }}
+                  >
+                    <option value="">Sin equipo</option>
+                    {LIFECYCLE_TEAM_OPTIONS.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+                  </select>
+                ) : (
+                  editor.team && <span style={mutedStyle}>· {LIFECYCLE_TEAM_OPTIONS.find(option => option.id === editor.team)?.label}</span>
+                )}
                 {canManage && (
                   <button
                     type="button"
