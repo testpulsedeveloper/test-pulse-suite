@@ -999,15 +999,54 @@ const LifecycleView = ({ ctx }) => {
     const epics = (progress.epics && progress.epics.length > 0) ? progress.epics : epicKeys.map(key => ({ key, stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns }));
     // v4.24.0: stories without an epic, one row each.
     const looseStories = (progress.looseStories && progress.looseStories.length > 0) ? progress.looseStories : storyKeys.map(key => ({ key, cases: 0, runs: noRuns }));
+    // v4.27.0: stories WITHOUT test cases (inside the epics and among the stories without epic).
+    const storiesWithoutCases = epics.reduce((sum, epic) => sum + (epic.storyList || []).filter(st => !st.cases).length, 0) +
+      looseStories.filter(story => !story.cases).length;
+    // "Solo historias sin casos": keeps only those stories (and the epics that have any).
+    const noCasesOnly = Boolean(openRows[`${initiative.id}:nocases`]);
+
     // One list for phase 03: epics first, then the stories added without an epic.
     const buildItems = [
       ...epics.map(epic => ({ ...epic, kind: 'epic' })),
       ...looseStories.map(story => ({ ...story, kind: 'story' }))
-    ];
-    /** One row of phase 03: an epic (with its stories) or a story without epic. */
-    const renderBuildItem = (item) => (
-      <div key={`${item.kind}:${item.key}`} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0 7px 18px', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
-        <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', flex: '0 0 auto' }}>{item.kind === 'epic' ? 'Épica' : 'Historia'}</span>
+    ].filter(item => !noCasesOnly || (item.kind === 'epic'
+      ? (item.storyList || []).some(st => !st.cases)
+      : !item.cases));
+
+    /** Stories of an epic, shown when the epic is opened (or always with the filter on). */
+    const renderEpicStories = (epic) => {
+      const list = (epic.storyList || []).filter(st => !noCasesOnly || !st.cases);
+      if (list.length === 0) {
+        return <div style={{ ...styles.muted, padding: '4px 0 8px 46px' }}>{noCasesOnly ? 'Todas sus historias tienen casos.' : 'Esta épica no tiene historias.'}</div>;
+      }
+      return list.map(story => (
+        <div key={story.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '5px 0 5px 46px', borderBottom: '1px dotted var(--jira-border, #DCDFE4)', fontSize: '0.8rem', flexWrap: 'wrap' }}>
+          <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto' }} onClick={() => openLink(`/browse/${story.key}`)}>{story.key}</button>
+          <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{story.summary || ''}</span>
+          {story.status && <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.status}</span>}
+          {story.cases > 0
+            ? <span style={{ flex: '0 0 auto', ...styles.muted }}>{story.cases} {story.cases === 1 ? 'caso' : 'casos'}</span>
+            : <span className="ads-lozenge" style={{ flex: '0 0 auto', fontSize: '10px', background: '#FFECEB', color: '#AE2A19' }}>Sin casos</span>}
+          <StateTag runs={story.runs || noRuns} />
+        </div>
+      ));
+    };
+    /** One row of phase 03: an epic (that opens to show its stories) or a story without epic. */
+    const renderBuildItem = (item) => {
+      const isEpic = item.kind === 'epic';
+      const epicOpen = isEpic && (noCasesOnly || Boolean(openRows[`${initiative.id}:story:${item.key}`]));
+      const missing = isEpic ? (item.storyList || []).filter(st => !st.cases).length : 0;
+      return (
+      <div key={`${item.kind}:${item.key}`}>
+      <div style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '7px 0 7px 18px', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+        {isEpic ? (
+          <button type="button" onClick={() => toggleRow(initiative.id, `story:${item.key}`)} aria-expanded={epicOpen} disabled={noCasesOnly}
+            title={epicOpen ? 'Ocultar historias' : 'Ver historias'}
+            style={{ ...styles.linkBtn, color: 'var(--jira-subtle, #626F86)', width: '12px', flex: '0 0 auto' }}>
+            {epicOpen ? '▾' : '▸'}
+          </button>
+        ) : <span style={{ width: '12px', flex: '0 0 auto' }} />}
+        <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', flex: '0 0 auto' }}>{isEpic ? 'Épica' : 'Historia'}</span>
         <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto', fontWeight: 700 }} onClick={() => openLink(`/browse/${item.key}`)}>{item.key}</button>
         <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{item.summary || ''}</span>
         <span style={{ flex: '0 0 auto', ...styles.muted }}>
@@ -1015,14 +1054,19 @@ const LifecycleView = ({ ctx }) => {
             ? `${item.stories} ${item.stories === 1 ? 'historia' : 'historias'} · ${item.cases} casos`
             : `${item.status ? `${item.status} · ` : ''}${item.cases} ${item.cases === 1 ? 'caso' : 'casos'}`}
         </span>
+        {isEpic && missing > 0 && <span className="ads-lozenge" style={{ flex: '0 0 auto', fontSize: '10px', background: '#FFECEB', color: '#AE2A19' }}>{missing} sin casos</span>}
+        {!isEpic && !item.cases && <span className="ads-lozenge" style={{ flex: '0 0 auto', fontSize: '10px', background: '#FFECEB', color: '#AE2A19' }}>Sin casos</span>}
         {groupMode !== 'user' && item.reporter?.displayName && <span style={{ flex: '0 0 auto', ...styles.muted }}>Informador: {item.reporter.displayName}</span>}
         <StateTag runs={item.runs || noRuns} />
         {canEdit && (
           <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy}
-            onClick={() => handleRemoveKey(initiative, item.kind === 'epic' ? 'epicKeys' : 'storyKeys', item.key)}>Quitar</button>
+            onClick={() => handleRemoveKey(initiative, isEpic ? 'epicKeys' : 'storyKeys', item.key)}>Quitar</button>
         )}
       </div>
-    );
+      {epicOpen && renderEpicStories(item)}
+      </div>
+      );
+    };
     return (
       <>
         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -1030,6 +1074,7 @@ const LifecycleView = ({ ctx }) => {
           {storyKeys.length > 0 && <Metric value={storyKeys.length} label="Historias sin épica" />}
           <Metric value={progress.stories} label="Historias" />
           <Metric value={progress.cases} label="Casos de prueba" />
+          <Metric value={storiesWithoutCases} label="Historias sin casos" color={storiesWithoutCases > 0 ? '#C9372C' : undefined} />
           <div style={{ minWidth: '120px' }}>
             <div style={{ marginBottom: '4px' }}><StateTag runs={progress.runs} /></div>
             <div style={styles.muted}>Estado general</div>
@@ -1041,6 +1086,14 @@ const LifecycleView = ({ ctx }) => {
             <Bar value={coverage} />
           </div>
         </div>
+        {/* v4.27.0: show only the stories that still have no test cases. */}
+        {storiesWithoutCases > 0 && (
+          <label style={{ ...styles.muted, display: 'inline-flex', alignItems: 'center', gap: '6px', marginTop: '10px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={noCasesOnly} onChange={() => toggleRow(initiative.id, 'nocases')} />
+            Solo historias sin casos ({storiesWithoutCases})
+          </label>
+        )}
+        {noCasesOnly && buildItems.length === 0 && <div style={{ ...styles.muted, marginTop: '6px' }}>Todas las historias tienen casos de prueba.</div>}
         {/* v4.25.0: epics and stories without epic in one list, grouped by the team (or the
             person) of their Jira reporter. Each group can be opened and closed. */}
         {renderGroups(initiative, phase.id, buildItems, {

@@ -553,7 +553,9 @@ async function computeProgress(epicKeys, storyKeys = []) {
   // One entry per epic of the initiative, in the order they were added. An epic without stories
   // still appears (with zeros) so it is visible that nothing has been built for it yet.
   // `runs` (v4.22.0) are the executions of the epic's test cases: they give its general status.
-  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', reporter: reporterOf(epicIssuesByKey.get(key)), stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
+  // v4.27.0: `storyList` = the epic's stories one by one (key, title, status, test cases and the
+  // executions of those cases), so phase 03 can open an epic and point at stories WITHOUT cases.
+  const epicMap = new Map(epicKeys.map(key => [key, { key, summary: epicTitles.get(key) || '', reporter: reporterOf(epicIssuesByKey.get(key)), stories: 0, storiesWithCases: 0, cases: 0, runs: noRuns(), storyList: [] }]));
   // v4.24.0: one entry per story without epic, in the order they were added. A story the user
   // cannot see (or that was deleted) still appears, with zeros, so it can be removed.
   const looseMap = new Map(storyKeys.map(key => [key, { key, summary: '', status: '', reporter: null, stories: 1, storiesWithCases: 0, cases: 0, runs: noRuns() }]));
@@ -593,13 +595,26 @@ async function computeProgress(epicKeys, storyKeys = []) {
     const group = epic || loose;
     if (group) {
       if (storyCases.length > 0) group.storiesWithCases++;
-      if (!groupCases.has(group)) groupCases.set(group, new Set());
-      storyCases.forEach(c => {
-        groupCases.get(group).add(c.key);
-        if (!caseGroups.has(c.key)) caseGroups.set(c.key, new Set());
-        caseGroups.get(c.key).add(group);
-      });
+      // A story of an epic is also its own small group, so its executions are counted too.
+      const storyEntry = epic
+        ? { key: story.key, summary: text(story?.fields?.summary, 160), status: text(story?.fields?.status?.name, 40), cases: 0, runs: noRuns() }
+        : null;
+      if (storyEntry) epic.storyList.push(storyEntry);
+      for (const target of [group, storyEntry].filter(Boolean)) {
+        if (!groupCases.has(target)) groupCases.set(target, new Set());
+        storyCases.forEach(c => {
+          groupCases.get(target).add(c.key);
+          if (!caseGroups.has(c.key)) caseGroups.set(c.key, new Set());
+          caseGroups.get(c.key).add(target);
+        });
+      }
     }
+  }
+  // Distinct test cases per story of an epic (a case linked twice counts once).
+  for (const epic of epicMap.values()) {
+    for (const entry of epic.storyList) entry.cases = groupCases.get(entry)?.size || 0;
+    // Stories without cases first, then by key, so the gaps are seen at a glance.
+    epic.storyList.sort((a, b) => (a.cases > 0) - (b.cases > 0) || String(a.key).localeCompare(String(b.key), undefined, { numeric: true }));
   }
   for (const group of [...epicMap.values(), ...looseMap.values()]) group.cases = groupCases.get(group)?.size || 0;
   const storyCount = stories.filter(s => !isTestCase(s) && !isTestRun(s) && !isBug(s)).length;

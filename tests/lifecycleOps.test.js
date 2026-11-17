@@ -202,3 +202,18 @@ test('timeline bar states: done, late, in progress, pending', async () => {
   assert.equal(barState({ total: 4, passed: 1, failed: 1, blocked: 0 }, future, today), 'progress');
   assert.equal(barState({ total: 4, passed: 0, failed: 0, blocked: 0 }, future, today), 'pending');
 });
+
+// ── v4.27.0: stories of each epic and stories without cases ──────────────────────────────────
+
+test('phase 03 returns each epic story with its cases and flags stories without cases', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(server, /storyList: \[\] \}\]\)\);/);
+  // Each story is its own group, so its executions are counted too.
+  assert.match(server, /for \(const target of \[group, storyEntry\]\.filter\(Boolean\)\)/);
+  // Stories without cases are listed first.
+  assert.match(server, /\(a\.cases > 0\) - \(b\.cases > 0\)/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /label="Historias sin casos"/);
+  assert.match(view, /Solo historias sin casos/);
+  assert.match(view, /renderEpicStories\(item\)/);
+});
