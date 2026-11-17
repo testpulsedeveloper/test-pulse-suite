@@ -189,3 +189,42 @@ export const extractEpicAndRequirement = (tc, config = {}, reqMap = {}) => {
 
   return { epicKey, epicSummary, reqKey, reqSummary };
 };
+
+/**
+ * Builds a map "test case id → test case key" (both upper-cased) from every place the
+ * traceability view knows test cases: the project's test cases and the cases linked to each story.
+ *
+ * Why (v4.23.6): the traceability view remembers each linked test case by its key AND by its id,
+ * so it can match executions that store either of them. Counting that set directly counted every
+ * case twice ("4 casos" became "8 casos"). With this map, both references collapse into one case.
+ *
+ * @param {Object[]} testCases - Test cases loaded by the app ({ id, key }).
+ * @param {Object[]} stories - traceabilityHierarchy.stories ({ linkedTestCases: [{ id, key }] }).
+ * @returns {Map<string, string>}
+ */
+export const buildCaseIdToKey = (testCases = [], stories = []) => {
+  const map = new Map();
+  const note = (tc) => {
+    if (tc?.id && tc?.key) map.set(String(tc.id).trim().toUpperCase(), String(tc.key).trim().toUpperCase());
+  };
+  (testCases || []).forEach(note);
+  (stories || []).forEach(story => (story?.linkedTestCases || []).forEach(note));
+  return map;
+};
+
+/**
+ * Counts the DISTINCT test cases in a set of references that may hold, for the same case, its
+ * key ("CUQ-12") and its numeric id ("10234").
+ *
+ * @param {Iterable<string>} refs - Upper-cased keys and/or ids.
+ * @param {Map<string, string>} idToKey - From buildCaseIdToKey.
+ * @returns {number}
+ */
+export const countDistinctCases = (refs, idToKey) => {
+  const unique = new Set();
+  for (const ref of refs || []) {
+    const up = String(ref).trim().toUpperCase();
+    if (up) unique.add(idToKey?.get(up) || up);
+  }
+  return unique.size;
+};

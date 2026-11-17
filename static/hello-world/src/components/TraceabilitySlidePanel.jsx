@@ -35,7 +35,7 @@ import {
   LoadMoreSentinel
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
-import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+import { extractEpicAndRequirement, buildCaseIdToKey, countDistinctCases } from '../utils/traceabilityHelpers';
 import PanelDockSwitcher, {
   usePanelDockPosition,
   usePanelDockWidth,
@@ -289,7 +289,8 @@ export default function TraceabilitySlidePanel({ ctx }) {
           status: aggSt,
           bugs: Array.from(b.bugsMap.values()),
           executedTcCount: b.executedTcCount,
-          linkedTcCount: linkedTestCaseObjects.length || storyTcRefs.size
+          // v4.23.6: storyTcRefs has each case by key AND id; count distinct cases, not refs.
+          linkedTcCount: linkedTestCaseObjects.length || countDistinctCases(storyTcRefs, buildCaseIdToKey(testCases, traceabilityHierarchy?.stories))
         };
       });
     }

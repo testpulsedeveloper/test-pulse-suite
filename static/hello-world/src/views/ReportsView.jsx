@@ -35,7 +35,7 @@ import {
   LoadMoreSentinel
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
-import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+import { extractEpicAndRequirement, buildCaseIdToKey, countDistinctCases } from '../utils/traceabilityHelpers';
 import {
   blockedRate,
   mttrBySeverity,
@@ -2721,6 +2721,14 @@ export default function ReportsView({ ctx }) {
       }
     });
 
+    // v4.23.6: number of DISTINCT test cases of each story. `tcRefSet` holds every case twice (by
+    // key and by id, so executions stored either way are found), so its size doubled the count:
+    // a story with 4 cases showed 8. `tcCount` is what the screen shows; `tcRefSet` stays for lookups.
+    const caseIdToKey = buildCaseIdToKey(testCases, traceabilityHierarchy?.stories);
+    consolidatedStoriesMap.forEach(st => {
+      st.tcCount = countDistinctCases(st.tcRefSet, caseIdToKey);
+    });
+
     // Resolve any missing Epic summaries on Stories
     consolidatedStoriesMap.forEach(st => {
       if (st.epicKey && !st.epicSummary) {
@@ -2819,7 +2827,7 @@ export default function ReportsView({ ctx }) {
             cycleId: group.cycleId,
             cycleName: group.cycleName,
             status: aggregateCycleStatus(group.statuses),
-            linkedTcCount: storyObj?.tcRefSet?.size || 0,
+            linkedTcCount: storyObj?.tcCount || 0,
             executedTcCount: group.tcKeys.size,
             bugs: Array.from(group.bugsMap.values())
           });
@@ -2844,7 +2852,7 @@ export default function ReportsView({ ctx }) {
           cycleId: null,
           cycleName: hasLinkedTcs ? 'Sin ciclo de ejecución' : 'Pendiente de cobertura',
           status: 'NOT_RUN',
-          linkedTcCount: storyObj?.tcRefSet?.size || 0,
+          linkedTcCount: storyObj?.tcCount || 0,
           executedTcCount: 0,
           bugs: []
         });
@@ -6211,7 +6219,7 @@ export default function ReportsView({ ctx }) {
               const stRows = rowsByStoryKey.get(stUpper) || [];
               const cycles = [];
               const bugsMap = new Map();
-              let maxLinkedTc = st.tcRefSet ? st.tcRefSet.size : 0;
+              let maxLinkedTc = st.tcCount || 0;
 
               stRows.forEach((r) => {
                 if ((r.linkedTcCount || 0) > maxLinkedTc) maxLinkedTc = r.linkedTcCount;

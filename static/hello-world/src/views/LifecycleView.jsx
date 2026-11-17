@@ -400,8 +400,25 @@ const LifecycleView = ({ ctx }) => {
     addNotification({ type: 'error', title, description: error?.message || String(error || '') });
   }, [addNotification]);
 
-  const replaceInitiative = (initiative) =>
-    setInitiatives(prev => prev.map(item => (item.id === initiative.id ? initiative : item)));
+  /**
+   * Copies the `report` of each deliverable of `fresh` into the initiative shown on screen,
+   * matching deliverables by id. Deliverables only one side knows are left as they are.
+   */
+  const mergeReports = (fresh) => setInitiatives(prev => prev.map(item => {
+    if (item.id !== fresh.id) return item;
+    const reports = new Map();
+    for (const phase of Object.values(fresh.phases || {})) {
+      for (const deliverable of phase?.deliverables || []) reports.set(deliverable.id, deliverable.report);
+    }
+    const phases = {};
+    for (const [phaseId, phase] of Object.entries(item.phases || {})) {
+      phases[phaseId] = {
+        ...phase,
+        deliverables: (phase?.deliverables || []).map(d => (reports.has(d.id) ? { ...d, report: reports.get(d.id) } : d))
+      };
+    }
+    return { ...item, phases };
+  }));
 
   // Load the initiatives of the project when the tab opens or the project changes.
   useEffect(() => {
@@ -427,7 +444,9 @@ const LifecycleView = ({ ctx }) => {
     setBusy(deliverableId || `refresh_${initiative.id}`);
     try {
       const res = await invoke('refreshLifecycleFindings', { projectId: selectedProjectId, initiativeId: initiative.id, deliverableId });
-      if (res?.initiative) replaceInitiative(res.initiative);
+      // v4.23.6: only the reports that were read are copied into what the page shows. Replacing
+      // the whole initiative could hide a deliverable saved while Confluence was being read.
+      if (res?.initiative) mergeReports(res.initiative);
     } catch (error) {
       if (!silent) notifyError('No se pudo actualizar el entregable', error);
     } finally {
@@ -513,17 +532,39 @@ const LifecycleView = ({ ctx }) => {
     }
   };
 
+  /**
+   * Sends ONE change of an existing initiative to the server (v4.23.6). The server applies it to
+   * the version stored at that moment and answers with the result, so a change made meanwhile by
+   * another save, a Confluence refresh or another person is never erased by this one.
+   *
+   * @param {string} initiativeId - Initiative to change.
+   * @param {Object} op - Operation, see src/utils/lifecycleOps.js (type + its fields).
+   * @param {string} busyKey - What the UI shows as "busy" while the request runs.
+   * @returns {Promise<Object|null>} The stored initiative, or null when the change failed.
+   */
+  const updateInitiative = async (initiativeId, op, busyKey) => {
+    setBusy(busyKey);
+    try {
+      const res = await invoke('updateLifecycleInitiative', { projectId: selectedProjectId, initiativeId, op });
+      const saved = res.initiative;
+      setInitiatives(prev => prev.map(item => (item.id === saved.id ? saved : item)));
+      return saved;
+    } catch (error) {
+      notifyError('No se pudo guardar', error);
+      return null;
+    } finally {
+      setBusy('');
+    }
+  };
+
   const handleSaveInitiativeForm = async () => {
     const form = initiativeForm;
     const existing = initiatives.find(item => item.id === form.id);
-    const saved = await saveInitiative({
-      ...(existing || { phases: emptyPhases() }),
-      id: form.id,
-      name: form.name.trim(),
-      description: form.description.trim()
-      // Epics and Test Plans are not part of this form (v4.22.2): they keep whatever the
-      // initiative already has and are managed in phases 03 and 04.
-    }, 'initiative');
+    // Epics, Test Plans and deliverables are not part of this form (v4.22.2): an existing
+    // initiative only changes its name and description, so nothing else can be overwritten.
+    const saved = existing
+      ? await updateInitiative(existing.id, { type: 'info', name: form.name.trim(), description: form.description.trim() }, 'initiative')
+      : await saveInitiative({ phases: emptyPhases(), name: form.name.trim(), description: form.description.trim() }, 'initiative');
     if (saved) {
       setInitiativeForm(null);
       setExpandedId(saved.id);
@@ -532,11 +573,9 @@ const LifecycleView = ({ ctx }) => {
   };
 
   const handleSaveDeliverable = async (initiative, phaseId, deliverable) => {
-    const current = deliverablesOf(initiative, phaseId);
-    const nextList = deliverable.id
-      ? current.map(item => (item.id === deliverable.id ? { ...item, ...deliverable } : item))
-      : [...current, deliverable];
-    const saved = await saveInitiative({ ...initiative, phases: { ...initiative.phases, [phaseId]: { deliverables: nextList } } }, 'deliverable');
+    // Only this deliverable travels to the server (v4.23.6); the rest of the initiative is
+    // taken from what is stored, so reports added meanwhile are kept.
+    const saved = await updateInitiative(initiative.id, { type: 'upsertDeliverable', phaseId, deliverable }, 'deliverable');
     if (!saved) return;
     setEditing(null);
     // A new or re-linked findings report is read from Confluence right away.
@@ -579,7 +618,7 @@ const LifecycleView = ({ ctx }) => {
     const current = initiative[field] || [];
     const chosen = (picker?.selected || []).filter(key => !current.includes(key));
     if (chosen.length === 0) return;
-    const saved = await saveInitiative({ ...initiative, [field]: [...current, ...chosen] }, 'keys');
+    const saved = await updateInitiative(initiative.id, { type: 'addKeys', field, keys: chosen }, 'keys');
     if (saved) {
       setPicker(null);
       loadProgress(saved); // read the figures again with the new selection
@@ -588,7 +627,7 @@ const LifecycleView = ({ ctx }) => {
 
   /** Removes an epic or a Test Plan from the initiative. Nothing is changed in Jira. */
   const handleRemoveKey = async (initiative, field, key) => {
-    const saved = await saveInitiative({ ...initiative, [field]: (initiative[field] || []).filter(item => item !== key) }, `remove_${key}`);
+    const saved = await updateInitiative(initiative.id, { type: 'removeKey', field, key }, `remove_${key}`);
     if (saved) loadProgress(saved);
   };
 
@@ -596,10 +635,7 @@ const LifecycleView = ({ ctx }) => {
     setOpenRows(prev => ({ ...prev, [`${initiativeId}:${key}`]: !prev[`${initiativeId}:${key}`] }));
 
   const handleRemoveDeliverable = (initiative, phaseId, deliverableId) =>
-    saveInitiative({
-      ...initiative,
-      phases: { ...initiative.phases, [phaseId]: { deliverables: deliverablesOf(initiative, phaseId).filter(item => item.id !== deliverableId) } }
-    }, deliverableId);
+    updateInitiative(initiative.id, { type: 'removeDeliverable', phaseId, deliverableId }, deliverableId);
 
   const handleDeleteInitiative = async (initiativeId) => {
     setBusy(`delete_${initiativeId}`);

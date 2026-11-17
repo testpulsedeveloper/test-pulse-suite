@@ -38,6 +38,8 @@ import { evaluateTestPlan } from '../utils/testPlanChecklist.js';
 import { currentPlanRefOfCycle, isSamePlan } from '../utils/planCycleRules.js';
 // Performance helpers (v4.22.1): bounded parallelism and a 60-second memory of expensive lists.
 import { mapLimit, createShortCache } from '../utils/asyncHelpers.js';
+// v4.23.6: one change at a time, applied to the stored version (see lifecycleOps.js).
+import { applyLifecycleOperation, fitsInStorage } from '../utils/lifecycleOps.js';
 
 // Shared by the resolvers of this file; entries are per user (see asyncHelpers.js).
 const cachedFor = createShortCache();
@@ -47,7 +49,9 @@ export const LIFECYCLE_PHASES = ['plan', 'design', 'build', 'execute', 'release'
 
 const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'delivered'];
 const MAX_INITIATIVES = 100;
-const MAX_DELIVERABLES_PER_PHASE = 30;
+// v4.23.6: raised from 30. It is only a safety ceiling; the real limit is the size of the
+// initiative in storage, checked with fitsInStorage() before every write.
+const MAX_DELIVERABLES_PER_PHASE = 200;
 // v4.22.2: an initiative may take every epic of a project, so there is no functional limit.
 // These numbers are only safety ceilings that keep one initiative inside what Forge storage and
 // the 25-second resolver limit can handle; a real project is far below them.
@@ -83,6 +87,8 @@ const safeUrl = (value) => {
 
 /** A short random id for initiatives and deliverables. */
 const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+const TOO_BIG_MESSAGE = 'La iniciativa llegó al tamaño máximo que Test Pulse puede guardar. Quita entregables que ya no uses o divide la iniciativa en dos.';
 
 const isSafeId = (value) => /^[a-z0-9]{6,24}$/i.test(String(value || ''));
 
@@ -693,7 +699,29 @@ export const registerLifecycleResolvers = (resolver) => {
       throw new Error(`Se alcanzó el máximo de ${MAX_INITIATIVES} iniciativas por proyecto.`);
     }
     const initiative = sanitizeInitiative(raw, stored, context?.accountId);
+    if (!fitsInStorage(initiative)) throw new Error(TOO_BIG_MESSAGE);
     await storage.set(`${keyPrefix(projectId)}${initiative.id}`, initiative);
+    return { initiative };
+  });
+
+  // v4.23.6: applies ONE change (add/edit/remove a deliverable, add/remove epics or plans, rename)
+  // to the version of the initiative stored right now, instead of replacing the whole initiative
+  // with the browser's copy. Two changes that overlap no longer erase each other.
+  resolver.define('updateLifecycleInitiative', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    await requireLifecycleEditor(projectId, context);
+    if (!isSafeId(payload.initiativeId)) throw new Error('Iniciativa inválida.');
+    const key = `${keyPrefix(projectId)}${payload.initiativeId}`;
+    // Read as late as possible: everything between this read and the write below is synchronous
+    // except the write itself, so the window in which another change could slip in is minimal.
+    const stored = await storage.get(key);
+    if (!stored) throw new Error('La iniciativa ya no existe. Recarga la vista.');
+    const initiative = sanitizeInitiative(applyLifecycleOperation(stored, payload.op), stored, context?.accountId);
+    if (!fitsInStorage(initiative)) throw new Error(TOO_BIG_MESSAGE);
+    await storage.set(key, initiative);
+    // Only ids and counts are logged (no names, links or people), to trace lost changes.
+    const count = LIFECYCLE_PHASES.reduce((sum, phase) => sum + (initiative.phases?.[phase]?.deliverables?.length || 0), 0);
+    console.log(`[lifecycle] update initiative=${initiative.id} op=${String(payload.op?.type).slice(0, 30)} phase=${String(payload.op?.phaseId || '-').slice(0, 10)} deliverables=${count} by=${context?.accountId || 'n/a'}`);
     return { initiative };
   });
 
