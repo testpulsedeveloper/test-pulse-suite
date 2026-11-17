@@ -18,6 +18,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { router } from '@forge/bridge';
 import TestPulseLoader from '../components/TestPulseLoader';
+// v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
+import LifecycleTimeline from '../components/LifecycleTimeline';
 import { invoke } from '../utils/queryClient';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
@@ -415,6 +417,9 @@ const LifecycleView = ({ ctx }) => {
   // current user, both from getLifecycle. Used to group reports and to pre-fill the team.
   const [people, setPeople] = useState([]);
   const [myTeam, setMyTeam] = useState('');
+  // v4.26.0: general timeline of every initiative, loaded only when it is opened.
+  // { open, loading, error, data: { initiatives: [...] } }
+  const [generalTimeline, setGeneralTimeline] = useState({ open: false, loading: false, error: '', data: null });
   // v4.25.0: groups the user closed in phases 02/03 ("initiative:phase:mode:group" → true).
   const [collapsedGroups, setCollapsedGroups] = useState({});
   // How phases 02 and 03 group their items: 'team', 'user' or 'none' (remembered in this browser).
@@ -1223,6 +1228,118 @@ const LifecycleView = ({ ctx }) => {
     </div>
   );
 
+  /** Deliverables of an initiative that have a delivery date, as timeline milestones. */
+  const milestonesOf = (initiative, prefix = '') => PHASES.flatMap(phase => deliverablesOf(initiative, phase.id)
+    .filter(deliverable => deliverable.date)
+    .map(deliverable => ({ date: deliverable.date, label: `${prefix}${phase.number} ${phase.title}: ${deliverable.name}` })));
+
+  /**
+   * Timeline of one initiative (v4.26.0): a bar per Test Plan of phase 04 (its dates from
+   * Planning) with its cycles under it, and the deliverables with a date as milestones.
+   * It reuses the plans already loaded for phase 04, so it costs no extra request.
+   */
+  const renderInitiativeTimeline = (initiative, progress) => {
+    const closedKey = `${initiative.id}:timeline-closed`;
+    const open = !openRows[closedKey];
+    const planKeys = initiative.planKeys || [];
+    let body = null;
+    if (open) {
+      if (planKeys.length > 0 && !progress?.plansLoaded) {
+        body = <div style={styles.muted}>Consultando Jira…</div>;
+      } else {
+        const rows = [];
+        for (const key of planKeys) {
+          const plan = (progress?.plans || []).find(item => item.key === key) || { key, cycles: [] };
+          const cyclesOpen = Boolean(openRows[`${initiative.id}:tl:${key}`]);
+          const cycles = plan.cycles || [];
+          rows.push({
+            id: `plan:${key}`, label: key, sublabel: plan.summary || '', start: plan.startDate, end: plan.endDate,
+            runs: plan.totals, href: `/browse/${key}`,
+            ...(cycles.length > 0 ? { open: cyclesOpen, onToggle: () => toggleRow(initiative.id, `tl:${key}`) } : {})
+          });
+          if (cyclesOpen) {
+            for (const cycle of cycles) {
+              rows.push({ id: `cycle:${cycle.key}`, label: cycle.key, sublabel: cycle.summary, start: cycle.startDate, end: cycle.endDate, runs: cycle, href: `/browse/${cycle.key}`, level: 1 });
+            }
+          }
+        }
+        body = (
+          <LifecycleTimeline rows={rows} milestones={milestonesOf(initiative)} onOpen={openLink}
+            emptyText="Sin fechas todavía. Agrega Test Plans en 04 Ejecutar (con fechas en Planeación) o fechas de entrega a los entregables." />
+        );
+      }
+    }
+    return (
+      <div style={{ marginTop: '14px' }}>
+        <button type="button" style={{ ...styles.linkBtn, fontWeight: 700 }} aria-expanded={open} onClick={() => toggleRow(initiative.id, 'timeline-closed')}>
+          {open ? '▾ Cronograma' : '▸ Cronograma'}
+        </button>
+        {open && <div style={{ marginTop: '6px' }}>{body}</div>}
+      </div>
+    );
+  };
+
+  /** Opens/closes the general timeline; the first opening loads it (one request). */
+  const toggleGeneralTimeline = async () => {
+    if (generalTimeline.open) {
+      setGeneralTimeline(prev => ({ ...prev, open: false }));
+      return;
+    }
+    setGeneralTimeline(prev => ({ ...prev, open: true, loading: true, error: '' }));
+    try {
+      const data = await invoke('getLifecycleTimeline', { projectId: selectedProjectId });
+      setGeneralTimeline({ open: true, loading: false, error: '', data });
+    } catch (error) {
+      setGeneralTimeline({ open: true, loading: false, error: error?.message || String(error), data: null });
+    }
+  };
+
+  /**
+   * General timeline (v4.26.0): one bar per initiative, from the first start to the last end of
+   * its Test Plans, with the sum of their executions. Each initiative opens to show its plans.
+   */
+  const renderGeneralTimeline = () => {
+    if (!generalTimeline.open) return null;
+    let body;
+    if (generalTimeline.loading) body = <div style={styles.muted}>Consultando los planes de todas las iniciativas…</div>;
+    else if (generalTimeline.error) body = <div style={{ ...styles.muted, color: '#AE2A19' }}>No se pudo cargar el cronograma: {generalTimeline.error}</div>;
+    else {
+      const rows = [];
+      const milestones = [];
+      for (const item of generalTimeline.data?.initiatives || []) {
+        const plans = (item.plans || []).filter(plan => !plan.error);
+        const starts = plans.map(plan => plan.startDate).filter(Boolean).sort();
+        const ends = plans.map(plan => plan.endDate).filter(Boolean).sort();
+        const runs = { total: 0, passed: 0, failed: 0, blocked: 0, notRun: 0, other: 0 };
+        for (const plan of plans) for (const field of Object.keys(runs)) runs[field] += plan.totals?.[field] || 0;
+        const key = `general:tl:${item.id}`;
+        const open = Boolean(openRows[`general:${key}`]);
+        rows.push({
+          id: `init:${item.id}`, label: item.name, sublabel: `${plans.length} ${plans.length === 1 ? 'plan' : 'planes'}`,
+          start: starts[0], end: ends[ends.length - 1], runs,
+          ...(plans.length > 0 ? { open, onToggle: () => toggleRow('general', key) } : {})
+        });
+        if (open) {
+          for (const plan of plans) {
+            rows.push({ id: `init:${item.id}:${plan.key}`, label: plan.key, sublabel: plan.summary, start: plan.startDate, end: plan.endDate, runs: plan.totals, href: `/browse/${plan.key}`, level: 1 });
+          }
+        }
+        for (const m of item.milestones || []) milestones.push({ date: m.date, label: `${item.name} · ${m.name}` });
+      }
+      body = <LifecycleTimeline rows={rows} milestones={milestones} onOpen={openLink}
+        emptyText="Ninguna iniciativa tiene todavía planes con fechas ni entregables con fecha." />;
+    }
+    return (
+      <div style={{ ...styles.card, padding: '14px 16px', marginBottom: '14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+          <strong style={{ fontSize: '0.95rem', color: 'var(--jira-text, #172B4D)' }}>Cronograma general</strong>
+          <span style={{ ...styles.muted, marginLeft: '8px' }}>Fechas de los Test Plans de cada iniciativa</span>
+        </div>
+        {body}
+      </div>
+    );
+  };
+
   const renderInitiative = (initiative) => {
     const expanded = expandedId === initiative.id;
     const progress = progressById[initiative.id];
@@ -1258,6 +1375,7 @@ const LifecycleView = ({ ctx }) => {
         </div>
         {initiative.description && <div style={{ ...styles.muted, marginBottom: '10px' }}>{initiative.description}</div>}
         {renderStepper(initiative, progress)}
+        {expanded && renderInitiativeTimeline(initiative, progress)}
         {expanded && <div style={{ marginTop: '14px' }}>{PHASES.map(phase => renderPhase(initiative, phase, progress))}</div>}
       </div>
     );
@@ -1279,8 +1397,13 @@ const LifecycleView = ({ ctx }) => {
             Solo lectura
           </span>
         )}
+        {!loadError && initiatives.length > 0 && (
+          <button type="button" className="btn-secondary" style={{ marginLeft: canEdit ? 'auto' : undefined }} onClick={toggleGeneralTimeline}>
+            {generalTimeline.open ? 'Ocultar cronograma general' : 'Cronograma general'}
+          </button>
+        )}
         {canEdit && !initiativeForm && (
-          <button type="button" className="btn-primary" style={{ marginLeft: 'auto' }}
+          <button type="button" className="btn-primary" style={{ marginLeft: initiatives.length > 0 ? undefined : 'auto' }}
             onClick={() => setInitiativeForm({ name: '', description: '' })}>
             + Nueva iniciativa
           </button>
@@ -1289,6 +1412,7 @@ const LifecycleView = ({ ctx }) => {
 
       {loadError && <div style={{ ...styles.card, padding: '12px', color: '#AE2A19', marginBottom: '12px' }}>No se pudo cargar el ciclo de vida: {loadError}</div>}
       {initiativeForm && renderInitiativeForm()}
+      {renderGeneralTimeline()}
 
       {!loadError && initiatives.length === 0 && !initiativeForm && (
         <div style={{ ...styles.card, padding: '28px', textAlign: 'center' }}>

@@ -275,6 +275,17 @@ const cycleCounters = (issue) => {
 };
 
 /**
+ * Dates of a Test Cycle as saved in Planning (property `testpulse-schedule`), for the timeline
+ * (v4.26.0). Only "YYYY-MM-DD" values are passed on; anything else becomes ''.
+ */
+const cycleDates = (issue) => {
+  const raw = issue?.properties?.['testpulse-schedule'];
+  const schedule = raw?.value && typeof raw.value === 'object' ? raw.value : (raw || {});
+  const day = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(String(value || '').slice(0, 10)) ? String(value).slice(0, 10) : '');
+  return { startDate: day(schedule.startDate), endDate: day(schedule.endDate) };
+};
+
+/**
  * Reads one Test Plan of Test Pulse with its children (the Test Cycles linked to it) and the
  * progress of each cycle, as the current user. Used by:
  *   - phase 04 "Ejecutar" of an initiative (v4.21.0), to show plans → cycles → progress;
@@ -318,7 +329,9 @@ async function readTestPulsePlanDetail(planKey, accountId) {
       const typeList = cycleTypes.map(name => jqlQuote(name)).join(',');
       return searchAll(
         `project = ${projectId} AND issuetype in (${typeList})`,
-        ['summary', 'status', 'parent'], 1000, ['testops-plan-link', 'testpulse-v2', 'execution-meta']
+        // v4.26.0: `testpulse-schedule` brings each cycle's dates for the Lifecycle timeline,
+        // in the same search (Jira returns at most 5 properties per search; this is the 4th).
+        ['summary', 'status', 'parent'], 1000, ['testops-plan-link', 'testpulse-v2', 'execution-meta', 'testpulse-schedule']
       );
     };
     let projectCycles = [];
@@ -334,6 +347,7 @@ async function readTestPulsePlanDetail(planKey, accountId) {
         key: issue.key,
         summary: text(issue?.fields?.summary, 160),
         status: text(issue?.fields?.status?.name, 40),
+        ...cycleDates(issue),
         ...cycleCounters(issue)
       }))
       .sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
@@ -887,6 +901,33 @@ export const registerLifecycleResolvers = (resolver) => {
     // a known user nothing is shared.
     if (!context?.accountId) return listCandidates(projectId);
     return cachedFor(`candidates:${context.accountId}:${projectId}`, () => listCandidates(projectId));
+  });
+
+  // v4.26.0: general timeline of the project. For every initiative: its Test Plans with their
+  // dates and progress, and the deliverables that have a delivery date (milestones). Loaded only
+  // when the user opens "Cronograma general". Plans are read five at a time and share one
+  // listing of the project's cycles (60-second cache per user), as in phase 04.
+  resolver.define('getLifecycleTimeline', async ({ payload, context }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    const initiatives = await listInitiatives(projectId);
+    const allPlanKeys = [...new Set(initiatives.flatMap(initiative => initiative.planKeys || []))];
+    const details = await mapLimit(allPlanKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId));
+    const byKey = new Map(details.map(detail => [detail.key, detail]));
+    return {
+      initiatives: initiatives.map(initiative => ({
+        id: initiative.id,
+        name: initiative.name,
+        plans: (initiative.planKeys || []).map(key => {
+          const detail = byKey.get(key) || { key, error: 'No se pudo leer el plan.' };
+          // The general view needs the plan bar only, not every cycle row.
+          const { cycles, ...plan } = detail;
+          return { ...plan, cycleCount: Array.isArray(cycles) ? cycles.length : 0 };
+        }),
+        milestones: LIFECYCLE_PHASES.flatMap(phase => (initiative.phases?.[phase]?.deliverables || [])
+          .filter(deliverable => deliverable.date)
+          .map(deliverable => ({ phase, date: deliverable.date, name: deliverable.name, status: deliverable.status })))
+      }))
+    };
   });
 
   // Phases 3 and 4: test design and execution figures for the epics of an initiative.

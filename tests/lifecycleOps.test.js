@@ -172,3 +172,33 @@ test('teams are managed by admins and phase 03 groups by the Jira reporter', () 
   const settings = read('static/hello-world/src/views/SettingsView.jsx');
   assert.match(settings, /<LifecycleTeamsCard /);
 });
+
+// ── v4.26.0: timeline ────────────────────────────────────────────────────────────────────────
+
+test('cycle dates travel with the cycle listing and the general timeline is a lazy resolver', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  // Same search as before, one more property (Jira allows up to 5 per search).
+  assert.match(server, /\['testops-plan-link', 'testpulse-v2', 'execution-meta', 'testpulse-schedule'\]/);
+  assert.match(server, /\.\.\.cycleDates\(issue\)/);
+  assert.match(server, /resolver\.define\('getLifecycleTimeline'[\s\S]*?mapLimit\(allPlanKeys, 5,/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  // The general timeline is requested only from the button, never on load.
+  assert.match(view, /const toggleGeneralTimeline = async/);
+  assert.equal((view.match(/invoke\('getLifecycleTimeline'/g) || []).length, 1);
+  assert.match(view, /renderInitiativeTimeline\(initiative, progress\)/);
+});
+
+test('timeline bar states: done, late, in progress, pending', async () => {
+  // The component file is JSX; only its pure barState rule is evaluated here.
+  const source = read('static/hello-world/src/components/LifecycleTimeline.jsx');
+  const body = source.slice(source.indexOf('export const barState'), source.indexOf('const STATE_COLORS'));
+  // eslint-disable-next-line no-new-func
+  const barState = new Function(`${body.replace('export const barState', 'const barState')}; return barState;`)();
+  const today = Date.UTC(2026, 10, 17);
+  const past = Date.UTC(2026, 10, 1);
+  const future = Date.UTC(2026, 11, 1);
+  assert.equal(barState({ total: 4, passed: 4, failed: 0, blocked: 0 }, past, today), 'done');
+  assert.equal(barState({ total: 4, passed: 1, failed: 0, blocked: 0 }, past, today), 'late');
+  assert.equal(barState({ total: 4, passed: 1, failed: 1, blocked: 0 }, future, today), 'progress');
+  assert.equal(barState({ total: 4, passed: 0, failed: 0, blocked: 0 }, future, today), 'pending');
+});
