@@ -21,6 +21,7 @@ import TestPulseLoader from '../components/TestPulseLoader';
 // v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
 import LifecycleTimeline, { planColor } from '../components/LifecycleTimeline';
 import { invoke, invalidateResolverCache, subscribeToMutations } from '../utils/queryClient';
+import { designTotals, designState } from '../utils/designTotals';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
 const PHASES = [
@@ -944,6 +945,39 @@ const LifecycleView = ({ ctx }) => {
     return next;
   });
 
+  /**
+   * Phase 02 counters (v4.32.0): the same kind of row phase 04 "Ejecutar" opens with, added up
+   * from the findings reports already loaded with each document. It costs no extra request.
+   */
+  const renderDesignCounters = (initiative, phase) => {
+    const totals = designTotals(deliverablesOf(initiative, phase.id));
+    const state = designState(totals);
+    return (
+      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: '10px' }}>
+        <Metric value={totals.documents} label="Documentos" />
+        <div style={{ minWidth: '120px' }}>
+          <div style={{ marginBottom: '4px' }}>
+            <span style={{ display: 'inline-block', fontSize: '0.72rem', fontWeight: 700, color: state.color, background: state.background, borderRadius: '3px', padding: '1px 6px', whiteSpace: 'nowrap' }}>{state.label}</span>
+          </div>
+          <div style={styles.muted}>Estado general</div>
+        </div>
+        <Metric value={totals.total} label="Hallazgos" />
+        <Metric value={totals.open} label="Abiertos" color={totals.open > 0 ? '#C9372C' : '#216E4E'} />
+        <Metric value={totals.closed} label="Cerrados" color="#216E4E" />
+        <Metric value={totals.seriousOpen} label="Críticos / altos abiertos" color={totals.seriousOpen > 0 ? '#AE2A19' : undefined} />
+        <Metric value={`${totals.delivered} / ${totals.documents}`} label="Entregados / total" />
+        {totals.unread > 0 && <Metric value={totals.unread} label="Sin leer de Confluence" color="#B65C02" />}
+        {totals.maturityAvg !== null && <Metric value={`${totals.maturityAvg}%`} label="Madurez promedio" />}
+        <div style={{ minWidth: '150px', flex: '0 1 220px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', ...styles.muted }}>
+            <span>Hallazgos cerrados</span><strong style={{ color: 'var(--jira-text, #172B4D)' }}>{totals.closedPct}%</strong>
+          </div>
+          <Bar value={totals.closedPct} color="#1F845A" />
+        </div>
+      </div>
+    );
+  };
+
   /** Phase 02: the reviewed documents, grouped by the team chosen on each one or by who added it. */
   const renderGroupedDeliverables = (initiative, phase) => renderGroups(initiative, phase.id, deliverablesOf(initiative, phase.id), {
     headerExtra: deliverablesOf(initiative, phase.id).length > 1 && (
@@ -1360,6 +1394,8 @@ const LifecycleView = ({ ctx }) => {
           : (
             <>
               {deliverablesOf(initiative, phase.id).length === 0 && !isAdding && <div style={styles.muted}>Sin entregables registrados.</div>}
+              {/* v4.32.0: row of counters for phase 02, like the one of phase 04. */}
+              {phase.id === 'design' && deliverablesOf(initiative, phase.id).length > 0 && renderDesignCounters(initiative, phase)}
               {phase.id === 'design'
                 ? renderGroupedDeliverables(initiative, phase)
                 : deliverablesOf(initiative, phase.id).map(deliverable => renderDeliverable(initiative, phase, deliverable))}
