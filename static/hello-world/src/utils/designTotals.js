@@ -72,3 +72,15 @@ export function designState(totals) {
   if (totals.unread > 0) return { label: 'Documentos sin leer', color: '#974F0C', background: '#FFF7D6' };
   return { label: 'Hallazgos atendidos', color: '#216E4E', background: '#DCFFF1' };
 }
+
+/**
+ * Name of the Confluence document a findings report reviews (v4.34.0): the "Nombre del
+ * documento" written in the report header, or the title of the Confluence page when the header
+ * does not have it. '' when the report has not been read yet.
+ *
+ * @param {Object} [report] - `deliverable.report` as stored by the server.
+ * @returns {string}
+ */
+export function reportDocumentName(report) {
+  return String(report?.general?.documentName || report?.pageTitle || '').trim();
+}

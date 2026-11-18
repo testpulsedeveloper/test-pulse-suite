@@ -21,7 +21,7 @@ import TestPulseLoader from '../components/TestPulseLoader';
 // v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
 import LifecycleTimeline, { planColor } from '../components/LifecycleTimeline';
 import { invoke, invalidateResolverCache, subscribeToMutations } from '../utils/queryClient';
-import { designTotals, designState } from '../utils/designTotals';
+import { designTotals, designState, reportDocumentName } from '../utils/designTotals';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
 const PHASES = [
@@ -328,9 +328,18 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam
     <div style={{ ...styles.card, padding: '12px', background: 'var(--jira-bg-app, #F7F8F9)', marginTop: '8px' }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
         <div>
-          <label style={styles.label}>{isFindings ? 'Documento revisado *' : 'Entregable *'}</label>
-          <input style={styles.input} value={form.name} onChange={set('name')} maxLength={160} placeholder={isFindings ? 'ERF Tarjetas Internas' : phase.deliverable} />
+          {/* v4.34.0: in phase 02 this is the functionality that was reviewed; the document's own
+              name is read from the report (field below). */}
+          <label style={styles.label}>{isFindings ? 'Funcionalidad revisada *' : 'Entregable *'}</label>
+          <input style={styles.input} value={form.name} onChange={set('name')} maxLength={160} placeholder={isFindings ? 'Tarjetas Internas' : phase.deliverable} />
         </div>
+        {isFindings && (
+          <div>
+            <label style={styles.label}>Nombre del documento (del reporte)</label>
+            <input style={styles.input} value={reportDocumentName(report)} disabled
+              placeholder="Se toma del reporte de Confluence" />
+          </div>
+        )}
         {isFindings && (
           <div>
             <label style={styles.label}>Tipo de documento</label>
@@ -817,6 +826,10 @@ const LifecycleView = ({ ctx }) => {
           )}
           <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{deliverable.name}</strong>
           {deliverable.docType && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{deliverable.docType}</span>}
+          {/* v4.34.0: name of the reviewed Confluence document, read from the report. */}
+          {deliverable.kind === 'findings' && reportDocumentName(deliverable.report) && (
+            <span style={styles.muted}>Documento: {reportDocumentName(deliverable.report)}</span>
+          )}
           {deliverable.team && TEAM_LABELS[deliverable.team] && <span className="ads-lozenge ads-lozenge-brand" style={{ fontSize: '10px' }}>{TEAM_LABELS[deliverable.team]}</span>}
           <Lozenge status={deliverable.status} />
           <span style={styles.muted}>
@@ -1401,7 +1414,7 @@ const LifecycleView = ({ ctx }) => {
           {canEdit && !phase.auto && !isAdding && (
             <button type="button" style={{ ...styles.linkBtn, marginLeft: 'auto' }}
               onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id })}>
-              {phase.id === 'design' ? '+ Agregar documento revisado' : '+ Agregar entregable'}
+              {phase.id === 'design' ? '+ Agregar funcionalidad revisada' : '+ Agregar entregable'}
             </button>
           )}
         </div>

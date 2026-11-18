@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { designTotals, designState } from '../static/hello-world/src/utils/designTotals.js';
+import { designTotals, designState, reportDocumentName } from '../static/hello-world/src/utils/designTotals.js';
 
 // Made-up documents (no real data): two read reports, one never read, one with an error.
 const report = (total, open, closed, openByImpact = {}, maturityPct = null) => ({ totals: { total, open, closed, openByImpact }, maturityPct });
@@ -45,4 +45,10 @@ test('state follows open findings and unread documents', () => {
   assert.equal(designState(designTotals([docs[2]])).label, 'Sin leer');
   assert.equal(designState(designTotals([docs[1], docs[2]])).label, 'Documentos sin leer');
   assert.equal(designState(designTotals([docs[1]])).label, 'Hallazgos atendidos');
+});
+
+test('document name comes from the report header, then from the page title', () => {
+  assert.equal(reportDocumentName({ general: { documentName: 'ERF Pagos Ficticios' }, pageTitle: 'Página' }), 'ERF Pagos Ficticios');
+  assert.equal(reportDocumentName({ general: {}, pageTitle: 'Reporte de hallazgos – Demo' }), 'Reporte de hallazgos – Demo');
+  assert.equal(reportDocumentName(undefined), '');
 });
