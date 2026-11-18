@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.28.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.29.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -8019,6 +8019,12 @@ Then el sistema valida la identidad.
     </Suspense>
   );
 
+  // v4.29.0: true from the first time the Lifecycle tab is opened (keeps it mounted afterwards).
+  const [lifecycleVisited, setLifecycleVisited] = useState(false);
+  useEffect(() => {
+    if (activeTab === 'lifecycle') setLifecycleVisited(true);
+  }, [activeTab]);
+
   const renderLifecycleTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
       <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId }} />
@@ -8201,7 +8207,14 @@ Then el sistema valida la identidad.
             {activeTab === 'execution' && renderExecutionTab()}
             {renderAssignModal()}
             {activeTab === 'reports' && renderReportsTab()}
-            {activeTab === 'lifecycle' && renderLifecycleTab()}
+            {/* v4.29.0: once opened, Lifecycle stays mounted (only hidden) while other tabs are
+                used, so coming back is instant and costs no Jira calls. Its "Actualizar" button
+                fetches fresh data on demand. */}
+            {lifecycleVisited && (
+              <div style={{ display: activeTab === 'lifecycle' ? 'block' : 'none', height: '100%' }}>
+                {renderLifecycleTab()}
+              </div>
+            )}
             {activeTab === 'config' && isAdmin && renderConfigTab()}
           </>
         )}

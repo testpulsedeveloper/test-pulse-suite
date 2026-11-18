@@ -16,8 +16,8 @@
  *     green = every execution passed, red = late, blue = in progress, grey = not started.
  * The solid part of a bar is the share of executions already run (passed + failed + blocked).
  *
- * Rows without dates cannot be drawn; they are listed under the chart so nobody thinks they
- * were forgotten.
+ * Rows without dates (v4.29.0) keep their place in the list, with a dashed "Sin fechas en
+ * Planeación" strip instead of a bar, so nobody thinks they were forgotten.
  *
  * Props:
  *   rows: Array<{ id, label, sublabel?, start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', runs?, level?, href?,
@@ -104,17 +104,21 @@ export const planColor = (index) => PLAN_COLORS[index % PLAN_COLORS.length];
 export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, emptyText = 'Sin fechas para mostrar.' }) {
   const today = todayMs();
   const dated = rows.map(row => ({ ...row, startMs: parseDay(row.start), endMs: parseDay(row.end) }));
-  const drawable = dated.filter(row => row.startMs !== null && row.endMs !== null && row.endMs >= row.startMs);
-  const undated = dated.filter(row => !drawable.includes(row));
+  const hasDates = (row) => row.startMs !== null && row.endMs !== null && row.endMs >= row.startMs;
+  const drawable = dated.filter(hasDates);
   const marks = milestones.map(m => ({ ...m, ms: parseDay(m.date) })).filter(m => m.ms !== null);
 
-  if (drawable.length === 0 && marks.length === 0) {
+  // v4.29.0: rows without dates are drawn too (with a "Sin fechas" strip), so the chart is only
+  // empty when there is nothing at all.
+  if (dated.length === 0 && marks.length === 0) {
     return <div style={{ color: 'var(--jira-subtle, #626F86)', fontSize: '0.8rem' }}>{emptyText}</div>;
   }
 
   // Period shown: from the earliest to the latest date (bars, milestones and today), with a
   // few days of margin on both sides so nothing touches the edges.
-  const points = [...drawable.flatMap(row => [row.startMs, row.endMs]), ...marks.map(m => m.ms), today];
+  // With no dated bar at all, a month around today is shown.
+  const points = [...drawable.flatMap(row => [row.startMs, row.endMs]), ...marks.map(m => m.ms), today,
+    ...(drawable.length === 0 && marks.length === 0 ? [today - 14 * DAY_MS, today + 14 * DAY_MS] : [])];
   const from = Math.min(...points) - 3 * DAY_MS;
   const to = Math.max(...points) + 4 * DAY_MS;
   const span = Math.max(to - from, DAY_MS);
@@ -162,8 +166,9 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
         </div>
       )}
 
-      {/* One bar per row */}
-      {drawable.map(row => {
+      {/* One bar per row (rows without dates get a dashed "Sin fechas" strip, v4.29.0) */}
+      {dated.map(row => {
+        const undated = !hasDates(row);
         const state = barState(row.runs, row.endMs, today, row.startMs);
         // A plan colour wins over the state colour; the state stays in the tooltip and a late bar
         // is outlined in red.
@@ -195,17 +200,23 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
                 {row.sublabel && <span style={{ color: 'var(--jira-subtle, #626F86)' }}> {row.sublabel}</span>}
               </span>
             </div>
-            {grid(
+            {grid(undated ? (
+              <div title={`${row.label}: sin fechas de inicio y fin en Planeación`}
+                style={{ position: 'absolute', left: 0, right: 0, top: '5px', bottom: '5px', border: `1px dashed ${row.color || '#8590A2'}`, borderRadius: '4px', display: 'flex', alignItems: 'center', paddingLeft: '8px', color: 'var(--jira-subtle, #626F86)', fontSize: '0.72rem', background: 'var(--jira-surface, #FFFFFF)' }}>
+                Sin fechas en Planeación{total > 0 ? ` · ${executed} de ${total} ejecutados` : ''}
+              </div>
+            ) : (
               <div title={tooltip} style={{ position: 'absolute', left: pos(row.startMs), width: width(row.startMs, row.endMs), top: '5px', bottom: '5px', background: colors.bar, borderRadius: '4px', overflow: 'hidden', ...lateOutline }}>
                 <div style={{ width: `${pct}%`, height: '100%', background: colors.fill }} />
-              </div>, 26)}
+              </div>
+            ), 26)}
           </div>
         );
       })}
 
       {/* Legend */}
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '8px', color: 'var(--jira-subtle, #626F86)' }}>
-        {drawable.some(row => row.color) && (
+        {dated.some(row => row.color) && (
           <>
             <span>Cada plan y sus ciclos tienen su color.</span>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
@@ -216,7 +227,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
             </span>
           </>
         )}
-        {drawable.some(row => !row.color) && Object.values(STATE_COLORS).map(c => (
+        {dated.some(row => !row.color) && Object.values(STATE_COLORS).map(c => (
           <span key={c.label} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
             <span style={{ width: '14px', height: '8px', borderRadius: '2px', background: c.fill }} />{c.label}
           </span>
@@ -227,11 +238,6 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
         <span>La parte sólida de cada barra es lo ya ejecutado.</span>
       </div>
 
-      {undated.length > 0 && (
-        <div style={{ marginTop: '6px', color: 'var(--jira-subtle, #626F86)' }}>
-          Sin fechas en Planeación: {undated.map(row => row.label).join(', ')}.
-        </div>
-      )}
     </div>
   );
 }

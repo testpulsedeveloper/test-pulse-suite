@@ -20,7 +20,7 @@ import { router } from '@forge/bridge';
 import TestPulseLoader from '../components/TestPulseLoader';
 // v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
 import LifecycleTimeline, { planColor } from '../components/LifecycleTimeline';
-import { invoke } from '../utils/queryClient';
+import { invoke, invalidateResolverCache } from '../utils/queryClient';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
 const PHASES = [
@@ -68,8 +68,10 @@ const deliverablesOf = (initiative, phaseId) => initiative?.phases?.[phaseId]?.d
 const executionState = (runs) => {
   const total = runs?.total || 0;
   const executed = (runs?.passed || 0) + (runs?.failed || 0) + (runs?.blocked || 0);
-  if (total === 0) return { label: 'Sin ejecuciones', color: '#44546F', background: '#F1F2F4' };
-  if (executed === 0) return { label: 'Sin iniciar', color: '#44546F', background: '#F1F2F4' };
+  // v4.29.0: clearer names. "Sin ciclo" = none of its test cases has been added to a cycle (no
+  // Test Runs); "En ciclo, sin ejecutar" = there are Test Runs but none has been run yet.
+  if (total === 0) return { label: 'Sin ciclo', color: '#44546F', background: '#F1F2F4' };
+  if (executed === 0) return { label: 'En ciclo, sin ejecutar', color: '#44546F', background: '#F1F2F4' };
   if (runs.failed > 0) return { label: 'Con fallas', color: '#AE2A19', background: '#FFECEB' };
   if (runs.blocked > 0) return { label: 'Con bloqueos', color: '#974F0C', background: '#FFF7D6' };
   if (runs.passed === total) return { label: 'Aprobado', color: '#216E4E', background: '#DCFFF1' };
@@ -420,6 +422,9 @@ const LifecycleView = ({ ctx }) => {
   // v4.26.0: general timeline of every initiative, loaded only when it is opened.
   // { open, loading, error, data: { initiatives: [...] } }
   const [generalTimeline, setGeneralTimeline] = useState({ open: false, loading: false, error: '', data: null });
+  // v4.29.0: bumping it reloads everything ("Actualizar"). The tab now stays mounted while other
+  // tabs are used, so data is only reloaded on purpose (or when the project changes).
+  const [reloadToken, setReloadToken] = useState(0);
   // v4.25.0: groups the user closed in phases 02/03 ("initiative:phase:mode:group" → true).
   const [collapsedGroups, setCollapsedGroups] = useState({});
   // How phases 02 and 03 group their items: 'team', 'user' or 'none' (remembered in this browser).
@@ -479,12 +484,25 @@ const LifecycleView = ({ ctx }) => {
         setCanEdit(Boolean(res?.canEdit));
         setPeople(Array.isArray(res?.people) ? res.people : []);
         setMyTeam(res?.myTeam || '');
-        setExpandedId(list.length === 1 ? list[0].id : null);
+        // Keep the initiative that was open when "Actualizar" was pressed.
+        setExpandedId(prev => (prev && list.some(item => item.id === prev) ? prev : (list.length === 1 ? list[0].id : null)));
       })
       .catch(error => { if (!cancelled) setLoadError(error?.message || String(error)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedProjectId]);
+  }, [selectedProjectId, reloadToken]);
+
+  /**
+   * "Actualizar" (v4.29.0): forgets the cached Jira figures and reads everything again: the
+   * initiatives, the figures of the expanded one and, if it is open, the general timeline.
+   * Confluence reports are re-read only when they are older than 15 minutes, as on first load.
+   */
+  const reloadAll = () => {
+    invalidateResolverCache('getLifecycleProgress');
+    setProgressById({});
+    setGeneralTimeline({ open: false, loading: false, error: '', data: null });
+    setReloadToken(token => token + 1);
+  };
 
   const refreshFindings = useCallback(async (initiative, deliverableId, silent) => {
     setBusy(deliverableId || `refresh_${initiative.id}`);
@@ -562,7 +580,7 @@ const LifecycleView = ({ ctx }) => {
       if (stale) refreshFindings(initiative, undefined, true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expandedId, initiatives.length]);
+  }, [expandedId, initiatives.length, reloadToken]);
 
   const saveInitiative = async (initiative, busyKey) => {
     setBusy(busyKey);
@@ -1453,13 +1471,18 @@ const LifecycleView = ({ ctx }) => {
             Solo lectura
           </span>
         )}
+        {/* v4.29.0: the tab is kept in memory, so fresh data is requested only from here. */}
+        <button type="button" className="btn-secondary" style={{ marginLeft: canEdit ? 'auto' : undefined }} onClick={reloadAll}
+          disabled={loading} title="Volver a leer iniciativas, cifras de Jira y cronograma">
+          ↻ Actualizar
+        </button>
         {!loadError && initiatives.length > 0 && (
-          <button type="button" className="btn-secondary" style={{ marginLeft: canEdit ? 'auto' : undefined }} onClick={toggleGeneralTimeline}>
+          <button type="button" className="btn-secondary" onClick={toggleGeneralTimeline}>
             {generalTimeline.open ? 'Ocultar cronograma general' : 'Cronograma general'}
           </button>
         )}
         {canEdit && !initiativeForm && (
-          <button type="button" className="btn-primary" style={{ marginLeft: initiatives.length > 0 ? undefined : 'auto' }}
+          <button type="button" className="btn-primary"
             onClick={() => setInitiativeForm({ name: '', description: '' })}>
             + Nueva iniciativa
           </button>

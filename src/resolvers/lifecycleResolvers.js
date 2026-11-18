@@ -482,16 +482,18 @@ async function searchPage(jql, fields, nextPageToken, properties) {
  *
  * @param {string[]} keys - Issue keys.
  * @param {string[]} fields - Fields to return.
+ * @param {string[]} [properties] - Issue properties to return.
  * @returns {Promise<Object[]>} The issues that could be read (missing ones are skipped).
  */
-async function fetchIssuesByKeys(keys, fields) {
+async function fetchIssuesByKeys(keys, fields, properties) {
   const chunks = [];
   for (let i = 0; i < keys.length; i += 100) chunks.push(keys.slice(i, i + 100));
   const results = await mapLimit(chunks, 4, async (chunk) => {
     const response = await api.asUser().requestJira(route`/rest/api/3/issue/bulkfetch`, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issueIdsOrKeys: chunk, fields })
+      // `properties` (v4.29.0): issue properties to return too, e.g. 'testpulse-run-data'.
+      body: JSON.stringify({ issueIdsOrKeys: chunk, fields, ...(properties?.length ? { properties } : {}) })
     });
     if (!response.ok) {
       // Logged without keys or titles: only how many and the HTTP status.
@@ -670,13 +672,34 @@ async function computeProgress(epicKeys, storyKeys = []) {
   // four at a time instead of one by one (v4.22.1).
   // v4.28.2: read by key with bulk fetch (100 per request, four at a time): one deleted test
   // case no longer makes the executions of the other 99 disappear.
-  const chunkResults = [await fetchIssuesByKeys(caseList, ['issuelinks'])];
-  for (const cases of chunkResults) {
+  const testCases = await fetchIssuesByKeys(caseList, ['issuelinks']);
+
+  // v4.29.0: Test Runs that were taken OUT of their cycle are not executions of the initiative.
+  // When an executed case is removed from a cycle, its run is kept (to preserve the result) but
+  // unlinked from the cycle and flagged `unlinkedFromCycle` in its `testpulse-run-data`
+  // property. It is still linked to the test case, so until now it was counted (a "limbo" run).
+  // The flag is only in the run itself, so the runs are read once more, by key, 100 per request.
+  const runKeys = new Set();
+  for (const testCase of testCases) {
+    for (const linked of linkedIssues(testCase)) if (isTestRun(linked)) runKeys.add(linked.key);
+  }
+  const outOfCycle = new Set();
+  if (runKeys.size > 0) {
+    const runIssues = await fetchIssuesByKeys([...runKeys], ['status'], ['testpulse-run-data']);
+    for (const run of runIssues) {
+      const raw = run?.properties?.['testpulse-run-data'];
+      const data = raw?.value && typeof raw.value === 'object' ? raw.value : (raw || {});
+      if (data.unlinkedFromCycle === true) outOfCycle.add(run.key);
+    }
+  }
+
+  for (const cases of [testCases]) {
     for (const testCase of cases) {
       for (const linked of linkedIssues(testCase)) {
         if (isBug(linked)) { noteBug(linked); continue; }
         if (!isTestRun(linked) || seenRuns.has(linked.key)) continue;
         seenRuns.add(linked.key);
+        if (outOfCycle.has(linked.key)) continue; // removed from its cycle: not counted
         const status = String(linked?.fields?.status?.name || '').toLowerCase();
         let bucket = 'other';
         if (status.startsWith('pass')) bucket = 'passed';
@@ -702,7 +725,9 @@ async function computeProgress(epicKeys, storyKeys = []) {
     bugs: { total: bugs.size, open: [...bugs.values()].filter(Boolean).length },
     epics: [...epicMap.values()],
     looseStories: [...looseMap.values()],
-    truncated: storiesTruncated || caseKeys.size > MAX_CASES
+    truncated: storiesTruncated || caseKeys.size > MAX_CASES,
+    // v4.29.0: how many runs were left out because they were removed from their cycle.
+    runsOutOfCycle: outOfCycle.size
   };
 }
 

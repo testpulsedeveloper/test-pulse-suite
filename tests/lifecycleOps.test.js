@@ -255,3 +255,29 @@ test('a cycle whose start date passed without executions is late; running ones a
   assert.match(source, /progress: '#1F845A'/);
   assert.match(source, /outlineOffset: '-2px'/);
 });
+
+// ── v4.29.0: out-of-cycle runs, undated rows, Lifecycle kept in memory ──────────────────────
+
+test('runs removed from their cycle are not counted and states have clearer names', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(server, /fetchIssuesByKeys\(\[\.\.\.runKeys\], \['status'\], \['testpulse-run-data'\]\)/);
+  assert.match(server, /if \(outOfCycle\.has\(linked\.key\)\) continue;/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /label: 'Sin ciclo'/);
+  assert.match(view, /label: 'En ciclo, sin ejecutar'/);
+});
+
+test('cycles without dates keep their row in the timeline', () => {
+  const timeline = read('static/hello-world/src/components/LifecycleTimeline.jsx');
+  assert.match(timeline, /\{dated\.map\(row => \{/);
+  assert.match(timeline, /Sin fechas en Planeación\{total > 0/);
+});
+
+test('Lifecycle stays mounted after the first visit and reloads only on demand', () => {
+  const app = read('static/hello-world/src/App.js');
+  assert.match(app, /\{lifecycleVisited && \(/);
+  assert.match(app, /display: activeTab === 'lifecycle' \? 'block' : 'none'/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /invalidateResolverCache\('getLifecycleProgress'\)/);
+  assert.match(view, /\}, \[selectedProjectId, reloadToken\]\);/);
+});

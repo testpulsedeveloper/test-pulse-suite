@@ -160,7 +160,9 @@ test('lifecycle resolvers are registered, read Confluence as the user and guard 
 test('the Lifecycle tab is lazy-loaded and does nothing until it is opened', () => {
   const app = read('static/hello-world/src/App.js');
   assert.match(app, /const LifecycleView = React\.lazy\(/);
-  assert.match(app, /activeTab === 'lifecycle' && renderLifecycleTab\(\)/);
+  // v4.29.0: mounted on the first visit only (then kept, hidden, to avoid reloading on return).
+  assert.match(app, /if \(activeTab === 'lifecycle'\) setLifecycleVisited\(true\)/);
+  assert.match(app, /\{lifecycleVisited && \(/);
   // No lifecycle resolver is called from App.js (startup): only the view calls them.
   assert.doesNotMatch(app, /invoke\('(getLifecycle|refreshLifecycleFindings|getLifecycleProgress)'/);
 });

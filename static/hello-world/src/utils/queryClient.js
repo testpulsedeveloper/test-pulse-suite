@@ -338,6 +338,28 @@ export const invalidateScopedCache = (mutationName) => {
   });
 };
 
+/**
+ * Forgets every cached answer of ONE resolver (memory, IndexedDB and React Query), so the next
+ * call goes to the server. Used by "Actualizar" buttons that must show fresh data (v4.29.0).
+ *
+ * @param {string} resolverName - e.g. 'getLifecycleProgress'.
+ */
+export const invalidateResolverCache = (resolverName) => {
+  const keysToDelete = [..._l1Cache.keys()].filter((key) => key.split('|')[0] === resolverName);
+  keysToDelete.forEach((k) => _l1Cache.delete(k));
+  openCacheDb().then((db) => {
+    if (!db || keysToDelete.length === 0) return;
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      keysToDelete.forEach((k) => store.delete(k));
+    } catch (_) {}
+  });
+  queryClient.removeQueries({
+    predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[1] === resolverName,
+  });
+};
+
 const _tpInFlight = new Map();
 
 // Frontend concurrency semaphore for read queries (prevents simultaneous Forge bridge stampedes -> HTTP 429)
