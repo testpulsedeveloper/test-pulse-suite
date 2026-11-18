@@ -3513,9 +3513,10 @@ body.tp-print-iframe-body {
 
 .planning-canvas {
   padding: 1.5rem;
-  max-width: 1280px;
+  /* v4.30.1: no max-width. Every module uses the full width, so hiding the left sidebar
+     gives the space to the content (Planning used to stay at 1280px, centred). */
   width: 100%;
-  margin: 0 auto;
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;

@@ -315,3 +315,11 @@ test('the "+ Nuevo" buttons open Test Pulse form; Jira form stays as fallback', 
   assert.match(planning, /openRenameDialog\('cycle', selectedCycle\)/);
   assert.doesNotMatch(planning, /onClick=\{handleCreateIssue\}/);
 });
+
+test('every module uses the full width (no centred max-width) (v4.30.1)', () => {
+  const css = read('static/hello-world/src/index.css');
+  const planning = css.slice(css.indexOf('.planning-canvas {'), css.indexOf('}', css.indexOf('.planning-canvas {')));
+  assert.doesNotMatch(planning, /^\s*max-width\s*:/m);
+  assert.doesNotMatch(read('static/hello-world/src/views/LifecycleView.jsx'), /maxWidth: '1200px', margin: '0 auto'/);
+  assert.doesNotMatch(read('static/hello-world/src/views/SettingsView.jsx'), /className="main-content" style=\{\{ maxWidth/);
+});

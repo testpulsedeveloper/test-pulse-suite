@@ -1460,7 +1460,8 @@ const LifecycleView = ({ ctx }) => {
   return (
     // The app shell hides overflow, so this view scrolls by itself.
     <div style={{ height: '100%', overflowY: 'auto', boxSizing: 'border-box' }}>
-    <div style={{ padding: '16px 20px', maxWidth: '1200px', margin: '0 auto' }}>
+    {/* v4.30.1: full width like the other modules (it used to stop at 1200px, centred). */}
+    <div style={{ padding: '16px 20px', width: '100%', boxSizing: 'border-box' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.15rem', color: 'var(--jira-text, #172B4D)' }}>Ciclo de vida de QA</h2>

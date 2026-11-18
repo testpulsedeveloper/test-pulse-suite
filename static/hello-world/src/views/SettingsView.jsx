@@ -1262,7 +1262,8 @@ export default function SettingsView({ ctx }) {
 
     return (
       <div className="tab-layout" style={{ background: 'var(--bg-main, #0d1117)', minHeight: 'calc(100vh - 120px)', padding: '1.5rem 2rem 4rem 2rem' }}>
-        <main className="main-content" style={{ maxWidth: '1080px', margin: '0 auto' }}>
+        {/* v4.30.1: full width like the other modules (it used to stop at 1080px, centred). */}
+        <main className="main-content" style={{ width: '100%' }}>
           
           {/* Header Banner */}
           <div style={{
