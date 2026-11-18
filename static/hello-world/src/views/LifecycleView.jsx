@@ -963,6 +963,29 @@ const LifecycleView = ({ ctx }) => {
       return { ...prev, selected: [...new Set([...prev.selected, ...visibleKeys])].slice(0, room) };
     });
     const overLimit = picker.selected.length > room;
+    // v4.30.3: stories can also be found BY KEY in Jira when they are not in the list.
+    const typedKey = String(picker.search || '').trim().toUpperCase();
+    const canLookUp = field === 'storyKeys' && /^[A-Z][A-Z0-9_]*-\d+$/.test(typedKey) &&
+      !picker.items.some(item => item.key === typedKey) && !current.includes(typedKey);
+    const lookUp = async () => {
+      setPicker(prev => ({ ...prev, lookingUp: true, lookupMessage: '' }));
+      try {
+        const res = await invoke('findLifecycleStory', { projectId: selectedProjectId, key: typedKey });
+        setPicker(prev => {
+          if (!prev) return prev;
+          if (!res?.story) return { ...prev, lookingUp: false, lookupMessage: res?.error || 'No se encontró la historia.' };
+          return {
+            ...prev,
+            lookingUp: false,
+            lookupMessage: res.story.parentKey ? `${res.story.key} pertenece a la épica ${res.story.parentKey}; se agrega igualmente como historia suelta.` : '',
+            items: [res.story, ...prev.items.filter(item => item.key !== res.story.key)],
+            selected: prev.selected.includes(res.story.key) ? prev.selected : [...prev.selected, res.story.key]
+          };
+        });
+      } catch (error) {
+        setPicker(prev => (prev ? { ...prev, lookingUp: false, lookupMessage: error?.message || String(error) } : prev));
+      }
+    };
     return (
       <div style={{ ...styles.card, padding: '12px', marginTop: '8px', background: 'var(--jira-bg-app, #F7F8F9)' }}>
         {picker.loading && <div style={styles.muted}>Consultando {noun} del proyecto…</div>}
@@ -979,9 +1002,19 @@ const LifecycleView = ({ ctx }) => {
               <span style={{ ...styles.muted, marginLeft: 'auto' }}>{picker.selected.length} seleccionadas</span>
             </div>
             <div style={{ maxHeight: '240px', overflowY: 'auto', border: '1px solid var(--jira-border, #DCDFE4)', borderRadius: '6px', background: 'var(--jira-surface, #FFFFFF)' }}>
-              {visible.length === 0 && (
+              {canLookUp && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem' }}>
+                  <span style={styles.muted}>{typedKey} no está en la lista.</span>
+                  <button type="button" style={styles.linkBtn} disabled={picker.lookingUp} onClick={lookUp}>
+                    {picker.lookingUp ? 'Buscando…' : `Buscar ${typedKey} en Jira`}
+                  </button>
+                </div>
+              )}
+              {picker.lookupMessage && <div style={{ ...styles.muted, padding: '8px 10px', color: '#974F0C' }}>{picker.lookupMessage}</div>}
+              {visible.length === 0 && !canLookUp && (
                 <div style={{ ...styles.muted, padding: '10px' }}>
                   {available.length === 0 ? `No hay más ${noun} en el proyecto para agregar.` : 'Nada coincide con la búsqueda.'}
+                  {field === 'storyKeys' && ' Escribe la clave de la historia (p. ej. CUQ-123) para buscarla en Jira.'}
                 </div>
               )}
               {visible.map(item => (

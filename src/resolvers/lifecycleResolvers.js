@@ -775,6 +775,8 @@ async function listCandidates(projectId) {
     list(planTypes),
     list(storyTypes, ' AND parent is EMPTY')
   ]);
+  // v4.30.3: counts and issue-type NAMES only (no keys or titles), to see why a list is empty.
+  console.log(`[lifecycle] candidates project=${projectId} epics=${epics.length} plans=${plans.length} stories=${stories.length} storyTypes=${JSON.stringify(storyTypes)}`);
   return { epics, plans, stories, maxEpics: MAX_EPICS, maxPlans: MAX_PLANS, maxStories: MAX_LOOSE_STORIES };
 }
 
@@ -973,6 +975,38 @@ export const registerLifecycleResolvers = (resolver) => {
       return { initiative: latest, refreshed: Math.min(targets.length, 10) };
     }
     return { initiative, refreshed: 0 };
+  });
+
+  // v4.30.3: looks ONE issue up by key for the "historias sin épica" picker, so a story can be
+  // added by typing its key even when it is not in the list (e.g. Jira's search index has not
+  // caught up yet, or its type is named differently). Read as the user with bulk fetch.
+  // Only requirement-level issues of THIS project are accepted; epics, sub-tasks, bugs and the
+  // test types are refused with a clear message. A story that has an epic can still be added.
+  resolver.define('findLifecycleStory', async ({ payload }) => {
+    const projectId = projectKeyPart(payload.projectId);
+    const key = issueKeyOf(payload.key);
+    if (!key) return { error: 'Escribe la clave completa de la historia, por ejemplo CUQ-123.' };
+    const [issue] = await fetchIssuesByKeys([key], ['summary', 'status', 'issuetype', 'parent', 'project']);
+    if (!issue) return { error: `No se encontró ${key} o no tienes permiso para verla.` };
+    const project = issue.fields?.project || {};
+    if (String(project.id) !== String(projectId) && String(project.key) !== String(projectId)) {
+      return { error: `${issue.key} es de otro proyecto (${project.key || '?'}).` };
+    }
+    const type = issue.fields?.issuetype || {};
+    if (type.subtask || (type.hierarchyLevel !== undefined && Number(type.hierarchyLevel) !== 0) || isTestCase(issue) || isTestRun(issue) || isBug(issue) ||
+        /cycle|ciclo|test ?set|test ?plan|plan de prueba/i.test(String(type.name || ''))) {
+      return { error: `${issue.key} es de tipo "${text(type.name, 40)}"; aquí solo se agregan historias o requerimientos.` };
+    }
+    const parent = issue.fields?.parent;
+    return {
+      story: {
+        key: issue.key,
+        summary: text(issue.fields?.summary, 160),
+        status: text(issue.fields?.status?.name, 40),
+        // Shown as a note: this story already has an epic.
+        parentKey: parent?.key || ''
+      }
+    };
   });
 
   // Picker of phases 03 and 04 (v4.22.0): the epics and the Test Plans of the project, so they can

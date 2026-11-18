@@ -353,3 +353,16 @@ test('Lifecycle refreshes itself when shown again after changes elsewhere', () =
   assert.match(server, /cachedFor\(`cycles:\$\{accountId\}:\$\{projectId\}`, listProjectCycles, \{ notBefore \}\)/);
   assert.match(read('static/hello-world/src/App.js'), /isActive: activeTab === 'lifecycle'/);
 });
+
+test('a story can be found by key for the "historias sin épica" picker (v4.30.3)', () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  const body = server.slice(server.indexOf("resolver.define('findLifecycleStory'"), server.indexOf("// Picker of phases 03 and 04 (v4.22.0)"));
+  assert.match(body, /fetchIssuesByKeys\(\[key\], \['summary', 'status', 'issuetype', 'parent', 'project'\]\)/);
+  assert.match(body, /es de otro proyecto/);
+  assert.match(body, /aquí solo se agregan historias o requerimientos/);
+  // Diagnostics without keys or titles.
+  assert.match(server, /\[lifecycle\] candidates project=\$\{projectId\} epics=\$\{epics\.length\}/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /invoke\('findLifecycleStory'/);
+  assert.match(view, /Buscar \$\{typedKey\} en Jira/);
+});
