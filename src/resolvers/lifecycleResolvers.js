@@ -470,6 +470,43 @@ async function searchPage(jql, fields, nextPageToken, properties) {
   return response.json();
 }
 
+/**
+ * Reads issues BY KEY with `POST /rest/api/3/issue/bulkfetch`, as the current user (v4.28.2).
+ *
+ * Why not a JQL `key in (…)` search: if ONE key of the list was deleted, moved or cannot be seen
+ * by the user, Jira rejects the whole query, so every other issue of the list came back empty
+ * too. That is why some epics appeared without a name. Bulk fetch returns every issue it can
+ * read and reports only the failing ones apart (`issueErrors`).
+ *
+ * Read 100 keys per request (the API limit), four requests at a time.
+ *
+ * @param {string[]} keys - Issue keys.
+ * @param {string[]} fields - Fields to return.
+ * @returns {Promise<Object[]>} The issues that could be read (missing ones are skipped).
+ */
+async function fetchIssuesByKeys(keys, fields) {
+  const chunks = [];
+  for (let i = 0; i < keys.length; i += 100) chunks.push(keys.slice(i, i + 100));
+  const results = await mapLimit(chunks, 4, async (chunk) => {
+    const response = await api.asUser().requestJira(route`/rest/api/3/issue/bulkfetch`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueIdsOrKeys: chunk, fields })
+    });
+    if (!response.ok) {
+      // Logged without keys or titles: only how many and the HTTP status.
+      console.warn(`[lifecycle] bulkfetch HTTP ${response.status} for ${chunk.length} issue(s)`);
+      return [];
+    }
+    const body = await response.json();
+    if (Array.isArray(body?.issueErrors) && body.issueErrors.length > 0) {
+      console.log(`[lifecycle] bulkfetch skipped ${body.issueErrors.length} issue(s) that could not be read`);
+    }
+    return body?.issues || [];
+  });
+  return results.flat();
+}
+
 /** Runs a JQL search up to `maxIssues` issues. */
 async function searchAll(jql, fields, maxIssues, properties) {
   const issues = [];
@@ -523,28 +560,34 @@ async function computeProgress(epicKeys, storyKeys = []) {
   // v4.22.3: the epics themselves are also read (only their title). Before, the title was taken
   // from the stories, so an epic WITHOUT stories appeared with no name. Both searches of a group
   // run at the same time, so this adds requests but almost no waiting.
-  const groupResults = await mapLimit(epicGroups, 3, (group) => {
-    const keyList = group.map(k => jqlQuote(k)).join(',');
-    return Promise.all([
-      searchAll(`parent in (${keyList})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent'], MAX_STORIES_PER_SEARCH),
-      // An epic the user cannot see, or that was deleted, is simply not returned.
-      // v4.25.0: `reporter` says which team the epic belongs to.
-      searchAll(`key in (${keyList})`, ['summary', 'reporter'], EPICS_PER_SEARCH).catch(() => [])
-    ]);
-  });
-  const storyGroups = groupResults.map(([groupStories]) => groupStories);
-  const epicIssuesByKey = new Map(groupResults.flatMap(([, epicIssues]) => epicIssues)
-    .map(issue => [String(issue.key).toUpperCase(), issue]));
+  const storyFields = ['issuetype', 'issuelinks', 'status', 'summary', 'parent'];
+  // The epics themselves (title and, since v4.25.0, reporter) are read by key with bulk fetch
+  // (v4.28.2), at the same time as the stories.
+  const [storyGroups, epicIssues] = await Promise.all([
+    mapLimit(epicGroups, 3, async (group) => {
+      const keyList = group.map(k => jqlQuote(k)).join(',');
+      try {
+        return await searchAll(`parent in (${keyList})`, storyFields, MAX_STORIES_PER_SEARCH);
+      } catch (e) {
+        // v4.28.2: one epic of the group that no longer exists (or cannot be seen) makes Jira
+        // reject the whole query. Then each epic is searched on its own, so only that one is
+        // left without stories instead of the whole group.
+        console.warn(`[lifecycle] stories of ${group.length} epic(s) failed as a group; retrying one by one`);
+        const single = await mapLimit(group, 3, (key) =>
+          searchAll(`parent = ${jqlQuote(key)}`, storyFields, MAX_STORIES_PER_SEARCH).catch(() => []));
+        return single.flat();
+      }
+    }),
+    fetchIssuesByKeys(epicKeys, ['summary', 'reporter'])
+  ]);
+  const epicIssuesByKey = new Map(epicIssues.map(issue => [String(issue.key).toUpperCase(), issue]));
   const epicTitles = new Map([...epicIssuesByKey].map(([key, issue]) => [key, text(issue?.fields?.summary, 160)]));
   const epicStories = storyGroups.flat();
 
-  // v4.24.0: stories added without an epic, read by key in groups of 50 (same fields). A story
+  // v4.24.0: stories added without an epic (same fields). A story
   // that is ALSO under one of the initiative's epics is counted only once, under its epic.
-  const storyChunks = [];
-  for (let i = 0; i < storyKeys.length; i += EPICS_PER_SEARCH) storyChunks.push(storyKeys.slice(i, i + EPICS_PER_SEARCH));
-  const looseIssues = (await mapLimit(storyChunks, 3, (chunk) =>
-    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuetype', 'issuelinks', 'status', 'summary', 'parent', 'reporter'], EPICS_PER_SEARCH).catch(() => [])
-  )).flat();
+  // v4.28.2: read by key with bulk fetch, so one deleted story does not hide the others.
+  const looseIssues = await fetchIssuesByKeys(storyKeys, ['issuetype', 'issuelinks', 'status', 'summary', 'parent', 'reporter']);
   const seenStoryKeys = new Set(epicStories.map(issue => String(issue.key).toUpperCase()));
   const stories = [...epicStories, ...looseIssues.filter(issue => !seenStoryKeys.has(String(issue.key).toUpperCase()))];
   // True when some group had more stories than are read at once: the figures are then partial.
@@ -625,10 +668,9 @@ async function computeProgress(epicKeys, storyKeys = []) {
   const caseList = [...caseKeys].slice(0, MAX_CASES);
   // The test cases are read in groups of 100. The groups are independent, so they are requested
   // four at a time instead of one by one (v4.22.1).
-  const chunks = [];
-  for (let i = 0; i < caseList.length; i += 100) chunks.push(caseList.slice(i, i + 100));
-  const chunkResults = await mapLimit(chunks, 4, (chunk) =>
-    searchAll(`key in (${chunk.map(k => jqlQuote(k)).join(',')})`, ['issuelinks'], 100));
+  // v4.28.2: read by key with bulk fetch (100 per request, four at a time): one deleted test
+  // case no longer makes the executions of the other 99 disappear.
+  const chunkResults = [await fetchIssuesByKeys(caseList, ['issuelinks'])];
   for (const cases of chunkResults) {
     for (const testCase of cases) {
       for (const linked of linkedIssues(testCase)) {

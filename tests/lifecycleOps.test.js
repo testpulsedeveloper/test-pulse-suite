@@ -238,3 +238,20 @@ test('the timeline shows names, one colour per plan, and aligned rows', () => {
   assert.match(view, /label: plan\.summary \|\| key/);
   assert.match(view, /label: cycle\.summary \|\| cycle\.key/);
 });
+
+test('a cycle whose start date passed without executions is late; running ones are on time (v4.28.2)', () => {
+  const source = read('static/hello-world/src/components/LifecycleTimeline.jsx');
+  const body = source.slice(source.indexOf('export const barState'), source.indexOf('const OUTLINES'));
+  // eslint-disable-next-line no-new-func
+  const barState = new Function(`${body.replace('export const barState', 'const barState')}; return barState;`)();
+  const today = Date.UTC(2026, 10, 17);
+  const startedAgo = Date.UTC(2026, 10, 10);
+  const startsLater = Date.UTC(2026, 10, 25);
+  const endLater = Date.UTC(2026, 11, 15);
+  const none = { total: 5, passed: 0, failed: 0, blocked: 0 };
+  assert.equal(barState(none, endLater, today, startedAgo), 'late');
+  assert.equal(barState(none, endLater, today, startsLater), 'pending');
+  assert.equal(barState({ total: 5, passed: 1, failed: 0, blocked: 0 }, endLater, today, startedAgo), 'progress');
+  assert.match(source, /progress: '#1F845A'/);
+  assert.match(source, /outlineOffset: '-2px'/);
+});

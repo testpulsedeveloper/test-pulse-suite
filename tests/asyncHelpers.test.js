@@ -66,7 +66,12 @@ test('epics have no functional limit and are searched in parallel groups (v4.22.
   assert.ok(limit >= 500, 'MAX_EPICS is only a safety ceiling');
   assert.match(resolvers, /mapLimit\(epicGroups, 3,/);
   // v4.22.3: epic titles are read from the epics themselves, so an epic without stories has a name.
-  assert.match(resolvers, /searchAll\(`key in \(\$\{keyList\}\)`, \['summary', 'reporter'\], EPICS_PER_SEARCH\)/);
+  // v4.28.2: by key with bulk fetch, so one deleted epic does not leave the others without a name.
+  assert.match(resolvers, /fetchIssuesByKeys\(epicKeys, \['summary', 'reporter'\]\)/);
+  assert.doesNotMatch(resolvers, /searchAll\(`key in/);
+  assert.match(resolvers, /route`\/rest\/api\/3\/issue\/bulkfetch`/);
+  // A failing group of epics is retried one epic at a time.
+  assert.match(resolvers, /searchAll\(`parent = \$\{jqlQuote\(key\)\}`/);
   assert.match(resolvers, /summary: epicTitles\.get\(key\) \|\| ''/);
   assert.match(resolvers, /truncated: storiesTruncated \|\| caseKeys\.size > MAX_CASES/);
 

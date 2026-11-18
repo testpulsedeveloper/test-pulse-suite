@@ -9,7 +9,9 @@
  *
  * Bar colours:
  *   - v4.28.0: a row with `color` (a Test Plan and its cycles) is drawn in that colour, so the
- *     cycles of each plan are easy to tell apart; a late bar gets a red outline.
+ *     cycles of each plan are easy to tell apart. Since v4.28.2 its OUTLINE says whether it is
+ *     on time: red = late (its start date passed and nothing was executed, or its end date
+ *     passed with executions left), green = running or finished, none = not due to start yet.
  *   - rows without `color` (an initiative in the general timeline) use the state colours:
  *     green = every execution passed, red = late, blue = in progress, grey = not started.
  * The solid part of a bar is the share of executions already run (passed + failed + blocked).
@@ -54,16 +56,35 @@ const formatDay = (value) => {
 };
 
 /** Colour of a bar from its executions and its end date (see the file header). */
-export const barState = (runs, endMs, today = todayMs()) => {
+export const barState = (runs, endMs, today = todayMs(), startMs = null) => {
   const total = runs?.total || 0;
   const executed = (runs?.passed || 0) + (runs?.failed || 0) + (runs?.blocked || 0);
   if (total > 0 && runs.passed === total) return 'done';
+  // Late: the end date passed with executions left (or with nothing to execute)…
   if (endMs !== null && endMs < today && total > 0 && executed < total) return 'late';
   if (endMs !== null && endMs < today && total === 0) return 'late';
+  // …or (v4.28.2) the start date passed and nothing has been executed yet: it should have begun.
+  if (startMs !== null && startMs < today && executed === 0) return 'late';
   if (executed > 0) return 'progress';
   return 'pending';
 };
 
+/**
+ * Outline of a coloured bar (v4.28.2), the "is it on time?" signal:
+ *   - red   → late (see barState);
+ *   - green → on time: already running or finished;
+ *   - none  → has not started and is not due to start yet.
+ */
+// Drawn with CSS `outline` (painted ON TOP of the executed part of the bar, which otherwise
+// hid an inset shadow), pulled 2px inside the bar so it never overlaps the next row.
+const OUTLINES = {
+  late: '#C9372C',
+  progress: '#1F845A',
+  done: '#1F845A'
+};
+const outlineStyle = (color) => ({ outline: `2px solid ${color}`, outlineOffset: '-2px' });
+
+// Bar colours of rows WITHOUT a plan colour (initiatives in the general timeline).
 const STATE_COLORS = {
   done: { bar: '#BAF3DB', fill: '#1F845A', label: 'Completado' },
   late: { bar: '#FFD5D2', fill: '#C9372C', label: 'Atrasado' },
@@ -143,7 +164,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
 
       {/* One bar per row */}
       {drawable.map(row => {
-        const state = barState(row.runs, row.endMs, today);
+        const state = barState(row.runs, row.endMs, today, row.startMs);
         // A plan colour wins over the state colour; the state stays in the tooltip and a late bar
         // is outlined in red.
         const colors = row.color
@@ -151,7 +172,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
           // the same colour, solid. The names on the left stay in the normal text colour.
           ? { bar: `${row.color}8C`, fill: row.color, label: STATE_COLORS[state].label }
           : STATE_COLORS[state];
-        const lateOutline = row.color && state === 'late' ? { boxShadow: 'inset 0 0 0 2px #C9372C' } : {};
+        const lateOutline = row.color && OUTLINES[state] ? outlineStyle(OUTLINES[state]) : {};
         const total = row.runs?.total || 0;
         const executed = (row.runs?.passed || 0) + (row.runs?.failed || 0) + (row.runs?.blocked || 0);
         const pct = total > 0 ? Math.round((executed / total) * 100) : 0;
@@ -188,7 +209,10 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
           <>
             <span>Cada plan y sus ciclos tienen su color.</span>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ width: '14px', height: '8px', borderRadius: '2px', boxShadow: 'inset 0 0 0 2px #C9372C' }} />Atrasado
+              <span style={{ width: '14px', height: '8px', borderRadius: '2px', ...outlineStyle(OUTLINES.late) }} />Atrasado (ya debió empezar o terminar)
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ width: '14px', height: '8px', borderRadius: '2px', ...outlineStyle(OUTLINES.progress) }} />A tiempo
             </span>
           </>
         )}
