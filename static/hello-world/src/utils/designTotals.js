@@ -74,13 +74,13 @@ export function designState(totals) {
 }
 
 /**
- * Name of the Confluence document a findings report reviews (v4.34.0): the "Nombre del
- * documento" written in the report header, or the title of the Confluence page when the header
- * does not have it. '' when the report has not been read yet.
+ * Name of the Confluence document a findings report reviews: the TITLE of the Confluence page
+ * (its header). Since v4.34.1 the title wins; the "Nombre del documento" written inside the body
+ * of the report is used only when the title is not known. '' when the report has not been read.
  *
  * @param {Object} [report] - `deliverable.report` as stored by the server.
  * @returns {string}
  */
 export function reportDocumentName(report) {
-  return String(report?.general?.documentName || report?.pageTitle || '').trim();
+  return String(report?.pageTitle || report?.general?.documentName || '').trim();
 }

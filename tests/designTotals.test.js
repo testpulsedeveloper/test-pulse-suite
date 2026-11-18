@@ -47,8 +47,8 @@ test('state follows open findings and unread documents', () => {
   assert.equal(designState(designTotals([docs[1]])).label, 'Hallazgos atendidos');
 });
 
-test('document name comes from the report header, then from the page title', () => {
-  assert.equal(reportDocumentName({ general: { documentName: 'ERF Pagos Ficticios' }, pageTitle: 'Página' }), 'ERF Pagos Ficticios');
-  assert.equal(reportDocumentName({ general: {}, pageTitle: 'Reporte de hallazgos – Demo' }), 'Reporte de hallazgos – Demo');
+test('document name is the page title, then the name written in the body', () => {
+  assert.equal(reportDocumentName({ general: { documentName: 'ERF Pagos Ficticios' }, pageTitle: 'Reporte de hallazgos – Demo' }), 'Reporte de hallazgos – Demo');
+  assert.equal(reportDocumentName({ general: { documentName: 'ERF Pagos Ficticios' } }), 'ERF Pagos Ficticios');
   assert.equal(reportDocumentName(undefined), '');
 });
