@@ -407,3 +407,42 @@ test('the shared refresh button reloads Lifecycle (v4.31.1)', () => {
   const view = read('static/hello-world/src/views/LifecycleView.jsx');
   assert.match(view, /if \(refreshSignal > 0\) reloadAll\(\);/);
 });
+
+// ── v4.33.0: Responsable / Fecha de entrega taken from the findings report ───────────────────
+import { applyReportAutoFields, reportDateToIso, localDayOf } from '../src/utils/lifecycleOps.js';
+
+test('report dates are turned into YYYY-MM-DD', () => {
+  assert.equal(reportDateToIso('21/08/2026'), '2026-08-21');
+  assert.equal(reportDateToIso('5-8-2026'), '2026-08-05');
+  assert.equal(reportDateToIso('2026-08-21'), '2026-08-21');
+  assert.equal(reportDateToIso('31/02/2026'), '');
+  assert.equal(reportDateToIso('agosto'), '');
+});
+
+test('last edit is read in Mexico City time', () => {
+  // 03:15 UTC on the 22nd is still the 21st in Mexico City.
+  assert.equal(localDayOf('2026-08-22T03:15:00.000Z'), '2026-08-21');
+  assert.equal(localDayOf('nope'), '');
+});
+
+test('owner and date come from the report, the latest date wins', () => {
+  const deliverable = {
+    kind: 'findings', owner: 'Escrito a mano', date: '2026-01-01',
+    report: { pageUpdatedAt: '2026-08-21T18:00:00.000Z', general: { analyst: 'Ana Prueba Ficticia', analysisDate: '10/08/2026' } }
+  };
+  const result = applyReportAutoFields(deliverable);
+  assert.equal(result.owner, 'Ana Prueba Ficticia');
+  assert.equal(result.date, '2026-08-21');
+  // The analysis date wins when it is later than the last edit.
+  const later = applyReportAutoFields({ ...deliverable, report: { ...deliverable.report, general: { analysisDate: '30/08/2026' } } });
+  assert.equal(later.date, '2026-08-30');
+  // Without an analyst in the report, the typed owner is kept.
+  assert.equal(later.owner, 'Escrito a mano');
+});
+
+test('deliverables without a report or of another kind are untouched', () => {
+  const plain = { kind: 'link', owner: 'X', date: '2026-01-01', report: { general: { analyst: 'Y' } } };
+  assert.equal(applyReportAutoFields(plain), plain);
+  const unread = { kind: 'findings', owner: 'X', date: '' };
+  assert.equal(applyReportAutoFields(unread), unread);
+});

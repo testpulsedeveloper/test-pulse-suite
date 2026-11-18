@@ -305,6 +305,16 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam
   }));
   const [isTestPlan, setIsTestPlan] = useState(canBeTestPlan && initial?.kind === 'testplan');
   const set = (field) => (event) => setForm(prev => ({ ...prev, [field]: event.target.value }));
+  // v4.33.0: which of Responsable / Fecha de entrega the findings report already provides.
+  // While the link is the one that was read, those come from Confluence and are not editable.
+  const report = isFindings && initial?.report && initial.url === form.url ? initial.report : null;
+  const ownerAuto = Boolean(String(report?.general?.analyst || '').trim());
+  const dateAuto = Boolean(report?.pageUpdatedAt || report?.general?.analysisDate);
+  // A new report (not read yet) or a changed link: both are filled once the page is read.
+  // If the page could not be read (the report only has an error), they can be typed by hand.
+  const pendingRead = isFindings && !report;
+  const ownerLocked = ownerAuto || pendingRead;
+  const dateLocked = dateAuto || pendingRead;
   const looksLikeUrl = (value) => !value || /^https?:\/\/\S+$/i.test(String(value).trim());
   const urlLooksValid = looksLikeUrl(form.url);
   const defectsUrlLooksValid = looksLikeUrl(form.defectsUrl);
@@ -372,13 +382,18 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam
             {!defectsUrlLooksValid && <div style={{ ...styles.muted, color: '#AE2A19' }}>El enlace debe empezar con https://</div>}
           </div>
         )}
+        {/* v4.33.0: in a findings report both fields are filled from Confluence (Analista QA,
+            and the latest of the page's last edit and the analysis date). They can be typed by
+            hand only when the report read does not have that value. */}
         <div>
-          <label style={styles.label}>Responsable</label>
-          <input style={styles.input} value={form.owner} onChange={set('owner')} maxLength={120} />
+          <label style={styles.label}>Responsable{ownerAuto ? ' (del reporte)' : ''}</label>
+          <input style={styles.input} value={form.owner} onChange={set('owner')} maxLength={120}
+            disabled={ownerLocked} placeholder={pendingRead ? 'Se toma del "Analista QA" del reporte' : ''} />
         </div>
         <div>
-          <label style={styles.label}>Fecha de entrega</label>
-          <input type="date" style={styles.input} value={form.date} onChange={set('date')} />
+          <label style={styles.label}>Fecha de entrega{dateAuto ? ' (última del documento)' : ''}</label>
+          <input type="date" style={styles.input} value={form.date} onChange={set('date')} disabled={dateLocked} />
+          {pendingRead && <div style={styles.muted}>Se toma de la última edición del documento.</div>}
         </div>
         <div>
           <label style={styles.label}>Estado</label>
@@ -460,13 +475,14 @@ const LifecycleView = ({ ctx }) => {
     if (item.id !== fresh.id) return item;
     const reports = new Map();
     for (const phase of Object.values(fresh.phases || {})) {
-      for (const deliverable of phase?.deliverables || []) reports.set(deliverable.id, deliverable.report);
+      // v4.33.0: owner and date travel with the report, because the server fills them from it.
+      for (const deliverable of phase?.deliverables || []) reports.set(deliverable.id, { report: deliverable.report, owner: deliverable.owner, date: deliverable.date });
     }
     const phases = {};
     for (const [phaseId, phase] of Object.entries(item.phases || {})) {
       phases[phaseId] = {
         ...phase,
-        deliverables: (phase?.deliverables || []).map(d => (reports.has(d.id) ? { ...d, report: reports.get(d.id) } : d))
+        deliverables: (phase?.deliverables || []).map(d => (reports.has(d.id) ? { ...d, ...reports.get(d.id) } : d))
       };
     }
     return { ...item, phases };

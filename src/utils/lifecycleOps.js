@@ -177,3 +177,68 @@ export function restoreMissingDeliverables(stored, raw) {
   }
   return { raw: { ...raw, phases }, restored };
 }
+
+/**
+ * Turns a date written in a report ("21/08/2026", "21-08-2026" or "2026-08-21") into YYYY-MM-DD.
+ * Anything else (text, impossible dates) gives ''.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function reportDateToIso(value) {
+  const raw = String(value || '').trim();
+  let year; let month; let day;
+  let match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (match) [, year, month, day] = match;
+  else {
+    match = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (!match) return '';
+    [, day, month, year] = match;
+  }
+  const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  // Rejects dates such as 31/02/2026 (Date would silently roll them over to March).
+  const check = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(check.getTime()) && check.toISOString().slice(0, 10) === iso ? iso : '';
+}
+
+/**
+ * Calendar day (YYYY-MM-DD) of an ISO timestamp in Mexico City time, so a page edited at night
+ * is not shown as the next day (Confluence gives the time in UTC).
+ *
+ * @param {string} timestamp - e.g. "2026-08-21T03:15:00.000Z"
+ * @returns {string} '' when the timestamp is not valid.
+ */
+export function localDayOf(timestamp) {
+  const date = new Date(String(timestamp || ''));
+  if (Number.isNaN(date.getTime())) return '';
+  try {
+    // 'en-CA' formats as YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  } catch (error) {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Fills "Responsable" and "Fecha de entrega" of a findings report from what was read in
+ * Confluence (v4.33.0), so nobody has to type them:
+ *   - Responsable      = "Analista QA" written in the report header.
+ *   - Fecha de entrega = the most recent of the page's last edit and the report's "Fecha del
+ *                        análisis".
+ * When the report does not have a value, the one already stored (typed by hand) is kept.
+ *
+ * @param {Object} deliverable - Deliverable of kind 'findings' (with or without `report`).
+ * @returns {Object} The same deliverable with `owner` / `date` updated (a new object).
+ */
+export function applyReportAutoFields(deliverable) {
+  if (!deliverable || deliverable.kind !== 'findings' || !deliverable.report) return deliverable;
+  const report = deliverable.report;
+  const analyst = String(report.general?.analyst || '').trim().slice(0, 120);
+  const dates = [localDayOf(report.pageUpdatedAt), reportDateToIso(report.general?.analysisDate)].filter(Boolean).sort();
+  const latest = dates[dates.length - 1] || '';
+  return {
+    ...deliverable,
+    owner: analyst || deliverable.owner || '',
+    date: latest || deliverable.date || ''
+  };
+}

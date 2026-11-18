@@ -43,7 +43,7 @@ import { currentPlanRefOfCycle, isSamePlan } from '../utils/planCycleRules.js';
 // Performance helpers (v4.22.1): bounded parallelism and a 60-second memory of expensive lists.
 import { mapLimit, createShortCache } from '../utils/asyncHelpers.js';
 // v4.23.6: one change at a time, applied to the stored version (see lifecycleOps.js).
-import { applyLifecycleOperation, fitsInStorage, lostDeliverables, restoreMissingDeliverables } from '../utils/lifecycleOps.js';
+import { applyLifecycleOperation, fitsInStorage, lostDeliverables, restoreMissingDeliverables, applyReportAutoFields } from '../utils/lifecycleOps.js';
 
 // Shared by the resolvers of this file; entries are per user (see asyncHelpers.js).
 const cachedFor = createShortCache();
@@ -142,6 +142,11 @@ function sanitizeDeliverable(raw, stored, accountId) {
   // Keep the last report read from Confluence only while the link still points to the same page.
   if (kind === 'findings' && stored?.report && stored.url === url) {
     clean.report = compactReport(stored.report);
+    // v4.33.0: "Responsable" and "Fecha de entrega" come from the report (Analista QA and the
+    // latest of last edit / analysis date); a value typed by hand stays only when it has none.
+    const auto = applyReportAutoFields(clean);
+    clean.owner = auto.owner;
+    clean.date = auto.date;
   }
   if (kind === 'testplan') {
     // Where the Excel is attached, and the link that covers element 16 (defect management).
@@ -1004,7 +1009,13 @@ export const registerLifecycleResolvers = (resolver) => {
         for (const deliverable of latest.phases?.[phase]?.deliverables || []) {
           // Only merge when the deliverable still points to what was read (same page or same issue).
           const refreshed = batch.find(t => t.id === deliverable.id && t.url === deliverable.url && (t.issueKey || '') === (deliverable.issueKey || ''));
-          if (refreshed) deliverable.report = refreshed.report;
+          if (refreshed) {
+            deliverable.report = refreshed.report;
+            // v4.33.0: a findings report just read also fills Responsable and Fecha de entrega.
+            const auto = applyReportAutoFields(deliverable);
+            deliverable.owner = auto.owner;
+            deliverable.date = auto.date;
+          }
           // Reports saved before v4.31.0 lose their per-finding list here, too.
           else if (deliverable.report) deliverable.report = compactReport(deliverable.report);
         }
