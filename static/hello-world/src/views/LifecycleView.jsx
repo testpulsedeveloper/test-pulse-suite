@@ -524,10 +524,15 @@ const LifecycleView = ({ ctx }) => {
   const refreshFindings = useCallback(async (initiative, deliverableId, silent) => {
     setBusy(deliverableId || `refresh_${initiative.id}`);
     try {
-      const res = await invoke('refreshLifecycleFindings', { projectId: selectedProjectId, initiativeId: initiative.id, deliverableId });
+      let res = await invoke('refreshLifecycleFindings', { projectId: selectedProjectId, initiativeId: initiative.id, deliverableId });
       // v4.23.6: only the reports that were read are copied into what the page shows. Replacing
       // the whole initiative could hide a deliverable saved while Confluence was being read.
       if (res?.initiative) mergeReports(res.initiative);
+      // v4.31.0: the server reads 10 reports per call; keep asking until every one is read.
+      for (let round = 0; round < 30 && !deliverableId && res?.remaining?.length; round++) {
+        res = await invoke('refreshLifecycleFindings', { projectId: selectedProjectId, initiativeId: initiative.id, deliverableIds: res.remaining });
+        if (res?.initiative) mergeReports(res.initiative);
+      }
     } catch (error) {
       if (!silent) notifyError('No se pudo actualizar el entregable', error);
     } finally {
@@ -771,9 +776,23 @@ const LifecycleView = ({ ctx }) => {
           onCancel={() => setEditing(null)} onSave={(form) => handleSaveDeliverable(initiative, phase.id, { ...form, id: deliverable.id })} />
       );
     }
+    // v4.31.0: findings reports and the Test Plan start COLLAPSED (one line with their totals) so
+    // a phase with many documents stays readable; ▸ opens one, "Expandir todos" opens them all.
+    const collapsible = deliverable.kind === 'findings' || deliverable.kind === 'testplan';
+    const docOpen = !collapsible || Boolean(openRows[`${initiative.id}:doc:${deliverable.id}`]);
+    const totals = deliverable.report?.totals;
+    const oneLine = deliverable.kind === 'findings'
+      ? (totals ? `${totals.total} hallazgos · ${totals.open} abiertos${deliverable.report.maturityPct != null ? ` · madurez ${deliverable.report.maturityPct}%` : ''}` : (deliverable.report?.error ? 'No se pudo leer el reporte' : 'Sin leer'))
+      : (deliverable.report?.compliancePct != null ? `Cumplimiento ${deliverable.report.compliancePct}%` : 'Sin evaluar');
     return (
       <div key={deliverable.id} style={{ ...styles.card, padding: '10px 12px', marginTop: '8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {collapsible && (
+            <button type="button" onClick={() => toggleRow(initiative.id, `doc:${deliverable.id}`)} aria-expanded={docOpen}
+              title={docOpen ? 'Contraer' : 'Expandir'} style={{ ...styles.linkBtn, color: 'var(--jira-subtle, #626F86)', width: '12px' }}>
+              {docOpen ? '▾' : '▸'}
+            </button>
+          )}
           <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{deliverable.name}</strong>
           {deliverable.docType && <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px' }}>{deliverable.docType}</span>}
           {deliverable.team && TEAM_LABELS[deliverable.team] && <span className="ads-lozenge ads-lozenge-brand" style={{ fontSize: '10px' }}>{TEAM_LABELS[deliverable.team]}</span>}
@@ -781,6 +800,9 @@ const LifecycleView = ({ ctx }) => {
           <span style={styles.muted}>
             {[deliverable.owner, deliverable.date].filter(Boolean).join(' · ')}
           </span>
+          {collapsible && !docOpen && (
+            <span style={{ ...styles.muted, fontWeight: 600, color: totals?.open > 0 ? '#AE2A19' : 'var(--jira-subtle, #626F86)' }}>{oneLine}</span>
+          )}
           <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px' }}>
             {deliverable.url && <button type="button" style={styles.linkBtn} onClick={() => openLink(deliverable.url)}>{deliverable.kind === 'findings' ? 'Abrir en Confluence ↗' : 'Abrir ↗'}</button>}
             {(deliverable.kind === 'findings' || deliverable.kind === 'testplan') && (
@@ -792,7 +814,7 @@ const LifecycleView = ({ ctx }) => {
             {canEdit && <button type="button" style={{ ...styles.linkBtn, color: '#AE2A19' }} disabled={!!busy} onClick={() => handleRemoveDeliverable(initiative, phase.id, deliverable.id)}>Quitar</button>}
           </span>
         </div>
-        {deliverable.kind === 'testplan' && (
+        {deliverable.kind === 'testplan' && docOpen && (
           <div style={{ marginTop: '10px' }}>
             <TestPlanSummary report={deliverable.report} />
             {deliverable.report?.fetchedAt && (
@@ -805,7 +827,7 @@ const LifecycleView = ({ ctx }) => {
             )}
           </div>
         )}
-        {deliverable.kind === 'findings' && (
+        {deliverable.kind === 'findings' && docOpen && (
           <div style={{ marginTop: '10px' }}>
             <FindingsSummary report={deliverable.report} />
             {deliverable.report?.fetchedAt && (
@@ -851,7 +873,7 @@ const LifecycleView = ({ ctx }) => {
    * @param {string} options.noun / options.nounPlural - "reporte" / "reportes", shown in headers.
    * @param {(items) => JSX.Element} [options.groupExtra] - Extra info in a group header.
    */
-  const renderGroups = (initiative, phaseId, items, { teamOf, userOf, renderItem, noun, nounPlural, groupExtra }) => {
+  const renderGroups = (initiative, phaseId, items, { teamOf, userOf, renderItem, noun, nounPlural, groupExtra, headerExtra }) => {
     if (items.length === 0) return null;
     const groups = new Map();
     const add = (id, label, item) => {
@@ -885,6 +907,9 @@ const LifecycleView = ({ ctx }) => {
               {mode.label}
             </button>
           ))}
+          {/* Total always visible, so nobody thinks a document vanished inside a closed group. */}
+          <span style={styles.muted}>· {items.length} {items.length === 1 ? noun : nounPlural} en total</span>
+          {headerExtra}
         </div>
         {ordered.map(group => {
           if (!group.label) return <div key="all">{group.items.map(renderItem)}</div>;
@@ -907,8 +932,21 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
+  /** Opens (true) or closes (false) every document of a phase at once (v4.31.0). */
+  const setAllDocs = (initiative, phaseId, open) => setOpenRows(prev => {
+    const next = { ...prev };
+    for (const deliverable of deliverablesOf(initiative, phaseId)) next[`${initiative.id}:doc:${deliverable.id}`] = open;
+    return next;
+  });
+
   /** Phase 02: the reviewed documents, grouped by the team chosen on each one or by who added it. */
   const renderGroupedDeliverables = (initiative, phase) => renderGroups(initiative, phase.id, deliverablesOf(initiative, phase.id), {
+    headerExtra: deliverablesOf(initiative, phase.id).length > 1 && (
+      <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px' }}>
+        <button type="button" style={styles.linkBtn} onClick={() => setAllDocs(initiative, phase.id, true)}>Expandir todos</button>
+        <button type="button" style={styles.linkBtn} onClick={() => setAllDocs(initiative, phase.id, false)}>Contraer todos</button>
+      </span>
+    ),
     teamOf: (deliverable) => deliverable.team || '',
     userOf: (deliverable) => ({ id: deliverable.createdBy || '', label: authorName(deliverable.createdBy) || 'Sin registro de quién lo agregó' }),
     renderItem: (deliverable) => renderDeliverable(initiative, phase, deliverable),

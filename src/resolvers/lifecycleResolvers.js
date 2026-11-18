@@ -43,7 +43,7 @@ import { currentPlanRefOfCycle, isSamePlan } from '../utils/planCycleRules.js';
 // Performance helpers (v4.22.1): bounded parallelism and a 60-second memory of expensive lists.
 import { mapLimit, createShortCache } from '../utils/asyncHelpers.js';
 // v4.23.6: one change at a time, applied to the stored version (see lifecycleOps.js).
-import { applyLifecycleOperation, fitsInStorage } from '../utils/lifecycleOps.js';
+import { applyLifecycleOperation, fitsInStorage, lostDeliverables, restoreMissingDeliverables } from '../utils/lifecycleOps.js';
 
 // Shared by the resolvers of this file; entries are per user (see asyncHelpers.js).
 const cachedFor = createShortCache();
@@ -81,6 +81,16 @@ const issueKeyOf = (value) => {
 };
 
 const keyPrefix = (projectId) => `lifecycle_${projectId}_`;
+
+/**
+ * A stored report without the per-finding list (v4.31.0). Reports saved before that version still
+ * carry `findings`; they are slimmed down the next time the initiative is written.
+ */
+const compactReport = (report) => {
+  if (!report || typeof report !== 'object' || !('findings' in report)) return report;
+  const { findings, ...rest } = report;
+  return { ...rest, findingsCount: rest.findingsCount ?? (Array.isArray(findings) ? findings.length : 0) };
+};
 
 /** Trims a value to a safe, bounded string. */
 const text = (value, max = 200) => String(value ?? '').trim().slice(0, max);
@@ -131,7 +141,7 @@ function sanitizeDeliverable(raw, stored, accountId) {
   };
   // Keep the last report read from Confluence only while the link still points to the same page.
   if (kind === 'findings' && stored?.report && stored.url === url) {
-    clean.report = stored.report;
+    clean.report = compactReport(stored.report);
   }
   if (kind === 'testplan') {
     // Where the Excel is attached, and the link that covers element 16 (defect management).
@@ -140,7 +150,7 @@ function sanitizeDeliverable(raw, stored, accountId) {
     // v4.20.1: Test Plan of Test Pulse whose schedule and cycles cover element 14.
     clean.planKey = issueKeyOf(raw?.planKey);
     // Keep the last evaluation only while it still refers to the same Jira issue.
-    if (stored?.report && stored.issueKey === clean.issueKey) clean.report = stored.report;
+    if (stored?.report && stored.issueKey === clean.issueKey) clean.report = compactReport(stored.report);
   }
   return clean;
 }
@@ -247,8 +257,10 @@ async function readFindingsReport(url) {
     statusSource: parsed.statusSource,
     general: parsed.general,
     totals: parsed.totals,
-    // Only what the UI lists: no descriptions, the full text stays in Confluence.
-    findings: parsed.findings.map(f => ({ id: f.id, type: f.type, impact: f.impact, owner: f.owner, status: f.status, closed: f.closed })),
+    // v4.31.0: the list of findings is NOT stored any more, only its totals (above). The page
+    // never showed it, and keeping one row per finding (with the people responsible) inside the
+    // initiative is what made initiatives with many reports reach the storage size limit.
+    findingsCount: parsed.findings.length,
     maturityPct: parsed.maturityPct,
     maturitySource: parsed.maturitySource,
     error: parsed.recognized ? null : 'No se encontró la tabla de hallazgos. La tabla de detalle debe tener una columna "ID" y columnas como "Tipo de hallazgo" e "Impacto"; el estado se toma de la tabla "Estado de atención de hallazgos" (ID y Estado).'
@@ -897,7 +909,18 @@ export const registerLifecycleResolvers = (resolver) => {
     } else if ((await listInitiatives(projectId)).length >= MAX_INITIATIVES) {
       throw new Error(`Se alcanzó el máximo de ${MAX_INITIATIVES} iniciativas por proyecto.`);
     }
-    const initiative = sanitizeInitiative(raw, stored, context?.accountId);
+    // v4.31.0: this whole-initiative save is only used to CREATE initiatives (and by browser tabs
+    // opened before v4.23.6). A stale copy must never erase documents: whatever is stored and
+    // missing from the copy is put back.
+    let source = raw;
+    if (stored) {
+      const fixed = restoreMissingDeliverables(stored, raw);
+      source = fixed.raw;
+      if (fixed.restored > 0) {
+        console.warn(`[lifecycle] saveLifecycleInitiative kept ${fixed.restored} deliverable(s) missing from a stale copy initiative=${stored.id} by=${context?.accountId || 'n/a'}`);
+      }
+    }
+    const initiative = sanitizeInitiative(source, stored, context?.accountId);
     if (!fitsInStorage(initiative)) throw new Error(TOO_BIG_MESSAGE);
     await storage.set(`${keyPrefix(projectId)}${initiative.id}`, initiative);
     return { initiative };
@@ -916,6 +939,12 @@ export const registerLifecycleResolvers = (resolver) => {
     const stored = await storage.get(key);
     if (!stored) throw new Error('La iniciativa ya no existe. Recarga la vista.');
     const initiative = sanitizeInitiative(applyLifecycleOperation(stored, payload.op), stored, context?.accountId);
+    // v4.31.0: a deliverable may only disappear through an explicit "Quitar".
+    const lost = lostDeliverables(stored, initiative, payload.op);
+    if (lost.length > 0) {
+      console.error(`[lifecycle] refused update that would drop ${lost.length} deliverable(s) initiative=${stored.id} op=${String(payload.op?.type).slice(0, 30)} by=${context?.accountId || 'n/a'}`);
+      throw new Error('El cambio se canceló porque habría quitado documentos que no elegiste. Recarga la vista e inténtalo de nuevo.');
+    }
     if (!fitsInStorage(initiative)) throw new Error(TOO_BIG_MESSAGE);
     await storage.set(key, initiative);
     // Only ids and counts are logged (no names, links or people), to trace lost changes.
@@ -942,39 +971,51 @@ export const registerLifecycleResolvers = (resolver) => {
     const initiative = await storage.get(key);
     if (!initiative) throw new Error('La iniciativa ya no existe. Recarga la vista.');
 
+    // v4.31.0: `deliverableIds` (a list) lets the page refresh EVERY report in batches; before,
+    // only the first 10 of an initiative were ever re-read.
+    const wantedIds = Array.isArray(payload.deliverableIds) ? new Set(payload.deliverableIds.map(String)) : null;
     const targets = [];
     for (const phase of LIFECYCLE_PHASES) {
       for (const deliverable of initiative.phases?.[phase]?.deliverables || []) {
-        const wanted = !payload.deliverableId || deliverable.id === payload.deliverableId;
+        const wanted = wantedIds ? wantedIds.has(String(deliverable.id))
+          : (!payload.deliverableId || deliverable.id === payload.deliverableId);
         if (deliverable.kind === 'findings' && deliverable.url && wanted) targets.push(deliverable);
         // v4.20.0: the Test Plan workbook attached in Jira is re-evaluated the same way.
         if (deliverable.kind === 'testplan' && wanted) targets.push(deliverable);
       }
     }
-    // At most 10 pages per call keeps the resolver well inside its time limit.
-    for (const deliverable of targets.slice(0, 10)) {
+    // At most 10 pages per call (read three at a time) keeps the resolver well inside its time
+    // limit; the ids left are returned in `remaining` so the page asks for them next.
+    const batch = targets.slice(0, 10);
+    await mapLimit(batch, 3, async (deliverable) => {
       const report = deliverable.kind === 'testplan'
         ? await readTestPlanReport(deliverable, initiative)
         : await readFindingsReport(deliverable.url);
       // A failed read keeps the previous numbers and only records the error.
       deliverable.report = report.error && deliverable.report?.totals
-        ? { ...deliverable.report, error: report.error, fetchedAt: report.fetchedAt }
+        ? { ...compactReport(deliverable.report), error: report.error, fetchedAt: report.fetchedAt }
         : report;
-    }
+    });
+    const remaining = targets.slice(10).map(t => t.id);
     if (targets.length > 0) {
       // Re-read before writing so an edit saved meanwhile is not lost: only reports are merged in.
       const latest = (await storage.get(key)) || initiative;
       for (const phase of LIFECYCLE_PHASES) {
         for (const deliverable of latest.phases?.[phase]?.deliverables || []) {
           // Only merge when the deliverable still points to what was read (same page or same issue).
-          const refreshed = targets.find(t => t.id === deliverable.id && t.url === deliverable.url && (t.issueKey || '') === (deliverable.issueKey || ''));
+          const refreshed = batch.find(t => t.id === deliverable.id && t.url === deliverable.url && (t.issueKey || '') === (deliverable.issueKey || ''));
           if (refreshed) deliverable.report = refreshed.report;
+          // Reports saved before v4.31.0 lose their per-finding list here, too.
+          else if (deliverable.report) deliverable.report = compactReport(deliverable.report);
         }
       }
+      if (!fitsInStorage(latest)) throw new Error(TOO_BIG_MESSAGE);
       await storage.set(key, latest);
-      return { initiative: latest, refreshed: Math.min(targets.length, 10) };
+      const count = LIFECYCLE_PHASES.reduce((sum, phase) => sum + (latest.phases?.[phase]?.deliverables?.length || 0), 0);
+      console.log(`[lifecycle] refresh initiative=${latest.id} reports=${batch.length} remaining=${remaining.length} deliverables=${count}`);
+      return { initiative: latest, refreshed: batch.length, remaining };
     }
-    return { initiative, refreshed: 0 };
+    return { initiative, refreshed: 0, remaining: [] };
   });
 
   // v4.30.3: looks ONE issue up by key for the "historias sin épica" picker, so a story can be

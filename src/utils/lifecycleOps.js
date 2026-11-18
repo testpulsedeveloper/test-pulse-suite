@@ -125,3 +125,55 @@ export function applyLifecycleOperation(stored, op) {
 export function fitsInStorage(initiative, maxBytes = 230000) {
   return Buffer.byteLength(JSON.stringify(initiative), 'utf8') <= maxBytes;
 }
+
+/**
+ * Deliverables that exist in `stored` but not in `next`, other than the one an explicit
+ * "removeDeliverable" operation removes (v4.31.0 safety check).
+ *
+ * Every write of an initiative goes through this check: a deliverable may disappear ONLY because
+ * someone pressed "Quitar". Any other path that would drop one (an old browser tab sending a stale
+ * copy, a bug) is refused instead of silently losing documents.
+ *
+ * @param {Object} stored - Initiative as stored before the write.
+ * @param {Object} next - Initiative about to be written.
+ * @param {Object} [op] - The operation being applied, if any.
+ * @returns {Array<{phase: string, id: string}>} What would be lost ([] = safe to write).
+ */
+export function lostDeliverables(stored, next, op) {
+  const lost = [];
+  for (const phase of PHASES) {
+    const kept = new Set((next?.phases?.[phase]?.deliverables || []).map(d => d?.id));
+    for (const deliverable of stored?.phases?.[phase]?.deliverables || []) {
+      if (!deliverable?.id || kept.has(deliverable.id)) continue;
+      const removedOnPurpose = op?.type === 'removeDeliverable' && op.phaseId === phase && op.deliverableId === deliverable.id;
+      if (!removedOnPurpose) lost.push({ phase, id: deliverable.id });
+    }
+  }
+  return lost;
+}
+
+/**
+ * For the old "save the whole initiative" call (kept only for browser tabs opened before
+ * v4.23.6): puts back every stored deliverable the browser's copy does not have, so a stale copy
+ * can add or edit but never erase (v4.31.0).
+ *
+ * @param {Object} stored - Initiative as stored.
+ * @param {Object} raw - Initiative sent by the browser.
+ * @returns {{raw: Object, restored: number}} The browser copy with the missing deliverables added.
+ */
+export function restoreMissingDeliverables(stored, raw) {
+  const phases = { ...(raw?.phases || {}) };
+  let restored = 0;
+  for (const phase of PHASES) {
+    const list = [...(phases[phase]?.deliverables || [])];
+    const present = new Set(list.map(d => d?.id));
+    for (const deliverable of stored?.phases?.[phase]?.deliverables || []) {
+      if (deliverable?.id && !present.has(deliverable.id)) {
+        list.push(deliverable);
+        restored++;
+      }
+    }
+    phases[phase] = { deliverables: list };
+  }
+  return { raw: { ...raw, phases }, restored };
+}

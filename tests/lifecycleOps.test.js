@@ -366,3 +366,36 @@ test('a story can be found by key for the "historias sin épica" picker (v4.30.3
   assert.match(view, /invoke\('findLifecycleStory'/);
   assert.match(view, /Buscar \$\{typedKey\} en Jira/);
 });
+
+// ── v4.31.0: documents never vanish silently; reports store totals only; collapsible view ───
+
+import { lostDeliverables, restoreMissingDeliverables } from '../src/utils/lifecycleOps.js';
+
+test('a write may drop a deliverable only through an explicit removal', () => {
+  const stored = storedWith(report('d1', 'Uno'), report('d2', 'Dos'));
+  const staleCopy = storedWith(report('d1', 'Uno'));
+  assert.deepEqual(lostDeliverables(stored, staleCopy), [{ phase: 'design', id: 'd2' }]);
+  assert.deepEqual(lostDeliverables(stored, staleCopy, { type: 'removeDeliverable', phaseId: 'design', deliverableId: 'd2' }), []);
+  const { raw, restored } = restoreMissingDeliverables(stored, staleCopy);
+  assert.equal(restored, 1);
+  assert.deepEqual(raw.phases.design.deliverables.map(d => d.id), ['d1', 'd2']);
+});
+
+test('reports keep totals only, the guard runs on every write, and refresh covers every report', async () => {
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.doesNotMatch(server, /findings: parsed\.findings\.map/);
+  assert.match(server, /findingsCount: parsed\.findings\.length/);
+  assert.match(server, /const lost = lostDeliverables\(stored, initiative, payload\.op\);/);
+  assert.match(server, /restoreMissingDeliverables\(stored, raw\)/);
+  assert.match(server, /const remaining = targets\.slice\(10\)\.map\(t => t\.id\);/);
+  // Old reports are slimmed down when written again.
+  const { __test } = await import('../src/resolvers/lifecycleResolvers.js');
+  const old = { ...report('d9', 'Viejo'), report: { totals: { total: 2 }, findings: [{ id: 'H1' }, { id: 'H2' }] } };
+  const clean = __test.sanitizeDeliverable(old, old, 'acc');
+  assert.equal(clean.report.findings, undefined);
+  assert.equal(clean.report.findingsCount, 2);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /deliverableIds: res\.remaining/);
+  assert.match(view, /Expandir todos/);
+  assert.match(view, /en total<\/span>/);
+});
