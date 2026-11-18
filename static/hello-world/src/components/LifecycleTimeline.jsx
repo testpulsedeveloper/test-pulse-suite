@@ -147,7 +147,9 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
         // A plan colour wins over the state colour; the state stays in the tooltip and a late bar
         // is outlined in red.
         const colors = row.color
-          ? { bar: `${row.color}33`, fill: row.color, label: STATE_COLORS[state].label }
+          // v4.28.1: the whole bar carries the plan colour (55% opacity) and the executed share is
+          // the same colour, solid. The names on the left stay in the normal text colour.
+          ? { bar: `${row.color}8C`, fill: row.color, label: STATE_COLORS[state].label }
           : STATE_COLORS[state];
         const lateOutline = row.color && state === 'late' ? { boxShadow: 'inset 0 0 0 2px #C9372C' } : {};
         const total = row.runs?.total || 0;
@@ -165,10 +167,9 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
                   {row.open ? '▾' : '▸'}
                 </button>
               )}
-              {row.color && <span aria-hidden="true" style={{ flex: '0 0 auto', width: '8px', height: '8px', borderRadius: '50%', background: row.color }} />}
               <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.sublabel || row.label}>
                 {row.href
-                  ? <button type="button" onClick={() => onOpen?.(row.href)} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--jira-blue, #0C66E4)', fontWeight: row.level ? 400 : 700, fontSize: 'inherit' }}>{row.label}</button>
+                  ? <button type="button" onClick={() => onOpen?.(row.href)} title="Abrir en Jira" style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--jira-text, #172B4D)', fontWeight: row.level ? 400 : 700, fontSize: 'inherit', textAlign: 'left' }}>{row.label}</button>
                   : <strong style={{ color: 'var(--jira-text, #172B4D)' }}>{row.label}</strong>}
                 {row.sublabel && <span style={{ color: 'var(--jira-subtle, #626F86)' }}> {row.sublabel}</span>}
               </span>
