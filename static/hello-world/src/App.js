@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.31.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.31.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -2418,7 +2418,12 @@ Then el sistema valida la identidad.
                   clearPersistentCache();
                   queryClient.invalidateQueries();
 
-                  if (activeTab === 'execution' || activeTab === 'planning') {
+                  if (activeTab === 'lifecycle') {
+                    // v4.31.1: Lifecycle loads its own data; the shared button now asks it to
+                    // reload everything (same as its "Actualizar" button, skipping the server's
+                    // 60-second copies). Before, this branch did not exist and nothing reloaded.
+                    setLifecycleRefreshSignal(n => n + 1);
+                  } else if (activeTab === 'execution' || activeTab === 'planning') {
                     setLocalLoading(true);
                     const config = projectConfig || { testCycleType: 'Test Cycle', planIssueType: 'Test Set' };
                     const [fetchedCycles, fetchedPlans] = await Promise.all([
@@ -8081,6 +8086,8 @@ Then el sistema valida la identidad.
 
   // v4.29.0: true from the first time the Lifecycle tab is opened (keeps it mounted afterwards).
   const [lifecycleVisited, setLifecycleVisited] = useState(false);
+  // v4.31.1: bumped by the shared refresh button while Lifecycle is shown.
+  const [lifecycleRefreshSignal, setLifecycleRefreshSignal] = useState(0);
   useEffect(() => {
     if (activeTab === 'lifecycle') setLifecycleVisited(true);
   }, [activeTab]);
@@ -8088,7 +8095,7 @@ Then el sistema valida la identidad.
   const renderLifecycleTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
       {/* isActive (v4.30.2): the view is kept mounted, so it needs to know when it is shown again. */}
-      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId, isActive: activeTab === 'lifecycle' }} />
+      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId, isActive: activeTab === 'lifecycle', refreshSignal: lifecycleRefreshSignal }} />
     </Suspense>
   );
 

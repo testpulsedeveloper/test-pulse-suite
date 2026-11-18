@@ -408,7 +408,7 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam
 // ── Main view ───────────────────────────────────────────────────────────────────────────────
 
 const LifecycleView = ({ ctx }) => {
-  const { selectedProjectId, isAdmin, addNotification, isActive = true } = ctx;
+  const { selectedProjectId, isAdmin, addNotification, isActive = true, refreshSignal = 0 } = ctx;
 
   const [initiatives, setInitiatives] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -513,6 +513,11 @@ const LifecycleView = ({ ctx }) => {
   // in memory → it is marked stale and refreshes by itself the next time it is shown.
   const staleRef = useRef(false);
   useEffect(() => subscribeToMutations(() => { staleRef.current = true; }), []);
+  // v4.31.1: the app's shared refresh button (next to "Buscar Test…") reloads Lifecycle too.
+  useEffect(() => {
+    if (refreshSignal > 0) reloadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSignal]);
   useEffect(() => {
     if (isActive && staleRef.current) {
       staleRef.current = false;

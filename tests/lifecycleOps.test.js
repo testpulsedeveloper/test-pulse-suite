@@ -399,3 +399,11 @@ test('reports keep totals only, the guard runs on every write, and refresh cover
   assert.match(view, /Expandir todos/);
   assert.match(view, /en total<\/span>/);
 });
+
+test('the shared refresh button reloads Lifecycle (v4.31.1)', () => {
+  const app = read('static/hello-world/src/App.js');
+  assert.match(app, /if \(activeTab === 'lifecycle'\) \{[\s\S]{0,400}setLifecycleRefreshSignal\(n => n \+ 1\)/);
+  assert.match(app, /refreshSignal: lifecycleRefreshSignal/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /if \(refreshSignal > 0\) reloadAll\(\);/);
+});
