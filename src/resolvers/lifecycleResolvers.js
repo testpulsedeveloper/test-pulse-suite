@@ -305,7 +305,7 @@ const cycleDates = (issue) => {
  *        and shared by every plan of that project for 60 seconds (see cachedFor).
  * @returns {Promise<Object>} { key, summary, status, startDate, endDate, cycles: [...], totals }
  */
-async function readTestPulsePlanDetail(planKey, accountId) {
+async function readTestPulsePlanDetail(planKey, accountId, notBefore = 0) {
   try {
     const planRes = await api.asUser().requestJira(
       route`/rest/api/3/issue/${planKey}?fields=summary,project,issuetype,status&properties=testpulse-schedule`,
@@ -337,7 +337,7 @@ async function readTestPulsePlanDetail(planKey, accountId) {
     let projectCycles = [];
     if (/^\d+$/.test(projectId)) {
       projectCycles = accountId
-        ? await cachedFor(`cycles:${accountId}:${projectId}`, listProjectCycles)
+        ? await cachedFor(`cycles:${accountId}:${projectId}`, listProjectCycles, { notBefore })
         : await listProjectCycles();
     }
 
@@ -982,7 +982,9 @@ export const registerLifecycleResolvers = (resolver) => {
     // Opening the picker twice in a minute (epics, then plans) reuses the same listing. Without
     // a known user nothing is shared.
     if (!context?.accountId) return listCandidates(projectId);
-    return cachedFor(`candidates:${context.accountId}:${projectId}`, () => listCandidates(projectId));
+    // v4.30.2: `fresh` = the page knows plans/cycles changed, so the 60-second copy is not reused.
+    return cachedFor(`candidates:${context.accountId}:${projectId}`, () => listCandidates(projectId),
+      { notBefore: payload.fresh ? Date.now() : 0 });
   });
 
   // v4.26.0: general timeline of the project. For every initiative: its Test Plans with their
@@ -993,7 +995,8 @@ export const registerLifecycleResolvers = (resolver) => {
     const projectId = projectKeyPart(payload.projectId);
     const initiatives = await listInitiatives(projectId);
     const allPlanKeys = [...new Set(initiatives.flatMap(initiative => initiative.planKeys || []))];
-    const details = await mapLimit(allPlanKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId));
+    const notBefore = payload.fresh ? Date.now() : 0;
+    const details = await mapLimit(allPlanKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId, notBefore));
     const byKey = new Map(details.map(detail => [detail.key, detail]));
     return {
       initiatives: initiatives.map(initiative => ({
@@ -1025,9 +1028,12 @@ export const registerLifecycleResolvers = (resolver) => {
     const storyKeys = [...new Set((Array.isArray(payload.storyKeys) ? payload.storyKeys : []).map(issueKeyOf).filter(Boolean))].slice(0, MAX_LOOSE_STORIES);
     // Epics and plans are independent, so both are read at the same time; the plans go five at
     // a time and share one listing of the project's cycles (v4.22.1).
+    const freshSince = payload.fresh ? Date.now() : 0;
     const [progress, plans] = await Promise.all([
       computeProgress(epicKeys, storyKeys),
-      mapLimit(planKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId))
+      // v4.30.2: `fresh` re-reads the project's cycles ONCE (one timestamp for every plan, so
+      // they share the new load) instead of reusing the 60-second copy.
+      mapLimit(planKeys, 5, (planKey) => readTestPulsePlanDetail(planKey, context?.accountId, freshSince))
     ]);
     return { ...progress, plans };
   });

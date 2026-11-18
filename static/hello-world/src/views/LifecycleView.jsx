@@ -20,7 +20,7 @@ import { router } from '@forge/bridge';
 import TestPulseLoader from '../components/TestPulseLoader';
 // v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
 import LifecycleTimeline, { planColor } from '../components/LifecycleTimeline';
-import { invoke, invalidateResolverCache } from '../utils/queryClient';
+import { invoke, invalidateResolverCache, subscribeToMutations } from '../utils/queryClient';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
 const PHASES = [
@@ -408,7 +408,7 @@ const DeliverableForm = ({ phase, initial, onCancel, onSave, saving, defaultTeam
 // ── Main view ───────────────────────────────────────────────────────────────────────────────
 
 const LifecycleView = ({ ctx }) => {
-  const { selectedProjectId, isAdmin, addNotification } = ctx;
+  const { selectedProjectId, isAdmin, addNotification, isActive = true } = ctx;
 
   const [initiatives, setInitiatives] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -425,6 +425,8 @@ const LifecycleView = ({ ctx }) => {
   // v4.29.0: bumping it reloads everything ("Actualizar"). The tab now stays mounted while other
   // tabs are used, so data is only reloaded on purpose (or when the project changes).
   const [reloadToken, setReloadToken] = useState(0);
+  // v4.30.2: "the next request must not reuse the server's 60-second copy" flags, one per kind.
+  const freshRef = useRef({ progress: false, candidates: false, timeline: false });
   // v4.25.0: groups the user closed in phases 02/03 ("initiative:phase:mode:group" → true).
   const [collapsedGroups, setCollapsedGroups] = useState({});
   // How phases 02 and 03 group their items: 'team', 'user' or 'none' (remembered in this browser).
@@ -499,10 +501,25 @@ const LifecycleView = ({ ctx }) => {
    */
   const reloadAll = () => {
     invalidateResolverCache('getLifecycleProgress');
+    invalidateResolverCache('getLifecycleCandidates');
+    // v4.30.2: the next Jira reads also skip the server's 60-second copies (cycles, pickers).
+    freshRef.current = { progress: true, candidates: true, timeline: true };
     setProgressById({});
     setGeneralTimeline({ open: false, loading: false, error: '', data: null });
     setReloadToken(token => token + 1);
   };
+
+  // v4.30.2: plans, cycles, dates or executions changed in another tab while Lifecycle was kept
+  // in memory → it is marked stale and refreshes by itself the next time it is shown.
+  const staleRef = useRef(false);
+  useEffect(() => subscribeToMutations(() => { staleRef.current = true; }), []);
+  useEffect(() => {
+    if (isActive && staleRef.current) {
+      staleRef.current = false;
+      reloadAll();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive]);
 
   const refreshFindings = useCallback(async (initiative, deliverableId, silent) => {
     setBusy(deliverableId || `refresh_${initiative.id}`);
@@ -536,6 +553,9 @@ const LifecycleView = ({ ctx }) => {
     const storyKeys = initiative.storyKeys || [];
     const hasBuildKeys = epicKeys.length > 0 || storyKeys.length > 0;
     const token = `${epicKeys.join(',')}|${storyKeys.join(',')}|${planKeys.join(',')}`;
+    // v4.30.2: after "Actualizar" or a change in another tab, ask the server for fresh data once.
+    const fresh = freshRef.current.progress;
+    freshRef.current.progress = false;
     progressTokenRef.current[id] = token;
     const apply = (patch) => {
       if (progressTokenRef.current[id] !== token) return;
@@ -552,12 +572,12 @@ const LifecycleView = ({ ctx }) => {
       }
     }));
     if (hasBuildKeys) {
-      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys, storyKeys, planKeys: [] })
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys, storyKeys, planKeys: [], ...(fresh ? { fresh: true } : {}) })
         .then(res => { const { plans, ...figures } = res || {}; apply({ ...EMPTY_PROGRESS, ...figures, epicsLoaded: true }); })
         .catch(error => apply({ ...EMPTY_PROGRESS, epicsLoaded: true, epicsError: message(error) }));
     }
     if (planKeys.length > 0) {
-      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: [], planKeys })
+      invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: [], planKeys, ...(fresh ? { fresh: true } : {}) })
         .then(res => apply({ plans: res?.plans || [], plansLoaded: true }))
         .catch(error => apply({ plans: [], plansLoaded: true, plansError: message(error) }));
     }
@@ -669,7 +689,9 @@ const LifecycleView = ({ ctx }) => {
     const base = { initiativeId: initiative.id, phaseId: phase.id, field, loading: true, error: '', items: [], selected: [], search: '', max: 0 };
     setPicker(base);
     try {
-      const res = await invoke('getLifecycleCandidates', { projectId: selectedProjectId });
+      const fresh = freshRef.current.candidates;
+      freshRef.current.candidates = false;
+      const res = await invoke('getLifecycleCandidates', { projectId: selectedProjectId, ...(fresh ? { fresh: true } : {}) });
       const source = {
         epicKeys: [res?.epics, res?.maxEpics],
         storyKeys: [res?.stories, res?.maxStories],
@@ -1361,7 +1383,9 @@ const LifecycleView = ({ ctx }) => {
     }
     setGeneralTimeline(prev => ({ ...prev, open: true, loading: true, error: '' }));
     try {
-      const data = await invoke('getLifecycleTimeline', { projectId: selectedProjectId });
+      const fresh = freshRef.current.timeline;
+      freshRef.current.timeline = false;
+      const data = await invoke('getLifecycleTimeline', { projectId: selectedProjectId, ...(fresh ? { fresh: true } : {}) });
       setGeneralTimeline({ open: true, loading: false, error: '', data });
     } catch (error) {
       setGeneralTimeline({ open: true, loading: false, error: error?.message || String(error), data: null });

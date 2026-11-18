@@ -51,9 +51,17 @@ export async function mapLimit(items, limit, task) {
  */
 export function createShortCache({ ttlMs = 60 * 1000, maxEntries = 100, now = Date.now } = {}) {
   const entries = new Map(); // key → { at: number, promise: Promise }
-  return function cachedFor(key, loader) {
+  /**
+   * @param {string} key
+   * @param {() => Promise} loader
+   * @param {{notBefore?: number}} [options] - v4.30.2: an entry loaded BEFORE `notBefore` (a
+   *        timestamp) is treated as expired. The page sends it when it knows something changed
+   *        (e.g. a cycle was just created). Several parallel calls with the same `notBefore`
+   *        still share ONE fresh load, because the new entry is newer than `notBefore`.
+   */
+  return function cachedFor(key, loader, { notBefore = 0 } = {}) {
     const hit = entries.get(key);
-    if (hit && now() - hit.at < ttlMs) return hit.promise;
+    if (hit && now() - hit.at < ttlMs && hit.at >= notBefore) return hit.promise;
     if (entries.size >= maxEntries) entries.clear();
     // The promise itself is stored, so two requests arriving together share one load.
     const promise = Promise.resolve().then(loader);

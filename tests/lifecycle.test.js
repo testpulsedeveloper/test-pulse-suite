@@ -206,7 +206,7 @@ test('phases 03 and 04 take several deliverables: epics with stories, plans with
   const resolvers = read('src/resolvers/lifecycleResolvers.js');
   // Per-epic breakdown and the Test Plans with their cycles come from the same resolver.
   assert.match(resolvers, /epics: \[\.\.\.epicMap\.values\(\)\]/);
-  assert.match(resolvers, /readTestPulsePlanDetail\(planKey, context\?\.accountId\)/);
+  assert.match(resolvers, /readTestPulsePlanDetail\(planKey, context\?\.accountId, freshSince\)/);
   assert.match(resolvers, /\['testops-plan-link', 'testpulse-v2', 'execution-meta', 'testpulse-schedule'\]/);
   // Plan keys are stored on the initiative, cleaned and bounded.
   assert.match(resolvers, /planKeys: \[\.\.\.new Set\(/);

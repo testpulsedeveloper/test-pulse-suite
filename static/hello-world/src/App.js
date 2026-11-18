@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.30.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.30.2'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -8087,7 +8087,8 @@ Then el sistema valida la identidad.
 
   const renderLifecycleTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
-      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId }} />
+      {/* isActive (v4.30.2): the view is kept mounted, so it needs to know when it is shown again. */}
+      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId, isActive: activeTab === 'lifecycle' }} />
     </Suspense>
   );
 

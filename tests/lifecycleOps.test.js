@@ -323,3 +323,33 @@ test('every module uses the full width (no centred max-width) (v4.30.1)', () => 
   assert.doesNotMatch(read('static/hello-world/src/views/LifecycleView.jsx'), /maxWidth: '1200px', margin: '0 auto'/);
   assert.doesNotMatch(read('static/hello-world/src/views/SettingsView.jsx'), /className="main-content" style=\{\{ maxWidth/);
 });
+
+// ── v4.30.2: Lifecycle sees plans / cycles created or changed in other tabs ──────────────────
+
+import { createShortCache } from '../src/utils/asyncHelpers.js';
+
+test('a cached entry older than notBefore is reloaded once, then shared', async () => {
+  let t = 1000;
+  const cachedFor = createShortCache({ ttlMs: 60000, now: () => t });
+  let loads = 0;
+  const loader = async () => ++loads;
+  assert.equal(await cachedFor('k', loader), 1);
+  t = 2000;
+  assert.equal(await cachedFor('k', loader), 1); // still within 60 s
+  const since = 2000;
+  assert.equal(await cachedFor('k', loader, { notBefore: since }), 2); // older than "since": reload
+  assert.equal(await cachedFor('k', loader, { notBefore: since }), 2); // the new load is shared
+});
+
+test('Lifecycle refreshes itself when shown again after changes elsewhere', () => {
+  const cache = read('static/hello-world/src/utils/queryClient.js');
+  assert.match(cache, /export const subscribeToMutations/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /subscribeToMutations\(\(\) => \{ staleRef\.current = true; \}\)/);
+  assert.match(view, /if \(isActive && staleRef\.current\)/);
+  assert.match(view, /\.\.\.\(fresh \? \{ fresh: true \} : \{\}\)/);
+  const server = read('src/resolvers/lifecycleResolvers.js');
+  assert.match(server, /const freshSince = payload\.fresh \? Date\.now\(\) : 0;/);
+  assert.match(server, /cachedFor\(`cycles:\$\{accountId\}:\$\{projectId\}`, listProjectCycles, \{ notBefore \}\)/);
+  assert.match(read('static/hello-world/src/App.js'), /isActive: activeTab === 'lifecycle'/);
+});

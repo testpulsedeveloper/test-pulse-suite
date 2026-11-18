@@ -361,6 +361,21 @@ export const invalidateResolverCache = (resolverName) => {
   });
 };
 
+// v4.30.2: views kept in memory (Lifecycle) subscribe here to learn that data changed elsewhere
+// (a cycle created in Planning, a status saved in Execution…) and refresh when shown again.
+const _mutationListeners = new Set();
+
+/**
+ * Calls `listener(resolverName)` after every successful change made through `invoke`.
+ *
+ * @param {(name: string) => void} listener
+ * @returns {() => void} Unsubscribe function.
+ */
+export const subscribeToMutations = (listener) => {
+  _mutationListeners.add(listener);
+  return () => _mutationListeners.delete(listener);
+};
+
 const _tpInFlight = new Map();
 
 // Frontend concurrency semaphore for read queries (prevents simultaneous Forge bridge stampedes -> HTTP 429)
@@ -447,6 +462,7 @@ export const invoke = async (name, payload) => {
     if (TP_MUTATION_RESOLVERS.has(name)) {
       // Selective invalidation preserves static catalogs & unaffected modules
       invalidateScopedCache(name);
+      _mutationListeners.forEach((listener) => { try { listener(name); } catch (_) { /* never break the call */ } });
     }
     return res;
   }
