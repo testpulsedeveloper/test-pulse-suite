@@ -217,3 +217,24 @@ test('phase 03 returns each epic story with its cases and flags stories without 
   assert.match(view, /Solo historias sin casos/);
   assert.match(view, /renderEpicStories\(item\)/);
 });
+
+// ── v4.28.0: Traceability removed from Reports; timeline shows names and a colour per plan ────
+
+test('the Traceability sub-view and its project-wide load are gone', () => {
+  const reports = read('static/hello-world/src/views/ReportsView.jsx');
+  assert.doesNotMatch(reports, /setDashboardSubView\('traceability'\)/);
+  assert.doesNotMatch(reports, /traceabilityRows/);
+  const app = read('static/hello-world/src/App.js');
+  assert.doesNotMatch(app, /getTraceabilityHierarchy|loadTraceabilityHierarchy/);
+  const server = read('src/index.js');
+  assert.doesNotMatch(server, /resolver\.define\('getTraceabilityHierarchy'/);
+});
+
+test('the timeline shows names, one colour per plan, and aligned rows', () => {
+  const timeline = read('static/hello-world/src/components/LifecycleTimeline.jsx');
+  assert.match(timeline, /export const planColor/);
+  assert.match(timeline, /boxSizing: 'border-box', padding: `5px 8px 5px \$\{row\.level \? 18 : 0\}px`/);
+  const view = read('static/hello-world/src/views/LifecycleView.jsx');
+  assert.match(view, /label: plan\.summary \|\| key/);
+  assert.match(view, /label: cycle\.summary \|\| cycle\.key/);
+});

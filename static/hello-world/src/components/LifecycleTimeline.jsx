@@ -7,19 +7,19 @@
  * vertical line for today. It is plain HTML/CSS: every bar is positioned with a percentage of the
  * total period, so it needs no chart library and scales with the width of the page.
  *
- * Bar colours (same meaning everywhere in Lifecycle):
- *   - green  → every execution passed;
- *   - red    → the end date has passed and there are executions left (late);
- *   - blue   → in progress;
- *   - grey   → not started yet / no executions.
- * The darker part of a bar is the share of executions already run (passed + failed + blocked).
+ * Bar colours:
+ *   - v4.28.0: a row with `color` (a Test Plan and its cycles) is drawn in that colour, so the
+ *     cycles of each plan are easy to tell apart; a late bar gets a red outline.
+ *   - rows without `color` (an initiative in the general timeline) use the state colours:
+ *     green = every execution passed, red = late, blue = in progress, grey = not started.
+ * The solid part of a bar is the share of executions already run (passed + failed + blocked).
  *
  * Rows without dates cannot be drawn; they are listed under the chart so nobody thinks they
  * were forgotten.
  *
  * Props:
  *   rows: Array<{ id, label, sublabel?, start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', runs?, level?, href?,
- *                 onToggle?, open? }>
+ *                 onToggle?, open?, color? }>  (`color`: '#RRGGBB' of the plan the row belongs to)
  *         `level` 1 indents the row (a cycle under its plan). `runs` = { total, passed, failed,
  *         blocked, notRun, other }. `onToggle`/`open` show an arrow that opens/closes child rows.
  *   milestones: Array<{ date, label }>
@@ -71,7 +71,14 @@ const STATE_COLORS = {
   pending: { bar: '#DCDFE4', fill: '#8590A2', label: 'Sin iniciar' }
 };
 
-const LABEL_WIDTH = 230;
+const LABEL_WIDTH = 260;
+
+/**
+ * Colours given to the Test Plans of a timeline, in order (v4.28.0). Chosen to be told apart
+ * from each other and readable on white; after the last one the list starts again.
+ */
+export const PLAN_COLORS = ['#0C66E4', '#6E5DC6', '#1F845A', '#B65C02', '#AE4787', '#227D9B', '#5B7F24', '#943D73'];
+export const planColor = (index) => PLAN_COLORS[index % PLAN_COLORS.length];
 
 export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, emptyText = 'Sin fechas para mostrar.' }) {
   const today = todayMs();
@@ -115,7 +122,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
     <div style={{ fontSize: '0.78rem' }}>
       {/* Axis: months and today */}
       <div style={{ display: 'flex' }}>
-        <div style={{ flex: `0 0 ${LABEL_WIDTH}px` }} />
+        <div style={{ flex: `0 0 ${LABEL_WIDTH}px`, width: `${LABEL_WIDTH}px` }} />
         {grid(
           <>
             {ticks.map(t => <span key={t.ms} style={{ position: 'absolute', left: pos(t.ms), top: 0, paddingLeft: '3px', color: 'var(--jira-subtle, #626F86)' }}>{t.label}</span>)}
@@ -126,7 +133,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
       {/* Milestones: one line with every deliverable that has a delivery date */}
       {marks.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
-          <div style={{ flex: `0 0 ${LABEL_WIDTH}px`, padding: '4px 8px 4px 0', color: 'var(--jira-subtle, #626F86)' }}>Hitos (entregables)</div>
+          <div style={{ flex: `0 0 ${LABEL_WIDTH}px`, width: `${LABEL_WIDTH}px`, boxSizing: 'border-box', padding: '4px 8px 4px 0', color: 'var(--jira-subtle, #626F86)' }}>Hitos (entregables)</div>
           {grid(marks.map((m, i) => (
             <span key={`${m.date}-${i}`} title={`${m.label} · ${formatDay(m.date)}`}
               style={{ position: 'absolute', left: pos(m.ms + DAY_MS / 2), top: '50%', transform: 'translate(-50%, -50%) rotate(45deg)', width: '9px', height: '9px', background: '#6E5DC6', border: '1px solid #FFFFFF' }} />
@@ -137,20 +144,28 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
       {/* One bar per row */}
       {drawable.map(row => {
         const state = barState(row.runs, row.endMs, today);
-        const colors = STATE_COLORS[state];
+        // A plan colour wins over the state colour; the state stays in the tooltip and a late bar
+        // is outlined in red.
+        const colors = row.color
+          ? { bar: `${row.color}33`, fill: row.color, label: STATE_COLORS[state].label }
+          : STATE_COLORS[state];
+        const lateOutline = row.color && state === 'late' ? { boxShadow: 'inset 0 0 0 2px #C9372C' } : {};
         const total = row.runs?.total || 0;
         const executed = (row.runs?.passed || 0) + (row.runs?.failed || 0) + (row.runs?.blocked || 0);
         const pct = total > 0 ? Math.round((executed / total) * 100) : 0;
         const tooltip = `${row.label}${row.sublabel ? ` — ${row.sublabel}` : ''}\n${formatDay(row.start)} → ${formatDay(row.end)}\n${colors.label}${total > 0 ? ` · ${executed} de ${total} ejecutados (${pct}%)` : ''}`;
         return (
           <div key={row.id} style={{ display: 'flex', alignItems: 'center', borderTop: '1px solid var(--jira-border, #DCDFE4)' }}>
-            <div style={{ flex: `0 0 ${LABEL_WIDTH}px`, padding: `5px 8px 5px ${row.level ? 18 : 0}px`, minWidth: 0, display: 'flex', alignItems: 'center', gap: '4px' }}>
+            {/* border-box: the indent of a cycle row stays INSIDE the label column, so every row's
+                chart starts at the same x and the month / "Hoy" lines line up (v4.28.0 fix). */}
+            <div style={{ flex: `0 0 ${LABEL_WIDTH}px`, width: `${LABEL_WIDTH}px`, boxSizing: 'border-box', padding: `5px 8px 5px ${row.level ? 18 : 0}px`, minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
               {row.onToggle && (
                 <button type="button" onClick={row.onToggle} aria-expanded={Boolean(row.open)} title={row.open ? 'Ocultar ciclos' : 'Ver ciclos'}
                   style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--jira-subtle, #626F86)', width: '12px' }}>
                   {row.open ? '▾' : '▸'}
                 </button>
               )}
+              {row.color && <span aria-hidden="true" style={{ flex: '0 0 auto', width: '8px', height: '8px', borderRadius: '50%', background: row.color }} />}
               <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.sublabel || row.label}>
                 {row.href
                   ? <button type="button" onClick={() => onOpen?.(row.href)} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--jira-blue, #0C66E4)', fontWeight: row.level ? 400 : 700, fontSize: 'inherit' }}>{row.label}</button>
@@ -159,7 +174,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
               </span>
             </div>
             {grid(
-              <div title={tooltip} style={{ position: 'absolute', left: pos(row.startMs), width: width(row.startMs, row.endMs), top: '5px', bottom: '5px', background: colors.bar, borderRadius: '4px', overflow: 'hidden' }}>
+              <div title={tooltip} style={{ position: 'absolute', left: pos(row.startMs), width: width(row.startMs, row.endMs), top: '5px', bottom: '5px', background: colors.bar, borderRadius: '4px', overflow: 'hidden', ...lateOutline }}>
                 <div style={{ width: `${pct}%`, height: '100%', background: colors.fill }} />
               </div>, 26)}
           </div>
@@ -168,7 +183,15 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
 
       {/* Legend */}
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '8px', color: 'var(--jira-subtle, #626F86)' }}>
-        {Object.values(STATE_COLORS).map(c => (
+        {drawable.some(row => row.color) && (
+          <>
+            <span>Cada plan y sus ciclos tienen su color.</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ width: '14px', height: '8px', borderRadius: '2px', boxShadow: 'inset 0 0 0 2px #C9372C' }} />Atrasado
+            </span>
+          </>
+        )}
+        {drawable.some(row => !row.color) && Object.values(STATE_COLORS).map(c => (
           <span key={c.label} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
             <span style={{ width: '14px', height: '8px', borderRadius: '2px', background: c.fill }} />{c.label}
           </span>
@@ -176,7 +199,7 @@ export default function LifecycleTimeline({ rows = [], milestones = [], onOpen, 
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
           <span style={{ width: '8px', height: '8px', background: '#6E5DC6', transform: 'rotate(45deg)' }} />Hito
         </span>
-        <span>La parte oscura de cada barra es lo ya ejecutado.</span>
+        <span>La parte sólida de cada barra es lo ya ejecutado.</span>
       </div>
 
       {undated.length > 0 && (

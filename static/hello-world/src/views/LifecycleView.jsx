@@ -19,7 +19,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { router } from '@forge/bridge';
 import TestPulseLoader from '../components/TestPulseLoader';
 // v4.26.0: Gantt-style timeline of plans, cycles and deliverable milestones.
-import LifecycleTimeline from '../components/LifecycleTimeline';
+import LifecycleTimeline, { planColor } from '../components/LifecycleTimeline';
 import { invoke } from '../utils/queryClient';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
@@ -1301,21 +1301,24 @@ const LifecycleView = ({ ctx }) => {
         body = <div style={styles.muted}>Consultando Jira…</div>;
       } else {
         const rows = [];
-        for (const key of planKeys) {
+        // v4.28.0: only names are shown (the key stays in the link), and each plan, with its
+        // cycles, gets its own colour.
+        planKeys.forEach((key, index) => {
           const plan = (progress?.plans || []).find(item => item.key === key) || { key, cycles: [] };
+          const color = planColor(index);
           const cyclesOpen = Boolean(openRows[`${initiative.id}:tl:${key}`]);
           const cycles = plan.cycles || [];
           rows.push({
-            id: `plan:${key}`, label: key, sublabel: plan.summary || '', start: plan.startDate, end: plan.endDate,
-            runs: plan.totals, href: `/browse/${key}`,
+            id: `plan:${key}`, label: plan.summary || key, start: plan.startDate, end: plan.endDate,
+            runs: plan.totals, href: `/browse/${key}`, color,
             ...(cycles.length > 0 ? { open: cyclesOpen, onToggle: () => toggleRow(initiative.id, `tl:${key}`) } : {})
           });
           if (cyclesOpen) {
             for (const cycle of cycles) {
-              rows.push({ id: `cycle:${cycle.key}`, label: cycle.key, sublabel: cycle.summary, start: cycle.startDate, end: cycle.endDate, runs: cycle, href: `/browse/${cycle.key}`, level: 1 });
+              rows.push({ id: `cycle:${cycle.key}`, label: cycle.summary || cycle.key, start: cycle.startDate, end: cycle.endDate, runs: cycle, href: `/browse/${cycle.key}`, level: 1, color });
             }
           }
-        }
+        });
         body = (
           <LifecycleTimeline rows={rows} milestones={milestonesOf(initiative)} onOpen={openLink}
             emptyText="Sin fechas todavía. Agrega Test Plans en 04 Ejecutar (con fechas en Planeación) o fechas de entrega a los entregables." />
@@ -1373,9 +1376,9 @@ const LifecycleView = ({ ctx }) => {
           ...(plans.length > 0 ? { open, onToggle: () => toggleRow('general', key) } : {})
         });
         if (open) {
-          for (const plan of plans) {
-            rows.push({ id: `init:${item.id}:${plan.key}`, label: plan.key, sublabel: plan.summary, start: plan.startDate, end: plan.endDate, runs: plan.totals, href: `/browse/${plan.key}`, level: 1 });
-          }
+          plans.forEach((plan, index) => {
+            rows.push({ id: `init:${item.id}:${plan.key}`, label: plan.summary || plan.key, start: plan.startDate, end: plan.endDate, runs: plan.totals, href: `/browse/${plan.key}`, level: 1, color: planColor(index) });
+          });
         }
         for (const m of item.milestones || []) milestones.push({ date: m.date, label: `${item.name} · ${m.name}` });
       }

@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.27.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.28.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -347,13 +347,11 @@ function App() {
   const [selectedDashboardSeverityFilter, setSelectedDashboardSeverityFilter] = useState(null);
   const [executionTypeFieldId, setExecutionTypeFieldId] = useState(null);
   const [resolutionStage, setResolutionStage] = useState('Nuevo a Abierto');
-  const [dashboardSubView, setDashboardSubView] = useState('runs'); // 'runs', 'bugs', 'traceability'
+  const [dashboardSubView, setDashboardSubView] = useState('runs'); // 'runs' or 'bugs'
   const [dashboardBugSearch, setDashboardBugSearch] = useState('');
   const [dashboardCycleBugFilter, setDashboardCycleBugFilter] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED', 'BLOCKER'
   const [dashboardGeneralBugSearch, setDashboardGeneralBugSearch] = useState('');
   const [dashboardGeneralBugStatusTab, setDashboardGeneralBugStatusTab] = useState('ALL'); // 'ALL', 'OPEN', 'CLOSED'
-  const [dashboardTraceabilitySearch, setDashboardTraceabilitySearch] = useState('');
-  const [expandedTraceabilityEpics, setExpandedTraceabilityEpics] = useState({});
   const [showUnlinkedBugsModal, setShowUnlinkedBugsModal] = useState(false);
   const [linkingUnlinkedBug, setLinkingUnlinkedBug] = useState(null);
   const [targetCycleForBug, setTargetCycleForBug] = useState('');
@@ -644,37 +642,9 @@ function App() {
     }
   };
 
-  // Traceability hierarchy state (Épicas ➔ Historias ➔ Casos de Prueba)
-  const [traceabilityHierarchy, setTraceabilityHierarchy] = useState({ epics: [], stories: [], storyMap: {}, storiesByEpic: {}, tcMap: {}, _projectId: null });
-  const [traceabilityHierarchyLoading, setTraceabilityHierarchyLoading] = useState(false);
-  const loadTraceabilityHierarchy = useCallback(async (projId, cfg) => {
-    const targetId = projId || selectedProjectId;
-    const targetCfg = cfg || projectConfig;
-    if (!targetId) return;
-    try {
-      setTraceabilityHierarchyLoading(true);
-      const res = await invoke('getTraceabilityHierarchy', { projectId: targetId, config: targetCfg });
-      if (res && res.tcMap) {
-        setTraceabilityHierarchy({ ...res, _projectId: String(targetId) });
-      }
-    } catch (err) {
-      console.warn("loadTraceabilityHierarchy error:", err);
-    } finally {
-      setTraceabilityHierarchyLoading(false);
-    }
-  }, [selectedProjectId, projectConfig]);
-
-  useEffect(() => {
-    if ((activeTab === 'reports' || activeTab === 'dashboard') && selectedProjectId) {
-      if (
-        !traceabilityHierarchy ||
-        String(traceabilityHierarchy._projectId) !== String(selectedProjectId) ||
-        (!traceabilityHierarchyLoading && (!traceabilityHierarchy.stories || traceabilityHierarchy.stories.length === 0) && (!traceabilityHierarchy.epics || traceabilityHierarchy.epics.length === 0))
-      ) {
-        loadTraceabilityHierarchy(selectedProjectId, projectConfig);
-      }
-    }
-  }, [activeTab, dashboardSubView, selectedProjectId, projectConfig, loadTraceabilityHierarchy]);
+  // v4.28.0: the Traceability sub-view of Reports was removed (Lifecycle covers it), so the
+  // project-wide epic → story → test case hierarchy is no longer loaded. Before, it was read on
+  // every project load and every time Reports opened, even when nobody looked at it.
 
   // Notifications
   const { addNotification } = useNotification();
@@ -1267,7 +1237,6 @@ function App() {
       }
       setProjectConfig(config);
       setProjectIssueTypes(projectTypes);
-      loadTraceabilityHierarchy(targetProjectId, config);
 
       const applyReportAutomation = (autoRes) => {
         if (autoRes && autoRes.success && autoRes.config) {
@@ -2426,9 +2395,6 @@ Then el sistema valida la identidad.
                       invoke('getTestPlans', { projectId: selectedProjectId, config }),
                       loadReportData(selectedProjectId, config, false, true)
                     ];
-                    if (dashboardSubView === 'traceability') {
-                      promises.push(loadTraceabilityHierarchy(selectedProjectId, config));
-                    }
                     const [fetchedCycles, fetchedPlans] = await Promise.all(promises);
                     if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
                     if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
@@ -2439,9 +2405,6 @@ Then el sistema valida la identidad.
                       invoke('getTestCycles', { projectId: selectedProjectId, config }),
                       invoke('getTestPlans', { projectId: selectedProjectId, config })
                     ];
-                    if (activeTab === 'dashboard' && dashboardSubView === 'traceability') {
-                      promises.push(loadTraceabilityHierarchy(selectedProjectId, config));
-                    }
                     const [fetchedCycles, fetchedPlans] = await Promise.all(promises);
                     if (fetchedCycles && !fetchedCycles._isError) setTestCycles(fetchedCycles);
                     if (fetchedPlans && !fetchedPlans._isError) setTestPlans(fetchedPlans);
@@ -8033,7 +7996,7 @@ Then el sistema valida la identidad.
     if (!selectedTraceabilityItem) return null;
     return (
       <Suspense fallback={null}>
-        <TraceabilitySlidePanel ctx={{ formatFileSize, handlePreviewEvidence, inlineAttachmentUrls, loadTestCaseDetails, openTraceabilityItemModal, projectConfig, reportData, requirementsMap, selectedTraceabilityDetails, selectedTraceabilityItem, selectedTraceabilityLoading, setModalDetailTab, setSelectedBug, setSelectedTestCase, setSelectedTraceabilityItem, testCases, testCycles, testPlans, traceabilityHierarchy }} />
+        <TraceabilitySlidePanel ctx={{ formatFileSize, handlePreviewEvidence, inlineAttachmentUrls, loadTestCaseDetails, openTraceabilityItemModal, projectConfig, reportData, requirementsMap, selectedTraceabilityDetails, selectedTraceabilityItem, selectedTraceabilityLoading, setModalDetailTab, setSelectedBug, setSelectedTestCase, setSelectedTraceabilityItem, testCases, testCycles, testPlans }} />
       </Suspense>
     );
   };
@@ -8052,7 +8015,7 @@ Then el sistema valida la identidad.
 
   const renderReportsTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando métricas y tableros de Reports..." />}>
-      <ReportsView ctx={{ addNotification, availableEnvironments, calcScheduleDays, circuitBreakerActive, context, dashboardBugSearch, dashboardCycleBugFilter, dashboardGeneralBugSearch, dashboardGeneralBugStatusTab, dashboardSubView, dashboardTraceabilitySearch, dashboardWidgets, draggedWidgetIndex, executiveReportBuild, executiveReportContainerRef, executiveReportModalOpen, executiveReportNotes, executiveReportSubject, expandedTraceabilityEpics, findTc, folderPaths, folders, formatShortDateEs, getExecVal, handleAddWidget, handleConfirmLinkUnlinkedBug, handleDragOver, handleDragStart, handleDrop, handleMoveWidget, handleRemoveWidget, handleRemoveWidgetByType, handleResetDashboardLayout, handleSaveDashboardLayout, handleToggleWidgetWidth, isCustomizingDashboard, isCycleInPlan, isFolderSidebarVisible, isHydratingReport, isLinkingUnlinkedBugLoading, isRefreshingReport, isResizing, linkingUnlinkedBug, loadReportData, openTraceabilityItemModal, perCycleCacheRef, planScheduleForm, projectConfig, projects, reportAutomationConfig, reportData, reportLoading, reportSelectedCycles, reportSelectedPlans, reportSelectedVersions, requirementsMap, runsCycleCarouselRef, runsPlanDropdownOpen, selectedDashboardSeverityFilter, selectedPlanId, selectedProjectId, setDashboardBugSearch, setDashboardCycleBugFilter, setDashboardGeneralBugSearch, setDashboardGeneralBugStatusTab, setDashboardSubView, setDashboardTraceabilitySearch, setExecutiveReportBuild, setExecutiveReportModalOpen, setExecutiveReportNotes, setExecutiveReportSubject, setExpandedTraceabilityEpics, setIsCustomizingDashboard, setIsResizing, setLinkingUnlinkedBug, setReportAutomationLastDispatch, setReportAutomationTesting, setReportSelectedCycles, setReportSelectedPlans, setRunsPlanDropdownOpen, setSelectedBug, setSelectedDashboardSeverityFilter, setShowAddWidgetModal, setShowUnlinkedBugsModal, setTargetCycleForBug, setTargetTestForBug, showAddWidgetModal, showUnlinkedBugsModal, sidebarWidth, targetCycleForBug, targetTestForBug, testCases, testCycles, testPlans, toggleFolderSidebar, traceabilityHierarchy, traceabilityHierarchyLoading, unlinkedBugs }} />
+      <ReportsView ctx={{ addNotification, availableEnvironments, calcScheduleDays, circuitBreakerActive, context, dashboardBugSearch, dashboardCycleBugFilter, dashboardGeneralBugSearch, dashboardGeneralBugStatusTab, dashboardSubView, dashboardWidgets, draggedWidgetIndex, executiveReportBuild, executiveReportContainerRef, executiveReportModalOpen, executiveReportNotes, executiveReportSubject, findTc, folderPaths, folders, formatShortDateEs, getExecVal, handleAddWidget, handleConfirmLinkUnlinkedBug, handleDragOver, handleDragStart, handleDrop, handleMoveWidget, handleRemoveWidget, handleRemoveWidgetByType, handleResetDashboardLayout, handleSaveDashboardLayout, handleToggleWidgetWidth, isCustomizingDashboard, isCycleInPlan, isFolderSidebarVisible, isHydratingReport, isLinkingUnlinkedBugLoading, isRefreshingReport, isResizing, linkingUnlinkedBug, loadReportData, perCycleCacheRef, planScheduleForm, projectConfig, projects, reportAutomationConfig, reportData, reportLoading, reportSelectedCycles, reportSelectedPlans, reportSelectedVersions, requirementsMap, runsCycleCarouselRef, runsPlanDropdownOpen, selectedDashboardSeverityFilter, selectedPlanId, selectedProjectId, setDashboardBugSearch, setDashboardCycleBugFilter, setDashboardGeneralBugSearch, setDashboardGeneralBugStatusTab, setDashboardSubView, setExecutiveReportBuild, setExecutiveReportModalOpen, setExecutiveReportNotes, setExecutiveReportSubject, setIsCustomizingDashboard, setIsResizing, setLinkingUnlinkedBug, setReportAutomationLastDispatch, setReportAutomationTesting, setReportSelectedCycles, setReportSelectedPlans, setRunsPlanDropdownOpen, setSelectedBug, setSelectedDashboardSeverityFilter, setShowAddWidgetModal, setShowUnlinkedBugsModal, setTargetCycleForBug, setTargetTestForBug, showAddWidgetModal, showUnlinkedBugsModal, sidebarWidth, targetCycleForBug, targetTestForBug, testCases, testCycles, testPlans, toggleFolderSidebar, unlinkedBugs }} />
     </Suspense>
   );
 
