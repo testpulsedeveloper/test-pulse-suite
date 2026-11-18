@@ -281,3 +281,37 @@ test('Lifecycle stays mounted after the first visit and reloads only on demand',
   assert.match(view, /invalidateResolverCache\('getLifecycleProgress'\)/);
   assert.match(view, /\}, \[selectedProjectId, reloadToken\]\);/);
 });
+
+// ── v4.30.0: create / rename Test Plans and Test Cycles from Test Pulse ──────────────────────
+
+test('plans and cycles are created with the name as summary AND description', () => {
+  const server = read('src/index.js');
+  assert.match(server, /description: adfParagraph\(String\(description \|\| ''\)\.trim\(\) \|\| summary\)/);
+  assert.equal((server.match(/const summary = cleanIssueName\(rawSummary\);/g) || []).length, 2);
+  // A failed creation is reported instead of returning Jira's error body as if it worked.
+  assert.match(server, /throw await jiraCreateError\(response, 'plan'\)/);
+  assert.match(server, /throw await jiraCreateError\(response, 'ciclo'\)/);
+});
+
+test('renaming checks project and issue type, and runs as the user', () => {
+  const server = read('src/index.js');
+  const body = server.slice(server.indexOf("resolver.define('renameTestIssue'"), server.indexOf("resolver.define('renameTestIssue'") + 4000);
+  assert.match(body, /if \(!projectId\) throw new Error/);
+  assert.match(body, /La incidencia no pertenece a este proyecto/);
+  // Issue types come from the stored project configuration, not from the browser.
+  assert.match(body, /properties\/testops-config/);
+  assert.match(body, /Solo se pueden renombrar Test Plans y Test Cycles/);
+  assert.match(body, /api\.asUser\(\)\.requestJira\(route`\/rest\/api\/3\/issue\/\$\{issueId\}`, \{\s*method: 'PUT'/);
+  const cache = read('static/hello-world/src/utils/queryClient.js');
+  assert.match(cache, /'renameTestIssue',/);
+});
+
+test('the "+ Nuevo" buttons open Test Pulse form; Jira form stays as fallback', () => {
+  const app = read('static/hello-world/src/App.js');
+  assert.match(app, /const handleCreateIssue = \(kind\) =>/);
+  assert.match(app, /onUseJiraForm=\{openJiraCreateIssue\}/);
+  const planning = read('static/hello-world/src/views/PlanningView.jsx');
+  assert.match(planning, /openRenameDialog\('plan', currentPlan\)/);
+  assert.match(planning, /openRenameDialog\('cycle', selectedCycle\)/);
+  assert.doesNotMatch(planning, /onClick=\{handleCreateIssue\}/);
+});

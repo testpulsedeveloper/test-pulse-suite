@@ -46,11 +46,13 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.29.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.30.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
 const TraceabilitySlidePanel = React.lazy(() => import('./components/TraceabilitySlidePanel'));
+// v4.30.0: Test Pulse's own "name only" form to create / rename Test Plans and Test Cycles.
+const PlanCycleNameDialog = React.lazy(() => import('./components/PlanCycleNameDialog'));
 const PlanningView = React.lazy(() => import('./views/PlanningView'));
 const ExecutionView = React.lazy(() => import('./views/ExecutionView'));
 const ReportsView = React.lazy(() => import('./views/ReportsView'));
@@ -1683,7 +1685,11 @@ function App() {
   
   const filteredTestCycles = testCycles;
 
-  const handleCreateIssue = () => {
+  /**
+   * Opens Jira's own "Create issue" form (any issue type, every field of the project). Since
+   * v4.30.0 it is the fallback behind "Usar el formulario de Jira" in Test Pulse's own form.
+   */
+  const openJiraCreateIssue = () => {
     const projectId = selectedProjectId || context?.extension?.project?.id;
     
     const createIssueModal = new CreateIssueModal({
@@ -1702,6 +1708,60 @@ function App() {
     });
 
     createIssueModal.open();
+  };
+
+  // ---------- Test Plan / Test Cycle: create and rename (v4.30.0) ----------
+  // { mode: 'create'|'rename', kind: 'plan'|'cycle'|'choose', issue?, activePlan? } or null.
+  const [nameDialog, setNameDialog] = useState(null);
+
+  /**
+   * "+ Nuevo" buttons: opens Test Pulse's name-only form. `kind` says what the button creates
+   * ('plan', 'cycle', or 'choose' to let the person pick). A cycle can go straight into the
+   * Test Plan that is active in Planning / Execution.
+   */
+  const handleCreateIssue = (kind) => {
+    const activePlan = (testPlans || []).find(p => String(p.id) === String(selectedPlanId)) || null;
+    setNameDialog({ mode: 'create', kind: typeof kind === 'string' ? kind : 'choose', activePlan });
+  };
+
+  /** ✎ buttons: rename a Test Plan or a Test Cycle (`issue` = { id, key, summary }). */
+  const openRenameDialog = (kind, issue) => {
+    if (issue?.id) setNameDialog({ mode: 'rename', kind, issue });
+  };
+
+  /** Saves what the form asked for; a rejected promise shows its message inside the form. */
+  const handleNameDialogSubmit = async ({ kind, name, linkToPlan }) => {
+    const projectId = selectedProjectId || context?.extension?.project?.id;
+    const config = projectConfig || {};
+    if (nameDialog?.mode === 'rename') {
+      const res = await invoke('renameTestIssue', { projectId, issueId: nameDialog.issue.id, name });
+      // Show the new name everywhere without reloading the lists.
+      const rename = (item) => (String(item.id) === String(res.id) ? { ...item, summary: res.summary, name: res.summary } : item);
+      if (kind === 'plan') setTestPlans(prev => (prev || []).map(rename));
+      else {
+        setTestCycles(prev => (prev || []).map(rename));
+        setSelectedCycle(prev => (prev && String(prev.id) === String(res.id) ? rename(prev) : prev));
+      }
+      addNotification({ type: 'success', title: 'Nombre actualizado', description: `${res.key}: ${res.summary}` });
+      return;
+    }
+    const created = await invoke(kind === 'plan' ? 'createTestSet' : 'createTestCycle', { projectId, summary: name, config });
+    if (kind === 'cycle' && linkToPlan && nameDialog?.activePlan?.id && created?.id) {
+      try {
+        await invoke('linkCycleToPlan', { cycleId: created.id, planId: nameDialog.activePlan.id });
+      } catch (e) {
+        addNotification({ type: 'error', title: 'El ciclo se creó, pero no se pudo agregar al plan', description: e?.message || String(e) });
+      }
+    }
+    // The create resolvers invalidate the cached lists, so these read fresh data.
+    const [plans, cycles] = await Promise.all([
+      invoke('getTestPlans', { projectId, config }),
+      invoke('getTestCycles', { projectId, config })
+    ]);
+    if (Array.isArray(plans)) setTestPlans(plans);
+    if (Array.isArray(cycles)) setTestCycles(cycles);
+    if (kind === 'plan' && created?.id) setSelectedPlanId(String(created.id));
+    addNotification({ type: 'success', title: kind === 'plan' ? 'Test Plan creado' : 'Ciclo creado', description: `${created?.key || ''} ${name}`.trim() });
   };
 
   // ---------- Bulk Upload Handlers ----------
@@ -8003,7 +8063,7 @@ Then el sistema valida la identidad.
 
   const renderPlanningTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Planning..." />}>
-      <PlanningView ctx={{ activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
+      <PlanningView ctx={{ activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, openRenameDialog, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 
@@ -8074,6 +8134,12 @@ Then el sistema valida la identidad.
       {renderReportAutomationModal()}
       {renderBugSlidePanel()}
       {renderTraceabilityItemSlidePanel()}
+      {nameDialog && (
+        <Suspense fallback={null}>
+          <PlanCycleNameDialog dialog={nameDialog} onClose={() => setNameDialog(null)}
+            onSubmit={handleNameDialogSubmit} onUseJiraForm={openJiraCreateIssue} />
+        </Suspense>
+      )}
       {renderMediaModal()}
       {renderQrModal()}
     </>

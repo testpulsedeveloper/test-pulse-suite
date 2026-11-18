@@ -482,7 +482,7 @@ export default function ExecutionView({ ctx }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <button
                       type="button"
-                      onClick={handleCreateIssue}
+                      onClick={() => handleCreateIssue('plan')}
                       style={{
                         fontSize: '11px',
                         fontWeight: 600,
@@ -752,7 +752,7 @@ export default function ExecutionView({ ctx }) {
               <div style={{ padding: '12px', borderTop: '1px solid var(--jira-border, #DCDFE4)', background: '#FFFFFF' }}>
                 <button
                   type="button"
-                  onClick={handleCreateIssue}
+                  onClick={() => handleCreateIssue('cycle')}
                   style={{
                     width: '100%',
                     padding: '8px 12px',

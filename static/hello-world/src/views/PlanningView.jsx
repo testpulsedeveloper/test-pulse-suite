@@ -58,6 +58,7 @@ export default function PlanningView({ ctx }) {
     groupByFolder,
     handleAddTestToCycle,
     handleCreateIssue,
+    openRenameDialog,
     handleCycleSelect,
     handleLinkCycleToPlan,
     handleRemoveManyFromCycle,
@@ -322,7 +323,7 @@ export default function PlanningView({ ctx }) {
                     </span>
                     <button
                       type="button"
-                      onClick={handleCreateIssue}
+                      onClick={() => handleCreateIssue('plan')}
                       style={{
                         fontSize: '11px',
                         fontWeight: 600,
@@ -403,6 +404,14 @@ export default function PlanningView({ ctx }) {
                               }}>
                                 {planDaysCalc.businessDays} días hábiles
                               </span>
+                            )}
+                            {/* v4.30.0: rename the plan from Test Pulse */}
+                            {currentPlan && (
+                              <button type="button" onClick={() => openRenameDialog('plan', currentPlan)}
+                                title="Renombrar plan" aria-label="Renombrar plan"
+                                style={{ width: '18px', height: '18px', padding: 0, border: 'none', background: 'none', cursor: 'pointer', color: '#64748B', fontSize: '12px' }}>
+                                ✎
+                              </button>
                             )}
                             {currentPlan && (
                               <button
@@ -804,7 +813,7 @@ export default function PlanningView({ ctx }) {
               <div style={{ padding: '12px', borderTop: '1px solid #E2E8F0', background: '#F8FAFC' }}>
                 <button
                   type="button"
-                  onClick={handleCreateIssue}
+                  onClick={() => handleCreateIssue('choose')}
                   style={{
                     width: '100%',
                     height: '36px',
@@ -885,6 +894,12 @@ export default function PlanningView({ ctx }) {
                         >
                           {selectedCycle.summary}
                         </span>
+                        {/* v4.30.0: rename the cycle from Test Pulse */}
+                        <button type="button" onClick={() => openRenameDialog('cycle', selectedCycle)}
+                          title="Renombrar ciclo" aria-label="Renombrar ciclo"
+                          style={{ marginLeft: '6px', border: 'none', background: 'none', cursor: 'pointer', color: '#64748B', fontSize: '14px', verticalAlign: 'middle' }}>
+                          ✎
+                        </button>
                       </h1>
                       <span style={{
                         padding: '2px 10px',

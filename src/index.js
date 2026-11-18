@@ -1309,9 +1309,57 @@ resolver.define('getTestCaseDetailsBatch', async ({ payload }) => {
   return results;
 });
 
+// === Plan / cycle names (v4.30.0) ===
+// Test Pulse creates Test Plans and Test Cycles from its own small form: the person only types a
+// NAME. Jira asks for a summary and (in these projects) a description, so the name is used for
+// both. The same name rules apply when a plan or cycle is renamed later.
+const MAX_ISSUE_NAME = 255;
+
+/** Trims a plan/cycle name; throws a readable error when it is empty. */
+const cleanIssueName = (value) => {
+  const name = String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_ISSUE_NAME);
+  if (!name) throw new Error('Escribe un nombre.');
+  return name;
+};
+
+/** One-paragraph ADF document with plain text (Jira Cloud descriptions are ADF). */
+const adfParagraph = (text) => ({
+  type: 'doc',
+  version: 1,
+  content: [{ type: 'paragraph', content: text ? [{ type: 'text', text }] : [] }]
+});
+
+/** Plain text of an ADF document (all text nodes joined), to compare descriptions. */
+const adfPlainText = (doc) => {
+  const parts = [];
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'text' && node.text) parts.push(node.text);
+    (node.content || []).forEach(walk);
+  };
+  walk(doc);
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * Turns a failed "create issue" answer from Jira into one readable sentence. The most common case
+ * is a project that requires more fields than name and description.
+ */
+const jiraCreateError = async (response, noun) => {
+  let detail = '';
+  try {
+    const body = await response.json();
+    const fieldErrors = Object.entries(body?.errors || {}).map(([field, message]) => `${field}: ${message}`);
+    detail = [...(body?.errorMessages || []), ...fieldErrors].join(' · ');
+  } catch (_) { /* no JSON body */ }
+  return new Error(`Jira no pudo crear el ${noun} (HTTP ${response.status})${detail ? `: ${detail}` : ''}. Si el proyecto pide más campos, usa el formulario de Jira.`);
+};
+
 // === Test Set Management ===
 resolver.define('createTestSet', async (req) => {
-  const { summary, description, projectId, config: payloadConfig } = req.payload || {};
+  const { summary: rawSummary, description, projectId, config: payloadConfig } = req.payload || {};
+  // v4.30.0: the name is required and is also the description when none is given.
+  const summary = cleanIssueName(rawSummary);
   let config = payloadConfig && typeof payloadConfig === 'object' ? payloadConfig : null;
   if (!config && projectId) {
     try {
@@ -1327,24 +1375,23 @@ resolver.define('createTestSet', async (req) => {
 
   const body = {
     fields: {
-      summary: summary,
-      description: {
-        type: "doc",
-        version: 1,
-        content: [{ type: "paragraph", content: [{ type: "text", text: description || "" }] }]
-      },
+      summary,
+      description: adfParagraph(String(description || '').trim() || summary),
       project: { id: projectId },
       issuetype: setIssueType
     }
   };
-  
+
+  // As the user: Jira checks that they may create issues in the project.
   const response = await api.asUser().requestJira(route`/rest/api/3/issue`, {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  
-  return await response.json();
+  if (!response.ok) throw await jiraCreateError(response, 'plan');
+  const created = await response.json();
+  console.log(`[createTestSet] created ${created?.key} by=${req.context?.accountId || 'n/a'}`);
+  return created;
 });
 
 resolver.define('linkTestToFolder', async ({ payload }) => {
@@ -1369,7 +1416,9 @@ resolver.define('linkTestToFolder', async ({ payload }) => {
 
 // === Test Cycle Management ===
 resolver.define('createTestCycle', async (req) => {
-  const { summary, description, projectId, config: payloadConfig } = req.payload || {};
+  const { summary: rawSummary, description, projectId, config: payloadConfig } = req.payload || {};
+  // v4.30.0: the name is required and is also the description when none is given.
+  const summary = cleanIssueName(rawSummary);
   
   // Fetch configured testCycleType (primary key: testops-config, legacy fallback: testpulse-config)
   let config = payloadConfig && typeof payloadConfig === 'object' ? payloadConfig : {};
@@ -1391,24 +1440,88 @@ resolver.define('createTestCycle', async (req) => {
 
   const body = {
     fields: {
-      summary: summary,
-      description: {
-        type: "doc",
-        version: 1,
-        content: [{ type: "paragraph", content: [{ type: "text", text: description || "" }] }]
-      },
+      summary,
+      description: adfParagraph(String(description || '').trim() || summary),
       project: { id: projectId },
       issuetype: cycleIssueType
     }
   };
-  
+
+  // As the user: Jira checks that they may create issues in the project.
   const response = await api.asUser().requestJira(route`/rest/api/3/issue`, {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  
-  return await response.json();
+  if (!response.ok) throw await jiraCreateError(response, 'ciclo');
+  const created = await response.json();
+  console.log(`[createTestCycle] created ${created?.key} by=${req.context?.accountId || 'n/a'}`);
+  return created;
+});
+
+/**
+ * Renames a Test Plan or a Test Cycle (v4.30.0).
+ *
+ * Checks before changing anything:
+ *   - the issue belongs to the project of the request (the central filter already verified that
+ *     the user is a member of that project);
+ *   - its issue type is the project's plan type or cycle type, so this cannot rename other issues.
+ * The summary always takes the new name. The description takes it too when it was empty or still
+ * equal to the old name (the copy Test Pulse makes on creation); a description someone wrote by
+ * hand is kept. The update runs as the user, so Jira's "Edit issues" permission applies.
+ */
+resolver.define('renameTestIssue', async ({ payload, context }) => {
+  const { projectId, issueId } = payload || {};
+  // The project is required: it makes the central filter check the user's membership.
+  if (!projectId) throw new Error('Falta el proyecto.');
+  const name = cleanIssueName(payload?.name);
+  if (!/^[A-Za-z0-9-]{1,40}$/.test(String(issueId || ''))) throw new Error('Incidencia inválida.');
+
+  const issueRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?fields=summary,description,project,issuetype`, {
+    headers: { Accept: 'application/json' }
+  });
+  if (!issueRes.ok) throw new Error(`No se pudo leer la incidencia en Jira (HTTP ${issueRes.status}).`);
+  const issue = await issueRes.json();
+
+  const project = issue?.fields?.project || {};
+  if (String(project.id) !== String(projectId) && String(project.key) !== String(projectId)) {
+    throw new Error('La incidencia no pertenece a este proyecto.');
+  }
+  // The plan / cycle issue types come from the project's stored configuration (never from the
+  // browser), so only real plans and cycles can be renamed here.
+  let config = {};
+  try {
+    const configRes = await api.asApp().requestJira(route`/rest/api/3/project/${project.id}/properties/testops-config`);
+    if (configRes.ok) config = (await configRes.json())?.value || {};
+  } catch (_) { /* defaults below */ }
+  const typeName = String(issue?.fields?.issuetype?.name || '').toLowerCase();
+  const typeId = String(issue?.fields?.issuetype?.id || '');
+  const allowedNames = [config.planIssueType || 'Test Set', config.testCycleType || 'Test Cycle']
+    .map(n => String(n).toLowerCase());
+  const allowedIds = [config.planIssueTypeId, config.testCycleTypeId].filter(Boolean).map(String);
+  if (!allowedNames.includes(typeName) && !allowedIds.includes(typeId)) {
+    throw new Error('Solo se pueden renombrar Test Plans y Test Cycles desde aquí.');
+  }
+
+  const oldName = String(issue?.fields?.summary || '');
+  const oldDescription = adfPlainText(issue?.fields?.description);
+  const fields = { summary: name };
+  if (!oldDescription || oldDescription === oldName.replace(/\s+/g, ' ').trim()) {
+    fields.description = adfParagraph(name);
+  }
+
+  const updateRes = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}`, {
+    method: 'PUT',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields })
+  });
+  if (!updateRes.ok) {
+    throw new Error(updateRes.status === 403
+      ? 'No tienes permiso para editar esta incidencia en Jira.'
+      : `Jira no pudo renombrar la incidencia (HTTP ${updateRes.status}).`);
+  }
+  console.log(`[renameTestIssue] ${issue?.key} renamed by=${context?.accountId || 'n/a'} description=${fields.description ? 'updated' : 'kept'}`);
+  return { id: String(issue.id), key: issue.key, summary: name, descriptionUpdated: Boolean(fields.description) };
 });
 
 

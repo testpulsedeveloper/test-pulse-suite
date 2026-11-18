@@ -276,6 +276,7 @@ const TP_MUTATION_RESOLVERS = new Set([
   'moveFolder',
   'createTestSet',
   'createTestCycle',
+  'renameTestIssue',
   'addTestToCycle',
   'addMultipleTestsToCycle',
   'removeTestFromCycle',
