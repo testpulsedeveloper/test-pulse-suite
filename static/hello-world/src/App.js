@@ -38,7 +38,7 @@ import {
   LIST_BATCH_SIZE,
   LoadMoreSentinel
 } from './components/CommonComponents';
-import { invoke, queryClient, clearPersistentCache } from './utils/queryClient';
+import { invoke, queryClient, clearPersistentCache, findFoldersBackup, discardFoldersBackup, dropFoldersFromCache } from './utils/queryClient';
 import { extractEpicAndRequirement } from './utils/traceabilityHelpers';
 // v4.23.1: editing a Test Case directly in the side panel of Design.
 import { useTestCaseInlineEdit, EditableCaseTitle, EditableCaseDescription, EditableCaseProperties, EditLink } from './components/TestCaseInlineEdit';
@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.34.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.35.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -70,6 +70,10 @@ function App() {
   
   // Design Tab State
   const [folders, setFolders] = useState([]);
+  // v4.35.0: copy of the folder tree kept in THIS browser that has folders the server no longer
+  // has (e.g. lost in an outage). Shown to project admins with a "Restaurar" button.
+  const [foldersBackup, setFoldersBackup] = useState(null);
+  const [restoringFolders, setRestoringFolders] = useState(false);
   const [testCases, setTestCases] = useState([]);
   const [requirementsMap, setRequirementsMap] = useState({});
   // O(1) lookup by id or key — replaces repeated testCases.find(...) scans inside list renders
@@ -2671,6 +2675,29 @@ Then el sistema valida la identidad.
           </div>
         </div>
 
+        {/* v4.35.0: restore notice (project admins only). */}
+        {foldersBackup && (
+          <div style={{ margin: '0.5rem', padding: '0.6rem', borderRadius: '4px', background: '#FFF7D6', border: '1px solid #F5CD47', fontSize: '0.75rem', color: '#172B4D' }}>
+            <div style={{ fontWeight: 700, marginBottom: '4px' }}>Hay {foldersBackup.missing} {foldersBackup.missing === 1 ? 'carpeta' : 'carpetas'} que ya no están guardadas</div>
+            <div style={{ marginBottom: '6px' }}>
+              Este navegador tiene una copia del {new Date(foldersBackup.savedAt).toLocaleString('es-MX')} con:{' '}
+              {(() => {
+                const current = new Set(folders.map(f => String(f.id)));
+                const names = foldersBackup.folders.filter(f => !current.has(String(f.id))).map(f => f.name);
+                return `${names.slice(0, 6).join(', ')}${names.length > 6 ? ` y ${names.length - 6} más` : ''}.`;
+              })()}
+              {' '}Restaurar solo agrega las que faltan; no cambia ni quita las actuales.
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button type="button" className="btn-primary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }} disabled={restoringFolders} onClick={handleRestoreFolders}>
+                {restoringFolders ? 'Restaurando…' : 'Restaurar carpetas'}
+              </button>
+              <button type="button" className="btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }} disabled={restoringFolders} onClick={handleDiscardFoldersBackup}>
+                Descartar
+              </button>
+            </div>
+          </div>
+        )}
         <div id="folderTreeList" style={{ padding: '0.5rem', margin: 0, overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '12px' }}>
           {(() => {
             const rootCount = isFetchingTests && testCases.length === 0
@@ -4922,6 +4949,45 @@ Then el sistema valida la identidad.
     }, { label: 'Nuevo nombre', defaultValue: oldName });
   };
 
+  // v4.35.0: look for a browser copy with lost folders whenever the repository's folders change.
+  // Only project admins see it (restoring is an admin action, like deleting).
+  useEffect(() => {
+    if (!isAdmin || !selectedProjectId || activeTab !== 'design') {
+      setFoldersBackup(null);
+      return undefined;
+    }
+    let cancelled = false;
+    findFoldersBackup(selectedProjectId, folders)
+      .then(backup => { if (!cancelled) setFoldersBackup(backup); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isAdmin, selectedProjectId, folders, activeTab]);
+
+  /** Sends the browser copy to the server, which adds back only the folders it no longer has. */
+  const handleRestoreFolders = async () => {
+    if (!foldersBackup || !selectedProjectId) return;
+    setRestoringFolders(true);
+    try {
+      const res = await invoke('restoreFolders', { projectId: selectedProjectId, folders: foldersBackup.folders });
+      const restored = Array.isArray(res?.folders) ? res.folders : folders;
+      setFolders(restored);
+      await discardFoldersBackup(selectedProjectId, restored);
+      setFoldersBackup(null);
+      addNotification({ type: 'success', title: 'Carpetas restauradas', description: `Se recuperaron ${res?.added || 0} carpetas desde la copia de este navegador.` });
+    } catch (e) {
+      addNotification({ type: 'error', title: 'No se pudieron restaurar las carpetas', description: e.message });
+    } finally {
+      setRestoringFolders(false);
+    }
+  };
+
+  /** "Descartar": forget this browser's copy (e.g. the missing folders were deleted on purpose). */
+  const handleDiscardFoldersBackup = async () => {
+    if (!selectedProjectId) return;
+    await discardFoldersBackup(selectedProjectId, folders);
+    setFoldersBackup(null);
+  };
+
   const handleDeleteFolder = async (folderId, name) => {
     if (!selectedProjectId) return;
     if (!isAdmin) {
@@ -4939,6 +5005,9 @@ Then el sistema valida la identidad.
         try {
           const updated = await invoke('deleteFolder', { projectId: selectedProjectId, folderId });
           setFolders(updated || []);
+          // v4.35.0: a folder deleted on purpose must never be offered back as "lost".
+          const kept = new Set((updated || []).map(f => String(f.id)));
+          dropFoldersFromCache(selectedProjectId, prev.filter(f => !kept.has(String(f.id))).map(f => f.id)).catch(() => {});
           addNotification({ type: 'success', title: 'Carpeta eliminada' });
         } catch (e) {
           setFolders(prev);

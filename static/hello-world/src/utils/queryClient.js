@@ -90,6 +90,24 @@ const ensureIdbHydrated = () => {
 // Start hydrating immediately on module load
 ensureIdbHydrated();
 
+// ── Folder backup (v4.35.0) ──
+// On 2026-11-19 a Jira outage made the server replace the folder tree of a project with a single
+// folder. The only copies of the lost tree were the ones cached in users' browsers, and every
+// reload overwrote them. Now, before the cached tree of a project is replaced by one that LACKS
+// some of its folders, the old copy is kept under a separate key (`tpbackup:` prefix, which the
+// cache invalidation never touches). A project admin can then restore it from the repository.
+const FOLDERS_BACKUP_PREFIX = 'tpbackup:';
+
+/** Ids of the folders in a cached getFolders answer. */
+const folderIdsOf = (data) => new Set((Array.isArray(data) ? data : []).map((f) => String(f?.id)));
+
+/** true when `previous` has at least one folder that `next` does not have. */
+const losesFolders = (previous, next) => {
+  if (!Array.isArray(previous) || previous.length === 0) return false;
+  const kept = folderIdsOf(next);
+  return previous.some((f) => !kept.has(String(f?.id)));
+};
+
 const writePersistentCache = (key, data) => {
   if (data && (data._isError || data.error)) return;
   const entry = { ts: Date.now(), data };
@@ -98,9 +116,72 @@ const writePersistentCache = (key, data) => {
     if (!db) return;
     try {
       const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put({ key, ts: entry.ts, data: entry.data });
+      const store = tx.objectStore(IDB_STORE);
+      if (key.startsWith('getFolders|')) {
+        // Read the copy about to be replaced (and any older backup) in the SAME transaction, so
+        // the backup is written before the old copy is gone.
+        const backupKey = `${FOLDERS_BACKUP_PREFIX}${key}`;
+        const oldReq = store.get(key);
+        oldReq.onsuccess = () => {
+          const old = oldReq.result;
+          const backupReq = store.get(backupKey);
+          backupReq.onsuccess = () => {
+            const backup = backupReq.result;
+            // Keep the backup with the most folders; a smaller copy never replaces a bigger one.
+            if (old && losesFolders(old.data, data) && (!backup || (old.data?.length || 0) >= (backup.data?.length || 0))) {
+              store.put({ key: backupKey, ts: old.ts, data: old.data });
+            }
+            store.put({ key, ts: entry.ts, data: entry.data });
+          };
+          backupReq.onerror = () => store.put({ key, ts: entry.ts, data: entry.data });
+        };
+        oldReq.onerror = () => store.put({ key, ts: entry.ts, data: entry.data });
+        return;
+      }
+      store.put({ key, ts: entry.ts, data: entry.data });
     } catch (_) {}
   });
+};
+
+/**
+ * Best copy of the folder tree of a project kept in THIS browser that has folders the server no
+ * longer has (v4.35.0). Looks at the backups and also at any cached getFolders answer for the
+ * project (an old one may still be there if it was not overwritten yet).
+ *
+ * @param {string|number} projectId - Project of the repository.
+ * @param {Array<Object>} currentFolders - Folders the server returned now.
+ * @returns {Promise<{folders: Array<Object>, savedAt: number, missing: number}|null>}
+ *   `missing` = how many folders of the copy are not in `currentFolders`; null when none.
+ */
+export const findFoldersBackup = async (projectId, currentFolders) => {
+  const db = await openCacheDb();
+  if (!db) return null;
+  const rows = await new Promise((resolve) => {
+    try {
+      const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    } catch (_) {
+      resolve([]);
+    }
+  });
+  const current = folderIdsOf(currentFolders);
+  let best = null;
+  for (const row of rows) {
+    const key = String(row?.key || '');
+    const bare = key.startsWith(FOLDERS_BACKUP_PREFIX) ? key.slice(FOLDERS_BACKUP_PREFIX.length) : key;
+    if (!bare.startsWith('getFolders|') || !Array.isArray(row.data)) continue;
+    let payload = null;
+    try {
+      payload = JSON.parse(bare.slice('getFolders|'.length));
+    } catch (_) {
+      continue;
+    }
+    if (String(payload?.projectId) !== String(projectId)) continue;
+    const missing = row.data.filter((f) => !current.has(String(f?.id))).length;
+    if (missing > 0 && (!best || missing > best.missing)) best = { folders: row.data, savedAt: row.ts, missing };
+  }
+  return best;
 };
 
 export const clearPersistentCache = () => {
@@ -273,6 +354,7 @@ const TP_MUTATION_RESOLVERS = new Set([
   'createFolder',
   'updateFolder',
   'deleteFolder',
+  'restoreFolders',
   'moveFolder',
   'createTestSet',
   'createTestCycle',
@@ -530,4 +612,61 @@ export const invoke = async (name, payload) => {
 
   _tpInFlight.set(inflightKey, promise);
   return promise;
+};
+
+/**
+ * Rewrites (or deletes) every cached folder tree of a project in this browser: the backups and
+ * the plain getFolders answers (v4.35.0). `change(rowData)` returns the new list, or null to
+ * delete the row.
+ */
+const rewriteFolderRows = async (projectId, change) => {
+  const db = await openCacheDb();
+  if (!db) return;
+  await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        for (const row of req.result || []) {
+          const key = String(row?.key || '');
+          const bare = key.startsWith(FOLDERS_BACKUP_PREFIX) ? key.slice(FOLDERS_BACKUP_PREFIX.length) : key;
+          if (!bare.startsWith('getFolders|')) continue;
+          let payload = null;
+          try { payload = JSON.parse(bare.slice('getFolders|'.length)); } catch (_) { continue; }
+          if (String(payload?.projectId) !== String(projectId)) continue;
+          const next = change(Array.isArray(row.data) ? row.data : []);
+          if (next === null) {
+            store.delete(key);
+            _l1Cache.delete(key);
+          } else {
+            store.put({ ...row, data: next });
+          }
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch (_) {
+      resolve();
+    }
+  });
+};
+
+/**
+ * "Descartar": forgets every copy of this browser that has folders the server no longer has,
+ * so the restore notice does not come back for them.
+ */
+export const discardFoldersBackup = (projectId, currentFolders) => {
+  const current = folderIdsOf(currentFolders);
+  return rewriteFolderRows(projectId, (data) => (data.some((f) => !current.has(String(f?.id))) ? null : data));
+};
+
+/**
+ * After a folder is deleted ON PURPOSE from this browser, removes it (and its subfolders) from
+ * the cached copies, so it is never offered back as "lost".
+ */
+export const dropFoldersFromCache = (projectId, deletedIds) => {
+  const gone = new Set([...(deletedIds || [])].map(String));
+  if (gone.size === 0) return Promise.resolve();
+  return rewriteFolderRows(projectId, (data) => data.filter((f) => !gone.has(String(f?.id))));
 };

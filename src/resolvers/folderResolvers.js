@@ -38,19 +38,89 @@ const verifyProjectBrowseAccess = async (projectId) => {
 /**
  * Fetches the folder tree stored in the `testops-folders` Jira project property.
  *
+ * v4.35.0 — STRICT read. Until v4.34.2 any failed answer (503, timeout…) was returned as an
+ * empty list. Creating, renaming or moving a folder reads the list, changes it and writes it back
+ * WHOLE, so on 2026-11-19, during a Jira outage, creating one folder in CUQ replaced the whole
+ * tree with just that folder. Now only "the property does not exist" (404) means "no folders";
+ * every other failure throws, so nothing is ever written on top of a list that was not read.
+ *
  * @param {string} projectId - Jira project ID or key.
  * @returns {Promise<Array<Object>>} Array of folder objects (`{ id, name, parentId }`).
+ * @throws {Error} When Jira could not answer (the caller must not write anything then).
  */
 export const getProjectFolders = async (projectId) => {
+  let response;
   try {
-    const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`);
-    if (response.status === 404 || !response.ok) return [];
-    const data = await response.json();
-    return data.value || [];
+    response = await api.asApp().requestJira(route`/rest/api/3/project/${projectId}/properties/testops-folders`);
   } catch (e) {
-    console.error('Error getProjectFolders:', e);
-    return [];
+    console.error('[folders] read failed:', e?.message);
+    throw new Error(FOLDERS_UNAVAILABLE_MESSAGE);
   }
+  // A project that never had folders has no property yet: that is a real "no folders".
+  if (response.status === 404) return [];
+  if (!response.ok) {
+    console.error(`[folders] read failed: HTTP ${response.status}`);
+    throw new Error(FOLDERS_UNAVAILABLE_MESSAGE);
+  }
+  const data = await response.json();
+  return Array.isArray(data?.value) ? data.value : [];
+};
+
+/** Shown when the folder tree cannot be read; contains the text the UI uses to detect outages. */
+const FOLDERS_UNAVAILABLE_MESSAGE = 'Jira no está respondiendo y no se pudieron leer las carpetas. No se hizo ningún cambio; intenta de nuevo en un momento.';
+
+/**
+ * One log line per change of the tree, so a future loss can be traced: who (Atlassian
+ * accountId only, never names), which project, what operation, and how many folders before and
+ * after. Folder names are not logged.
+ */
+const logFolderChange = (op, projectId, context, before, after) => {
+  console.log(`[folders] op=${op} project=${projectId} by=${context?.accountId || 'n/a'} before=${before} after=${after}`);
+};
+
+/** Ids Test Pulse generates for folders (`folder-<milliseconds>`); anything else is refused. */
+const FOLDER_ID = /^folder-\d{10,16}$/;
+const MAX_RESTORED_FOLDERS = 3000;
+
+/**
+ * Cleans a folder list coming from a browser copy before it is merged back (v4.35.0).
+ * Only `{ id, name, parentId }` with a Test Pulse id and a non-empty name are kept.
+ *
+ * @param {Array<Object>} raw
+ * @returns {Array<{id: string, name: string, parentId: (string|null)}>}
+ */
+export const sanitizeFolderBackup = (raw) => {
+  const seen = new Set();
+  const clean = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, MAX_RESTORED_FOLDERS) : []) {
+    const id = String(item?.id ?? '');
+    const name = String(item?.name ?? '').trim().slice(0, 200);
+    if (!FOLDER_ID.test(id) || !name || seen.has(id)) continue;
+    seen.add(id);
+    const parentId = item?.parentId && FOLDER_ID.test(String(item.parentId)) ? String(item.parentId) : null;
+    clean.push({ id, name, parentId });
+  }
+  return clean;
+};
+
+/**
+ * Puts back the folders of a browser copy that the stored tree no longer has (v4.35.0).
+ * Folders already stored win (they may have been renamed or moved since the copy), so a restore
+ * never undoes later work. A folder whose parent exists in neither list goes to the root, so it
+ * is visible instead of hanging from a parent that does not exist.
+ *
+ * @param {Array<Object>} stored - Folders currently stored.
+ * @param {Array<Object>} backup - Sanitized folders from the browser copy.
+ * @returns {{folders: Array<Object>, added: number}}
+ */
+export const mergeFolderBackup = (stored, backup) => {
+  const current = Array.isArray(stored) ? stored : [];
+  const ids = new Set(current.map(f => String(f?.id)));
+  const added = backup.filter(f => !ids.has(f.id));
+  const merged = [...current, ...added];
+  const all = new Set(merged.map(f => String(f?.id)));
+  const folders = merged.map(f => (f?.parentId && !all.has(String(f.parentId)) ? { ...f, parentId: null } : f));
+  return { folders, added: added.length };
 };
 
 /**
@@ -85,24 +155,27 @@ export function registerFolderResolvers(resolver) {
     return await getProjectFolders(projectId);
   });
 
-  resolver.define('createFolder', async ({ payload }) => {
+  resolver.define('createFolder', async ({ payload, context }) => {
     const { projectId, name, parentId } = payload;
     // Any user with project access can create folders
     await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
+    const before = folders.length;
     const newFolder = { id: `folder-${Date.now()}`, name, parentId: parentId || null };
     folders.push(newFolder);
     await setProjectFolders(projectId, folders);
+    logFolderChange('create', projectId, context, before, folders.length);
     return folders;
   });
 
-  resolver.define('updateFolder', async ({ payload }) => {
+  resolver.define('updateFolder', async ({ payload, context }) => {
     const { projectId, folderId, newName } = payload;
     // Any user with project access can rename folders
     await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
     const updatedFolders = folders.map(f => (f.id === folderId ? { ...f, name: newName } : f));
     await setProjectFolders(projectId, updatedFolders);
+    logFolderChange('rename', projectId, context, folders.length, updatedFolders.length);
     return updatedFolders;
   });
 
@@ -112,7 +185,7 @@ export function registerFolderResolvers(resolver) {
    * the folder's `parentId` changes. Moving a folder into itself or one of its own subfolders
    * is refused, because it would cut that branch off the tree.
    */
-  resolver.define('moveFolder', async ({ payload }) => {
+  resolver.define('moveFolder', async ({ payload, context }) => {
     const { projectId, folderId } = payload || {};
     const newParentId = payload?.newParentId || null;
     // Any user with project access can reorganise folders (same rule as create/rename)
@@ -134,6 +207,7 @@ export function registerFolderResolvers(resolver) {
 
     const updated = folders.map(f => (String(f.id) === String(folderId) ? { ...f, parentId: newParentId } : f));
     await setProjectFolders(projectId, updated);
+    logFolderChange('move', projectId, context, folders.length, updated.length);
     return updated;
   });
 
@@ -155,7 +229,25 @@ export function registerFolderResolvers(resolver) {
     }
     const updatedFolders = folders.filter(f => !toDelete.includes(f.id));
     await setProjectFolders(projectId, updatedFolders);
+    logFolderChange('delete', projectId, context, folders.length, updatedFolders.length);
     return updatedFolders;
+  });
+
+  /**
+   * v4.35.0: puts back folders from a copy kept in the browser of a project admin (see
+   * keepFoldersBackup in queryClient.js). Only folders missing from the stored tree are added;
+   * nothing stored is changed or removed. Admins only, like deleting.
+   */
+  resolver.define('restoreFolders', async ({ payload, context }) => {
+    const { projectId } = payload || {};
+    await requireProjectAdmin(projectId, context);
+    const backup = sanitizeFolderBackup(payload?.folders);
+    if (backup.length === 0) throw new Error('La copia no tiene carpetas válidas para restaurar.');
+    const folders = await getProjectFolders(projectId);
+    const { folders: merged, added } = mergeFolderBackup(folders, backup);
+    if (added > 0) await setProjectFolders(projectId, merged);
+    logFolderChange('restore', projectId, context, folders.length, merged.length);
+    return { folders: merged, added };
   });
 }
 
