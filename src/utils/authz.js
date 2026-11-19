@@ -45,15 +45,22 @@ export function normalizeIssueRef(value) {
 }
 
 /**
- * Asks Jira whether the current user holds ALL of the given permissions.
- * Supply `projectId` or `issueId` to scope the check, or `global: true` for global
- * permissions such as `ADMINISTER`.
+ * Asks Jira whether the current user holds ALL of the given permissions, and tells apart
+ * "Jira said no" from "Jira could not answer" (v4.34.2).
+ *
+ * Why: on 2026-11-19 Jira answered 503 / timed out for several minutes. The old check treated
+ * any failed answer as "no permission", so members were told "No tienes acceso a este proyecto"
+ * and that "no" stayed cached for 5 minutes after Jira came back.
  *
  * @param {Object} scope - `{ projectId }`, `{ issueId }` (ID or key) or `{ global: true }`.
  * @param {string[]} permissions - Jira permission keys, e.g. `['ADMINISTER_PROJECTS']`.
- * @returns {Promise<boolean>} `true` only when Jira confirms every permission.
+ * @returns {Promise<true|false|null>}
+ *   true  = Jira confirmed every permission;
+ *   false = Jira answered and at least one is missing (or the request is not valid);
+ *   null  = unknown: Jira is rate-limiting (429), failing (5xx, also the synthetic 503 of the
+ *           outage breaker) or the connection dropped. Never treated as a "yes".
  */
-export async function userHasPermissions({ projectId, issueId, global = false } = {}, permissions = []) {
+export async function checkPermissions({ projectId, issueId, global = false } = {}, permissions = []) {
   if (!Array.isArray(permissions) || permissions.length === 0) return false;
   const perms = permissions.join(',');
   try {
@@ -72,13 +79,38 @@ export async function userHasPermissions({ projectId, issueId, global = false } 
     } else {
       return false;
     }
-    if (!res.ok) return false;
+    if (!res.ok) {
+      // 429 and 5xx mean "Jira could not answer now", not "the user has no access".
+      if (isJiraUnavailableStatus(res.status)) {
+        console.warn(`[authz] permission check unavailable: HTTP ${res.status}`);
+        return null;
+      }
+      return false;
+    }
     const data = await res.json();
     return permissions.every(p => data?.permissions?.[p]?.havePermission === true);
   } catch (e) {
+    // Dropped connection / timeout: unknown as well.
     console.warn('[authz] permission check failed:', e?.message);
-    return false;
+    return null;
   }
+}
+
+/** HTTP statuses that mean Jira is overloaded or failing, so a permission is unknown. */
+function isJiraUnavailableStatus(status) {
+  return status === 429 || (Number(status) >= 500 && Number(status) <= 599);
+}
+
+/**
+ * Asks Jira whether the current user holds ALL of the given permissions.
+ * Boolean version of `checkPermissions`: "unknown" counts as "no" (fail closed).
+ *
+ * @param {Object} scope - `{ projectId }`, `{ issueId }` (ID or key) or `{ global: true }`.
+ * @param {string[]} permissions - Jira permission keys.
+ * @returns {Promise<boolean>} `true` only when Jira confirms every permission.
+ */
+export async function userHasPermissions(scope = {}, permissions = []) {
+  return (await checkPermissions(scope, permissions)) === true;
 }
 
 /**
@@ -205,32 +237,60 @@ export class AuthorizationError extends Error {
 }
 
 /**
- * Is the current user a Test Pulse superuser (Jira admin or member of the superuser group)?
+ * Superuser state of the current user: true / false, or null when Jira could not answer
+ * (v4.34.2). Only definite answers are cached, so an outage is never remembered as a "no".
  *
  * @param {Object} context - Forge resolver context (`context.accountId`).
- * @returns {Promise<boolean>}
+ * @returns {Promise<true|false|null>}
  */
-export async function isSuperuser(context) {
+async function superuserState(context) {
   const key = accountKey(context, 'superuser');
   const cached = cacheGet(_superuserCache, key, PERMISSION_CACHE_TTL_MS);
   if (cached !== undefined) return cached;
 
-  let result = await userHasPermissions({ projectId: null, issueId: null, global: true }, ['ADMINISTER']);
-  if (!result) {
+  const admin = await checkPermissions({ projectId: null, issueId: null, global: true }, ['ADMINISTER']);
+  let result = admin === true ? true : null;
+  let unknown = admin === null;
+  if (result !== true) {
     try {
       const res = await api.asUser().requestJira(route`/rest/api/3/myself?expand=groups`);
       if (res.ok) {
         const me = await res.json();
         const groupName = getSuperuserGroupName().toLowerCase();
         result = (me?.groups?.items || []).some(g => String(g?.name || '').toLowerCase() === groupName);
+      } else if (isJiraUnavailableStatus(res.status)) {
+        unknown = true;
+      } else {
+        result = false;
       }
     } catch (e) {
       console.warn('[authz] superuser group lookup failed:', e?.message);
+      unknown = true;
     }
   }
-  cacheSet(_superuserCache, key, result);
-  return result;
+  // A "yes" from either source is definite. A "no" is definite only when both sources answered.
+  if (result === true) {
+    cacheSet(_superuserCache, key, true);
+    return true;
+  }
+  if (unknown) return null;
+  cacheSet(_superuserCache, key, false);
+  return false;
 }
+
+/**
+ * Is the current user a Test Pulse superuser (Jira admin or member of the superuser group)?
+ * "Unknown" (Jira not answering) counts as "no", but is not cached.
+ *
+ * @param {Object} context - Forge resolver context (`context.accountId`).
+ * @returns {Promise<boolean>}
+ */
+export async function isSuperuser(context) {
+  return (await superuserState(context)) === true;
+}
+
+/** Jira could not confirm the user's access (outage, timeouts, rate limit). */
+const JIRA_UNAVAILABLE_MESSAGE = 'Jira no está respondiendo y no se pudo confirmar tu acceso al proyecto. Intenta de nuevo en un momento.';
 
 /**
  * Can the current user use Test Pulse in `projectId`? (superuser or project member)
@@ -245,9 +305,19 @@ export async function canAccessProject(projectId, context) {
   const key = accountKey(context, `browse::${ref}`);
   const cached = cacheGet(_browseCache, key, PERMISSION_CACHE_TTL_MS);
   if (cached !== undefined) return cached;
-  const result = (await userHasPermissions({ projectId: ref }, ['BROWSE_PROJECTS'])) || (await isSuperuser(context));
-  cacheSet(_browseCache, key, result);
-  return result;
+  const browse = await checkPermissions({ projectId: ref }, ['BROWSE_PROJECTS']);
+  const superuser = browse === true ? true : await superuserState(context);
+  if (browse === true || superuser === true) {
+    cacheSet(_browseCache, key, true);
+    return true;
+  }
+  if (browse === null || superuser === null) {
+    // v4.34.2: Jira did not answer. Access is still refused (fail closed), but with the real
+    // reason, and the answer is NOT cached, so the user gets in as soon as Jira is back.
+    throw new AuthorizationError('JIRA_UNAVAILABLE', JIRA_UNAVAILABLE_MESSAGE);
+  }
+  cacheSet(_browseCache, key, false);
+  return false;
 }
 
 /**
@@ -263,8 +333,11 @@ export async function canAdministerProject(projectId, context) {
   const key = accountKey(context, `admin::${ref}`);
   const cached = cacheGet(_projectAdminCache, key, PERMISSION_CACHE_TTL_MS);
   if (cached !== undefined) return cached;
-  const result = (await isSuperuser(context)) || (await userHasPermissions({ projectId: ref }, ['ADMINISTER_PROJECTS']));
-  cacheSet(_projectAdminCache, key, result);
+  const superuser = await superuserState(context);
+  const admin = superuser === true ? true : await checkPermissions({ projectId: ref }, ['ADMINISTER_PROJECTS']);
+  const result = superuser === true || admin === true;
+  // v4.34.2: a "no" caused by Jira not answering is not remembered.
+  if (result || (superuser === false && admin === false)) cacheSet(_projectAdminCache, key, result);
   return result;
 }
 

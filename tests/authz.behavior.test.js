@@ -20,13 +20,20 @@ const jira = {
     'acc-outsider':{ projectPerms: { '200': ['BROWSE_PROJECTS'] }, global: [], groups: [] }
   },
   enabled: { '100': true, '300': false },
-  calls: 0
+  calls: 0,
+  // v4.34.2: when set, every asUser() call answers with this HTTP status (simulated outage),
+  // or throws when it is 'throw' (dropped connection).
+  outage: null
 };
 
 const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
 
 function handle(path, asApp) {
   jira.calls++;
+  if (jira.outage && !asApp) {
+    if (jira.outage === 'throw') throw new Error('connect ETIMEDOUT');
+    return json({ errorMessages: ['Service Unavailable'] }, jira.outage);
+  }
   const url = new URL(path, 'https://jira.test');
   if (url.pathname === '/rest/api/3/mypermissions') {
     const user = jira.users[jira.currentUser];
@@ -117,4 +124,46 @@ test('requireProjectAdmin throws a FORBIDDEN AuthorizationError for members', as
 
 test('malformed project references are rejected before reaching Jira', async () => {
   assert.equal(await authz.canAccessProject('100" OR 1=1', ctx('acc-jiraadm')), false);
+});
+
+// ── v4.34.2: Jira not answering must not be reported (nor cached) as "no access" ─────────────
+
+test('a member gets JIRA_UNAVAILABLE (not FORBIDDEN) while Jira answers 503, and gets in after', async () => {
+  // A fresh account, so nothing about it is cached yet.
+  jira.users['acc-outage'] = { projectPerms: { '100': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
+  jira.outage = 503;
+  await assert.rejects(authz.canAccessProject('100', ctx('acc-outage')), (e) => e.code === 'JIRA_UNAVAILABLE');
+  jira.outage = 'throw';
+  await assert.rejects(authz.canAccessProject('100', ctx('acc-outage')), (e) => e.code === 'JIRA_UNAVAILABLE');
+  // Jira is back: the earlier failures were not cached, so access works right away.
+  jira.outage = null;
+  assert.equal(await authz.canAccessProject('100', ctx('acc-outage')), true);
+});
+
+test('rate limiting (429) is also unknown, never a yes', async () => {
+  jira.users['acc-limited'] = { projectPerms: {}, global: [], groups: [] };
+  jira.outage = 429;
+  await assert.rejects(authz.canAccessProject('100', ctx('acc-limited')), (e) => e.code === 'JIRA_UNAVAILABLE');
+  jira.outage = null;
+  // Once Jira answers, a real outsider is still refused with a plain false (FORBIDDEN upstream).
+  assert.equal(await authz.canAccessProject('100', ctx('acc-limited')), false);
+});
+
+test('an admin check during an outage says no but is not remembered', async () => {
+  jira.users['acc-padmin2'] = { projectPerms: { '100': ['BROWSE_PROJECTS', 'ADMINISTER_PROJECTS'] }, global: [], groups: [] };
+  jira.outage = 503;
+  assert.equal(await authz.canAdministerProject('100', ctx('acc-padmin2')), false);
+  assert.equal(await authz.isSuperuser(ctx('acc-padmin2')), false);
+  jira.outage = null;
+  assert.equal(await authz.canAdministerProject('100', ctx('acc-padmin2')), true);
+});
+
+test('checkPermissions tells yes, no and unknown apart', async () => {
+  ctx('acc-member');
+  assert.equal(await authz.checkPermissions({ projectId: '100' }, ['BROWSE_PROJECTS']), true);
+  assert.equal(await authz.checkPermissions({ projectId: '100' }, ['ADMINISTER_PROJECTS']), false);
+  jira.outage = 504;
+  assert.equal(await authz.checkPermissions({ projectId: '100' }, ['BROWSE_PROJECTS']), null);
+  assert.equal(await authz.userHasPermissions({ projectId: '100' }, ['BROWSE_PROJECTS']), false);
+  jira.outage = null;
 });
