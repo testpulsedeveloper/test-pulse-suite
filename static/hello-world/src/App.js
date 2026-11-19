@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.36.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.37.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -561,6 +561,9 @@ function App() {
   const [pointerDragState, setPointerDragState] = useState(null);
   const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const [designTypeFilter, setDesignTypeFilter] = useState('all'); // 'all' | 'automated' | 'manual'
+  // v4.37.0: Design filter by the Jira reporter ("Informador") of each case: 'all', an accountId,
+  // or '__none__' (cases without reporter). Helps find each team's cases to file them in folders.
+  const [designReporterFilter, setDesignReporterFilter] = useState('all');
   const [designSortOrder, setDesignSortOrder] = useState('recent'); // 'recent' | 'az'
   const [isRefreshing, setIsRefreshing] = useState(false);
   const searchInputRef = useRef(null);
@@ -1664,7 +1667,30 @@ function App() {
     return testCases.filter(tc => tc.folderId && descendantIds.has(tc.folderId));
   }, [activeFolder, testCases, getFolderDescendantIds, existingFolderIdSet]);
 
-  // Filtered Data based on active folder scope, search, and type filter
+  /**
+   * Reporter ("Informador") of a test case (v4.37.0): Jira's reporter, or its creator when the
+   * reporter is empty. `id` is the accountId (or the name for old data without it).
+   */
+  const reporterOfCase = useCallback((tc) => {
+    const person = tc?.rawFields?.reporter || tc?.rawFields?.creator || null;
+    if (!person) return { id: '__none__', name: 'Sin informador' };
+    const name = person.displayName || person.name || 'Sin nombre';
+    return { id: String(person.accountId || name), name };
+  }, []);
+
+  // Reporters of the cases in the selected folder, with how many cases each one has (most first).
+  const designReporterOptions = useMemo(() => {
+    const byId = new Map();
+    for (const tc of activeFolderScopedTestCases) {
+      const reporter = reporterOfCase(tc);
+      const entry = byId.get(reporter.id) || { ...reporter, count: 0 };
+      entry.count++;
+      byId.set(reporter.id, entry);
+    }
+    return [...byId.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [activeFolderScopedTestCases, reporterOfCase]);
+
+  // Filtered Data based on active folder scope, search, type and reporter filters
   const filteredTestCasesAll = useMemo(() => {
     return activeFolderScopedTestCases.filter(tc => {
       const matchesSearch = tc.key.toLowerCase().includes(deferredSearchQuery.toLowerCase()) || (tc.summary || '').toLowerCase().includes(deferredSearchQuery.toLowerCase());
@@ -1672,7 +1698,8 @@ function App() {
       const matchesType = designTypeFilter === 'all' 
         || (designTypeFilter === 'automated' && isAuto)
         || (designTypeFilter === 'manual' && !isAuto);
-      return matchesSearch && matchesType;
+      const matchesReporter = designReporterFilter === 'all' || reporterOfCase(tc).id === designReporterFilter;
+      return matchesSearch && matchesType && matchesReporter;
     }).sort((a, b) => {
       if (designSortOrder === 'az') {
         return (a.summary || '').localeCompare(b.summary || '');
@@ -1682,7 +1709,7 @@ function App() {
       const numB = parseInt((b.key || '').replace(/\D/g, ''), 10) || 0;
       return numB - numA;
     });
-  }, [activeFolderScopedTestCases, deferredSearchQuery, isAutomatedTest, designTypeFilter, designSortOrder]);
+  }, [activeFolderScopedTestCases, deferredSearchQuery, isAutomatedTest, designTypeFilter, designReporterFilter, reporterOfCase, designSortOrder]);
   
   const totalPages = Math.ceil(filteredTestCasesAll.length / itemsPerPage);
   const filteredTestCases = filteredTestCasesAll.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -3419,6 +3446,17 @@ Then el sistema valida la identidad.
               />
               <span>Seleccionar página</span>
             </label>
+            {/* v4.37.0: select EVERY case that matches the filters (all pages), e.g. all the cases
+                of one reporter, to move them to a folder at once. */}
+            {filteredTestCasesAll.length > filteredTestCases.length && !filteredTestCasesAll.every(t => selectedDesignTestIds.has(t.id)) && (
+              <button
+                type="button"
+                onClick={() => setSelectedDesignTestIds(prev => new Set([...prev, ...filteredTestCasesAll.map(t => t.id)]))}
+                style={{ background: 'none', border: 'none', color: 'var(--jira-blue, #0C66E4)', cursor: 'pointer', fontSize: '11px', fontWeight: 600, padding: '2px 4px', whiteSpace: 'nowrap' }}
+              >
+                Seleccionar los {filteredTestCasesAll.length} filtrados
+              </button>
+            )}
             {selectedDesignTestIds.size > 0 && (
               <span className="ads-lozenge ads-lozenge-brand" style={{ borderRadius: '9999px', fontSize: '11px', background: 'var(--jira-blue, #0C66E4)', color: '#FFFFFF', border: 'none' }}>
                 {selectedDesignTestIds.size} seleccionados
@@ -3530,6 +3568,34 @@ Then el sistema valida la identidad.
                 Manual ({isFetchingTests && testCases.length === 0 ? '...' : activeFolderScopedTestCases.filter(t => !isAutomatedTest(t)).length})
               </button>
             </div>
+
+            {/* v4.37.0: Reporter ("Informador") filter. Lists the reporters of the selected folder
+                with their number of cases; the chosen one stays listed even if it has none here. */}
+            <select
+              value={designReporterFilter}
+              onChange={(e) => { setDesignReporterFilter(e.target.value); setCurrentPage(1); }}
+              title="Filtrar por informador (reporter de Jira)"
+              style={{
+                padding: '4px 8px',
+                borderRadius: '4px',
+                border: `1px solid ${designReporterFilter !== 'all' ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-border, #DCDFE4)'}`,
+                background: '#FFFFFF',
+                color: 'var(--jira-navy, #091E42)',
+                fontSize: '0.75rem',
+                fontWeight: designReporterFilter !== 'all' ? 700 : 500,
+                cursor: 'pointer',
+                outline: 'none',
+                maxWidth: '240px'
+              }}
+            >
+              <option value="all">Informador: todos</option>
+              {designReporterFilter !== 'all' && !designReporterOptions.some(r => r.id === designReporterFilter) && (
+                <option value={designReporterFilter}>Informador seleccionado (0)</option>
+              )}
+              {designReporterOptions.map(r => (
+                <option key={r.id} value={r.id}>{r.name} ({r.count})</option>
+              ))}
+            </select>
 
             {/* Sort Dropdown */}
             <select

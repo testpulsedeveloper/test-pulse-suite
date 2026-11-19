@@ -101,12 +101,14 @@ export async function saveFolderSnapshot(projectId, folders, { op, by, removesFo
     const latest = existing[0];
     if (!removesFolders && latest && now - latest.savedAt < COALESCE_MS) return false;
 
-    const value = { projectId: String(projectId), savedAt: now, by: by || null, op: String(op || ''), count: list.length, folders: list };
+    // Two changes in the same millisecond must still be ordered: each version is strictly newer.
+    const savedAt = latest && latest.savedAt >= now ? latest.savedAt + 1 : now;
+    const value = { projectId: String(projectId), savedAt, by: by || null, op: String(op || ''), count: list.length, folders: list };
     if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_SNAPSHOT_BYTES) {
       console.warn(`[folders] history skipped project=${projectId}: tree too big (${list.length} folders)`);
       return false;
     }
-    await storage.set(snapshotKey(projectId, now), value);
+    await storage.set(snapshotKey(projectId, savedAt), value);
 
     // Keep only the newest MAX_SNAPSHOTS (the one just written counts).
     const extra = existing.slice(MAX_SNAPSHOTS - 1);

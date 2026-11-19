@@ -265,3 +265,14 @@ test('UI: Settings shows the folder history card', () => {
   assert.ok(settings.includes('<FolderHistoryCard projectId={selectedProjectId}'));
   assert.ok(qc.includes("'restoreFolderVersion',"));
 });
+
+test('UI: Design filters cases by reporter and can select every filtered case (v4.37.0)', () => {
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(app.includes("const [designReporterFilter, setDesignReporterFilter] = useState('all');"));
+  assert.ok(app.includes("designReporterFilter === 'all' || reporterOfCase(tc).id === designReporterFilter"), 'filter applied to the list');
+  assert.ok(app.includes('<option value="all">Informador: todos</option>'));
+  assert.ok(app.includes('Seleccionar los {filteredTestCasesAll.length} filtrados'));
+  // The reporter comes from data the case list already loads (no extra Jira calls).
+  const fields = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/customFieldConfig.js'), 'utf8');
+  assert.ok(fields.includes("'reporter',") && fields.includes("'creator',"));
+});
