@@ -13,6 +13,7 @@
 import api, { route } from '@forge/api';
 import { summarizeJiraError } from '../utils/jiraErrors.js';
 import { requireProjectAdmin } from '../utils/authz.js';
+import { saveFolderSnapshot, listFolderSnapshots, getFolderSnapshot } from '../utils/folderHistory.js';
 
 /**
  * Verifies that the current user has permission to access the project (`BROWSE_PROJECTS`).
@@ -145,6 +146,64 @@ export const setProjectFolders = async (projectId, data) => {
 };
 
 /**
+ * Folders of `before` that are missing from `after`, other than the ones the change is ALLOWED
+ * to remove (v4.36.0 safety brake).
+ *
+ * @param {Array<Object>} before - Tree as read.
+ * @param {Array<Object>} after - Tree about to be written.
+ * @param {Iterable<string>} [allowed] - Ids the operation removes on purpose (a deleted subtree).
+ * @returns {string[]} Ids that would be lost by mistake ([] = safe).
+ */
+export const unexpectedFolderLoss = (before, after, allowed = []) => {
+  const kept = new Set((after || []).map(f => String(f?.id)));
+  const ok = new Set([...allowed].map(String));
+  return (before || []).map(f => String(f?.id)).filter(id => !kept.has(id) && !ok.has(id));
+};
+
+/**
+ * The ONLY place that writes the folder tree (v4.36.0). In order:
+ *   1. Safety brake: refuses the write when a folder would disappear without the operation
+ *      meaning to remove it (create / rename / move / restore never remove anything; delete
+ *      removes exactly the chosen subtree).
+ *   2. History: saves the tree being replaced in Forge storage (see folderHistory.js).
+ *   3. Writes the new tree to the Jira project property and logs one line.
+ *
+ * @param {Object} args
+ * @param {string} args.projectId
+ * @param {Array<Object>} args.before - Tree as read for this change.
+ * @param {Array<Object>} args.after - Tree to write.
+ * @param {string} args.op - create | rename | move | delete | restore | restoreVersion.
+ * @param {Object} args.context - Resolver context (accountId of who changes it).
+ * @param {Iterable<string>} [args.allowedRemovals] - Ids this operation removes on purpose.
+ */
+const writeFolderTree = async ({ projectId, before, after, op, context, allowedRemovals = [] }) => {
+  const lost = unexpectedFolderLoss(before, after, allowedRemovals);
+  if (lost.length > 0) {
+    console.error(`[folders] blocked op=${op} project=${projectId} by=${context?.accountId || 'n/a'} would_lose=${lost.length} before=${before.length} after=${after.length}`);
+    throw new Error('El cambio se canceló porque habría quitado carpetas que no se pidió quitar. No se modificó nada; recarga la vista e intenta de nuevo.');
+  }
+  const allowed = new Set([...allowedRemovals].map(String));
+  const removesFolders = before.some(f => allowed.has(String(f?.id)));
+  await saveFolderSnapshot(projectId, before, { op, by: context?.accountId || null, removesFolders });
+  await setProjectFolders(projectId, after);
+  logFolderChange(op, projectId, context, before.length, after.length);
+};
+
+/** Display name of each accountId (as the user, so Jira's privacy rules apply). */
+const displayNames = async (accountIds) => {
+  const names = {};
+  await Promise.all([...new Set(accountIds.filter(Boolean))].slice(0, 20).map(async (accountId) => {
+    try {
+      const res = await api.asUser().requestJira(route`/rest/api/3/user?accountId=${accountId}`);
+      if (res.ok) names[accountId] = (await res.json())?.displayName || null;
+    } catch (e) {
+      // A name is only a label; the version is listed without it.
+    }
+  }));
+  return names;
+};
+
+/**
  * Registers all folder CRUD resolvers on the shared Forge Resolver instance.
  *
  * @param {import('@forge/resolver').default} resolver - Forge Resolver instance.
@@ -160,12 +219,10 @@ export function registerFolderResolvers(resolver) {
     // Any user with project access can create folders
     await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
-    const before = folders.length;
     const newFolder = { id: `folder-${Date.now()}`, name, parentId: parentId || null };
-    folders.push(newFolder);
-    await setProjectFolders(projectId, folders);
-    logFolderChange('create', projectId, context, before, folders.length);
-    return folders;
+    const updated = [...folders, newFolder];
+    await writeFolderTree({ projectId, before: folders, after: updated, op: 'create', context });
+    return updated;
   });
 
   resolver.define('updateFolder', async ({ payload, context }) => {
@@ -174,8 +231,7 @@ export function registerFolderResolvers(resolver) {
     await verifyProjectBrowseAccess(projectId);
     const folders = await getProjectFolders(projectId);
     const updatedFolders = folders.map(f => (f.id === folderId ? { ...f, name: newName } : f));
-    await setProjectFolders(projectId, updatedFolders);
-    logFolderChange('rename', projectId, context, folders.length, updatedFolders.length);
+    await writeFolderTree({ projectId, before: folders, after: updatedFolders, op: 'rename', context });
     return updatedFolders;
   });
 
@@ -206,8 +262,7 @@ export function registerFolderResolvers(resolver) {
     }
 
     const updated = folders.map(f => (String(f.id) === String(folderId) ? { ...f, parentId: newParentId } : f));
-    await setProjectFolders(projectId, updated);
-    logFolderChange('move', projectId, context, folders.length, updated.length);
+    await writeFolderTree({ projectId, before: folders, after: updated, op: 'move', context });
     return updated;
   });
 
@@ -228,8 +283,8 @@ export function registerFolderResolvers(resolver) {
       });
     }
     const updatedFolders = folders.filter(f => !toDelete.includes(f.id));
-    await setProjectFolders(projectId, updatedFolders);
-    logFolderChange('delete', projectId, context, folders.length, updatedFolders.length);
+    // Only the chosen folder and its subfolders may disappear.
+    await writeFolderTree({ projectId, before: folders, after: updatedFolders, op: 'delete', context, allowedRemovals: toDelete });
     return updatedFolders;
   });
 
@@ -245,9 +300,47 @@ export function registerFolderResolvers(resolver) {
     if (backup.length === 0) throw new Error('La copia no tiene carpetas válidas para restaurar.');
     const folders = await getProjectFolders(projectId);
     const { folders: merged, added } = mergeFolderBackup(folders, backup);
-    if (added > 0) await setProjectFolders(projectId, merged);
-    logFolderChange('restore', projectId, context, folders.length, merged.length);
+    if (added > 0) await writeFolderTree({ projectId, before: folders, after: merged, op: 'restore', context });
     return { folders: merged, added };
+  });
+
+  /**
+   * v4.36.0: versions of the folder tree saved before each change (newest first), for the
+   * "Historial de carpetas" card in Settings. Admins only. Folders themselves are not sent.
+   */
+  resolver.define('getFolderHistory', async ({ payload, context }) => {
+    const { projectId } = payload || {};
+    await requireProjectAdmin(projectId, context);
+    const versions = await listFolderSnapshots(projectId);
+    const names = await displayNames(versions.map(v => v.by));
+    return { versions: versions.map(v => ({ ...v, byName: names[v.by] || null })) };
+  });
+
+  /**
+   * v4.36.0: brings a saved version back. Admins only.
+   *   mode 'merge'   → adds the folders of that version that are missing now (nothing current is
+   *                    changed or removed). The default.
+   *   mode 'replace' → the tree becomes exactly that version (undoes later renames and moves,
+   *                    and removes folders created after it).
+   * Either way the current tree is saved to the history first, so the restore can be undone too.
+   */
+  resolver.define('restoreFolderVersion', async ({ payload, context }) => {
+    const { projectId, snapshotId } = payload || {};
+    const mode = payload?.mode === 'replace' ? 'replace' : 'merge';
+    await requireProjectAdmin(projectId, context);
+    const snapshot = await getFolderSnapshot(projectId, snapshotId);
+    if (!snapshot) throw new Error('Esa versión del historial ya no existe. Recarga el historial.');
+    const version = sanitizeFolderBackup(snapshot.folders);
+    const folders = await getProjectFolders(projectId);
+    if (mode === 'replace') {
+      const keep = new Set(version.map(f => f.id));
+      const removed = folders.map(f => String(f?.id)).filter(id => !keep.has(id));
+      await writeFolderTree({ projectId, before: folders, after: version, op: 'restoreVersion', context, allowedRemovals: removed });
+      return { folders: version, added: version.filter(f => !folders.some(c => String(c?.id) === f.id)).length, removed: removed.length };
+    }
+    const { folders: merged, added } = mergeFolderBackup(folders, version);
+    if (added > 0) await writeFolderTree({ projectId, before: folders, after: merged, op: 'restoreVersion', context });
+    return { folders: merged, added, removed: 0 };
   });
 }
 

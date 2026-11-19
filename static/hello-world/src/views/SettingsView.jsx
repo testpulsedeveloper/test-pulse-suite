@@ -8,6 +8,7 @@ import Spinner from '@atlaskit/spinner';
 import TestPulseLoader from '../components/TestPulseLoader';
 import LifecycleEditorsCard from '../components/LifecycleEditorsCard';
 import LifecycleTeamsCard from '../components/LifecycleTeamsCard';
+import FolderHistoryCard from '../components/FolderHistoryCard';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from '../assets/liverpool-logo-b64';
 import packageJson from '../../package.json';
 import { generateQrSvg, generateQrDataUrl } from '../utils/qrCodeGenerator';
@@ -86,6 +87,8 @@ export default function SettingsView({ ctx }) {
     setNewEnvDesc,
     setNewEnvName,
     setProjectConfig,
+    // v4.36.0: lets the folder history card refresh the repository tree after a restore.
+    setFolders,
     setResyncCycleId,
     setResyncResult,
     setSelectedCycle,
@@ -2056,6 +2059,9 @@ export default function SettingsView({ ctx }) {
 
               {/* Card: Dev / QA / UAT teams used by Lifecycle to group its content (v4.25.0). */}
               <LifecycleTeamsCard projectId={selectedProjectId} addNotification={addNotification} />
+
+              {/* Card: versions of the repository folder tree, to restore one (v4.36.0). */}
+              <FolderHistoryCard projectId={selectedProjectId} addNotification={addNotification} onFoldersChanged={setFolders} />
 
               {/* Card 4: Widgets y Métricas del Tablero */}
               <div className="glass" style={{

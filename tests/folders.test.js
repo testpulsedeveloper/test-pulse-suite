@@ -36,12 +36,39 @@ const handle = async (p, init = {}) => {
   return json({}, 404);
 };
 const route = (strings, ...values) => strings.reduce((acc, s, i) => acc + s + (i < values.length ? String(values[i]) : ''), '');
+// v4.36.0: in-memory Forge KVS with the query().where(beginsWith).limit().cursor().getMany() API,
+// for the folder history.
+const kvStore = new Map();
+const kvs = {
+  get: async (k) => kvStore.get(k),
+  set: async (k, v) => { kvStore.set(k, JSON.parse(JSON.stringify(v))); },
+  delete: async (k) => { kvStore.delete(k); },
+  query: () => {
+    let prefix = '';
+    let limit = 20;
+    let start = 0;
+    const q = {
+      where: (_field, cond) => { prefix = cond.prefix; return q; },
+      limit: (n) => { limit = n; return q; },
+      cursor: (c) => { start = Number(c) || 0; return q; },
+      getMany: async () => {
+        const keys = [...kvStore.keys()].filter(k => k.startsWith(prefix)).sort();
+        const slice = keys.slice(start, start + limit);
+        return { results: slice.map(key => ({ key, value: kvStore.get(key) })), nextCursor: start + limit < keys.length ? String(start + limit) : undefined };
+      }
+    };
+    return q;
+  }
+};
+mock.module('@forge/kvs', { namedExports: { kvs, WhereConditions: { beginsWith: (prefix) => ({ prefix }) } } });
+
 mock.module('@forge/api', {
   defaultExport: { asUser: () => ({ requestJira: handle }), asApp: () => ({ requestJira: handle }) },
   namedExports: { route }
 });
 
-const { registerFolderResolvers, sanitizeFolderBackup, mergeFolderBackup } = await import('../src/resolvers/folderResolvers.js');
+const { registerFolderResolvers, sanitizeFolderBackup, mergeFolderBackup, unexpectedFolderLoss } = await import('../src/resolvers/folderResolvers.js');
+const history = await import('../src/utils/folderHistory.js');
 const defs = {};
 registerFolderResolvers({ define: (name, fn) => { defs[name] = fn; } });
 const move = (folderId, newParentId) => defs.moveFolder({ payload: { projectId: '10010', folderId, newParentId } });
@@ -161,4 +188,80 @@ test('UI: restore notice and backup helpers are wired', () => {
   assert.ok(app.includes('dropFoldersFromCache(selectedProjectId'));
   assert.ok(qc.includes("'restoreFolders',"), 'restore invalidates the cache like other folder mutations');
   assert.ok(qc.includes('export const findFoldersBackup'));
+});
+
+// ── v4.36.0: server-side history and safety brake ───────────────────────────────────────────
+
+const F = (n, parentId = null) => ({ id: `folder-17900000000${String(n).padStart(2, '0')}`, name: `Carpeta ${n}`, parentId });
+
+test('the brake spots folders that would vanish without being asked to', () => {
+  const before = [F(1), F(2), F(3)];
+  assert.deepEqual(unexpectedFolderLoss(before, [F(1), F(2), F(3), F(4)]), []);
+  assert.deepEqual(unexpectedFolderLoss(before, [F(4)]), [F(1).id, F(2).id, F(3).id]);
+  assert.deepEqual(unexpectedFolderLoss(before, [F(1)], [F(2).id, F(3).id]), [], 'a deleted subtree is allowed');
+});
+
+test('each change saves the previous tree; quick successive changes share one version', async () => {
+  kvStore.clear();
+  stored = [F(1), F(2)];
+  await defs.createFolder({ payload: { projectId: '10010', name: 'Nueva', parentId: null }, context: ctxAdmin });
+  await defs.updateFolder({ payload: { projectId: '10010', folderId: F(1).id, newName: 'Renombrada' }, context: ctxAdmin });
+  let versions = await history.listFolderSnapshots('10010');
+  assert.equal(versions.length, 1, 'the rename right after the create does not add a version');
+  assert.equal(versions[0].count, 2, 'the version is the tree BEFORE the first change');
+  assert.equal(versions[0].op, 'create');
+  assert.equal(versions[0].by, 'acc-test-admin', 'only the accountId is stored');
+  // A delete always gets its own version, even right after another change.
+  await defs.deleteFolder({ payload: { projectId: '10010', folderId: F(2).id }, context: ctxAdmin });
+  versions = await history.listFolderSnapshots('10010');
+  assert.equal(versions.length, 2);
+  assert.equal(versions[0].op, 'delete');
+  assert.equal(versions[0].count, 3);
+});
+
+test('only the newest 30 versions are kept', async () => {
+  kvStore.clear();
+  const base = Date.now() - 1000 * 60 * 60 * 24;
+  for (let i = 0; i < 35; i++) {
+    await history.saveFolderSnapshot('10010', [F(1)], { op: 'move', by: 'acc', removesFolders: false, now: base + i * history.COALESCE_MS * 2 });
+  }
+  const versions = await history.listFolderSnapshots('10010');
+  assert.equal(versions.length, history.MAX_SNAPSHOTS);
+  assert.equal(versions[0].savedAt, base + 34 * history.COALESCE_MS * 2, 'newest kept');
+});
+
+test('a version is restored by merging (default) or by replacing the tree', async () => {
+  kvStore.clear();
+  stored = [F(1), F(2), F(3, F(2).id)];
+  // The tree loses everything but a new folder (as in CUQ), through a delete of the old ones.
+  await defs.deleteFolder({ payload: { projectId: '10010', folderId: F(2).id }, context: ctxAdmin });
+  stored = [...stored, F(9)];
+  const { versions } = await defs.getFolderHistory({ payload: { projectId: '10010' }, context: ctxAdmin });
+  assert.equal(versions[0].count, 3);
+
+  const merged = await defs.restoreFolderVersion({ payload: { projectId: '10010', snapshotId: versions[0].id }, context: ctxAdmin });
+  assert.equal(merged.added, 2);
+  assert.deepEqual(ids(stored), [F(1).id, F(2).id, F(3).id, F(9).id].sort(), 'folder created later is kept');
+
+  const fresh = (await defs.getFolderHistory({ payload: { projectId: '10010' }, context: ctxAdmin })).versions;
+  const target = fresh.find(v => v.count === 3);
+  const replaced = await defs.restoreFolderVersion({ payload: { projectId: '10010', snapshotId: target.id, mode: 'replace' }, context: ctxAdmin });
+  assert.equal(replaced.removed, 1);
+  assert.deepEqual(ids(stored), [F(1).id, F(2).id, F(3).id].sort());
+  // The restore itself left the previous tree in the history, so it can be undone.
+  const after = (await defs.getFolderHistory({ payload: { projectId: '10010' }, context: ctxAdmin })).versions;
+  assert.equal(after[0].op, 'restoreVersion');
+});
+
+test('a version of another project cannot be restored', async () => {
+  await assert.rejects(defs.restoreFolderVersion({ payload: { projectId: '10010', snapshotId: 'folderSnap:OTRO:000000000000001-abcd' }, context: ctxAdmin }), /ya no existe/);
+  assert.equal(history.isSnapshotOf('10010', 'folderSnap:10010:000000000000001-abcd'), true);
+  assert.equal(history.isSnapshotOf('10010', 'folderSnap:100100:000000000000001-abcd'), false);
+});
+
+test('UI: Settings shows the folder history card', () => {
+  const settings = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/SettingsView.jsx'), 'utf8');
+  const qc = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/utils/queryClient.js'), 'utf8');
+  assert.ok(settings.includes('<FolderHistoryCard projectId={selectedProjectId}'));
+  assert.ok(qc.includes("'restoreFolderVersion',"));
 });

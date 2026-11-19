@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.35.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.36.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -8170,7 +8170,7 @@ Then el sistema valida la identidad.
 
   const renderConfigTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando Configuración..." />}>
-      <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
+      <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setFolders, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
     </Suspense>
   );
 
