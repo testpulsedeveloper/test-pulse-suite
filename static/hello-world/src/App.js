@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.37.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.38.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -1651,21 +1651,39 @@ function App() {
   // Set of valid folder IDs currently existing in the project
   const existingFolderIdSet = useMemo(() => new Set(folders.map(f => f.id)), [folders]);
 
-  // Helper to count test cases in a folder and all its subfolders recursively
-  const getFolderTotalCount = useCallback((folderId) => {
-    const descendantIds = getFolderDescendantIds(folderId);
-    return testCases.filter(t => t.folderId && descendantIds.has(t.folderId)).length;
-  }, [getFolderDescendantIds, testCases]);
+  // v4.38.0: cases filed DIRECTLY in each folder, counted in ONE pass over the cases (the tree
+  // asks for every folder on each render; filtering all cases per folder was folders × cases).
+  const folderDirectCounts = useMemo(() => {
+    const counts = new Map();
+    for (const t of testCases) {
+      if (!t.folderId) continue;
+      const id = String(t.folderId);
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    return counts;
+  }, [testCases]);
 
-  // Scoped tests for the active folder selection in Design Tab
+  /** Cases filed directly in a folder (not in its subfolders): what opening the folder shows. */
+  const getFolderDirectCount = useCallback((folderId) => folderDirectCounts.get(String(folderId)) || 0, [folderDirectCounts]);
+
+  /** Cases in a folder AND all its subfolders (for the tooltip and the empty-folder hint). */
+  const getFolderTotalCount = useCallback((folderId) => {
+    let total = 0;
+    for (const id of getFolderDescendantIds(folderId)) total += folderDirectCounts.get(String(id)) || 0;
+    return total;
+  }, [getFolderDescendantIds, folderDirectCounts]);
+
+  // Scoped tests for the active folder selection in Design Tab.
+  // v4.38.0: a folder shows ONLY the cases filed directly in it. Before, a parent folder also
+  // listed every case of its subfolders, so the same case appeared in several places and it was
+  // unclear where it really was. The subfolders' cases are seen by opening each subfolder.
   const activeFolderScopedTestCases = useMemo(() => {
     if (activeFolder === null) {
       // "Sin Carpeta" -> Only tests without folder assigned OR assigned to a deleted folder
       return testCases.filter(tc => !tc.folderId || !existingFolderIdSet.has(tc.folderId));
     }
-    const descendantIds = getFolderDescendantIds(activeFolder);
-    return testCases.filter(tc => tc.folderId && descendantIds.has(tc.folderId));
-  }, [activeFolder, testCases, getFolderDescendantIds, existingFolderIdSet]);
+    return testCases.filter(tc => tc.folderId && String(tc.folderId) === String(activeFolder));
+  }, [activeFolder, testCases, existingFolderIdSet]);
 
   /**
    * Reporter ("Informador") of a test case (v4.37.0): Jira's reporter, or its creator when the
@@ -2856,7 +2874,13 @@ Then el sistema valida la identidad.
                     const isExpanded = q ? true : (expandedFolders[folder.id] !== false);
                     const isActive = activeFolder === folder.id;
                     const isDragTarget = dragOverFolderId === folder.id;
-                    const folderCount = isFetchingTests && testCases.length === 0 ? '...' : getFolderTotalCount(folder.id);
+                    // v4.38.0: the badge counts the cases filed directly in this folder (what opening
+                    // it shows); the tooltip adds the total including subfolders.
+                    const folderCount = isFetchingTests && testCases.length === 0 ? '...' : getFolderDirectCount(folder.id);
+                    const folderTotalCount = isFetchingTests && testCases.length === 0 ? null : getFolderTotalCount(folder.id);
+                    const folderCountTitle = folderTotalCount !== null && folderTotalCount !== folderCount
+                      ? `${folderCount} en esta carpeta · ${folderTotalCount} contando sus subcarpetas`
+                      : `${folderCount} en esta carpeta`;
 
                     return (
                       <div key={folder.id} style={{ display: 'flex', flexDirection: 'column' }}>
@@ -3004,15 +3028,15 @@ Then el sistema valida la identidad.
                             </div>
 
                             {isActive ? (
-                              <span style={{ backgroundColor: '#0C66E4', color: '#FFFFFF', fontSize: '10px', fontWeight: 700, borderRadius: '9999px', padding: '1px 7px', lineHeight: '16px' }}>
+                              <span title={folderCountTitle} style={{ backgroundColor: '#0C66E4', color: '#FFFFFF', fontSize: '10px', fontWeight: 700, borderRadius: '9999px', padding: '1px 7px', lineHeight: '16px' }}>
                                 {folderCount}
                               </span>
                             ) : folderCount === 0 ? (
-                              <span style={{ fontSize: '10px', color: '#8590A2', fontWeight: 500, padding: '0 4px' }}>
+                              <span title={folderCountTitle} style={{ fontSize: '10px', color: '#8590A2', fontWeight: 500, padding: '0 4px' }}>
                                 0
                               </span>
                             ) : (
-                              <span style={{ backgroundColor: '#F1F2F4', color: '#44546F', fontSize: '10px', fontWeight: 600, borderRadius: '9999px', padding: '2px 7px', lineHeight: '14px' }}>
+                              <span title={folderCountTitle} style={{ backgroundColor: '#F1F2F4', color: '#44546F', fontSize: '10px', fontWeight: 600, borderRadius: '9999px', padding: '2px 7px', lineHeight: '14px' }}>
                                 {folderCount}
                               </span>
                             )}
@@ -3784,7 +3808,12 @@ Then el sistema valida la identidad.
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
                   <p style={{ margin: 0, fontWeight: 600, color: 'var(--jira-text, #172B4D)' }}>No se encontraron casos de prueba</p>
-                  <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem' }}>Intenta ajustar tus filtros de búsqueda o carpeta seleccionada.</p>
+                  <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem' }}>
+                    {/* v4.38.0: a folder lists only its own cases; say so when they are in subfolders. */}
+                    {activeFolder !== null && activeFolderScopedTestCases.length === 0 && getFolderTotalCount(activeFolder) > 0
+                      ? `Esta carpeta no tiene casos propios; sus subcarpetas tienen ${getFolderTotalCount(activeFolder)}. Abre cada subcarpeta para verlos.`
+                      : 'Intenta ajustar tus filtros de búsqueda o carpeta seleccionada.'}
+                  </p>
                 </div>
               )}
             </div>

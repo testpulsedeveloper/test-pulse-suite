@@ -276,3 +276,13 @@ test('UI: Design filters cases by reporter and can select every filtered case (v
   const fields = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/customFieldConfig.js'), 'utf8');
   assert.ok(fields.includes("'reporter',") && fields.includes("'creator',"));
 });
+
+test('UI: a folder lists only its own cases; badge counts direct cases (v4.38.0)', () => {
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  const scope = app.slice(app.indexOf('const activeFolderScopedTestCases = useMemo('), app.indexOf('const activeFolderScopedTestCases = useMemo(') + 600);
+  assert.ok(scope.includes('String(tc.folderId) === String(activeFolder)'), 'only cases filed directly in the folder');
+  assert.ok(!scope.includes('getFolderDescendantIds'), 'subfolders are no longer mixed in');
+  assert.ok(app.includes(': getFolderDirectCount(folder.id);'), 'tree badge = direct cases');
+  assert.ok(app.includes('contando sus subcarpetas'), 'tooltip keeps the total with subfolders');
+  assert.ok(app.includes('Esta carpeta no tiene casos propios'), 'hint when the cases live in subfolders');
+});
