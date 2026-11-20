@@ -40,6 +40,11 @@ import {
   blockedRate,
   mttrBySeverity,
   formatBusinessDuration,
+  slaCompliance,
+  firstPassYield,
+  SLA_COMPLIANCE_TARGET_PCT,
+  FIRST_PASS_TARGET_PCT,
+  FIRST_PASS_WARNING_PCT,
   BLOCKED_LIMIT_PCT,
   BLOCKED_FUSE_PCT
 } from '../utils/qaKpis';
@@ -661,6 +666,9 @@ export default function ReportsView({ ctx }) {
     let failed = 0;
     let blocked = 0;
     let notRun = 0;
+    // v4.39.0: one entry per run in scope, for the First Pass Yield KPI (status, first result and
+    // number of linked bugs). Filled in the same loop that counts the statuses: no extra work.
+    const firstPassRuns = [];
     let totalResolutionHours = 0;
     let resolvedCount = 0;
     
@@ -808,6 +816,11 @@ export default function ReportsView({ ctx }) {
 
           const normExStatus = normalizeUiStatus(ex.status);
           totalCases++;
+          firstPassRuns.push({
+            status: normExStatus,
+            firstResult: ex.firstResult ? normalizeUiStatus(ex.firstResult) : null,
+            linkedBugs: Array.isArray(ex.linkedBugs) ? ex.linkedBugs.length : 0
+          });
           if (normExStatus === 'Passed') passed++;
           else if (normExStatus === 'Failed') failed++;
           else if (normExStatus === 'Blocked') blocked++;
@@ -1374,6 +1387,9 @@ export default function ReportsView({ ctx }) {
           hours: cachedBugBusinessHours(bug)
         })))
       : [];
+    // v4.39.0: CU-3 (one % of defects repaired within SLA) and CE-4 (First Pass Yield).
+    const slaKpi = slaCompliance(mttrKpi);
+    const firstPassKpi = qaKpisWidgetVisible ? firstPassYield(firstPassRuns) : firstPassYield([]);
     // Colours shared by the KPI widget and the fuse banner, one set per traffic-light level.
     const KPI_TONES = {
       ok: { fg: '#006644', bg: '#E3FCEF', border: '#ABF5D1' },
@@ -4804,6 +4820,58 @@ export default function ReportsView({ ctx }) {
                                       </span>
                                     </React.Fragment>
                                   ))}
+                                </div>
+                              </div>
+
+                              {/* KPI 3 (v4.39.0): CU-3, one % of defects repaired within their SLA. */}
+                              <div style={{ background: KPI_TONES[slaKpi.level].bg, border: `1px solid ${KPI_TONES[slaKpi.level].border}`, borderRadius: '8px', padding: '12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    Cumplimiento de SLA de corrección
+                                  </span>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: KPI_TONES[slaKpi.level].fg }}>
+                                    {slaKpi.level === 'empty' && 'Sin defectos cerrados'}
+                                    {slaKpi.level === 'ok' && 'En meta'}
+                                    {slaKpi.level === 'breach' && (slaKpi.pct !== null && slaKpi.pct >= SLA_COMPLIANCE_TARGET_PCT ? 'Hay defectos vencidos' : 'Bajo la meta')}
+                                  </span>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '6px 0' }}>
+                                  <span style={{ fontSize: '28px', fontWeight: 800, color: KPI_TONES[slaKpi.level].fg, letterSpacing: '-0.02em' }}>
+                                    {slaKpi.pct === null ? '—' : `${slaKpi.pct.toFixed(0)}%`}
+                                  </span>
+                                  <span style={{ fontSize: '12px', color: '#44546F' }}>
+                                    {slaKpi.withinSla} de {slaKpi.closed} defectos cerrados dentro de SLA
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#626F86' }}>
+                                  Meta ≥ {SLA_COMPLIANCE_TARGET_PCT}% y ningún defecto abierto vencido{slaKpi.openOverdue > 0 ? ` (hoy ${slaKpi.openOverdue} vencidos)` : ''}.
+                                </div>
+                              </div>
+
+                              {/* KPI 4 (v4.39.0): CE-4, First Pass Yield. */}
+                              <div style={{ background: KPI_TONES[firstPassKpi.level === 'breach' ? 'fuse' : firstPassKpi.level].bg, border: `1px solid ${KPI_TONES[firstPassKpi.level === 'breach' ? 'fuse' : firstPassKpi.level].border}`, borderRadius: '8px', padding: '12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    Efectividad a la primera ejecución
+                                  </span>
+                                  <span style={{ fontSize: '11px', fontWeight: 700, color: KPI_TONES[firstPassKpi.level === 'breach' ? 'fuse' : firstPassKpi.level].fg }}>
+                                    {firstPassKpi.level === 'empty' && 'Sin casos ejecutados'}
+                                    {firstPassKpi.level === 'ok' && 'En meta'}
+                                    {firstPassKpi.level === 'warning' && 'Bajo la meta'}
+                                    {firstPassKpi.level === 'breach' && 'Muy bajo la meta'}
+                                  </span>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '6px 0' }}>
+                                  <span style={{ fontSize: '28px', fontWeight: 800, color: KPI_TONES[firstPassKpi.level === 'breach' ? 'fuse' : firstPassKpi.level].fg, letterSpacing: '-0.02em' }}>
+                                    {firstPassKpi.pct === null ? '—' : `${firstPassKpi.pct.toFixed(0)}%`}
+                                  </span>
+                                  <span style={{ fontSize: '12px', color: '#44546F' }}>
+                                    {firstPassKpi.firstPass} de {firstPassKpi.executed} casos pasaron a la primera
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#626F86' }}>
+                                  Meta ≥ {FIRST_PASS_TARGET_PCT}% (alerta bajo {FIRST_PASS_WARNING_PCT}%).
+                                  {firstPassKpi.estimated > 0 && ` ${firstPassKpi.estimated} de ${firstPassKpi.executed} se estiman: se ejecutaron antes de que Test Pulse guardara el primer resultado (un caso aprobado sin bugs ligados cuenta como aprobado a la primera).`}
                                 </div>
                               </div>
 

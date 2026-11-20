@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { getBusinessMilliseconds, analyzeBugChangelog } from './utils/slaHelpers.js';
 import { jqlQuote } from './utils/jqlHelpers.js';
-import { stampRunDataV2 } from './utils/runDataContract.js';
+import { stampRunDataV2, withFirstResult } from './utils/runDataContract.js';
 import { compactIssueFields } from './utils/compactIssueFields.js';
 import { parseAutomationComment, mentionsAutomationMarker } from './utils/automationCommentParser.js';
 import { applyExecutionIndexMigrations, getExecutionIndexHealth } from './sql/executionIndexSchema.js';
@@ -2308,6 +2308,8 @@ const getCycleExecutionSummary = async (cycleId) => {
             assignee: run.fields?.assignee || null,
             executedBy: runData.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
             executedAt: runData.executedAt || null,
+            // v4.39.0: first final result of the run (null for runs executed before it existed).
+            firstResult: runData.firstResult || null,
             evidences: filterNonIterationEvidences([
               ...(run.fields?.attachment || []).map(a => ({ id: String(a.id), filename: a.filename, url: a.content })),
               ...(runData.evidences || [])
@@ -2999,6 +3001,8 @@ resolver.define('getTestExecution', async ({ payload }) => {
           ], getIterationEvidenceKeys(prop.iterations)),
           executedBy: prop.executedBy || (runIssue.fields?.assignee ? { displayName: runIssue.fields.assignee.displayName, accountId: runIssue.fields.assignee.accountId } : null),
           executedAt: prop.executedAt,
+          // v4.39.0: first final result of the run (null for runs executed before it existed).
+          firstResult: prop.firstResult || null,
           executionType: prop.executionType || 'Manual',
           description: runIssue.fields?.description || prop.snapshot?.testCaseDescription || null,
           linkedBugs: prop.linkedBugs || (runIssue.fields?.issuelinks || [])
@@ -3713,7 +3717,8 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
 
     // 1. Save testpulse-run-data property FIRST on the Test Run issue itself
     // so any concurrent getTestExecution / getCycleExecutionSummary immediately reads the latest iterations.
-    const newProp = {
+    // v4.39.0: withFirstResult records the run's first final result (First Pass Yield KPI).
+    const newProp = withFirstResult(currentProp, {
       ...currentProp,
       status: newStatus,
       comment: newComment,
@@ -3724,7 +3729,7 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
       linkedBugs: newLinkedBugs,
       lockedAt: newLockedAt,
       _v2Clean: true
-    };
+    });
     await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
@@ -3895,7 +3900,8 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
           await api.asUser().requestJira(route`/rest/api/3/issue/${createdRunId}/properties/testpulse-run-data`, {
             method: 'PUT',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify(stampRunDataV2(runDataProp, projectId))
+            // v4.39.0: a run created already executed records that result as its first one.
+            body: JSON.stringify(stampRunDataV2(withFirstResult({}, runDataProp), projectId))
           }).catch(() => {});
         }
       }
@@ -4969,7 +4975,8 @@ resolver.define('updateTestRunExecution', async ({ payload, context }) => {
   const targetEvidences = evidences !== undefined ? evidences : (currentRunData.evidences || []);
   const cleanEvidences = filterNonIterationEvidences(targetEvidences, iterKeys);
 
-  const updatedRunData = {
+  // v4.39.0: withFirstResult records the run's first final result (First Pass Yield KPI).
+  const updatedRunData = withFirstResult(currentRunData, {
     ...currentRunData,
     status: status !== undefined ? status : currentRunData.status,
     iterations: targetIterations,
@@ -4978,7 +4985,7 @@ resolver.define('updateTestRunExecution', async ({ payload, context }) => {
     linkedBugs: linkedBugs !== undefined ? linkedBugs : (currentRunData.linkedBugs || []),
     executedBy: executorInfo,
     executedAt: status && status !== 'Not Run' ? (currentRunData.executedAt || Date.now()) : currentRunData.executedAt
-  };
+  });
 
   // 2. Save property on Test Run issue FIRST
   await api.asUser().requestJira(route`/rest/api/3/issue/${testRunId}/properties/testpulse-run-data`, {

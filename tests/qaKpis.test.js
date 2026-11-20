@@ -13,7 +13,9 @@ import {
   blockedRate,
   severityGroup,
   mttrBySeverity,
-  formatBusinessDuration
+  formatBusinessDuration,
+  slaCompliance,
+  firstPassYield
 } from '../static/hello-world/src/utils/qaKpis.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -89,4 +91,47 @@ test('Reports renders the KPI widget and the fuse banner from the shared rules',
   assert.match(view, /widget\.type === 'qa_kpis'/);
   assert.match(view, /blockedKpi\.level === 'fuse'/);
   assert.match(constants, /type: 'qa_kpis'/);
+});
+
+// ── v4.39.0: CU-3 % within SLA and CE-4 First Pass Yield ───────────────────────────────────
+
+test('SLA compliance adds every severity with an SLA and flags overdue open defects', () => {
+  const groups = [
+    { targetHours: 24, withinSla: 9, closed: 10, openOverdue: 0 },
+    { targetHours: 48, withinSla: 9, closed: 10, openOverdue: 0 },
+    { targetHours: null, withinSla: 0, closed: 5, openOverdue: 0 }
+  ];
+  const ok = slaCompliance(groups);
+  assert.equal(ok.closed, 20, 'groups without SLA are left out');
+  assert.equal(ok.pct, 90);
+  assert.equal(ok.level, 'ok');
+  assert.equal(slaCompliance([{ ...groups[0], withinSla: 8 }]).level, 'breach', 'below 90 %');
+  assert.equal(slaCompliance([{ ...groups[0], openOverdue: 1 }]).level, 'breach', 'an open defect past its SLA');
+  assert.equal(slaCompliance([]).level, 'empty');
+});
+
+test('First Pass Yield uses the recorded first result and estimates older runs', () => {
+  const runs = [
+    { status: 'Passed', firstResult: 'Passed' },
+    { status: 'Passed', firstResult: 'Failed' },           // failed first, fixed later
+    { status: 'Passed', firstResult: null, linkedBugs: 0 }, // estimated: first pass
+    { status: 'Passed', firstResult: null, linkedBugs: 2 }, // estimated: had bugs → not first pass
+    { status: 'Failed', firstResult: null },
+    { status: 'Not Run' }                                    // not executed: out of the KPI
+  ];
+  const kpi = firstPassYield(runs);
+  assert.equal(kpi.executed, 5);
+  assert.equal(kpi.firstPass, 2);
+  assert.equal(kpi.estimated, 3);
+  assert.equal(kpi.pct, 40);
+  assert.equal(kpi.level, 'breach');
+  assert.equal(firstPassYield([{ status: 'Passed', firstResult: 'Passed' }]).level, 'ok');
+  assert.equal(firstPassYield([]).level, 'empty');
+});
+
+test('Reports shows both new KPIs in the QA KPIs widget', () => {
+  const view = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/ReportsView.jsx'), 'utf8');
+  assert.ok(view.includes('const slaKpi = slaCompliance(mttrKpi);'));
+  assert.ok(view.includes('firstPassYield(firstPassRuns)'));
+  assert.ok(view.includes('Cumplimiento de SLA de corrección') && view.includes('Efectividad a la primera ejecución'));
 });

@@ -155,3 +155,71 @@ export function formatBusinessDuration(hours) {
   if (h < BUSINESS_HOURS_PER_DAY) return `${h.toFixed(1)} h`;
   return `${(h / BUSINESS_HOURS_PER_DAY).toFixed(1)} días háb.`;
 }
+
+// ─── v4.39.0: two more KPIs from "KPIs de Calidad QA – CU-POS" ───────────────────────────────
+
+/** CU-3 target: share of closed defects repaired within their SLA. */
+export const SLA_COMPLIANCE_TARGET_PCT = 90;
+
+/**
+ * CU-3 · Cumplimiento de SLA de corrección: one percentage for all severities that have an SLA,
+ * built from the per-severity rows of mttrBySeverity (so both always agree).
+ *
+ * @param {Array<Object>} mttrGroups - Result of mttrBySeverity().
+ * @returns {{pct: (number|null), withinSla: number, closed: number, openOverdue: number, level: 'empty'|'ok'|'breach'}}
+ *   level 'breach' when below the target OR when an open defect is already past its SLA.
+ */
+export function slaCompliance(mttrGroups) {
+  let withinSla = 0;
+  let closed = 0;
+  let openOverdue = 0;
+  (Array.isArray(mttrGroups) ? mttrGroups : []).forEach(group => {
+    if (!group || group.targetHours === null || group.targetHours === undefined) return;
+    withinSla += Number(group.withinSla) || 0;
+    closed += Number(group.closed) || 0;
+    openOverdue += Number(group.openOverdue) || 0;
+  });
+  if (closed === 0) return { pct: null, withinSla, closed, openOverdue, level: openOverdue > 0 ? 'breach' : 'empty' };
+  const pct = (withinSla / closed) * 100;
+  const level = pct >= SLA_COMPLIANCE_TARGET_PCT && openOverdue === 0 ? 'ok' : 'breach';
+  return { pct, withinSla, closed, openOverdue, level };
+}
+
+/** CE-4 thresholds: at or above the target is healthy; below the warning floor is a breach. */
+export const FIRST_PASS_TARGET_PCT = 85;
+export const FIRST_PASS_WARNING_PCT = 70;
+
+/**
+ * CE-4 · Efectividad a la primera ejecución (First Pass Yield): executed cases that passed on
+ * their first execution ÷ executed cases.
+ *
+ * Exact when the run recorded its first result (runs executed from v4.39.0 on: `firstResult`).
+ * For older runs it is ESTIMATED: a run that is Passed now and has no linked bug is counted as
+ * passed at the first try; a run with linked bugs, or Failed / Blocked now, is not. The result
+ * says how many were estimated so the screen can show it.
+ *
+ * @param {Array<{status: string, firstResult?: (string|null), linkedBugs?: number}>} runs
+ *        `status` already normalized (Passed / Failed / Blocked / Not Run); `linkedBugs` = count.
+ * @returns {{pct: (number|null), firstPass: number, executed: number, estimated: number, level: 'empty'|'ok'|'warning'|'breach'}}
+ */
+export function firstPassYield(runs) {
+  let executed = 0;
+  let firstPass = 0;
+  let estimated = 0;
+  (Array.isArray(runs) ? runs : []).forEach(run => {
+    if (!run || !['Passed', 'Failed', 'Blocked'].includes(run.status)) return;
+    executed++;
+    if (['Passed', 'Failed', 'Blocked'].includes(run.firstResult)) {
+      if (run.firstResult === 'Passed') firstPass++;
+    } else {
+      estimated++;
+      if (run.status === 'Passed' && !(Number(run.linkedBugs) > 0)) firstPass++;
+    }
+  });
+  if (executed === 0) return { pct: null, firstPass, executed, estimated, level: 'empty' };
+  const pct = (firstPass / executed) * 100;
+  let level = 'breach';
+  if (pct >= FIRST_PASS_TARGET_PCT) level = 'ok';
+  else if (pct >= FIRST_PASS_WARNING_PCT) level = 'warning';
+  return { pct, firstPass, executed, estimated, level };
+}

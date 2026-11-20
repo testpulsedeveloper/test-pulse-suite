@@ -61,3 +61,39 @@ export function stampRunDataV2(data, projectId = null, now = new Date()) {
     updatedAt: now.toISOString()
   };
 }
+
+// Final results of a Test Run (anything else counts as "not executed yet").
+const FINAL_RESULTS = ['Passed', 'Failed', 'Blocked'];
+
+/** Canonical result name, or null when the status is not a final result. */
+const finalResult = (status) => {
+  const s = String(status || '').trim().toLowerCase();
+  if (s === 'passed' || s === 'pass') return 'Passed';
+  if (s === 'failed' || s === 'fail') return 'Failed';
+  if (s === 'blocked' || s === 'block') return 'Blocked';
+  return null;
+};
+
+/**
+ * Records the FIRST final result of a Test Run (v4.39.0), for the KPI "Efectividad a la primera
+ * ejecución" (First Pass Yield). Test Pulse keeps only the current status of a run, so a case that
+ * failed and passed after the fix looked the same as one that passed at once.
+ *
+ * `firstResult` is set once, when the run goes from "not executed" to Passed / Failed / Blocked,
+ * and never changes afterwards. A run that already had a final result before this version has no
+ * reliable first result, so it is left without one (the KPI estimates those).
+ *
+ * @param {Object} previous - The run data stored before this write.
+ * @param {Object} next - The run data about to be written.
+ * @param {number} [now] - Clock override for tests.
+ * @returns {Object} `next`, plus `firstResult` / `firstResultAt` when this write sets them.
+ */
+export function withFirstResult(previous, next, now = Date.now()) {
+  const prev = previous && typeof previous === 'object' ? previous : {};
+  if (prev.firstResult) return { ...next, firstResult: prev.firstResult, firstResultAt: prev.firstResultAt || null };
+  const result = finalResult(next?.status);
+  if (!result || finalResult(prev.status)) return next;
+  return { ...next, firstResult: result, firstResultAt: now };
+}
+
+export { FINAL_RESULTS };

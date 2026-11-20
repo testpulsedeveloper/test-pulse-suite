@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stampRunDataV2, toIsoDate, RUN_DATA_SCHEMA_VERSION } from '../src/utils/runDataContract.js';
+import { stampRunDataV2, toIsoDate, RUN_DATA_SCHEMA_VERSION, withFirstResult } from '../src/utils/runDataContract.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NOW = new Date('2026-10-23T18:00:00.000Z');
@@ -91,4 +91,28 @@ test('SQL migrations are uniquely named, ordered and idempotent DDL', async () =
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual(names, [...names].sort());
   for (const [, stmt] of EXECUTION_INDEX_MIGRATIONS) assert.match(stmt, /^CREATE TABLE IF NOT EXISTS /);
+});
+
+// ── v4.39.0: first final result of a run ─────────────────────────────────────────────────────
+
+test('the first final result is recorded once and never changes', () => {
+  const first = withFirstResult({ status: 'Not Run' }, { status: 'Failed' }, 1000);
+  assert.equal(first.firstResult, 'Failed');
+  assert.equal(first.firstResultAt, 1000);
+  const fixed = withFirstResult(first, { ...first, status: 'Passed' }, 2000);
+  assert.equal(fixed.firstResult, 'Failed', 'a later Passed does not overwrite it');
+  assert.equal(fixed.firstResultAt, 1000);
+  // A brand-new run created already executed.
+  assert.equal(withFirstResult({}, { status: 'Passed' }).firstResult, 'Passed');
+});
+
+test('runs executed before v4.39.0 get no invented first result', () => {
+  const legacy = withFirstResult({ status: 'Passed' }, { status: 'Failed' });
+  assert.equal(legacy.firstResult, undefined);
+  assert.equal(withFirstResult({ status: 'Not Run' }, { status: 'In Progress' }).firstResult, undefined, 'only final results count');
+});
+
+test('stamping keeps the first result (the contract does not drop extra fields)', () => {
+  const stamped = stampRunDataV2({ status: 'Passed', firstResult: 'Failed', firstResultAt: 5 }, '10010');
+  assert.equal(stamped.firstResult, 'Failed');
 });
