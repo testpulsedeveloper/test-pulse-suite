@@ -286,3 +286,11 @@ test('UI: a folder lists only its own cases; badge counts direct cases (v4.38.0)
   assert.ok(app.includes('contando sus subcarpetas'), 'tooltip keeps the total with subfolders');
   assert.ok(app.includes('Esta carpeta no tiene casos propios'), 'hint when the cases live in subfolders');
 });
+
+test('UI: Design selection is cleared when the folder changes; delete warns about hidden cases (v4.38.1)', () => {
+  const app = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/App.js'), 'utf8');
+  assert.ok(/setSelectedDesignTestIds\(prev => \(prev\.size === 0 \? prev : new Set\(\)\)\);\s*\}, \[activeFolder, selectedProjectId\]\);/.test(app),
+    'selection reset on folder or project change');
+  const del = app.slice(app.indexOf('const handleDeleteTestCases = (ids) => {'), app.indexOf('const handleDeleteTestCases = (ids) => {') + 1500);
+  assert.ok(del.includes('filteredTestCasesAll.map(t => String(t.id))') && del.includes('no se ven'), 'confirmation warns about cases not in view');
+});

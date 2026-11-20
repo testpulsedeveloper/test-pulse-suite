@@ -46,7 +46,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.38.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.38.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -578,6 +578,13 @@ function App() {
   // Project Context & Config State
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
+
+  // v4.38.1: the Design selection belongs to the folder (and project) where it was made. Before,
+  // it survived switching folders, so cases ticked in a subfolder were still selected in the
+  // parent folder and "Eliminar de Jira" there would delete them too without them being visible.
+  useEffect(() => {
+    setSelectedDesignTestIds(prev => (prev.size === 0 ? prev : new Set()));
+  }, [activeFolder, selectedProjectId]);
   const [isGlobal, setIsGlobal] = useState(false);
   const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY', environments: [] });
   const [projectIssueTypes, setProjectIssueTypes] = useState([]);
@@ -6458,8 +6465,16 @@ Then el sistema valida la identidad.
     if (idList.length === 0 || !selectedProjectId) return;
     const names = idList.slice(0, 5).map(id => testCases.find(t => String(t.id) === id)?.key || id).join(', ');
     const plural = idList.length !== 1;
+    // v4.38.1: warn when some selected cases are not in the list being shown (e.g. hidden by a
+    // filter set after selecting them), so nobody deletes cases they cannot see.
+    const visibleIds = new Set(filteredTestCasesAll.map(t => String(t.id)));
+    const hidden = idList.filter(id => !visibleIds.has(id)).length;
+    const hiddenWarning = hidden > 0
+      ? `⚠ ${hidden === 1 ? '1 de estos casos no se ve' : `${hidden} de estos casos no se ven`} en la lista actual (filtros o búsqueda). Revisa la selección antes de continuar.\n\n`
+      : '';
     showConfirm(
       plural ? `Eliminar ${idList.length} casos de Jira` : 'Eliminar caso de Jira',
+      hiddenWarning +
       `Se eliminarán permanentemente de Jira: ${names}${idList.length > 5 ? '…' : ''}.\n\n` +
       'También se eliminan sus Test Runs que nunca se ejecutaron. Los Test Runs ya ejecutados se conservan con sus resultados y evidencias.\n\n' +
       'Esta acción no se puede deshacer.',
