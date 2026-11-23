@@ -32,6 +32,7 @@ function handle(path, asApp) {
   jira.calls++;
   if (jira.outage && !asApp) {
     if (jira.outage === 'throw') throw new Error('connect ETIMEDOUT');
+    if (jira.outage === 'auth') throw new Error('Authentication Required');
     return json({ errorMessages: ['Service Unavailable'] }, jira.outage);
   }
   const url = new URL(path, 'https://jira.test');
@@ -166,4 +167,29 @@ test('checkPermissions tells yes, no and unknown apart', async () => {
   assert.equal(await authz.checkPermissions({ projectId: '100' }, ['BROWSE_PROJECTS']), null);
   assert.equal(await authz.userHasPermissions({ projectId: '100' }, ['BROWSE_PROJECTS']), false);
   jira.outage = null;
+});
+
+// ── v4.39.1: a user's missing session is not a Jira outage ─────────────────────────────────────
+
+test('"Authentication Required" refuses only that user, with NEEDS_AUTH and a session message', async () => {
+  jira.users['acc-nosession'] = { projectPerms: { '100': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
+  jira.outage = 'auth';
+  await assert.rejects(authz.canAccessProject('100', ctx('acc-nosession')),
+    (e) => e.code === 'NEEDS_AUTH' && /sesión/.test(e.message) && !/no está respondiendo/i.test(e.message));
+  // Nothing was cached: once the session works, the user gets in.
+  jira.outage = null;
+  assert.equal(await authz.canAccessProject('100', ctx('acc-nosession')), true);
+});
+
+test('isUserAuthError tells session errors from network errors', () => {
+  assert.equal(authz.isUserAuthError(new Error('Authentication Required')), true);
+  assert.equal(authz.isUserAuthError({ name: 'NeedsAuthenticationError', message: '' }), true);
+  assert.equal(authz.isUserAuthError(new Error('connect ETIMEDOUT')), false);
+  assert.equal(authz.isUserAuthError(new Error('socket hang up')), false);
+});
+
+test('the outage breaker ignores session errors (source check)', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.ok(src.includes("if (!isUserAuthError(networkErr)) recordJiraOutageFailure("));
 });

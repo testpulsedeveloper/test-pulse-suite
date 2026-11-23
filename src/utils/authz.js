@@ -45,6 +45,25 @@ export function normalizeIssueRef(value) {
 }
 
 /**
+ * true when an error thrown by `api.asUser().requestJira` means Atlassian could not provide THIS
+ * user's session ("Authentication Required"), not that Jira is down (v4.39.1).
+ *
+ * Why: on 2026-11-23 the calls made as three users failed with "Authentication Required". The
+ * outage breaker counted those as Jira failures and paused Jira for EVERY user for 30 s, over and
+ * over, so nobody could see their test cases. A session problem must only affect that user.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isUserAuthError(err) {
+  const text = `${err?.name || ''} ${err?.code || ''} ${err?.message || ''}`;
+  return /authentication required|needs?_?authentication|needsauthentication|unauthori[sz]ed|consent/i.test(text);
+}
+
+/** Shown when Atlassian could not confirm the user's session. */
+const SESSION_MESSAGE = 'Atlassian no pudo confirmar tu sesión para Test Pulse. Recarga la página; si sigue igual, cierra sesión en Atlassian y vuelve a entrar.';
+
+/**
  * Asks Jira whether the current user holds ALL of the given permissions, and tells apart
  * "Jira said no" from "Jira could not answer" (v4.34.2).
  *
@@ -90,6 +109,11 @@ export async function checkPermissions({ projectId, issueId, global = false } = 
     const data = await res.json();
     return permissions.every(p => data?.permissions?.[p]?.havePermission === true);
   } catch (e) {
+    if (isUserAuthError(e)) {
+      // v4.39.1: the user's session, not Jira. Refused with its own code and message.
+      console.warn('[authz] permission check: user session not available');
+      throw new AuthorizationError('NEEDS_AUTH', SESSION_MESSAGE);
+    }
     // Dropped connection / timeout: unknown as well.
     console.warn('[authz] permission check failed:', e?.message);
     return null;
@@ -264,6 +288,7 @@ async function superuserState(context) {
         result = false;
       }
     } catch (e) {
+      if (isUserAuthError(e)) throw new AuthorizationError('NEEDS_AUTH', SESSION_MESSAGE);
       console.warn('[authz] superuser group lookup failed:', e?.message);
       unknown = true;
     }

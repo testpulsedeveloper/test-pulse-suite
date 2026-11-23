@@ -18,7 +18,8 @@ import {
   isSuperuser,
   normalizeIssueRef,
   getIssueVisibleToUser,
-  getProjectActionPermissions
+  getProjectActionPermissions,
+  isUserAuthError
 } from './utils/authz.js';
 import {
   enqueueCycleRemoval,
@@ -179,7 +180,9 @@ try {
                 res = await origReq.apply(requester, reqArgs);
               } catch (networkErr) {
                 // Dropped connection / timeout towards Jira: count it, never retry it here.
-                recordJiraOutageFailure(networkErr?.message || 'network error');
+                // v4.39.1: a user's missing session ("Authentication Required") is NOT a Jira
+                // outage; counting it paused Jira for every user. It only fails this call.
+                if (!isUserAuthError(networkErr)) recordJiraOutageFailure(networkErr?.message || 'network error');
                 throw networkErr;
               }
               if (res && JIRA_OUTAGE_STATUSES.has(res.status)) {
