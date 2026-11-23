@@ -60,8 +60,10 @@ export function isUserAuthError(err) {
   return /authentication required|needs?_?authentication|needsauthentication|unauthori[sz]ed|consent/i.test(text);
 }
 
-/** Shown when Atlassian could not confirm the user's session. */
-const SESSION_MESSAGE = 'Atlassian no pudo confirmar tu sesión para Test Pulse. Recarga la página; si sigue igual, cierra sesión en Atlassian y vuelve a entrar.';
+// v4.39.2: the error is RE-THROWN untouched (never wrapped). Forge recognizes
+// NEEDS_AUTHENTICATION_ERR coming out of a function and asks the user to grant the app access
+// again ("Allow access"). Wrapping it in another error hid that prompt, so the user only saw a
+// message and could not get back in.
 
 /**
  * Asks Jira whether the current user holds ALL of the given permissions, and tells apart
@@ -110,9 +112,10 @@ export async function checkPermissions({ projectId, issueId, global = false } = 
     return permissions.every(p => data?.permissions?.[p]?.havePermission === true);
   } catch (e) {
     if (isUserAuthError(e)) {
-      // v4.39.1: the user's session, not Jira. Refused with its own code and message.
-      console.warn('[authz] permission check: user session not available');
-      throw new AuthorizationError('NEEDS_AUTH', SESSION_MESSAGE);
+      // v4.39.1/v4.39.2: the user's consent/session, not Jira. Re-thrown as it came so Forge
+      // shows the user the "Allow access" prompt; nothing is cached.
+      console.warn('[authz] permission check: user consent required (NEEDS_AUTHENTICATION_ERR)');
+      throw e;
     }
     // Dropped connection / timeout: unknown as well.
     console.warn('[authz] permission check failed:', e?.message);
@@ -288,7 +291,7 @@ async function superuserState(context) {
         result = false;
       }
     } catch (e) {
-      if (isUserAuthError(e)) throw new AuthorizationError('NEEDS_AUTH', SESSION_MESSAGE);
+      if (isUserAuthError(e)) throw e; // v4.39.2: let Forge ask the user for consent
       console.warn('[authz] superuser group lookup failed:', e?.message);
       unknown = true;
     }

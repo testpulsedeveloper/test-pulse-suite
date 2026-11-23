@@ -32,7 +32,13 @@ function handle(path, asApp) {
   jira.calls++;
   if (jira.outage && !asApp) {
     if (jira.outage === 'throw') throw new Error('connect ETIMEDOUT');
-    if (jira.outage === 'auth') throw new Error('Authentication Required');
+    if (jira.outage === 'auth') {
+      // Same shape as @forge/api's NeedsAuthenticationError.
+      const err = new Error('Authentication Required');
+      err.name = 'NEEDS_AUTHENTICATION_ERR';
+      err.status = 401;
+      throw err;
+    }
     return json({ errorMessages: ['Service Unavailable'] }, jira.outage);
   }
   const url = new URL(path, 'https://jira.test');
@@ -171,11 +177,12 @@ test('checkPermissions tells yes, no and unknown apart', async () => {
 
 // ── v4.39.1: a user's missing session is not a Jira outage ─────────────────────────────────────
 
-test('"Authentication Required" refuses only that user, with NEEDS_AUTH and a session message', async () => {
+test('"Authentication Required" reaches Forge untouched so it can ask the user for consent', async () => {
   jira.users['acc-nosession'] = { projectPerms: { '100': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
   jira.outage = 'auth';
+  // v4.39.2: the very same NEEDS_AUTHENTICATION_ERR, not wrapped in an AuthorizationError.
   await assert.rejects(authz.canAccessProject('100', ctx('acc-nosession')),
-    (e) => e.code === 'NEEDS_AUTH' && /sesión/.test(e.message) && !/no está respondiendo/i.test(e.message));
+    (e) => e.name === 'NEEDS_AUTHENTICATION_ERR' && !(e instanceof authz.AuthorizationError));
   // Nothing was cached: once the session works, the user gets in.
   jira.outage = null;
   assert.equal(await authz.canAccessProject('100', ctx('acc-nosession')), true);
