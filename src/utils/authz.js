@@ -15,6 +15,7 @@
  */
 
 import api, { route } from '@forge/api';
+import { isAppFallbackEnabled } from './appFallback.js';
 
 /**
  * Jira project IDs are numeric and project keys are uppercase alphanumerics
@@ -65,6 +66,75 @@ export function isUserAuthError(err) {
 // again ("Allow access"). Wrapping it in another error hid that prompt, so the user only saw a
 // message and could not get back in.
 
+// ── v4.40.0: read-only contingency mode (see appFallback.js) ─────────────────────────────────
+// index.js hands in a function that returns the store of the running resolver invocation (its
+// AsyncLocalStorage), so these checks know the accountId and can mark the invocation as verified.
+let invocationStore = () => null;
+export function setInvocationStoreProvider(fn) {
+  invocationStore = typeof fn === 'function' ? fn : () => null;
+}
+
+/** The project gate passed for this user in this invocation: its READS may fall back to the app. */
+function markProjectVerified() {
+  const store = invocationStore();
+  if (store) store.fallbackVerified = true;
+}
+
+/** Numeric id of a project or issue (the bulk permissions API takes ids, not keys). */
+async function numericIdAsApp(kind, ref) {
+  if (/^\d+$/.test(String(ref))) return Number(ref);
+  const res = kind === 'project'
+    ? await api.asApp().requestJira(route`/rest/api/3/project/${ref}`)
+    : await api.asApp().requestJira(route`/rest/api/3/issue/${ref}?fields=project`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return /^\d+$/.test(String(data?.id)) ? Number(data.id) : null;
+}
+
+/**
+ * The same question as checkPermissions, asked AS THE APP about a given user, with Jira's bulk
+ * permissions API (POST /rest/api/3/permissions/check + accountId). The answer is still the
+ * user's own Jira permissions.
+ *
+ * @returns {Promise<true|false|null|undefined>} like checkPermissions; `undefined` = this way of
+ *          asking is not possible (no accountId, or Jira refused the request) → the caller keeps
+ *          the original NEEDS_AUTHENTICATION_ERR.
+ */
+async function checkPermissionsAsApp({ projectId, issueId, global = false }, permissions, accountId) {
+  if (!accountId) return undefined;
+  try {
+    const body = { accountId };
+    if (global) {
+      body.globalPermissions = permissions;
+    } else {
+      const id = await numericIdAsApp(issueId ? 'issue' : 'project', issueId || projectId);
+      if (id === null) return undefined;
+      body.projectPermissions = [{ permissions, ...(issueId ? { issues: [id] } : { projects: [id] }) }];
+    }
+    const res = await api.asApp().requestJira(route`/rest/api/3/permissions/check`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      if (isJiraUnavailableStatus(res.status)) return null;
+      console.warn(`[authz-fallback] bulk permission check refused: HTTP ${res.status}`);
+      return undefined;
+    }
+    const data = await res.json();
+    if (global) {
+      const granted = new Set(data?.globalPermissions || []);
+      return permissions.every(p => granted.has(p));
+    }
+    const target = issueId ? 'issues' : 'projects';
+    return permissions.every(p => (data?.projectPermissions || [])
+      .some(entry => entry?.permission === p && Array.isArray(entry?.[target]) && entry[target].length > 0));
+  } catch (e) {
+    console.warn('[authz-fallback] bulk permission check failed:', e?.message);
+    return null;
+  }
+}
+
 /**
  * Asks Jira whether the current user holds ALL of the given permissions, and tells apart
  * "Jira said no" from "Jira could not answer" (v4.34.2).
@@ -112,6 +182,15 @@ export async function checkPermissions({ projectId, issueId, global = false } = 
     return permissions.every(p => data?.permissions?.[p]?.havePermission === true);
   } catch (e) {
     if (isUserAuthError(e)) {
+      // v4.40.0: contingency mode — ask Jira as the app about this user's permissions.
+      if (isAppFallbackEnabled()) {
+        const answer = await checkPermissionsAsApp({ projectId, issueId, global }, permissions, invocationStore()?.accountId);
+        if (answer !== undefined) {
+          const store = invocationStore();
+          if (store) store.appFallback = (store.appFallback || 0) + 1;
+          return answer;
+        }
+      }
       // v4.39.1/v4.39.2: the user's consent/session, not Jira. Re-thrown as it came so Forge
       // shows the user the "Allow access" prompt; nothing is cached.
       console.warn('[authz] permission check: user consent required (NEEDS_AUTHENTICATION_ERR)');
@@ -291,9 +370,32 @@ async function superuserState(context) {
         result = false;
       }
     } catch (e) {
-      if (isUserAuthError(e)) throw e; // v4.39.2: let Forge ask the user for consent
-      console.warn('[authz] superuser group lookup failed:', e?.message);
-      unknown = true;
+      if (isUserAuthError(e)) {
+        // v4.40.0: contingency mode — read this user's groups as the app.
+        const accountId = invocationStore()?.accountId;
+        if (isAppFallbackEnabled() && accountId) {
+          try {
+            const res = await api.asApp().requestJira(route`/rest/api/3/user/groups?accountId=${accountId}`);
+            if (res.ok) {
+              const groups = await res.json();
+              const groupName = getSuperuserGroupName().toLowerCase();
+              result = (Array.isArray(groups) ? groups : []).some(g => String(g?.name || '').toLowerCase() === groupName);
+            } else if (isJiraUnavailableStatus(res.status)) {
+              unknown = true;
+            } else {
+              throw e;
+            }
+          } catch (fallbackErr) {
+            if (fallbackErr === e) throw e;
+            unknown = true;
+          }
+        } else {
+          throw e; // v4.39.2: let Forge ask the user for consent
+        }
+      } else {
+        console.warn('[authz] superuser group lookup failed:', e?.message);
+        unknown = true;
+      }
     }
   }
   // A "yes" from either source is definite. A "no" is definite only when both sources answered.
@@ -332,11 +434,15 @@ export async function canAccessProject(projectId, context) {
   if (!ref) return false;
   const key = accountKey(context, `browse::${ref}`);
   const cached = cacheGet(_browseCache, key, PERMISSION_CACHE_TTL_MS);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    if (cached === true) markProjectVerified();
+    return cached;
+  }
   const browse = await checkPermissions({ projectId: ref }, ['BROWSE_PROJECTS']);
   const superuser = browse === true ? true : await superuserState(context);
   if (browse === true || superuser === true) {
     cacheSet(_browseCache, key, true);
+    markProjectVerified();
     return true;
   }
   if (browse === null || superuser === null) {

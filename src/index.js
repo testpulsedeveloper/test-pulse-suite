@@ -19,8 +19,10 @@ import {
   normalizeIssueRef,
   getIssueVisibleToUser,
   getProjectActionPermissions,
-  isUserAuthError
+  isUserAuthError,
+  setInvocationStoreProvider
 } from './utils/authz.js';
+import { isAppFallbackEnabled, isReadOnlyJiraRequest } from './utils/appFallback.js';
 import {
   enqueueCycleRemoval,
   markPendingRemoval,
@@ -120,6 +122,8 @@ async function getCachedIsProjectAdmin(projectId, context) {
 // AsyncLocalStorage keeps counts correct even if invocations overlap within one instance.
 // Fails open: if patching the api object isn't possible, the app keeps working uninstrumented.
 const __perfALS = new AsyncLocalStorage();
+// v4.40.0: authz.js reads the running invocation's store (accountId, contingency flags).
+setInvocationStoreProvider(() => __perfALS.getStore());
 const __perfSamplesByResolver = new Map();
 const PERF_SAMPLE_LIMIT = 200;
 
@@ -183,6 +187,15 @@ try {
                 // v4.39.1: a user's missing session ("Authentication Required") is NOT a Jira
                 // outage; counting it paused Jira for every user. It only fails this call.
                 if (!isUserAuthError(networkErr)) recordJiraOutageFailure(networkErr?.message || 'network error');
+                // v4.40.0 read-only contingency (appFallback.js): when Atlassian has no session
+                // for the user, a READ is repeated as the app — only if the switch is on and this
+                // invocation already verified, as the app, the user's access to the project.
+                // Writes are never repeated.
+                if (m === 'asUser' && isUserAuthError(networkErr) && isAppFallbackEnabled() &&
+                    store?.fallbackVerified && isReadOnlyJiraRequest(reqArgs)) {
+                  store.appFallbackReads = (store.appFallbackReads || 0) + 1;
+                  return api.asApp().requestJira(...reqArgs);
+                }
                 throw networkErr;
               }
               if (res && JIRA_OUTAGE_STATUSES.has(res.status)) {
@@ -432,7 +445,8 @@ async function enforceProjectScope(name, req) {
   const __origDefine = resolver.define.bind(resolver);
   resolver.define = (name, fn) => (__resolverFns.set(name, fn), __origDefine(name, async (req) => {
     const t0 = Date.now();
-    const store = { calls: 0, r429: 0, startedAt: t0 };
+    // accountId: used by the read-only contingency mode to check THIS user's permissions.
+    const store = { calls: 0, r429: 0, startedAt: t0, accountId: req?.context?.accountId || null };
     try {
       return await __perfALS.run(store, async () => {
         await enforceProjectScope(name, req);
@@ -455,7 +469,7 @@ async function enforceProjectScope(name, req) {
       samples.push(elapsed);
       if (samples.length > PERF_SAMPLE_LIMIT) samples.shift();
       const { p50, p95, maxMs } = computePercentiles(samples);
-      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}${store.paused ? ` jiraPaused=${store.paused}` : ''}`);
+      console.log(`[perf] resolver=${name} jiraCalls=${store.calls} r429=${store.r429} ms=${elapsed} p50=${p50} p95=${p95} maxMs=${maxMs}${store.paused ? ` jiraPaused=${store.paused}` : ''}${store.appFallback || store.appFallbackReads ? ` appFallbackChecks=${store.appFallback || 0} appFallbackReads=${store.appFallbackReads || 0}` : ''}`);
     }
   }));
 }

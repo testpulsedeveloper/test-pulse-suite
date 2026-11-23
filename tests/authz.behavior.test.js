@@ -28,7 +28,7 @@ const jira = {
 
 const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
 
-function handle(path, asApp) {
+function handle(path, asApp, init = {}) {
   jira.calls++;
   if (jira.outage && !asApp) {
     if (jira.outage === 'throw') throw new Error('connect ETIMEDOUT');
@@ -42,6 +42,22 @@ function handle(path, asApp) {
     return json({ errorMessages: ['Service Unavailable'] }, jira.outage);
   }
   const url = new URL(path, 'https://jira.test');
+  // v4.40.0: Jira's bulk permissions API, asked AS THE APP about a given accountId.
+  if (asApp && url.pathname === '/rest/api/3/permissions/check') {
+    const body = JSON.parse(init?.body || '{}');
+    const user = jira.users[body.accountId] || { projectPerms: {}, global: [] };
+    if (body.globalPermissions) return json({ globalPermissions: body.globalPermissions.filter(p => user.global.includes(p)) });
+    const projectPermissions = (body.projectPermissions || []).flatMap(req => req.permissions.map(permission => ({
+      permission,
+      projects: (req.projects || []).filter(id => (user.projectPerms[String(id)] || []).includes(permission)),
+      issues: []
+    })));
+    return json({ projectPermissions });
+  }
+  if (asApp && url.pathname === '/rest/api/3/user/groups') {
+    const user = jira.users[url.searchParams.get('accountId')] || { groups: [] };
+    return json(user.groups.map(name => ({ name })));
+  }
   if (url.pathname === '/rest/api/3/mypermissions') {
     const user = jira.users[jira.currentUser];
     const keys = (url.searchParams.get('permissions') || '').split(',');
@@ -67,8 +83,8 @@ const route = (strings, ...values) => strings.reduce((acc, s, i) => acc + s + (i
 
 mock.module('@forge/api', {
   defaultExport: {
-    asUser: () => ({ requestJira: async (p) => handle(p, false) }),
-    asApp: () => ({ requestJira: async (p) => handle(p, true) })
+    asUser: () => ({ requestJira: async (p, init) => handle(p, false, init) }),
+    asApp: () => ({ requestJira: async (p, init) => handle(p, true, init) })
   },
   namedExports: { route }
 });
@@ -199,4 +215,65 @@ test('the outage breaker ignores session errors (source check)', async () => {
   const fs = await import('node:fs');
   const src = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
   assert.ok(src.includes("if (!isUserAuthError(networkErr)) recordJiraOutageFailure("));
+});
+
+// ── v4.40.0: read-only contingency mode (TESTPULSE_ASAPP_FALLBACK=on) ─────────────────────────
+
+const { isReadOnlyJiraRequest, isAppFallbackEnabled } = await import('../src/utils/appFallback.js');
+
+test('contingency off: the consent error still reaches Forge', async () => {
+  delete process.env.TESTPULSE_ASAPP_FALLBACK;
+  jira.users['acc-cont-off'] = { projectPerms: { '100': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
+  jira.outage = 'auth';
+  await assert.rejects(authz.canAccessProject('100', ctx('acc-cont-off')), (e) => e.name === 'NEEDS_AUTHENTICATION_ERR');
+  jira.outage = null;
+});
+
+test('contingency on: the user\'s own permissions are checked as the app, and the invocation is marked', async () => {
+  process.env.TESTPULSE_ASAPP_FALLBACK = 'on';
+  const store = {};
+  authz.setInvocationStoreProvider(() => store);
+  jira.users['acc-cont-member'] = { projectPerms: { '100': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
+  jira.users['acc-cont-outsider'] = { projectPerms: { '200': ['BROWSE_PROJECTS'] }, global: [], groups: [] };
+  jira.outage = 'auth';
+
+  store.accountId = 'acc-cont-member';
+  assert.equal(await authz.canAccessProject('100', ctx('acc-cont-member')), true);
+  assert.equal(store.fallbackVerified, true, 'reads of this invocation may fall back');
+  assert.equal(store.appFallback, 1);
+
+  const outsiderStore = { accountId: 'acc-cont-outsider' };
+  authz.setInvocationStoreProvider(() => outsiderStore);
+  assert.equal(await authz.canAccessProject('100', ctx('acc-cont-outsider')), false, 'no access stays no access');
+  assert.equal(outsiderStore.fallbackVerified, undefined);
+
+  // A project admin check also works through the bulk API.
+  jira.users['acc-cont-admin'] = { projectPerms: { '100': ['BROWSE_PROJECTS', 'ADMINISTER_PROJECTS'] }, global: [], groups: [] };
+  authz.setInvocationStoreProvider(() => ({ accountId: 'acc-cont-admin' }));
+  assert.equal(await authz.canAdministerProject('100', ctx('acc-cont-admin')), true);
+
+  jira.outage = null;
+  delete process.env.TESTPULSE_ASAPP_FALLBACK;
+  authz.setInvocationStoreProvider(() => null);
+});
+
+test('only reads may be repeated as the app', () => {
+  assert.equal(isReadOnlyJiraRequest(['/rest/api/3/issue/CUQ-1?fields=summary']), true);
+  assert.equal(isReadOnlyJiraRequest([{ value: '/rest/api/3/search/jql' }, { method: 'POST' }]), true);
+  assert.equal(isReadOnlyJiraRequest(['/rest/api/3/issue/bulkfetch', { method: 'POST' }]), true);
+  assert.equal(isReadOnlyJiraRequest(['/rest/api/3/issue', { method: 'POST' }]), false, 'creating an issue');
+  assert.equal(isReadOnlyJiraRequest(['/rest/api/3/issue/CUQ-1', { method: 'PUT' }]), false);
+  assert.equal(isReadOnlyJiraRequest(['/rest/api/3/issue/CUQ-1/properties/x', { method: 'DELETE' }]), false);
+  delete process.env.TESTPULSE_ASAPP_FALLBACK;
+  assert.equal(isAppFallbackEnabled(), false, 'off unless the variable says "on"');
+  process.env.TESTPULSE_ASAPP_FALLBACK = 'ON';
+  assert.equal(isAppFallbackEnabled(), true);
+  delete process.env.TESTPULSE_ASAPP_FALLBACK;
+});
+
+test('the request wrapper repeats only verified reads as the app (source check)', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.ok(src.includes("store?.fallbackVerified && isReadOnlyJiraRequest(reqArgs)"));
+  assert.ok(src.includes("setInvocationStoreProvider(() => __perfALS.getStore());"));
 });
