@@ -4759,8 +4759,10 @@ export default function ReportsView({ ctx }) {
                               </span>
                             </div>
 
-                            {/* Two KPI blocks side by side when the widget is wide, stacked when it is narrow. */}
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.85rem 1.25rem', padding: '0.4rem 0', alignItems: 'start' }}>
+                            {/* v4.40.1: the three percentage cards share a row (they wrap when the widget is
+                                narrow) and the MTTR table takes a full row below them. Before, the table
+                                (≈420 px wide) sat in a 300 px column and overflowed onto the cards. */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '0.85rem 1.25rem', padding: '0.4rem 0', alignItems: 'stretch' }}>
                               {/* KPI 1: blocked-cases rate with its two thresholds */}
                               <div style={{ background: KPI_TONES[blockedKpi.level].bg, border: `1px solid ${KPI_TONES[blockedKpi.level].border}`, borderRadius: '8px', padding: '12px' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
@@ -4791,35 +4793,6 @@ export default function ReportsView({ ctx }) {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#626F86', marginTop: '6px' }}>
                                   <span>Límite operativo &lt; {BLOCKED_LIMIT_PCT}%</span>
                                   <span>Suspensión ≥ {BLOCKED_FUSE_PCT}%</span>
-                                </div>
-                              </div>
-
-                              {/* KPI 2: MTTR per severity against the SLA */}
-                              <div>
-                                <div style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>
-                                  MTTR por severidad vs SLA
-                                </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.4fr) repeat(4, minmax(60px, 1fr))', gap: '4px 8px', fontSize: '12px', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Severidad</span>
-                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>MTTR</span>
-                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>SLA</span>
-                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>En SLA</span>
-                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>Vencidos</span>
-                                  {mttrKpi.map(group => (
-                                    <React.Fragment key={group.key}>
-                                      <span style={{ fontWeight: 600, color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.label}</span>
-                                      <span style={{ textAlign: 'right', fontWeight: 700, color: KPI_TONES[group.level].fg, borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
-                                        {formatBusinessDuration(group.avgHours)}
-                                      </span>
-                                      <span style={{ textAlign: 'right', color: '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.targetLabel}</span>
-                                      <span style={{ textAlign: 'right', color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
-                                        {group.compliancePct === null ? '—' : `${group.compliancePct.toFixed(0)}% (${group.withinSla}/${group.closed})`}
-                                      </span>
-                                      <span style={{ textAlign: 'right', fontWeight: group.openOverdue > 0 ? 700 : 400, color: group.openOverdue > 0 ? '#BF2600' : '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
-                                        {group.targetHours === null ? '—' : `${group.openOverdue} de ${group.open}`}
-                                      </span>
-                                    </React.Fragment>
-                                  ))}
                                 </div>
                               </div>
 
@@ -4872,6 +4845,35 @@ export default function ReportsView({ ctx }) {
                                 <div style={{ fontSize: '11px', color: '#626F86' }}>
                                   Meta ≥ {FIRST_PASS_TARGET_PCT}% (alerta bajo {FIRST_PASS_WARNING_PCT}%).
                                   {firstPassKpi.estimated > 0 && ` ${firstPassKpi.estimated} de ${firstPassKpi.executed} se estiman: se ejecutaron antes de que Test Pulse guardara el primer resultado (un caso aprobado sin bugs ligados cuenta como aprobado a la primera).`}
+                                </div>
+                              </div>
+
+                              {/* KPI 2: MTTR per severity against the SLA (full row, v4.40.1) */}
+                              <div style={{ gridColumn: '1 / -1', overflowX: 'auto' }}>
+                                <div style={{ fontSize: '11px', fontWeight: 700, color: '#44546F', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>
+                                  MTTR por severidad vs SLA
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.4fr) repeat(4, minmax(60px, 1fr))', gap: '4px 8px', fontSize: '12px', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase' }}>Severidad</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>MTTR</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>SLA</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>En SLA</span>
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#626F86', textTransform: 'uppercase', textAlign: 'right' }}>Vencidos</span>
+                                  {mttrKpi.map(group => (
+                                    <React.Fragment key={group.key}>
+                                      <span style={{ fontWeight: 600, color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.label}</span>
+                                      <span style={{ textAlign: 'right', fontWeight: 700, color: KPI_TONES[group.level].fg, borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {formatBusinessDuration(group.avgHours)}
+                                      </span>
+                                      <span style={{ textAlign: 'right', color: '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>{group.targetLabel}</span>
+                                      <span style={{ textAlign: 'right', color: '#172B4D', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {group.compliancePct === null ? '—' : `${group.compliancePct.toFixed(0)}% (${group.withinSla}/${group.closed})`}
+                                      </span>
+                                      <span style={{ textAlign: 'right', fontWeight: group.openOverdue > 0 ? 700 : 400, color: group.openOverdue > 0 ? '#BF2600' : '#626F86', borderTop: '1px solid #F1F2F4', paddingTop: '4px' }}>
+                                        {group.targetHours === null ? '—' : `${group.openOverdue} de ${group.open}`}
+                                      </span>
+                                    </React.Fragment>
+                                  ))}
                                 </div>
                               </div>
 

@@ -135,3 +135,10 @@ test('Reports shows both new KPIs in the QA KPIs widget', () => {
   assert.ok(view.includes('firstPassYield(firstPassRuns)'));
   assert.ok(view.includes('Cumplimiento de SLA de corrección') && view.includes('Efectividad a la primera ejecución'));
 });
+
+test('QA KPIs widget: MTTR table takes a full row so it never overlaps the cards (v4.40.1)', () => {
+  const view = fs.readFileSync(path.join(ROOT_DIR, 'static/hello-world/src/views/ReportsView.jsx'), 'utf8');
+  const mttr = view.indexOf('KPI 2: MTTR per severity against the SLA (full row');
+  assert.ok(mttr > view.indexOf('KPI 4 (v4.39.0)'), 'MTTR table comes after the percentage cards');
+  assert.ok(view.slice(mttr, mttr + 200).includes("gridColumn: '1 / -1'"), 'MTTR spans the whole row');
+});
