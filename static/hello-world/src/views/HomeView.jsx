@@ -246,7 +246,7 @@ export default function HomeView({ ctx }) {
                 <button type="button" key={r.id} className="tp5-cycle-row" onClick={() => c && onOpenCycle(c)} title="Abrir en Ejecución">
                   <span className="tp5-cycle-row__name">
                     <span className="tp5-ellipsis tp5-strong">{r.name}</span>
-                    <span className="tp5-mono tp5-subtle tp5-ellipsis">{r.key} · {dates}{planName ? ` · ${planName}` : ''}</span>
+                    <span className="tp5-mono tp5-subtle tp5-ellipsis">{[dates, planName].filter(Boolean).join(' · ')}</span>
                   </span>
                   <span className="tp5-bar" role="img" aria-label={aria}>
                     <span style={{ width: `${r.bar.passed}%`, background: 'var(--tp5-success)' }} />

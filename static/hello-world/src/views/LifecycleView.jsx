@@ -1044,8 +1044,15 @@ const LifecycleView = ({ ctx }) => {
           style={{ ...styles.linkBtn, color: 'var(--jira-subtle, #626F86)', width: '14px' }}>
           {open ? '▾' : '▸'}
         </button>
-        <button type="button" style={{ ...styles.linkBtn, fontWeight: 700 }} onClick={() => openLink(`/browse/${item.key}`)}>{item.key}</button>
-        <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{item.summary || ''}</strong>
+        {field === 'planKeys' && item.summary ? (
+          // Test Plans are known by name: the name itself opens Jira, no key shown.
+          <button type="button" style={{ ...styles.linkBtn, fontWeight: 700, fontSize: '0.88rem' }} title="Abrir en Jira" onClick={() => openLink(`/browse/${item.key}`)}>{item.summary}</button>
+        ) : (
+          <>
+            <button type="button" style={{ ...styles.linkBtn, fontWeight: 700 }} onClick={() => openLink(`/browse/${item.key}`)}>{item.key}</button>
+            <strong style={{ fontSize: '0.88rem', color: 'var(--jira-text, #172B4D)' }}>{item.summary || ''}</strong>
+          </>
+        )}
         {extra}
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '12px', alignItems: 'center' }}>
           {children}
@@ -1379,8 +1386,8 @@ const LifecycleView = ({ ctx }) => {
                     const cycleExecuted = cycle.passed + cycle.failed + cycle.blocked;
                     return (
                       <div key={cycle.key} style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--jira-border, #DCDFE4)', fontSize: '0.82rem', flexWrap: 'wrap' }}>
-                        <button type="button" style={{ ...styles.linkBtn, flex: '0 0 auto' }} onClick={() => openLink(`/browse/${cycle.key}`)}>{cycle.key}</button>
-                        <span style={{ flex: '1 1 180px', minWidth: 0, color: 'var(--jira-text, #172B4D)' }}>{cycle.summary}</span>
+                        {/* Cycles are known by name: the name opens Jira, no key shown. */}
+                        <button type="button" style={{ ...styles.linkBtn, flex: '1 1 180px', minWidth: 0, textAlign: 'left' }} title="Abrir en Jira" onClick={() => openLink(`/browse/${cycle.key}`)}>{cycle.summary || cycle.key}</button>
                         <span style={{ flex: '0 0 auto', ...styles.muted }}>
                           {cycle.passed} Passed · {cycle.failed} Failed · {cycle.blocked} Blocked · {(cycle.notRun || 0) + (cycle.other || 0)} sin ejecutar
                         </span>

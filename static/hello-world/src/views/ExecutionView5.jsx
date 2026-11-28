@@ -494,7 +494,7 @@ export default function ExecutionView5({ ctx, d }) {
             return (
               <button key={c.id} type="button" className={`tp5-cyclecard${on ? ' is-on' : ''}`} onClick={() => handleCycleSelect(c)}>
                 <span className="tp5-strong">{c.summary || c.key}</span>
-                <span className="tp5-cyclecard__meta"><span className="tp5-mono">{c.key}</span><span className="tp5-strong" style={{ color: 'var(--tp5-text)' }}>{p}%</span></span>
+                <span className="tp5-cyclecard__meta"><span>Avance</span><span className="tp5-strong" style={{ color: 'var(--tp5-text)' }}>{p}%</span></span>
                 <span className="tp5-bar" style={{ height: 5 }}><span style={{ width: `${p}%`, background: 'var(--tp5-success)' }} /></span>
               </button>
             );
@@ -509,7 +509,7 @@ export default function ExecutionView5({ ctx, d }) {
           <>
             <header className="tp5-plan__head">
               <div>
-                <span className="tp5-eyebrow">Ciclo · <span className="tp5-mono">{selectedCycle.key}</span></span>
+                <span className="tp5-eyebrow">Ciclo</span>
                 <h1 className="tp5-pagehead__title">{selectedCycle.summary}</h1>
               </div>
               <div className="tp5-pagehead__actions">

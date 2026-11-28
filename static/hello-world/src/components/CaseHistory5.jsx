@@ -119,7 +119,7 @@ export default function CaseHistory5({ history, cycles, plans, onOpenRun, onOpen
             {visible.map((r, idx) => (
               <tr key={`${r.cycleId || idx}-${r.testRunKey || idx}`}>
                 <td className="tp5-nowrap">{fmtDate(r.executedAt)}</td>
-                <td>{r.cycleSummary ? <><span className="tp5-strong">{r.cycleSummary}</span><br /></> : null}<span className={r.cycleSummary ? 'tp5-mono tp5-subtle' : 'tp5-mono tp5-strong'}>{r.cycleKey}</span></td>
+                <td><span className="tp5-strong">{r.cycleSummary || r.cycleKey}</span></td>
                 <td className="tp5-subtle-2">{r.planName}</td>
                 <td className="tp5-subtle-2">{r.env}</td>
                 <td className="tp5-subtle-2 tp5-nowrap">{r.tester}</td>

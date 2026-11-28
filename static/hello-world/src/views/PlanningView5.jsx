@@ -191,7 +191,7 @@ export default function PlanningView5({ ctx, d }) {
       <label className="tp5-field-label">Plan activo
         <select className="tp5-select" value={selectedPlanId || ''} onChange={e => setSelectedPlanId(e.target.value)}>
           <option value="">Todos los ciclos</option>
-          {testPlans.map(p => <option key={p.id} value={p.id}>{p.summary} · {p.key}</option>)}
+          {testPlans.map(p => <option key={p.id} value={p.id}>{p.summary || p.key}</option>)}
         </select>
       </label>
       <span className="tp5-eyebrow">Ciclos · {cyclesInCurrentPlan.length}</span>
@@ -201,7 +201,7 @@ export default function PlanningView5({ ctx, d }) {
           return (
             <button key={c.id} type="button" className={`tp5-cyclecard${on ? ' is-on' : ''}`} onClick={() => handleCycleSelect(c)}>
               <span className="tp5-strong">{c.summary || c.key}</span>
-              <span className="tp5-cyclecard__meta"><span className="tp5-mono">{c.key}</span><span>{c.testCount || 0} casos</span><span>{range(c.schedule?.startDate, c.schedule?.endDate)}</span></span>
+              <span className="tp5-cyclecard__meta"><span>{c.testCount || 0} casos</span><span>{range(c.schedule?.startDate, c.schedule?.endDate)}</span></span>
             </button>
           );
         })}
@@ -212,7 +212,7 @@ export default function PlanningView5({ ctx, d }) {
       {selectedPlanId && (linkOpen ? (
         <select className="tp5-select" autoFocus aria-label="Ciclo existente a agregar" value="" onChange={e => { if (e.target.value) { handleLinkCycleToPlan(e.target.value, selectedPlanId); setLinkOpen(false); } }} onBlur={() => setLinkOpen(false)}>
           <option value="">{availableUnlinkedCycles.length ? 'Elige un ciclo sin plan…' : 'No hay ciclos sin plan'}</option>
-          {availableUnlinkedCycles.map(c => <option key={c.id} value={c.id}>{c.summary} · {c.key}</option>)}
+          {availableUnlinkedCycles.map(c => <option key={c.id} value={c.id}>{c.summary || c.key}</option>)}
         </select>
       ) : (
         <button type="button" className="tp5-link tp5-center" onClick={() => setLinkOpen(true)}>Agregar un ciclo existente al plan</button>
@@ -240,7 +240,7 @@ export default function PlanningView5({ ctx, d }) {
       <section className="tp5-plan__main" aria-label="Ciclo">
         <header className="tp5-plan__head">
           <div>
-            <span className="tp5-eyebrow">Ciclo · <span className="tp5-mono">{selectedCycle.key}</span></span>
+            <span className="tp5-eyebrow">Ciclo</span>
             <h1 className="tp5-pagehead__title">{selectedCycle.summary || selectedCycle.name} <button type="button" className="tp5-inline-edit" aria-label="Renombrar ciclo" onClick={() => openRenameDialog('cycle', selectedCycle)}>✎</button></h1>
           </div>
           <div className="tp5-pagehead__actions">
@@ -391,7 +391,7 @@ export default function PlanningView5({ ctx, d }) {
             <div className="tp5-drawer__head">
               <div>
                 <span className="tp5-eyebrow">Calendario y metas</span>
-                <h2 className="tp5-drawer__title">{cal === 'plan' ? (currentPlan?.summary || 'Sin plan') : (selectedCycle.summary)} <span className="tp5-mono tp5-subtle">{cal === 'plan' ? currentPlan?.key : selectedCycle.key}</span></h2>
+                <h2 className="tp5-drawer__title">{cal === 'plan' ? (currentPlan?.summary || currentPlan?.key || 'Sin plan') : (selectedCycle.summary || selectedCycle.key)}</h2>
               </div>
               <button type="button" className="tp5-iconbtn" aria-label="Cerrar" onClick={cancelCal}>✕</button>
             </div>
