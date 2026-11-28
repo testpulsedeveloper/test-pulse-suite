@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.47.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.47.1'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -2864,7 +2864,7 @@ Then el sistema valida la identidad.
                   const summary = test.summary || findTc(test.id)?.summary || 'Caso de prueba';
                   return (
                     <tr key={test.id}
-                      className={`modern-test-card tp5-row${isSel ? ' is-selected' : ''}${dragged ? ' dragging' : ''}`}
+                      className={`modern-test-card tp5-trow${isSel ? ' is-selected' : ''}${dragged ? ' dragging' : ''}`}
                       onPointerDown={(e) => handleCardPointerDown(e, test)}
                       onClick={() => openCase(test)}
                       title="Abrir detalle · arrastra la fila a una carpeta para moverla">

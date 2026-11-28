@@ -52,14 +52,16 @@ const TONE_TOP = { success: 'success', warning: 'warning', danger: 'danger', neu
 
 /** Small SVG line chart used by "Avance real vs. línea ideal" and "Llegada vs. cierre". */
 function LineChart({ height = 260, lines, xLabels, yTicks, todayX, endLabels, area }) {
-  const W = 1000; const H = height; const L = 30; const R = 70; const T = 14; const B = 34;
+  // With end labels ("54 abiertos"), the right margin holds them and the axis moves left.
+  const hasEnd = Boolean(endLabels && endLabels.length);
+  const W = 1000; const H = height; const L = hasEnd ? 56 : 30; const R = hasEnd ? 190 : 70; const T = 14; const B = 34;
   const x = (v) => L + v * (W - L - R);
   const y = (v) => T + (1 - v) * (H - T - B);
   const path = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.x).toFixed(1)},${y(p.y).toFixed(1)}`).join(' ');
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="tp5-chart" role="img" aria-label={lines.map(l => l.aria).join('. ')}>
       {yTicks.map(t => (
-        <g key={t.v}><line x1={L} x2={W - R} y1={y(t.v)} y2={y(t.v)} stroke="#EBECF0" /><text x={W - R + 8} y={y(t.v) + 4} className="tp5-chart__tick">{t.label}</text></g>
+        <g key={t.v}><line x1={L} x2={W - R} y1={y(t.v)} y2={y(t.v)} stroke="#EBECF0" /><text x={hasEnd ? L - 10 : W - R + 8} y={y(t.v) + 5} textAnchor={hasEnd ? 'end' : 'start'} className="tp5-chart__tick">{t.label}</text></g>
       ))}
       {area && <path d={`${path(area.top)} ${area.bottom.slice().reverse().map(p => `L${x(p.x).toFixed(1)},${y(p.y).toFixed(1)}`).join(' ')} Z`} fill={area.fill} />}
       {todayX != null && <line x1={x(todayX)} x2={x(todayX)} y1={T} y2={H - B} stroke="#172B4D" strokeWidth="1.5" />}
@@ -442,7 +444,7 @@ export default function QualityView5({ ctx, d }) {
                   lines={[{ id: 'o', pts: top, color: '#C9372C', aria: `${last.opened} abiertos` }, { id: 'c', pts: bot, color: '#1F845A', aria: `${last.closed} cerrados` }]}
                   yTicks={[0, 0.33, 0.66, 1].map(v => ({ v, label: String(Math.round(v * m)) }))}
                   xLabels={[{ x: 0, label: defects.series.startLabel, anchor: 'start' }, { x: 1, label: defects.series.endLabel, anchor: 'end' }]}
-                  endLabels={[{ x: 1, y: last.opened / m, text: `${last.opened} abiertos`, color: '#AE2E24' }, { x: 1, y: last.closed / m, text: `${last.closed} cerrados`, color: '#216E4E' }]}
+                  endLabels={[{ x: 1, y: last.opened / m, text: `${last.opened} ${last.opened === 1 ? 'abierto' : 'abiertos'}`, color: '#AE2E24' }, { x: 1, y: last.closed / m, text: `${last.closed} ${last.closed === 1 ? 'cerrado' : 'cerrados'}`, color: '#216E4E' }]}
                 />
                 <p className="tp5-subtle tp5-small" style={{ margin: 0 }}>Cuando la curva de abiertos se aplana y la de cerrados la alcanza, el producto se está estabilizando. Hoy la brecha es de {last.opened - last.closed} abiertos.</p>
               </>
@@ -487,7 +489,7 @@ export default function QualityView5({ ctx, d }) {
               <thead><tr><th>Clave</th><th>Resumen</th><th>Severidad</th><th>Estado</th><th>Antigüedad</th><th>SLA</th><th>Casos afectados</th><th>Asignado</th></tr></thead>
               <tbody>
                 {defects.openRows.map(b => (
-                  <tr key={b.key} className="tp5-row" onClick={() => setSelectedBug && setSelectedBug(b)} style={{ cursor: 'pointer' }}>
+                  <tr key={b.key} className="tp5-trow" onClick={() => setSelectedBug && setSelectedBug(b)} style={{ cursor: 'pointer' }}>
                     <td className="tp5-mono tp5-key">{b.key}</td><td>{b.summary}</td>
                     <td><span className={`tp5-loz tp5-loz--${sevTone(b.severity)}`}>{sevLabel(b.severity)}</span></td>
                     <td className="tp5-subtle-2">{b.status}</td><td className="tp5-nowrap">{b.ageDays == null ? '—' : `${b.ageDays} día${b.ageDays === 1 ? '' : 's'}`}</td>

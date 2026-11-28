@@ -562,8 +562,8 @@
 .tp5 .tp5-qrow__side { flex: 1 1 320px; min-width: 0; }
 .tp5 .tp5-qgrid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
 .tp5 .tp5-chart { width: 100%; height: auto; display: block; }
-.tp5 .tp5-chart__tick { font: 22px var(--tp5-font); fill: #626F86; }
-.tp5 .tp5-chart__end { font: 700 30px var(--tp5-font); }
+.tp5 .tp5-chart__tick { font: 16px var(--tp5-font); fill: #626F86; }
+.tp5 .tp5-chart__end { font: 700 22px var(--tp5-font); }
 .tp5 .tp5-legend { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; color: var(--tp5-text-subtle); }
 .tp5 .tp5-legend > span { display: inline-flex; align-items: center; gap: 8px; }
 .tp5 .tp5-legend__line { display: inline-block; width: 22px; height: 0; border-top: 3px solid #0C66E4; }
@@ -685,3 +685,8 @@
 @media (max-width: 1100px) { .tp5 .tp5-docrow__detail { grid-template-columns: minmax(0, 1fr); padding-left: 16px; } }
 .tp5 .tp5-docrow__info { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
 .tp5 .tp5-docrow__actions { display: flex; flex-direction: column; gap: 6px; }
+
+/* Clickable table rows (Repositorio cases, Calidad open defects). Its own class so the
+   Inicio row layout (.tp5-row, a flex container) never applies to a table row. */
+.tp5 .tp5-table tr.tp5-trow { cursor: pointer; }
+.tp5 .tp5-table tr.tp5-trow:hover td { background: var(--tp5-bg); }
