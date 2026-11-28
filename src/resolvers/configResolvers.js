@@ -286,6 +286,46 @@ export function registerConfigResolvers(resolver) {
     return { success: response.status >= 200 && response.status < 300, config: nextConfig };
   });
 
+  /**
+   * Test Pulse 5.0 project switch (v4.41.0): turns the new design on or off for everyone in
+   * the project, immediately.
+   *
+   * It patches ONLY `newDesignEnabled` in the project's `testops-config` property, instead of
+   * going through `setConfig`, so that pending (unsaved) edits elsewhere in the Configuración
+   * form are not saved by accident when an admin flips this switch.
+   *
+   * Authorization: same rule as `setConfig` — project admins or Test Pulse superusers.
+   */
+  resolver.define('setNewDesignEnabled', async ({ payload, context }) => {
+    const { projectId, enabled } = payload || {};
+    await requireProjectAdmin(projectId, context);
+
+    // Read the current property; a 404 just means the project has no config saved yet.
+    const propRoute = route`/rest/api/3/project/${projectId}/properties/testops-config`;
+    const current = await api.asApp().requestJira(propRoute);
+    let config = {};
+    if (current.ok) {
+      const data = await current.json();
+      config = (data?.value && typeof data.value === 'object') ? data.value : {};
+    } else if (current.status !== 404) {
+      // Don't write over a config we could not read: we would lose the other settings.
+      throw new Error(`No se pudo leer la configuración del proyecto (HTTP ${current.status}).`);
+    }
+
+    const next = { ...config, newDesignEnabled: enabled === true };
+    const res = await api.asApp().requestJira(propRoute, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(next)
+    });
+    if (!(res.status >= 200 && res.status < 300)) {
+      throw new Error(`No se pudo guardar el interruptor del diseño 5.0 (HTTP ${res.status}).`);
+    }
+    // Audit trail: who flipped it (accountId only, no names) and the new value.
+    console.log(`[setNewDesignEnabled] project=${projectId} enabled=${next.newDesignEnabled} by=${context?.accountId || 'unknown'}`);
+    return { success: true, newDesignEnabled: next.newDesignEnabled };
+  });
+
   // === Permissions ===
   resolver.define('checkAdminPermission', async ({ payload, context }) => {
     try {

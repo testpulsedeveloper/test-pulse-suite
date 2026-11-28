@@ -42,6 +42,39 @@ import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
 
 const APP_VERSION = `v${packageJson.version || '4.10.0'}`;
 
+/**
+ * Test Pulse 5.0 (v4.41.0): Configuración is organised in sections with a side index instead
+ * of one long page. Each existing card carries `data-tp5-sec="<id>"`; with the new design on,
+ * only the cards of the selected section are shown (the others stay mounted but hidden, so
+ * unsaved edits are kept and "Guardar Configuración" still saves everything at once).
+ */
+const TP5_SETTINGS_GROUPS = [
+  { name: 'General', items: [
+    { id: 'acceso', label: 'Acceso y estado', hint: 'Habilitar la suite e interruptor del diseño 5.0' },
+    { id: 'tipos', label: 'Tipos de incidencia', hint: 'Casos, ciclos, planes, ejecuciones y defectos' }
+  ] },
+  { name: 'Ejecución', items: [
+    { id: 'ambientes', label: 'Ambientes', hint: 'Catálogo de ambientes de ejecución' },
+    { id: 'vista', label: 'Vista por defecto', hint: 'Todos los casos o mis asignaciones' },
+    { id: 'mantenimiento', label: 'Mantenimiento de Test Runs', hint: 'Copiar cambios de los casos a sus ejecuciones' }
+  ] },
+  { name: 'Trazabilidad y defectos', items: [
+    { id: 'trazabilidad', label: 'Requerimientos y enlaces', hint: 'Tipos de requerimiento y enlace con los casos' },
+    { id: 'defectos', label: 'Defectos', hint: 'Qué cuenta como defecto' }
+  ] },
+  { name: 'Calidad y reportes', items: [
+    { id: 'tableros', label: 'Tableros predeterminados', hint: 'Widgets del tablero del proyecto' },
+    { id: 'reportes', label: 'Reportes', hint: 'Envío programado y Testing Exit Report' }
+  ] },
+  { name: 'Ciclo de vida', items: [
+    { id: 'editores', label: 'Editores', hint: 'Quién edita iniciativas y entregables' },
+    { id: 'equipos', label: 'Equipos', hint: 'Equipos Dev, QA y UAT' }
+  ] },
+  { name: 'Respaldo', items: [
+    { id: 'historial', label: 'Historial de carpetas', hint: 'Restaurar versiones del árbol de carpetas' }
+  ] }
+];
+
 export default function SettingsView({ ctx }) {
   const {
     DEFAULT_EXECUTION_ENVIRONMENTS = [],
@@ -112,6 +145,11 @@ export default function SettingsView({ ctx }) {
     // calculando automáticamente el Resumen de Ejecuciones, Resumen de Defectos
     // y el Semáforo de Calidad bajo la matriz de puntuación oficial (máx. 15 pts).
     // Incluye advertencia explícita de que NO es un VoBo, sólo Recomendación de Calidad.
+    // v4.41.0: true while the Test Pulse 5.0 project switch is being saved.
+    const [savingDesignSwitch, setSavingDesignSwitch] = React.useState(false);
+    // v4.41.0: selected section and index filter (5.0 design only).
+    const [tp5Sec, setTp5Sec] = React.useState('acceso');
+    const [tp5SecQuery, setTp5SecQuery] = React.useState('');
     const [exitReportPlanId, setExitReportPlanId] = React.useState('ALL');
     const [exitReportCycleIds, setExitReportCycleIds] = React.useState([]);
     const [exitReportEnv, setExitReportEnv] = React.useState('QA / UAT');
@@ -1309,9 +1347,13 @@ export default function SettingsView({ ctx }) {
                 <button
                   type="button"
                   onClick={() => {
-                    const el = document.getElementById('tp-testing-exit-report-card');
-                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    else setExitReportModalOpen(true);
+                    // 5.0: the Exit Report card lives in the "Reportes" section; open it first.
+                    if (ctx.newDesign) setTp5Sec('reportes');
+                    setTimeout(() => {
+                      const el = document.getElementById('tp-testing-exit-report-card');
+                      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                      else setExitReportModalOpen(true);
+                    }, 0);
                   }}
                   style={{
                     display: 'inline-flex',
@@ -1370,10 +1412,47 @@ export default function SettingsView({ ctx }) {
               </p>
             </div>
           ) : (
-            <form onSubmit={handleSaveConfig} style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+            <div className={ctx.newDesign ? 'tp5-settings' : undefined}>
+            {ctx.newDesign && (
+              <nav className="tp5-settings__nav" aria-label="Secciones de Configuración">
+                <input
+                  type="search"
+                  className="tp5-settings__search"
+                  placeholder="Buscar sección…"
+                  aria-label="Buscar sección de Configuración"
+                  value={tp5SecQuery}
+                  onChange={e => setTp5SecQuery(e.target.value)}
+                />
+                {TP5_SETTINGS_GROUPS.map(g => {
+                  const q = tp5SecQuery.trim().toLowerCase();
+                  const items = g.items.filter(it => !q || `${it.label} ${it.hint} ${g.name}`.toLowerCase().includes(q));
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={g.name} className="tp5-settings__group">
+                      <span className="tp5-settings__group-name">{g.name}</span>
+                      {items.map(it => (
+                        <button
+                          key={it.id}
+                          type="button"
+                          className={`tp5-settings__item${tp5Sec === it.id ? ' is-active' : ''}`}
+                          aria-current={tp5Sec === it.id ? 'page' : undefined}
+                          onClick={() => setTp5Sec(it.id)}
+                          title={it.hint}
+                        >
+                          {it.label}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </nav>
+            )}
+            <form onSubmit={handleSaveConfig} className={ctx.newDesign ? 'tp5-settings__body' : undefined} style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+              {/* 5.0: hide the cards of the other sections (they stay mounted). */}
+              {ctx.newDesign && <style>{`.tp5-settings__body [data-tp5-sec]:not([data-tp5-sec="${tp5Sec}"]) { display: none !important; }`}</style>}
               
               {/* Card 1: Mapeo de Tipos de Incidencia */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="tipos" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -1521,7 +1600,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
               {/* Card 1.5: Catálogo de Ambientes de Ejecución (Formato Tabla para Administradores) */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="ambientes" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -1914,7 +1993,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
               {/* Card 2: Trazabilidad y Requerimientos */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="trazabilidad" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -2001,7 +2080,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
               {/* Card 3: Gestión de Defectos (Bugs) */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="defectos" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -2055,16 +2134,22 @@ export default function SettingsView({ ctx }) {
 
               {/* Card: who may edit the Lifecycle module (v4.19.0). Everybody sees Lifecycle; this
                   list decides who can also change it. */}
-              <LifecycleEditorsCard projectId={selectedProjectId} addNotification={addNotification} />
+              <div data-tp5-sec="editores">
+                <LifecycleEditorsCard projectId={selectedProjectId} addNotification={addNotification} />
+              </div>
 
               {/* Card: Dev / QA / UAT teams used by Lifecycle to group its content (v4.25.0). */}
-              <LifecycleTeamsCard projectId={selectedProjectId} addNotification={addNotification} />
+              <div data-tp5-sec="equipos">
+                <LifecycleTeamsCard projectId={selectedProjectId} addNotification={addNotification} />
+              </div>
 
               {/* Card: versions of the repository folder tree, to restore one (v4.36.0). */}
-              <FolderHistoryCard projectId={selectedProjectId} addNotification={addNotification} onFoldersChanged={setFolders} />
+              <div data-tp5-sec="historial">
+                <FolderHistoryCard projectId={selectedProjectId} addNotification={addNotification} onFoldersChanged={setFolders} />
+              </div>
 
               {/* Card 4: Widgets y Métricas del Tablero */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="tableros" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -2376,7 +2461,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
               {/* Card 4.5: Automatización y Envío Programado de Reportes Ejecutivos */}
-              <div className="glass" style={{
+              <div className="glass" data-tp5-sec="reportes" style={{
                 background: 'var(--bg-surface, #161b22)',
                 border: '1px solid var(--ds-border, #30363d)',
                 borderRadius: '10px',
@@ -2453,7 +2538,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
               {/* Card 4.6: 🏁 Testing Exit Report */}
-              <div
+              <div data-tp5-sec="reportes"
                 id="tp-testing-exit-report-card"
                 className="glass"
                 style={{
@@ -3328,7 +3413,7 @@ export default function SettingsView({ ctx }) {
 
               {/* Card 5: Control de Acceso al Proyecto (Admin Only) */}
               {isAdmin && (
-                <div className="glass" style={{
+                <div className="glass" data-tp5-sec="acceso" style={{
                   background: 'var(--bg-surface, #161b22)',
                   border: '1px solid var(--ds-border, #30363d)',
                   borderRadius: '10px',
@@ -3400,12 +3485,53 @@ export default function SettingsView({ ctx }) {
                     />
                     <span>Habilitar Test Pulse Suite para usuarios de este proyecto</span>
                   </label>
+
+                  {/* v4.41.0 — Interruptor general del diseño Test Pulse 5.0. Se guarda al
+                      instante con su propio resolver (no depende de "Guardar Configuración") y
+                      aplica a todos los usuarios del proyecto en su siguiente carga. */}
+                  <div style={{ marginTop: '1.25rem', paddingTop: '1.25rem', borderTop: '1px solid var(--ds-border, #30363d)' }}>
+                    <h3 style={{ margin: '0 0 0.35rem', fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary, #e6edf3)' }}>
+                      Diseño Test Pulse 5.0
+                    </h3>
+                    <p style={{ margin: '0 0 0.85rem', color: 'var(--text-secondary, #8b949e)', fontSize: '0.88rem', maxWidth: '650px' }}>
+                      Enciende el nuevo diseño para todo el proyecto. Si algo falla, apágalo aquí y todos regresan a la vista anterior al recargar, sin actualizar la app. Mientras esté encendido, cada persona puede volver a la vista anterior desde el menú «Diseño 5.0» hasta el 14 de diciembre de 2026.
+                    </p>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem', cursor: savingDesignSwitch ? 'wait' : 'pointer', background: 'var(--bg-main, #0d1117)', padding: '0.75rem 1.25rem', borderRadius: '8px', border: '1px solid var(--ds-border, #30363d)', fontWeight: 500, color: 'var(--text-primary, #e6edf3)', fontSize: '0.9rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={projectConfig?.newDesignEnabled === true}
+                        disabled={savingDesignSwitch}
+                        onChange={async (e) => {
+                          const enabled = e.target.checked;
+                          setSavingDesignSwitch(true);
+                          try {
+                            await invoke('setNewDesignEnabled', { projectId: selectedProjectId, enabled });
+                            // Update local state too, so this admin sees the change right away.
+                            setProjectConfig(prev => ({ ...(prev || {}), newDesignEnabled: enabled }));
+                            addNotification({
+                              type: enabled ? 'success' : 'info',
+                              title: enabled ? 'Diseño 5.0 encendido' : 'Diseño 5.0 apagado',
+                              description: enabled
+                                ? 'Todos los usuarios del proyecto verán el nuevo diseño al recargar Test Pulse.'
+                                : 'Todos los usuarios regresan a la vista anterior al recargar Test Pulse.'
+                            });
+                          } catch (err) {
+                            addNotification({ type: 'error', title: 'No se pudo cambiar el diseño', description: err.message || 'Intenta de nuevo.' });
+                          } finally {
+                            setSavingDesignSwitch(false);
+                          }
+                        }}
+                        style={{ width: '1.2rem', height: '1.2rem', accentColor: '#0C66E4', cursor: 'inherit' }}
+                      />
+                      <span>{projectConfig?.newDesignEnabled === true ? 'Nuevo diseño activo para todo el proyecto' : 'Activar el nuevo diseño para todo el proyecto'}</span>
+                    </label>
+                  </div>
                 </div>
               )}
 
               {/* Card 5b: Vista por defecto en Ejecución (Admin Only) */}
               {isAdmin && (
-                <div className="glass" style={{
+                <div className="glass" data-tp5-sec="vista" style={{
                   background: 'var(--bg-surface, #161b22)',
                   border: '1px solid var(--ds-border, #30363d)',
                   borderRadius: '10px',
@@ -3437,7 +3563,7 @@ export default function SettingsView({ ctx }) {
 
               {/* Card 6: Mantenimiento de Test Runs (Admin Only) */}
               {isAdmin && (
-                <div className="glass" style={{
+                <div className="glass" data-tp5-sec="mantenimiento" style={{
                   background: 'var(--bg-surface, #161b22)',
                   border: '1px solid var(--ds-border, #30363d)',
                   borderRadius: '10px',
@@ -3549,6 +3675,7 @@ export default function SettingsView({ ctx }) {
               </div>
 
             </form>
+            </div>
           )}
 
           {/* MODAL DE VISTA PREVIA DEL TESTING EXIT REPORT (FORMATO EJECUTIVO LIVERPOOL) */}

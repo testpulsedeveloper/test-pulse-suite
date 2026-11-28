@@ -6,6 +6,9 @@ import Badge from '@atlaskit/badge';
 import Button from '@atlaskit/button';
 import Spinner from '@atlaskit/spinner';
 import './index.css';
+// Test Pulse 5.0 visual system. Every rule is scoped under `.tp5`, so it only applies when the new design is on.
+import './tp5.css';
+import { readDesignPref, writeDesignPref, resolveNewDesign, isRollbackWindowOpen, TAB_LABELS, ROLLBACK_UNTIL } from './utils/designFlag';
 import TestPulseLoader from './components/TestPulseLoader';
 import { LIVERPOOL_LOGO_WHITE_ANIMATED_B64, LIVERPOOL_LOGO_WHITE_B64, LIVERPOOL_LOGO_PINK_B64 } from './assets/liverpool-logo-b64';
 import packageJson from '../package.json';
@@ -46,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.40.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.41.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -59,6 +62,8 @@ const ReportsView = React.lazy(() => import('./views/ReportsView'));
 const SettingsView = React.lazy(() => import('./views/SettingsView'));
 // v4.17.0: QA lifecycle (phases and deliverables per initiative). Loaded only when its tab opens.
 const LifecycleView = React.lazy(() => import('./views/LifecycleView'));
+// Inicio (Test Pulse 5.0): only downloaded when the new design is active.
+const HomeView = React.lazy(() => import('./views/HomeView'));
 // v4.23.0: form to create and edit Test Cases inside Design (replaces Jira's own screens).
 const TestCaseEditor = React.lazy(() => import('./components/TestCaseEditor'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
@@ -588,6 +593,20 @@ function App() {
   const [isGlobal, setIsGlobal] = useState(false);
   const [projectConfig, setProjectConfig] = useState({ testCaseType: '', testCycleType: '', planIssueType: '', testRunType: 'Test Run', requirementIssueTypes: [], requirementLinkType: 'ANY', environments: [] });
   const [projectIssueTypes, setProjectIssueTypes] = useState([]);
+
+  // ─── Test Pulse 5.0 design switch (v4.41.0) ───
+  // `designPref` is the personal choice kept in this browser ('new', 'old' or null) and
+  // `projectConfig.newDesignEnabled` is the admin's project-wide switch. See utils/designFlag.js.
+  const [designPref, setDesignPref] = useState(() => readDesignPref());
+  const [designMenuOpen, setDesignMenuOpen] = useState(false);
+  const newDesign = resolveNewDesign(projectConfig, designPref);
+  // Visible tab names for the active design (tab ids never change).
+  const tabLabels = newDesign ? TAB_LABELS.v5 : TAB_LABELS.classic;
+  const changeDesignPref = (value) => {
+    writeDesignPref(value);
+    setDesignPref(value);
+    setDesignMenuOpen(false);
+  };
   const [linkTypes, setLinkTypes] = useState([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -2271,6 +2290,17 @@ Then el sistema valida la identidad.
         <>
           {/* Navigation Tabs with Badges & Indicators */}
           <div className="nav-tabs" style={{ marginLeft: '1rem', flex: 1, overflowX: 'auto', overflowY: 'hidden', scrollbarWidth: 'none', msOverflowStyle: 'none', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '0.25rem', height: '100%' }}>
+            {/* Inicio (5.0 only): first tab, the landing screen of the new design. */}
+            {newDesign && (
+              <button
+                className={`nav-tab ${activeTab === 'home' ? 'active' : ''}`}
+                onClick={() => setActiveTab('home')}
+                style={{ display: 'inline-flex', alignItems: 'center', position: 'relative', padding: '0 0.85rem', height: '100%', border: 'none', background: 'none', cursor: 'pointer', fontWeight: activeTab === 'home' ? 700 : 500, color: activeTab === 'home' ? 'var(--jira-blue, #0C66E4)' : 'var(--jira-subtle, #626F86)', fontSize: '0.88rem' }}
+              >
+                <span>{tabLabels.home}</span>
+                {activeTab === 'home' && <div className="tab-indicator" />}
+              </button>
+            )}
             <button 
               className={`nav-tab ${activeTab === 'design' ? 'active' : ''}`} 
               onClick={() => setActiveTab('design')}
@@ -2289,7 +2319,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Design</span>
+              <span>{tabLabels.design}</span>
               <span className={`ads-lozenge ${activeTab === 'design' ? 'ads-lozenge-brand' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px' }}>
                 {isFetchingTests && testCases.length === 0 ? '...' : testCases.length}
               </span>
@@ -2314,7 +2344,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Planning</span>
+              <span>{tabLabels.planning}</span>
               <span className={`ads-lozenge ${activeTab === 'planning' ? 'ads-lozenge-brand' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px' }}>
                 {testCycles.length}
               </span>
@@ -2339,7 +2369,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Execution</span>
+              <span>{tabLabels.execution}</span>
               <span className="live-dot" title="Ejecución en vivo" />
               {activeTab === 'execution' && <div className="tab-indicator" />}
             </button>
@@ -2362,7 +2392,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Reports</span>
+              <span>{tabLabels.reports}</span>
               {activeTab === 'reports' && <div className="tab-indicator" />}
             </button>
 
@@ -2386,7 +2416,7 @@ Then el sistema valida la identidad.
                 fontSize: '0.88rem'
               }}
             >
-              <span>Lifecycle</span>
+              <span>{tabLabels.lifecycle}</span>
               {activeTab === 'lifecycle' && <div className="tab-indicator" />}
             </button>
 
@@ -2419,6 +2449,51 @@ Then el sistema valida la identidad.
 
           {/* Nav Actions: Search Cmd+K & Refresh */}
           <div className="nav-actions" style={{ display: 'flex', gap: '0.6rem', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
+            {/* Design menu (v4.41.0): try Test Pulse 5.0, or go back to the classic view while
+                the two-week window is open. Admins also get a shortcut to the project switch. */}
+            {(() => {
+              const projectOn = projectConfig?.newDesignEnabled === true;
+              const canGoBack = projectOn && isRollbackWindowOpen();
+              // Nothing to offer once 5.0 is on for the project and the window has closed.
+              if (projectOn && !canGoBack && designPref !== 'old') return null;
+              return (
+                <div className="tp-design-menu">
+                  <button
+                    type="button"
+                    className={`tp-design-menu__btn ${newDesign ? 'tp-design-menu__btn--new' : ''}`}
+                    aria-haspopup="menu"
+                    aria-expanded={designMenuOpen}
+                    onClick={() => setDesignMenuOpen(o => !o)}
+                    title="Diseño de Test Pulse"
+                  >
+                    {newDesign ? 'Diseño 5.0' : 'Nuevo diseño'}
+                    <svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                  {designMenuOpen && (
+                    <div className="tp-design-menu__panel" role="menu" onMouseLeave={() => setDesignMenuOpen(false)}>
+                      {newDesign ? (
+                        <button type="button" role="menuitem" className="tp-design-menu__item" onClick={() => { changeDesignPref(projectOn ? 'old' : null); if (activeTab === 'home') setActiveTab('design'); }}>
+                          Volver a la vista anterior
+                          <span>{projectOn ? `Disponible hasta el 14 de diciembre de 2026. Tus datos son los mismos en las dos vistas.` : 'Deja de probar el diseño 5.0 en este navegador.'}</span>
+                        </button>
+                      ) : (
+                        <button type="button" role="menuitem" className="tp-design-menu__item" onClick={() => { changeDesignPref(projectOn ? null : 'new'); setActiveTab('home'); }}>
+                          {projectOn ? 'Usar el diseño 5.0' : 'Probar nuevo diseño'}
+                          <span>Mismas funciones y datos, con la navegación e Inicio de Test Pulse 5.0. Puedes regresar cuando quieras.</span>
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button type="button" role="menuitem" className="tp-design-menu__item" onClick={() => { setDesignMenuOpen(false); setActiveTab('config'); }}>
+                          Interruptor del proyecto
+                          <span>{projectOn ? 'El diseño 5.0 está activo para todo el proyecto.' : 'El diseño 5.0 está apagado para el proyecto.'} Se cambia en Configuración.</span>
+                        </button>
+                      )}
+                      <div className="tp-design-menu__note">La preferencia se guarda solo en este navegador.</div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {/* Quick Search input */}
             <div style={{ position: 'relative', display: 'flex', alignItems: 'center', width: '220px' }}>
               <span style={{ position: 'absolute', left: '8px', pointerEvents: 'none', display: 'flex', alignItems: 'center', color: '#626F86' }}>
@@ -8271,6 +8346,32 @@ Then el sistema valida la identidad.
     if (activeTab === 'lifecycle') setLifecycleVisited(true);
   }, [activeTab]);
 
+  // ─── Inicio (Test Pulse 5.0, v4.41.0) ───
+  // When the new design turns on, land on Inicio once; when it turns off while Inicio is
+  // open, fall back to the classic first tab (Inicio doesn't exist there).
+  const landedOnHomeRef = useRef(false);
+  useEffect(() => {
+    if (newDesign && !landedOnHomeRef.current) {
+      landedOnHomeRef.current = true;
+      setActiveTab(prev => (prev === 'design' ? 'home' : prev));
+    }
+    if (!newDesign && activeTab === 'home') setActiveTab('design');
+  }, [newDesign, activeTab]);
+
+  // Opens a cycle from Inicio in Ejecución, selecting its plan first.
+  const openCycleFromHome = (cycle) => {
+    if (!cycle) return;
+    if (cycle.planId) setSelectedPlanId(String(cycle.planId));
+    handleCycleSelect(cycle);
+    setActiveTab('execution');
+  };
+
+  const renderHomeTab = () => (
+    <Suspense fallback={<TestPulseLoader size={110} text="Cargando Inicio..." />}>
+      <HomeView ctx={{ testCycles, testPlans, projects, selectedProjectId, projectConfig, isActive: activeTab === 'home', onNavigate: setActiveTab, onOpenCycle: openCycleFromHome }} />
+    </Suspense>
+  );
+
   const renderLifecycleTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
       {/* isActive (v4.30.2): the view is kept mounted, so it needs to know when it is shown again. */}
@@ -8280,7 +8381,7 @@ Then el sistema valida la identidad.
 
   const renderConfigTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando Configuración..." />}>
-      <SettingsView ctx={{ DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setFolders, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
+      <SettingsView ctx={{ newDesign, DEFAULT_EXECUTION_ENVIRONMENTS, addNotification, availableEnvironments, context, editingEnvDesc, editingEnvId, editingEnvName, findTc, handleResyncCycleRuns, handleSaveConfig, handleUpdateEnvironmentsCatalog, isAdmin, isCycleInPlan, isHydratingReport, isProjectAllowed, isRefreshingReport, isSavingConfig, isSavingEnvCatalog, linkTypes, loadReportAutomationConfig, loadReportData, newEnvDesc, newEnvName, projectConfig, projectIssueTypes, projects, reportAutomationConfig, reportData, reportLoading, resyncCycleId, resyncProgress, resyncResult, resyncRunning, selectedProjectId, setActiveTab, setAllowedProjects, setEditingEnvDesc, setFolders, setEditingEnvId, setEditingEnvName, setIsProjectAllowed, setNewEnvDesc, setNewEnvName, setProjectConfig, setResyncCycleId, setResyncResult, setSelectedCycle, setSelectedPlanId, setShowReportAutomationModal, snapshotFieldMap, testCases, testCycles, testPlans, unlinkedBugs }} />
     </Suspense>
   );
 
@@ -8420,7 +8521,7 @@ Then el sistema valida la identidad.
   const activeDockCssWidth = getDockSplitCssWidth(dockWidth);
 
   return (
-    <div className="app-container">
+    <div className={`app-container${newDesign ? ' tp5' : ''}`}>
       {renderTopNav()}
       
       <div
@@ -8455,6 +8556,7 @@ Then el sistema valida la identidad.
           </div>
         ) : (
           <>
+            {activeTab === 'home' && newDesign && renderHomeTab()}
             {activeTab === 'design' && renderDesignTab()}
             {activeTab === 'planning' && renderPlanningTab()}
             {activeTab === 'execution' && renderExecutionTab()}

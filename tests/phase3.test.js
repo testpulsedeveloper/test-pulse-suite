@@ -280,7 +280,7 @@ test('Per-project model — environments/widgets are stored per project, never g
   const cfg = fs.readFileSync(path.join(ROOT_DIR, 'src/resolvers/configResolvers.js'), 'utf8');
   assert.ok(!/storage\.set\(GLOBAL_/.test(cfg), 'no writes to the shared global catalog');
   assert.ok(cfg.includes('const effectiveEnvironments = projectEnvs || globalEnvironments || DEFAULT_EXECUTION_ENVIRONMENTS;'), 'project values win over the template');
-  assert.equal((cfg.match(/await requireProjectAdmin\(projectId, context\);/g) || []).length, 2, 'setConfig and setAllowedProjects require project admin/superuser');
+  assert.equal((cfg.match(/await requireProjectAdmin\(projectId, context\);/g) || []).length, 3, 'setConfig, setAllowedProjects and setNewDesignEnabled (v4.41.0) require project admin/superuser');
 });
 
 test('Per-project model — report dispatch stays inside its project and is audited (A2)', () => {
