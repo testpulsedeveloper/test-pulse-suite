@@ -157,6 +157,24 @@ export default function SettingsView({ ctx }) {
       if (!isSavingConfig) setTp5ConfigSnapshot(projectConfig);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isSavingConfig, selectedProjectId]);
+    // v4.47.0 (5.0): availability per environment over the last 30 days (Ambientes y componentes).
+    const [tp5Downtime, setTp5Downtime] = React.useState(null);
+    React.useEffect(() => {
+      if (!ctx.newDesign || tp5Sec !== 'ambientes' || !selectedProjectId) return;
+      invoke('getEnvDowntime', { projectId: selectedProjectId }).then(r => setTp5Downtime(Array.isArray(r?.events) ? r.events : [])).catch(() => setTp5Downtime([]));
+    }, [ctx.newDesign, tp5Sec, selectedProjectId]);
+    const tp5Availability = React.useMemo(() => {
+      const now = Date.now(); const from = now - 30 * 86400000; const out = {};
+      (tp5Downtime || []).forEach(ev => {
+        const s0 = Math.max(new Date(ev.startedAt).getTime(), from);
+        const f0 = ev.endedAt ? new Date(ev.endedAt).getTime() : now;
+        if (!(f0 > s0)) return;
+        const o = out[ev.envId] || (out[ev.envId] = { ms: 0, count: 0 });
+        o.ms += f0 - s0; o.count++;
+      });
+      Object.values(out).forEach(o => { o.pct = Math.max(0, Math.round((1 - o.ms / (30 * 86400000)) * 1000) / 10); });
+      return out;
+    }, [tp5Downtime]);
     // Jira fields for "Campos para métricas avanzadas" (loaded only when that section is open).
     const [tp5Fields, setTp5Fields] = React.useState(null);
     React.useEffect(() => {
@@ -1910,8 +1928,9 @@ export default function SettingsView({ ctx }) {
                           Descripción / Notas
                         </th>
                         <th style={{ textAlign: 'center', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)', width: '120px' }}>
-                          Disponibilidad
+                          {ctx.newDesign ? 'Estado' : 'Disponibilidad'}
                         </th>
+                        {ctx.newDesign && <th style={{ textAlign: 'left', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)' }}>Disponibilidad (30 días)</th>}
                         <th style={{ textAlign: 'right', padding: '10px 14px', fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary, #64748B)', width: '170px' }}>
                           Acciones
                         </th>
@@ -2011,6 +2030,16 @@ export default function SettingsView({ ctx }) {
                                 Activo
                               </span>
                             </td>
+                            {/* v4.47.0 (5.0): availability over the last 30 days from "Ambiente no disponible". */}
+                            {ctx.newDesign && (() => {
+                              const a = tp5Availability[envItem.id] || { pct: 100, count: 0 };
+                              return (
+                                <td style={{ padding: '10px 14px', verticalAlign: 'middle' }}>
+                                  <span className={`tp5-loz tp5-loz--${a.pct >= 99 ? 'success' : a.pct >= 95 ? 'warning' : 'danger'}`}>{a.pct} %</span>
+                                  <span className="tp5-subtle tp5-small" style={{ marginLeft: 8 }}>{a.count ? `${a.count} caída${a.count === 1 ? '' : 's'}` : 'Sin caídas'}</span>
+                                </td>
+                              );
+                            })()}
                             <td style={{ padding: '10px 14px', textAlign: 'right', verticalAlign: 'middle' }}>
                               {isEditingRow ? (
                                 <div style={{ display: 'inline-flex', gap: '6px' }}>

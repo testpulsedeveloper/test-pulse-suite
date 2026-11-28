@@ -1650,6 +1650,112 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
+  // ─── 5.0 (v4.47.0): phase 02 "Diseñar" as in the approved board ───
+  // Group switch + "Agregar funcionalidad", six counters, closed-findings bar, and a table of the
+  // reviewed documents (grouped like before) whose rows open to show the findings by impact and
+  // the actions (open in Confluence, read again, edit, remove). Same data and handlers as before.
+  // 'YYYY-MM-DD' as "12 nov" without the time-zone shift of new Date('YYYY-MM-DD').
+  const shortDocDate = (v) => {
+    const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${Number(m[3])} ${['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'][Number(m[2]) - 1]}` : (v || '');
+  };
+  const V5_STATUS = { delivered: ['Entregado', 'success'], in_progress: ['En curso', 'warning'], pending: ['Pendiente', 'neutral'] };
+  const renderDesign5 = (initiative, phase) => {
+    const docs = deliverablesOf(initiative, phase.id);
+    const totals = designTotals(docs);
+    const isAdding = editing && editing.initiativeId === initiative.id && editing.phaseId === phase.id && !editing.deliverable;
+    // Groups exactly as the classic view builds them (team / user / none).
+    const groups = new Map();
+    docs.forEach(d => {
+      let id = 'all'; let label = '';
+      if (groupMode === 'team') { id = TEAM_LABELS[d.team] ? d.team : ''; label = id ? TEAM_LABELS[id] : 'Sin equipo'; }
+      else if (groupMode === 'user') { id = d.createdBy || ''; label = authorName(d.createdBy) || 'Sin registro de quién lo agregó'; }
+      if (!groups.has(id)) groups.set(id, { id, label, items: [] });
+      groups.get(id).items.push(d);
+    });
+    const ordered = [...groups.values()];
+    if (groupMode === 'team') ordered.sort((a, b) => TEAM_ORDER.indexOf(a.id) - TEAM_ORDER.indexOf(b.id));
+    if (groupMode === 'user') ordered.sort((a, b) => (!a.id) - (!b.id) || a.label.localeCompare(b.label));
+
+    const row = (d) => {
+      if (editing && editing.initiativeId === initiative.id && editing.deliverable?.id === d.id) {
+        return <DeliverableForm key={d.id} phase={phase} initial={d} saving={busy === 'deliverable'}
+          onCancel={() => setEditing(null)} onSave={(form) => handleSaveDeliverable(initiative, phase.id, { ...form, id: d.id })} />;
+      }
+      const open = Boolean(openRows[`${initiative.id}:doc:${d.id}`]);
+      const t = d.report?.totals;
+      const st = V5_STATUS[d.status] || V5_STATUS.pending;
+      return (
+        <div key={d.id} className={`tp5-docrow${open ? ' is-open' : ''}`}>
+          <button type="button" className="tp5-docrow__main" aria-expanded={open} onClick={() => toggleRow(initiative.id, `doc:${d.id}`)}>
+            <span className="tp5-docrow__chev" aria-hidden="true">{open ? '⌄' : '›'}</span>
+            <span className="tp5-strong tp5-ellipsis">{d.name}</span>
+            <span className="tp5-ellipsis">{reportDocumentName(d.report) || '—'} {d.docType && <span className="tp5-loz tp5-loz--neutral">{d.docType}</span>}</span>
+            <span className="tp5-subtle-2">{[d.owner, shortDocDate(d.date)].filter(Boolean).join(' · ') || '—'}</span>
+            <span className={t ? (t.open > 0 ? 'tp5-tone-danger tp5-strong' : 'tp5-tone-success tp5-strong') : 'tp5-subtle'}>{t ? `${t.total} · ${t.open} abiertos` : (d.report?.error ? 'No se pudo leer' : 'Sin leer')}</span>
+            <span className={`tp5-loz tp5-loz--${st[1]}`} style={{ justifySelf: 'end' }}>{st[0]}</span>
+          </button>
+          {open && (
+            <div className="tp5-docrow__detail">
+              <div><FindingsSummary report={d.report} /></div>
+              <div className="tp5-docrow__info">
+                {d.report?.maturityPct != null && <span>Madurez del documento: <strong>{d.report.maturityPct} %</strong>{d.report?.fetchedAt ? ` · leído de Confluence ${formatDateTime(d.report.fetchedAt)}` : ''}</span>}
+                {d.createdBy && <span className="tp5-subtle">Agregado por {authorName(d.createdBy)}</span>}
+                {d.notes && <span className="tp5-subtle">{d.notes}</span>}
+              </div>
+              <div className="tp5-docrow__actions">
+                {d.url && <button type="button" className="tp5-btn tp5-btn--outline tp5-btn--sm" onClick={() => openLink(d.url)}>Abrir en Confluence ↗</button>}
+                <button type="button" className="tp5-btn tp5-btn--secondary tp5-btn--sm" disabled={!!busy} onClick={() => refreshFindings(initiative, d.id, false)}>{busy === d.id ? 'Leyendo…' : 'Volver a leer'}</button>
+                {canEdit && <span style={{ display: 'flex', gap: 6 }}>
+                  <button type="button" className="tp5-btn tp5-btn--secondary tp5-btn--sm" style={{ flex: 1 }} onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id, deliverable: d })}>Editar</button>
+                  <button type="button" className="tp5-btn tp5-btn--secondary tp5-btn--sm tp5-tone-danger" style={{ flex: 1 }} disabled={!!busy} onClick={() => handleRemoveDeliverable(initiative, phase.id, d.id)}>Quitar</button>
+                </span>}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <>
+        <div className="tp5-design5__tools">
+          <span className="tp5-subtle-2">Agrupar por</span>
+          <span role="group" aria-label="Agrupar por" className="tp5-seg">
+            {GROUP_MODES.map(m => <button key={m.id} type="button" aria-pressed={groupMode === m.id} className={groupMode === m.id ? 'is-on' : undefined} onClick={() => changeGroupMode(m.id)}>{m.label}</button>)}
+          </span>
+          {canEdit && !isAdding && <button type="button" className="tp5-btn tp5-btn--primary" onClick={() => setEditing({ initiativeId: initiative.id, phaseId: phase.id })}>+ Agregar funcionalidad</button>}
+        </div>
+        {isAdding && <DeliverableForm phase={phase} saving={busy === 'deliverable'} onCancel={() => setEditing(null)} defaultTeam={myTeam} onSave={(form) => handleSaveDeliverable(initiative, phase.id, form)} />}
+        {docs.length === 0 ? <div className="tp5-subtle tp5-small">Sin documentos revisados todavía.</div> : (
+          <>
+            <div className="tp5-design5__counters">
+              <div><strong>{totals.documents}</strong><span>Documentos</span></div>
+              <div><strong>{totals.delivered} / {totals.documents}</strong><span>Entregados / total</span></div>
+              <div><strong>{totals.total}</strong><span>Hallazgos</span></div>
+              <div><strong className={totals.open ? 'tp5-tone-danger' : undefined}>{totals.open}</strong><span>Abiertos</span></div>
+              <div><strong className={totals.seriousOpen ? 'tp5-tone-danger' : undefined}>{totals.seriousOpen}</strong><span>Críticos / altos abiertos</span></div>
+              <div><strong>{totals.maturityAvg == null ? '—' : `${totals.maturityAvg} %`}</strong><span>Madurez promedio</span></div>
+            </div>
+            <div className="tp5-design5__progress">
+              <span>Hallazgos cerrados</span>
+              <span className="tp5-bar" style={{ height: 10 }}><span style={{ width: `${totals.closedPct}%`, background: 'var(--tp5-success)' }} /></span>
+              <strong>{totals.closed} de {totals.total} · {totals.closedPct} %</strong>
+              <button type="button" className="tp5-link" onClick={() => setAllDocs(initiative, phase.id, !docs.every(d => openRows[`${initiative.id}:doc:${d.id}`]))}>{docs.every(d => openRows[`${initiative.id}:doc:${d.id}`]) ? 'Contraer todos' : 'Expandir todos'}</button>
+            </div>
+            <div className="tp5-docrow__head"><span /><span>Funcionalidad revisada</span><span>Documento (del reporte)</span><span>Responsable · entrega</span><span>Hallazgos</span><span style={{ textAlign: 'right' }}>Estado</span></div>
+            {ordered.map(g => (
+              <div key={g.id || 'none'} className="tp5-docgroup">
+                {g.label && <div className="tp5-docgroup__label"><strong>{g.label}</strong> · {g.items.length} {g.items.length === 1 ? 'reporte' : 'reportes'}</div>}
+                {g.items.map(row)}
+              </div>
+            ))}
+          </>
+        )}
+      </>
+    );
+  };
+
   // ─── Test Pulse 5.0 (v4.46.0): layout of the approved board "Ciclo de vida" ───
   // Initiatives on the left (bars per phase), the selected initiative with a five-card phase
   // stepper, and the selected phase's content below. The content of each phase is the same
@@ -1760,7 +1866,7 @@ const LifecycleView = ({ ctx }) => {
                     <h2 className="tp5-h2">{phase.number} {phase.title} · {phase.deliverable}</h2>
                     <span className="tp5-subtle tp5-small">{phase.subtitle}{phase.id === 'design' ? ': hallazgos en documentos antes de construir' : ''}</span>
                   </div>
-                  {renderPhase(current, phase, progress)}
+                  {phase.id === 'design' ? renderDesign5(current, phase) : renderPhase(current, phase, progress)}
                 </section>
               </>
             )}
