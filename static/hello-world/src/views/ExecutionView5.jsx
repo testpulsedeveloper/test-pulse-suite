@@ -14,6 +14,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { router } from '@forge/bridge';
 import { normalizeUiStatus } from '../utils/constants';
+import { adfToHtml, sanitizeHtml } from '../utils/adfUtils';
 import EnvDowntimeBar from '../components/EnvDowntimeBar';
 import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
 
@@ -26,14 +27,39 @@ const STEP_LABEL = { Passed: 'Pass', Failed: 'Fail', Blocked: 'Block' };
 const nameOf = (u) => (u && typeof u === 'object' ? (u.displayName || '') : '');
 const initials = (full) => { const p = String(full || '').trim().split(/\s+/); return p.length > 1 ? `${p[0]} ${p[1][0]}.` : (p[0] || '—'); };
 const evName = (e) => (typeof e === 'object' && e ? (e.filename || e.name || 'archivo') : String(e || 'archivo'));
+// Identity of an evidence (id, name or url) so the same file is not listed twice.
+const evKeys = (e) => (typeof e === 'object' && e ? [e.id, e.filename, e.url].filter(Boolean).map(String) : (e ? [String(e)] : []));
+const isVideoName = (n) => /\.(mp4|webm|mov|avi|mkv)$/i.test(n);
+const isPdfName = (n) => /\.pdf$/i.test(n);
+/** Small evidence chip: opens the 5.0 viewer with every evidence of the same group to browse. */
+function EvChip({ ev, onOpen, onDelete, disabled }) {
+  const name = evName(ev);
+  // Deleting removes the attachment from Jira for good, so it takes two clicks: ✕ → "¿Eliminar?".
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => { if (!confirming) return undefined; const t = setTimeout(() => setConfirming(false), 4000); return () => clearTimeout(t); }, [confirming]);
+  return (
+    <span className="tp5-evchip">
+      <button type="button" className="tp5-evchip__open" title={`Ver ${name}`} onClick={onOpen}>
+        <span aria-hidden="true">{isVideoName(name) ? '▶' : isPdfName(name) ? '📄' : '🖼'}</span>
+        <span className="tp5-ellipsis">{name}</span>
+      </button>
+      {onDelete && (confirming
+        ? <button type="button" className="tp5-evchip__del is-confirm" disabled={disabled} onClick={() => { setConfirming(false); onDelete(); }}>¿Eliminar?</button>
+        : <button type="button" className="tp5-evchip__del" aria-label={`Eliminar ${name}`} title="Eliminar evidencia" disabled={disabled} onClick={() => setConfirming(true)}>✕</button>)}
+    </span>
+  );
+}
 
 /** Run panel of one case (Lateral / Amplio / Flotante). */
 function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
   const {
     runningTests, handleRunTest, handleStopExecution, handleUpdateTestStatus, handleSaveRunFields, handleUploadEvidence,
     handleCaptureScreen, handleOpenQrCapture, handleCreateBug, doLinkBug, handleAddIteration, handlePreviewEvidence,
-    setSelectedBug, findTc
+    setSelectedBug, findTc, handleIterationChange, handleDeleteIteration, handleDeleteEvidence, formatScenarioHtml
   } = ctx;
+  const iterFileRef = useRef(null);
+  const [iterUploadId, setIterUploadId] = useState(null);
+  const [confirmIterId, setConfirmIterId] = useState(null); // iteration awaiting the 2nd delete click
   const [dockPosition, setDockPosition] = usePanelDockPosition();
   const [dockWidth, , isResizing] = usePanelDockWidth();
   const [linking, setLinking] = useState(false);
@@ -62,9 +88,34 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
   // Suggested result from the steps: any Fail → Failed, any Block → Blocked, all Pass → Passed.
   const stepSt = steps.map((_, idx) => resultOf(idx + 1).status);
   const suggested = stepSt.includes('Failed') ? 'Failed' : stepSt.includes('Blocked') ? 'Blocked' : (steps.length && stepSt.every(s => s === 'Passed') ? 'Passed' : null);
-  const evidences = (test.evidences || []).filter(Boolean);
   const bugs = (test.linkedBugs || []).filter(b => b && b.key);
   const iterations = Array.isArray(test.iterations) ? test.iterations : [];
+  // As in the classic view: evidences that belong to an iteration are listed in that
+  // iteration's row, not again in the case's general evidence list.
+  const iterEvKeys = new Set();
+  iterations.forEach(it => (it.evidences || []).forEach(e => evKeys(e).forEach(k => iterEvKeys.add(k))));
+  const evidences = (test.evidences || (test.evidence ? [test.evidence] : [])).filter(e => e && !evKeys(e).some(k => iterEvKeys.has(k)));
+  // Opens the viewer with the whole group so the tester can browse with ‹ › (or the arrow keys).
+  const openEv = (list, idx, label) => handlePreviewEvidence && handlePreviewEvidence(list[idx], evName(list[idx]), { items: list, index: idx, label });
+
+  // Case detail as written in Jira: description (free-text steps, data tables, <<<parameters>>>)
+  // and BDD scenarios. Same sources and sanitising as the classic Ejecución.
+  const scenarioDesc = test.description || tc.description || (details?.type === 'continuous' ? details.content : null);
+  const fmt = (v) => (formatScenarioHtml ? formatScenarioHtml(v) : v);
+  const rich = (v) => sanitizeHtml(fmt(adfToHtml(v)));
+  const bdd = details?.type === 'bdd' && Array.isArray(details.content) ? details.content : [];
+  const detailBlock = (scenarioDesc || bdd.length > 0) ? (
+    <section className="tp5-card tp5-casedetail">
+      <h3 className="tp5-sec-title">Detalle del caso</h3>
+      {scenarioDesc && <div className="tp5-scenario" dangerouslySetInnerHTML={{ __html: rich(scenarioDesc) }} />}
+      {bdd.map((sc, i) => (
+        <div key={i} className="tp5-bdd">
+          {sc.title && <strong>{sc.title}</strong>}
+          <pre>{sc.gherkin}</pre>
+        </div>
+      ))}
+    </section>
+  ) : null;
   const tester = nameOf(test.executedBy) || nameOf(test.assignee);
   const startedAt = test.executedAt ? new Date(test.executedAt) : null;
 
@@ -99,7 +150,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
   );
 
   const stepsBlock = steps.length === 0 ? (
-    details?.type === 'continuous' || test.description ? <span className="tp5-subtle tp5-small">Este caso describe sus pasos como texto; regístralos con el resultado del caso.</span>
+    scenarioDesc || bdd.length ? <span className="tp5-subtle tp5-small">Los pasos de este caso están en el detalle de arriba; registra lo obtenido en el comentario o en las iteraciones.</span>
       : <span className="tp5-subtle tp5-small">Este caso no tiene pasos registrados.</span>
   ) : wide ? (
     <div className="tp5-card tp5-table-wrap">
@@ -111,8 +162,8 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
             return (
               <tr key={idx} className={r.status === 'Failed' ? 'is-failrow' : undefined}>
                 <td>{idx + 1}</td>
-                <td>{step.action}{step.data ? <><br /><span className="tp5-subtle tp5-small">Datos: {step.data}</span></> : null}</td>
-                <td>{step.expectedResult}</td>
+                <td><div className="tp5-scenario" dangerouslySetInnerHTML={{ __html: rich(step.action) }} />{step.data ? <span className="tp5-stepdata">Datos: <code>{step.data}</code></span> : null}</td>
+                <td><div className="tp5-scenario" dangerouslySetInnerHTML={{ __html: rich(step.expectedResult) }} /></td>
                 <td><textarea className="tp5-textarea" rows={2} defaultValue={r.actual} disabled={!running} aria-label={`Resultado obtenido del paso ${idx + 1}`}
                   onBlur={(e) => { if (e.target.value !== r.actual) setStep(idx + 1, { actual: e.target.value }); }} /></td>
                 <td>
@@ -136,7 +187,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
         return (
           <li key={idx}>
             <span className="tp5-steps__n">{idx + 1}</span>
-            <span className="tp5-steps__txt">{step.action}{step.expectedResult ? <span className="tp5-subtle tp5-small"> Esperado: {step.expectedResult}</span> : null}</span>
+            <span className="tp5-steps__txt"><span className="tp5-scenario" dangerouslySetInnerHTML={{ __html: rich(step.action) }} />{step.expectedResult ? <span className="tp5-subtle tp5-small">Esperado: <span dangerouslySetInnerHTML={{ __html: rich(step.expectedResult) }} /></span> : null}{step.data ? <span className="tp5-stepdata">Datos: <code>{step.data}</code></span> : null}</span>
             {running ? (
               <span className="tp5-stepseg tp5-stepseg--sm">
                 {['Passed', 'Failed', 'Blocked'].map(s => (
@@ -154,11 +205,10 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
     <section className={wide ? 'tp5-card tp5-sidecard' : 'tp5-casepanel__sec'}>
       <h3 className="tp5-sec-title">Evidencias{evidences.length ? ` · ${evidences.length}` : ''}</h3>
       {evidences.length > 0 && (
-        <div className="tp5-evgrid">
+        <div className="tp5-evlist">
           {evidences.map((e, i) => (
-            <button key={i} type="button" className="tp5-evthumb" onClick={() => handlePreviewEvidence && handlePreviewEvidence(e, evName(e))} title={evName(e)}>
-              <span className="tp5-ellipsis">{/\.(mp4|webm|mov)$/i.test(evName(e)) ? '▶ ' : ''}{evName(e)}</span>
-            </button>
+            <EvChip key={evKeys(e)[0] || i} ev={e} onOpen={() => openEv(evidences, i, 'Evidencias del caso')}
+              disabled={!running} onDelete={handleDeleteEvidence && running ? () => handleDeleteEvidence(test.id, typeof e === 'object' ? e.id : e, (test.evidences || []).indexOf(e)) : null} />
           ))}
         </div>
       )}
@@ -198,23 +248,77 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
     <section className="tp5-casepanel__sec">
       <div className="tp5-section__head" style={{ marginBottom: 0 }}>
         <h3 className="tp5-sec-title">Iteraciones (data-driven){iterations.length ? ` · ${iterations.length}` : ''}</h3>
-        {wide && <button type="button" className="tp5-chip" style={{ marginLeft: 'auto' }} disabled={!running} onClick={() => handleAddIteration(test)}>+ Agregar iteración</button>}
+        <button type="button" className="tp5-chip" style={{ marginLeft: 'auto' }} disabled={!running} title={running ? '' : 'Primero presiona «Iniciar ejecución»'} onClick={() => handleAddIteration(test)}>+ Agregar iteración</button>
       </div>
+      {/* One hidden file input shared by every iteration row; iterUploadId says which row asked. */}
+      <input ref={iterFileRef} type="file" hidden multiple onChange={(e) => {
+        [...(e.target.files || [])].forEach(f => handleUploadEvidence(test.id, key, f, iterUploadId));
+        e.target.value = ''; setIterUploadId(null);
+      }} />
       {iterations.length === 0 ? (
-        <span className="tp5-subtle tp5-small">Sin iteraciones{!wide && <> · <button type="button" className="tp5-link" disabled={!running} onClick={() => handleAddIteration(test)}>Agregar iteración</button></>}</span>
+        <span className="tp5-subtle tp5-small">Sin iteraciones. Agrega una por cada juego de datos que quieras probar.</span>
       ) : (
         <div className="tp5-card tp5-table-wrap">
-          <table className="tp5-table" style={{ minWidth: 0 }}>
-            <thead><tr><th>Datos de entrada</th><th>Esperado</th><th>Obtenido</th><th>Estado</th></tr></thead>
+          <table className="tp5-table tp5-itertable" style={{ minWidth: 0 }}>
+            <thead><tr><th>#</th><th>Estado</th><th>Datos de entrada</th><th>Resultado obtenido</th><th>Evidencias</th><th><span className="tp5-sr-only">Acciones</span></th></tr></thead>
             <tbody>
               {iterations.map((it, i) => {
                 const s = normalizeUiStatus(it.status);
+                const itEvs = (Array.isArray(it.evidences) ? it.evidences : []).filter(Boolean);
+                const label = `Iteración ${i + 1}`;
                 return (
-                  <tr key={it.id || i}>
-                    <td className="tp5-mono">{it.parameters || it.data || it.name || `Iteración ${i + 1}`}</td>
-                    <td>{it.expected || it.expectedResult || '—'}</td>
-                    <td>{it.actualResult || it.result || it.comment || '—'}</td>
-                    <td><span className={`tp5-loz tp5-loz--${TONE[s]}`}>{LABEL[s]}</span></td>
+                  <tr key={it.id || i} className={s === 'Failed' ? 'is-failrow' : undefined}
+                    onPaste={(e) => {
+                      // Paste a screenshot straight into the iteration row (same as the classic view).
+                      if (!running) return;
+                      const item = [...(e.clipboardData?.items || [])].find(x => x.type.indexOf('image') !== -1);
+                      const blob = item && item.getAsFile();
+                      if (!blob) return;
+                      e.preventDefault(); e.stopPropagation();
+                      handleUploadEvidence(test.id, key, new File([blob], `captura_iter${i + 1}_${new Date().toISOString().replace(/[:.]/g, '-')}.png`, { type: blob.type || 'image/png' }), it.id);
+                    }}>
+                    <td className="tp5-mono">{i + 1}</td>
+                    <td>
+                      {running ? (
+                        <select className={`tp5-select tp5-iterstatus tp5-iterstatus--${TONE[s]}`} value={['Passed', 'Failed', 'Blocked'].includes(s) ? s : 'Not Run'} aria-label={`Estado de la ${label}`}
+                          onChange={e => handleIterationChange(test, it.id, 'status', e.target.value)}>
+                          <option value="Not Run">Sin ejecutar</option><option value="Passed">Passed</option><option value="Failed">Failed</option><option value="Blocked">Blocked</option>
+                        </select>
+                      ) : <span className={`tp5-loz tp5-loz--${TONE[s]}`}>{LABEL[s]}</span>}
+                    </td>
+                    <td>
+                      {running ? (
+                        <input className="tp5-input tp5-mono" defaultValue={it.expectedData || ''} placeholder="p. ej. tarjeta=4152…" aria-label={`Datos de entrada de la ${label}`}
+                          onBlur={e => { if (e.target.value !== (it.expectedData || '')) handleIterationChange(test, it.id, 'expectedData', e.target.value, { flush: true }); }} />
+                      ) : <span className="tp5-mono">{it.expectedData || '—'}</span>}
+                    </td>
+                    <td>
+                      {running ? (
+                        <textarea className="tp5-textarea" rows={2} defaultValue={it.actualResult || ''} placeholder="Lo que pasó con estos datos" aria-label={`Resultado obtenido de la ${label}`}
+                          onBlur={e => { if (e.target.value !== (it.actualResult || '')) handleIterationChange(test, it.id, 'actualResult', e.target.value, { flush: true }); }} />
+                      ) : <span>{it.actualResult || '—'}</span>}
+                    </td>
+                    <td>
+                      <div className="tp5-evlist">
+                        {itEvs.map((e, j) => (
+                          <EvChip key={evKeys(e)[0] || j} ev={e} onOpen={() => openEv(itEvs, j, label)}
+                            disabled={!running} onDelete={handleDeleteEvidence && running ? () => handleDeleteEvidence(test.id, typeof e === 'object' ? e.id : e, j, it.id) : null} />
+                        ))}
+                        {itEvs.length === 0 && !running && <span className="tp5-subtle">—</span>}
+                      </div>
+                      {running && (
+                        <span className="tp5-iteradd">
+                          <button type="button" className="tp5-link" onClick={() => { setIterUploadId(it.id); iterFileRef.current?.click(); }}>Subir</button>
+                          <button type="button" className="tp5-link" onClick={() => handleCaptureScreen(test.id, key, it.id)}>Grabar</button>
+                          <button type="button" className="tp5-link" onClick={() => handleOpenQrCapture(test, it.id, label)}>QR</button>
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      {running && handleDeleteIteration && (confirmIterId === it.id
+                        ? <button type="button" className="tp5-chip tp5-chip--danger" onClick={() => { setConfirmIterId(null); handleDeleteIteration(test, it.id); }} onBlur={() => setConfirmIterId(null)}>¿Eliminar?</button>
+                        : <button type="button" className="tp5-iconbtn" aria-label={`Eliminar ${label}`} title={`Eliminar ${label}`} onClick={() => setConfirmIterId(it.id)}>🗑</button>)}
+                    </td>
                   </tr>
                 );
               })}
@@ -222,6 +326,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
           </table>
         </div>
       )}
+      {running && iterations.length > 0 && <span className="tp5-subtle tp5-small">Tip: pega una captura (⌘V) sobre la fila de una iteración para adjuntarla ahí.</span>}
     </section>
   );
 
@@ -260,6 +365,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
       {downtimeWarning}
       <div className="tp5-exec-grid">
         <div className="tp5-exec-main">
+          {detailBlock}
           <div className="tp5-section__head" style={{ marginBottom: 0 }}>
             <h3 className="tp5-h2">Pasos{steps.length ? ` · ${doneSteps} de ${steps.length}` : ''}</h3>
             {steps.length > 0 && <span className="tp5-subtle tp5-small">El resultado del caso se sugiere a partir de los pasos; tú lo confirmas.</span>}
@@ -286,6 +392,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
           <button type="button" className="tp5-btn tp5-btn--ghost tp5-btn--block" onClick={() => handleStopExecution(test.id, test)}>Detener sin resultado</button></div>
       )}
       {resultButtons}
+      {detailBlock}
       <section className="tp5-casepanel__sec"><span className="tp5-eyebrow">Pasos</span>{stepsBlock}</section>
       {evidenceBlock}
       {bugsBlock}

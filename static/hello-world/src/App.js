@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.47.3'}`;
+const APP_VERSION = `v${packageJson.version || '4.48.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -65,6 +65,7 @@ const LifecycleView = React.lazy(() => import('./views/LifecycleView'));
 // Inicio (Test Pulse 5.0): only downloaded when the new design is active.
 const HomeView = React.lazy(() => import('./views/HomeView'));
 import CaseHistory5 from './components/CaseHistory5';
+import EvidenceViewer5 from './components/EvidenceViewer5';
 // v4.23.0: form to create and edit Test Cases inside Design (replaces Jira's own screens).
 const TestCaseEditor = React.lazy(() => import('./components/TestCaseEditor'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
@@ -6906,8 +6907,10 @@ Then el sistema valida la identidad.
    * resolver (`getAttachmentContent`) when browser `requestJira` is blocked by Jira's
    * 303 redirect to `api.media.atlassian.com`.
    */
-  const handlePreviewEvidence = async (ev, explicitFilename) => {
+  const handlePreviewEvidence = async (ev, explicitFilename, group) => {
     if (!ev) return;
+    // Optional group ({ items, index, label }) lets the 5.0 viewer browse sibling evidences with ‹ ›.
+    const evGroup = group && Array.isArray(group.items) ? group : null;
     const id = typeof ev === 'object' ? (ev.id || ev.attachmentId) : ev;
     if (!id) return;
 
@@ -6935,6 +6938,7 @@ Then el sistema valida la identidad.
         id,
         filename,
         note,
+        group: evGroup,
         loading: true,
         isPdf: isPdfExt,
         isVideo: isVideoExt
@@ -6959,6 +6963,7 @@ Then el sistema valida la identidad.
             id,
             filename: finalFilename,
             note,
+            group: evGroup,
             loading: false,
             blobUrl: data.blobUrl,
             byteArray: data.byteArray || null,
@@ -6971,6 +6976,7 @@ Then el sistema valida la identidad.
             id,
             filename,
             note,
+            group: evGroup,
             loading: false,
             error: 'No se pudo generar la vista previa directa del archivo.',
             downloadUrl: `/secure/attachment/${id}/${encodeURIComponent(filename)}`
@@ -6982,6 +6988,7 @@ Then el sistema valida la identidad.
           id,
           filename,
           note,
+          group: evGroup,
           loading: false,
           error: `Error al cargar archivo: ${err.message || String(err)}`,
           downloadUrl: `/secure/attachment/${id}/${encodeURIComponent(filename)}`
@@ -9107,7 +9114,16 @@ Then el sistema valida la identidad.
       {renderModal()}
       {renderSlidePanel()}
       {renderTestCaseEditor()}
-      {previewModalData && (
+      {previewModalData && newDesign && (
+        <EvidenceViewer5
+          data={previewModalData}
+          onClose={() => setPreviewModalData(null)}
+          onNavigate={(i) => { const g = previewModalData.group; const it = g && g.items[i]; if (it) handlePreviewEvidence(it, typeof it === 'object' ? it.filename : null, { ...g, index: i }); }}
+          onDownload={(url) => router.open(url)}
+          PdfPreview={PdfDocumentPreview}
+        />
+      )}
+      {previewModalData && !newDesign && (
         <div className="modal-overlay" style={{zIndex: 9999}} onClick={() => {
           setPreviewModalData(null);
         }}>
