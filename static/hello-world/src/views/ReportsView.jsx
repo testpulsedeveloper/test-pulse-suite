@@ -79,6 +79,8 @@ function cachedBugBusinessHours(bug) {
   return hours;
 }
 
+// Test Pulse 5.0 (v4.43.0): release exit criteria card.
+import GoNoGoCard from '../components/GoNoGoCard';
 export default function ReportsView({ ctx }) {
   const {
     addNotification,
@@ -2899,7 +2901,7 @@ export default function ReportsView({ ctx }) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>📊</span>
                   <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--jira-dark, #172B4D)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                    REPORTS
+                    {ctx.newDesign ? 'CALIDAD' : 'REPORTS'}
                   </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2956,7 +2958,7 @@ export default function ReportsView({ ctx }) {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>📊</span>
-                  <span>Runs</span>
+                  <span>{ctx.newDesign ? 'Ejecuciones' : 'Runs'}</span>
                 </div>
                 <span className="ads-lozenge ads-lozenge-subtle" style={{ fontSize: '10px', fontWeight: 700 }}>
                   {totalCases}
@@ -2989,7 +2991,7 @@ export default function ReportsView({ ctx }) {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '15px' }}>🐞</span>
-                  <span>Bugs</span>
+                  <span>{ctx.newDesign ? 'Defectos' : 'Bugs'}</span>
                 </div>
                 <span className={`ads-lozenge ${openCycleBugs > 0 ? 'ads-lozenge-danger' : 'ads-lozenge-subtle'}`} style={{ fontSize: '10px', fontWeight: 700 }}>
                   {totalCycleBugs}
@@ -3108,8 +3110,8 @@ export default function ReportsView({ ctx }) {
                 )}
 
                 <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em', margin: 0 }}>
-                  {dashboardSubView === 'runs' && 'Consola de Ejecución & Control Multi-Ciclo'}
-                  {dashboardSubView === 'bugs' && 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)'}
+                  {dashboardSubView === 'runs' && (ctx.newDesign ? 'Calidad · Ejecuciones' : 'Consola de Ejecución & Control Multi-Ciclo')}
+                  {dashboardSubView === 'bugs' && (ctx.newDesign ? 'Calidad · Defectos' : 'Reports: Tablero de Defectos y Fallos Críticos (Bugs)')}
                 </h1>
 
                 <span className="dashboard-live-badge">
@@ -3148,7 +3150,9 @@ export default function ReportsView({ ctx }) {
                     }}
                     title="Personalizar, reordenar y agregar widgets en el dashboard"
                   >
-                    ⚙️ {isCustomizingDashboard ? 'Terminar Personalización' : 'Personalizar Widgets'}
+                    {ctx.newDesign
+                      ? (isCustomizingDashboard ? 'Listo' : 'Personalizar')
+                      : `⚙️ ${isCustomizingDashboard ? 'Terminar Personalización' : 'Personalizar Widgets'}`}
                   </button>
                 )}
 
@@ -3194,7 +3198,7 @@ export default function ReportsView({ ctx }) {
                   }}
                   title="Congelar snapshot local para las sesiones de estatus (12:30 / 5:00 PM)"
                 >
-                  📸 Guardar Snapshot
+                  {ctx.newDesign ? 'Guardar snapshot' : '📸 Guardar Snapshot'}
                 </button>
 
                 <button 
@@ -3211,7 +3215,7 @@ export default function ReportsView({ ctx }) {
                   }}
                   title="Copiar reporte ejecutivo HTML y redactar en Gmail"
                 >
-                  📧 Enviar Reporte Ejecutivo
+                  {ctx.newDesign ? 'Enviar reporte ejecutivo' : '📧 Enviar Reporte Ejecutivo'}
                 </button>
               </div>
             </div>
@@ -4208,6 +4212,18 @@ export default function ReportsView({ ctx }) {
                   </div>
                 </div>
               </div>
+
+              {/* v4.43.0 (5.0): release exit criteria for the selected cycles. */}
+              {ctx.newDesign && dashboardSubView === 'runs' && (
+                <GoNoGoCard
+                  passed={passed}
+                  failed={failed}
+                  blocked={blocked}
+                  notRun={notRun}
+                  bugs={cycleAllBugsList}
+                  scopeLabel={`${allTotal.toLocaleString('es-MX')} casos en la selección`}
+                />
+              )}
 
               {/* Customizer Mode Banner */}
               {isCustomizingDashboard && (

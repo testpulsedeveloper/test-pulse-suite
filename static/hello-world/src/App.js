@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.42.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.43.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -64,6 +64,7 @@ const SettingsView = React.lazy(() => import('./views/SettingsView'));
 const LifecycleView = React.lazy(() => import('./views/LifecycleView'));
 // Inicio (Test Pulse 5.0): only downloaded when the new design is active.
 const HomeView = React.lazy(() => import('./views/HomeView'));
+import CaseHistory5 from './components/CaseHistory5';
 // v4.23.0: form to create and edit Test Cases inside Design (replaces Jira's own screens).
 const TestCaseEditor = React.lazy(() => import('./components/TestCaseEditor'));
 const ReportAutomationModal = React.lazy(() => import('./components/ReportAutomationModal'));
@@ -2721,10 +2722,440 @@ Then el sistema valida la identidad.
     window.addEventListener('pointerup', onPointerUp);
   };
 
-  const renderDesignTab = () => (
+  // ─── Repositorio 5.0 (v4.43.0) ───────────────────────────────────────────────────────────
+  // Layout of the approved design: full-width page header, folder tree on the left, and the
+  // cases as a table with a segmented type filter, a selection bar and pagination. Only the
+  // presentation is new: filtering, selection, moving, deleting and opening the detail use the
+  // same state and handlers as the classic view.
+  const renderRepo5Header = () => {
+    const folderName = activeFolder === null ? 'Sin carpeta' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta');
+    return (
+      <header className="tp5-pagehead">
+        <div className="tp5-pagehead__text">
+          <span className="tp5-eyebrow">Repositorio · {testCases.length.toLocaleString('es-MX')} casos</span>
+          <h1 className="tp5-pagehead__title">{folderName}</h1>
+        </div>
+        <div className="tp5-pagehead__actions">
+          {isFetchingTests && testCases.length > 0 && <span className="tp5-subtle tp5-small">Sincronizando…</span>}
+          <button type="button" className="tp5-btn tp5-btn--secondary" onClick={() => { setShowBulkUpload(v => !v); resetBulkUpload(); }}>Importar CSV</button>
+          <button type="button" className="tp5-btn tp5-btn--primary" onClick={() => setTestCaseEditor({ mode: 'create' })}>Nuevo caso</button>
+        </div>
+      </header>
+    );
+  };
+
+  const renderRepoCases5 = () => {
+    // Counts per execution type over the folder's cases (before the type filter).
+    const scope = activeFolderScopedTestCases;
+    const autoCount = scope.filter(tc => isAutomatedTest(tc)).length;
+    const typeButtons = [
+      { id: 'all', label: `Todos · ${scope.length}` },
+      { id: 'automated', label: `Automatizados · ${autoCount}` },
+      { id: 'manual', label: `Manuales · ${scope.length - autoCount}` }
+    ];
+    const pageIds = filteredTestCases.map(t => t.id);
+    const pageAllSelected = pageIds.length > 0 && pageIds.every(id => selectedDesignTestIds.has(id));
+    const selCount = selectedDesignTestIds.size;
+    const first = filteredTestCasesAll.length === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
+    const last = Math.min(currentPage * itemsPerPage, filteredTestCasesAll.length);
+    const openCase = (test) => {
+      if (window.__justFinishedDrag && Date.now() - window.__justFinishedDrag < 350) return;
+      setSelectedTestCase(test);
+      setModalDetailTab('details');
+      loadTestCaseDetails(test.id);
+    };
+    const toggleOne = (id, checked) => {
+      const next = new Set(selectedDesignTestIds);
+      if (checked) next.add(id); else next.delete(id);
+      setSelectedDesignTestIds(next);
+    };
+    return (
+      <section className="tp5-repo__cases" aria-label="Casos">
+        <div className="tp5-toolbar">
+          <div role="group" aria-label="Tipo de ejecución" className="tp5-seg">
+            {typeButtons.map(b => (
+              <button key={b.id} type="button" aria-pressed={designTypeFilter === b.id}
+                className={designTypeFilter === b.id ? 'is-on' : undefined}
+                onClick={() => { setDesignTypeFilter(b.id); setCurrentPage(1); }}>{b.label}</button>
+            ))}
+          </div>
+          <label className="tp5-inline-field">Informador
+            <select className="tp5-select" value={designReporterFilter} onChange={(e) => { setDesignReporterFilter(e.target.value); setCurrentPage(1); }}>
+              <option value="all">Todos ({scope.length})</option>
+              {designReporterOptions.map(r => <option key={r.id} value={r.id}>{r.name} ({r.count})</option>)}
+            </select>
+          </label>
+          <label className="tp5-inline-field">Orden
+            <select className="tp5-select" value={designSortOrder} onChange={(e) => setDesignSortOrder(e.target.value)}>
+              <option value="recent">Más recientes</option>
+              <option value="az">Nombre A–Z</option>
+            </select>
+          </label>
+          <input type="search" className="tp5-select tp5-toolbar__search" placeholder="Buscar en esta carpeta" aria-label="Buscar en la carpeta"
+            value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }} />
+        </div>
+
+        {(selCount > 0 || deleteProgress) && (
+          <div role="region" aria-label="Selección" className="tp5-selbar">
+            {deleteProgress
+              ? <span role="status"><Spinner size="small" /> Eliminando de Jira: {deleteProgress.done} de {deleteProgress.total}…</span>
+              : <strong>{selCount} seleccionado{selCount === 1 ? '' : 's'}</strong>}
+            {!deleteProgress && filteredTestCasesAll.length > selCount && (
+              <button type="button" className="tp5-link" onClick={() => setSelectedDesignTestIds(prev => new Set([...prev, ...filteredTestCasesAll.map(t => t.id)]))}>
+                Seleccionar los {filteredTestCasesAll.length} filtrados
+              </button>
+            )}
+            {!deleteProgress && (
+              <span className="tp5-selbar__actions">
+                <select className="tp5-chip" aria-label="Mover a carpeta" value=""
+                  onChange={(e) => {
+                    const id = e.target.value; if (!id) return;
+                    const name = id === '__ROOT__' ? 'Sin carpeta' : (folderPaths.find(f => f.id === id)?.path || 'Carpeta');
+                    handleBatchLinkTestsToFolder(Array.from(selectedDesignTestIds), id, name);
+                    setSelectedDesignTestIds(new Set());
+                  }}>
+                  <option value="">Mover a carpeta…</option>
+                  <option value="__ROOT__">Sin carpeta</option>
+                  {folderPaths.map(f => <option key={f.id} value={f.id}>{f.path}</option>)}
+                </select>
+                <select className="tp5-chip" aria-label="Agregar a ciclo" value="" disabled={Boolean(repo5Adding)}
+                  onChange={(e) => { if (e.target.value) handleRepo5AddToCycle(e.target.value); }}>
+                  <option value="">{repo5Adding ? `Agregando ${repo5Adding.done} de ${repo5Adding.total}…` : 'Agregar a ciclo…'}</option>
+                  {testCycles.map(c => <option key={c.id} value={c.id}>{c.summary || c.key} · {c.key}</option>)}
+                </select>
+                {canDeleteIssues && (
+                  <button type="button" className="tp5-chip tp5-chip--danger" onClick={() => handleDeleteTestCases(Array.from(selectedDesignTestIds))}
+                    title="Eliminar permanentemente de Jira los casos seleccionados">Eliminar de Jira</button>
+                )}
+                <button type="button" className="tp5-chip tp5-chip--ghost" onClick={() => setSelectedDesignTestIds(new Set())}>Desmarcar</button>
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="tp5-card tp5-table-wrap">
+          {loading || (isFetchingTests && testCases.length === 0) ? (
+            <div className="tp5-empty" style={{ padding: '24px' }}><Spinner size="medium" /> Cargando casos…</div>
+          ) : (
+            <table className="tp5-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}>
+                    <input type="checkbox" aria-label="Seleccionar página" checked={pageAllSelected}
+                      onChange={(e) => {
+                        const next = new Set(selectedDesignTestIds);
+                        pageIds.forEach(id => (e.target.checked ? next.add(id) : next.delete(id)));
+                        setSelectedDesignTestIds(next);
+                      }} />
+                  </th>
+                  <th>Clave</th><th>Caso de prueba</th><th>Tipo</th><th>Prioridad</th><th>Informador</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTestCases.map(test => {
+                  const isSel = selectedDesignTestIds.has(test.id);
+                  const isAuto = isAutomatedTest(test);
+                  const dragged = (pointerDragState?.testIds?.includes(test.id)) || (draggedDesignTestIds?.includes(test.id));
+                  const summary = test.summary || findTc(test.id)?.summary || 'Caso de prueba';
+                  return (
+                    <tr key={test.id}
+                      className={`modern-test-card tp5-row${isSel ? ' is-selected' : ''}${dragged ? ' dragging' : ''}`}
+                      onPointerDown={(e) => handleCardPointerDown(e, test)}
+                      onClick={() => openCase(test)}
+                      title="Abrir detalle · arrastra la fila a una carpeta para moverla">
+                      <td onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" aria-label={`Seleccionar ${test.key}`} checked={isSel} onChange={(e) => toggleOne(test.id, e.target.checked)} />
+                      </td>
+                      <td className="tp5-mono tp5-key">{test.key}</td>
+                      <td className="tp5-table__title" title={summary}>{summary}</td>
+                      <td><span className={`tp5-loz ${isAuto ? 'tp5-loz--brand' : 'tp5-loz--neutral'}`}>{isAuto ? 'AUTO' : 'MANUAL'}</span></td>
+                      <td className="tp5-subtle-2">{test.rawFields?.priority?.name || test.priority?.name || '—'}</td>
+                      <td className="tp5-subtle-2 tp5-nowrap">{reporterOfCase(test).name}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {!loading && !isFetchingTests && filteredTestCases.length === 0 && (
+            <div className="tp5-empty" style={{ padding: '20px 24px' }}>
+              <strong>No hay casos aquí</strong>
+              <span>{activeFolder !== null && activeFolderScopedTestCases.length === 0 && getFolderTotalCount(activeFolder) > 0
+                ? `Esta carpeta no tiene casos propios; sus subcarpetas tienen ${getFolderTotalCount(activeFolder)}.`
+                : 'Ajusta los filtros o crea un caso nuevo.'}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="tp5-pager">
+          <span>{first}–{last} de {filteredTestCasesAll.length.toLocaleString('es-MX')}</span>
+          <span className="tp5-pager__btns">
+            <button type="button" className="tp5-chip" disabled={currentPage <= 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>Anterior</button>
+            <button type="button" className="tp5-chip" disabled={currentPage >= totalPages} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}>Siguiente</button>
+          </span>
+        </div>
+      </section>
+    );
+  };
+
+  // Folder panel of the 5.0 design: "CARPETAS" with a "+" button, a filter, the tree with the
+  // own-case count on the right, and a footnote. Same handlers as the classic tree: select,
+  // drop cases or folders on a folder, create subfolder, rename and delete (on hover).
+  const renderRepo5Folders = () => {
+    const q = (folderSearchQuery || '').trim().toLowerCase();
+    const matches = (fId) => {
+      if (!q) return true;
+      const desc = getFolderDescendantIds(fId);
+      return folders.some(f => desc.has(f.id) && (f.name || '').toLowerCase().includes(q));
+    };
+    const loadingCounts = isFetchingTests && testCases.length === 0;
+    const dropProps = (targetId, targetName) => ({
+      onDragOver: (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverFolderId !== targetId) setDragOverFolderId(targetId); },
+      onDragLeave: (e) => { if (e.currentTarget.contains(e.relatedTarget)) return; if (dragOverFolderId === targetId) setDragOverFolderId(null); },
+      onDrop: (e) => {
+        e.preventDefault();
+        setDragOverFolderId(null);
+        if (draggedFolderId) {
+          if (String(draggedFolderId) !== String(targetId)) handleMoveFolder(draggedFolderId, targetId === '__ROOT__' ? null : targetId);
+          setDraggedFolderId(null);
+          return;
+        }
+        let ids = draggedDesignTestIds;
+        try {
+          const raw = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain');
+          if (raw) { const parsed = JSON.parse(raw); if (parsed?.testIds?.length) ids = parsed.testIds; }
+        } catch (_) { /* not a Test Pulse drag */ }
+        if (ids && ids.length) {
+          handleBatchLinkTestsToFolder(ids, targetId, targetName);
+          setSelectedDesignTestIds(new Set());
+          setDraggedDesignTestIds(null);
+        }
+      }
+    });
+    const FolderIcon = () => (
+      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" className="tp5-folder__icon">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      </svg>
+    );
+    const rows = [];
+    const walk = (parentId, level) => {
+      folders.filter(f => (f.parentId || null) === parentId && matches(f.id)).forEach(f => {
+        const total = loadingCounts ? null : getFolderTotalCount(f.id);
+        rows.push(
+          <div key={f.id}
+            data-folder-id={f.id}
+            role="button" tabIndex={0}
+            className={`tp5-folder${activeFolder === f.id ? ' is-active' : ''}${dragOverFolderId === f.id ? ' is-drop' : ''}`}
+            style={{ paddingLeft: 8 + level * 18 }}
+            onClick={() => setActiveFolder(f.id)}
+            onKeyDown={(e) => { if (e.key === 'Enter') setActiveFolder(f.id); }}
+            draggable
+            onDragStart={(e) => { setDraggedFolderId(f.id); e.dataTransfer.effectAllowed = 'move'; }}
+            onDragEnd={() => setDraggedFolderId(null)}
+            title={total === null ? f.name : `${f.name} · ${total} con subcarpetas`}
+            {...dropProps(f.id, `"${f.name}"`)}>
+            <FolderIcon />
+            <span className="tp5-folder__name">{f.name}</span>
+            <span className="tp5-folder__actions">
+              <button type="button" title="Nueva subcarpeta" aria-label={`Nueva subcarpeta en ${f.name}`} onClick={(e) => { e.stopPropagation(); handleCreateFolder(f.id); }}>+</button>
+              <button type="button" title="Renombrar" aria-label={`Renombrar ${f.name}`} onClick={(e) => { e.stopPropagation(); handleUpdateFolder(f.id, f.name); }}>✎</button>
+              {isAdmin && <button type="button" title="Eliminar carpeta" aria-label={`Eliminar ${f.name}`} className="is-danger" onClick={(e) => { e.stopPropagation(); handleDeleteFolder(f.id, f.name); }}>✕</button>}
+            </span>
+            <span className="tp5-folder__count">{loadingCounts ? '…' : getFolderDirectCount(f.id)}</span>
+          </div>
+        );
+        walk(f.id, level + 1);
+      });
+    };
+    walk(null, 0);
+    const rootCount = loadingCounts ? '…' : testCases.filter(t => !t.folderId).length;
+    return (
+      <aside className="tp5-folders" aria-label="Carpetas">
+        <div className="tp5-folders__head">
+          <span className="tp5-eyebrow">Carpetas</span>
+          <button type="button" className="tp5-iconbtn" aria-label="Nueva carpeta" title="Nueva carpeta" onClick={() => handleCreateFolder(null)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+          </button>
+        </div>
+        <input type="search" className="tp5-select" style={{ width: '100%' }} placeholder="Filtrar carpetas" aria-label="Filtrar carpetas"
+          value={folderSearchQuery} onChange={(e) => setFolderSearchQuery(e.target.value)} />
+        {foldersBackup && isAdmin && (
+          <div className="tp5-folders__restore" role="status">
+            <span>Hay una copia del árbol de carpetas anterior a un cambio.</span>
+            <span style={{ display: 'flex', gap: 6 }}>
+              <button type="button" className="tp5-chip" disabled={restoringFolders} onClick={handleRestoreFolders}>Restaurar</button>
+              <button type="button" className="tp5-chip tp5-chip--ghost" disabled={restoringFolders} onClick={handleDiscardFoldersBackup}>Descartar</button>
+            </span>
+          </div>
+        )}
+        <nav aria-label="Árbol de carpetas" className="tp5-folders__tree">
+          <div data-folder-id="__ROOT__" role="button" tabIndex={0}
+            className={`tp5-folder${activeFolder === null ? ' is-active' : ''}${dragOverFolderId === '__ROOT__' ? ' is-drop' : ''}`}
+            style={{ paddingLeft: 8 }}
+            onClick={() => setActiveFolder(null)}
+            onKeyDown={(e) => { if (e.key === 'Enter') setActiveFolder(null); }}
+            {...dropProps('__ROOT__', 'Sin carpeta')}>
+            <FolderIcon />
+            <span className="tp5-folder__name">Sin carpeta</span>
+            <span className="tp5-folder__count">{rootCount}</span>
+          </div>
+          {rows}
+        </nav>
+        <p className="tp5-folders__note">El número es de casos propios de la carpeta; al pasar el cursor se ve el total con subcarpetas.</p>
+      </aside>
+    );
+  };
+
+  // Case detail of the 5.0 design (Lateral / Amplio / Flotante). Same data and inline editing
+  // as the classic panel, laid out as in the boards "Repositorio" and "Repositorio – detalle
+  // flotante e historial": key + type, view switcher, title, story · epic · folder, and the
+  // tabs "Detalle y pasos" / "Historial de ejecuciones · N".
+  const renderRepo5CasePanel = ({ isAuto, priority, creatorName, currentFolder, testLevel, modalEpicReq }) => {
+    const close = () => { setSelectedTestCase(null); setTestCaseDetails({ type: 'traditional', content: [] }); setTestCaseHistory([]); };
+    const isFloat = dockPosition === 'center';
+    const histCount = testCaseHistory.length;
+    return (
+      <div style={getDockOverlayStyle(dockPosition, 1000)} onClick={() => { if (isFloat) close(); }}>
+        <div
+          className={`tp5-casepanel${isFloat ? ' is-float' : ''}`}
+          style={isFloat
+            ? { position: 'fixed', left: repo5FloatPos.x, top: repo5FloatPos.y, width: 'min(1000px, 94vw)', height: 'min(720px, 86vh)', background: '#FFFFFF', color: '#172B4D' }
+            : { ...getDockContainerStyle(dockPosition, { drawerWidth: DOCK_SPLIT_WIDTH, dockWidthPx: dockWidth, isResizing: isResizingDock, drawerMinWidth: '380px', backgroundColor: '#FFFFFF' }), color: '#172B4D' }}
+          onClick={e => e.stopPropagation()}
+        >
+          {!isFloat && <PanelResizeHandle dockPosition={dockPosition} />}
+          <div className={`tp5-casepanel__top${isFloat ? ' is-draggable' : ''}`}
+            onPointerDown={isFloat ? (e) => {
+              if (e.target.closest('button, a, input, select')) return;
+              const sx = e.clientX - repo5FloatPos.x; const sy = e.clientY - repo5FloatPos.y;
+              const move = (ev) => setRepo5FloatPos({ x: Math.max(0, ev.clientX - sx), y: Math.max(0, ev.clientY - sy) });
+              const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+              window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+            } : undefined}>
+            {isFloat && <span className="tp5-grip" aria-hidden="true">⠿</span>}
+            <span className="tp5-mono tp5-key">{selectedTestCase.key}</span>
+            <span className={`tp5-loz ${isAuto ? 'tp5-loz--brand' : 'tp5-loz--neutral'}`}>{isAuto ? 'AUTO' : 'MANUAL'}</span>
+            {isFloat && <span className="tp5-subtle tp5-small tp5-ellipsis">Arrastra para mover · esquina inferior para cambiar el tamaño</span>}
+            <span className="tp5-casepanel__tools">
+              <PanelDockSwitcher dockPosition={dockPosition} onChange={setDockPosition} />
+              <button type="button" className="tp5-iconbtn" aria-label="Cerrar detalle" onClick={close}>
+                <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+              </button>
+            </span>
+          </div>
+          <div className="tp5-casepanel__scroll">
+            <div className="tp5-casepanel__title"><EditableCaseTitle edit={caseEdit} summary={selectedTestCase.summary} /></div>
+            <div className="tp5-subtle tp5-small">
+              {modalEpicReq?.reqKey && <>Historia <button type="button" className="tp5-link tp5-link--plain" onClick={() => openTraceabilityItemModal('requirement', modalEpicReq.reqKey)}>{modalEpicReq.reqKey}</button> · </>}
+              {modalEpicReq?.epicKey && <>Épica <button type="button" className="tp5-link tp5-link--plain" onClick={() => openTraceabilityItemModal('epic', modalEpicReq.epicKey)}>{modalEpicReq.epicSummary || modalEpicReq.epicKey}</button> · </>}
+              Carpeta {currentFolder ? currentFolder.path : 'Sin carpeta'}
+            </div>
+            <div role="tablist" aria-label="Detalle" className="tp5-tabs">
+              <button type="button" role="tab" aria-selected={modalDetailTab !== 'history'} className={modalDetailTab !== 'history' ? 'is-on' : undefined} onClick={() => setModalDetailTab('details')}>Detalle y pasos</button>
+              <button type="button" role="tab" aria-selected={modalDetailTab === 'history'} className={modalDetailTab === 'history' ? 'is-on' : undefined} onClick={() => setModalDetailTab('history')}>
+                Historial de ejecuciones{testCaseHistoryLoading ? '' : ` · ${histCount}`}
+              </button>
+            </div>
+
+            {modalDetailTab !== 'history' ? (
+              <>
+                {caseEdit.propsEditing ? (
+                  <EditableCaseProperties edit={caseEdit} derivedEpicKey={selectedCaseTrace?.epicKey || ''} />
+                ) : (
+                  <dl className="tp5-dl">
+                    <dt>Prioridad</dt><dd>{priority?.name || '—'}</dd>
+                    <dt>Nivel</dt><dd>{testLevel || '—'}</dd>
+                    <dt>Informador</dt><dd>{creatorName}</dd>
+                    <dt>Carpeta</dt><dd>{currentFolder ? currentFolder.path : 'Sin carpeta'}</dd>
+                  </dl>
+                )}
+                <div className="tp5-casepanel__steps">
+                  <span className="tp5-eyebrow">Pasos</span>
+                  {caseEdit.descEditing ? (
+                    <EditableCaseDescription edit={caseEdit} />
+                  ) : loadingDescription ? (
+                    <span className="tp5-subtle tp5-small">Cargando pasos…</span>
+                  ) : selectedTestCaseDescription ? (
+                    <div className="description-content tp5-casepanel__desc" dangerouslySetInnerHTML={{ __html: adfToHtml(selectedTestCaseDescription) }} />
+                  ) : (
+                    <span className="tp5-subtle tp5-small">Este caso aún no tiene pasos. Usa «Editar caso» para agregarlos.</span>
+                  )}
+                </div>
+                {!caseEdit.descEditing && !caseEdit.propsEditing && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button type="button" className="tp5-btn tp5-btn--secondary" onClick={caseEdit.startDescriptionEdit} disabled={caseEdit.opening === 'description'}>
+                      {caseEdit.opening === 'description' ? 'Abriendo…' : 'Editar caso'}
+                    </button>
+                    <button type="button" className="tp5-btn tp5-btn--ghost" onClick={caseEdit.startPropertiesEdit} disabled={caseEdit.opening === 'properties'}>
+                      {caseEdit.opening === 'properties' ? 'Abriendo…' : 'Editar propiedades'}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : testCaseHistoryLoading ? (
+              <span className="tp5-subtle tp5-small">Cargando historial…</span>
+            ) : (
+              <CaseHistory5
+                history={testCaseHistory}
+                cycles={testCycles}
+                plans={testPlans}
+                onOpenRun={(h) => {
+                  const cycle = testCycles.find(c => String(c.id) === String(h.cycleId));
+                  if (!cycle) { addNotification({ type: 'info', title: 'Ciclo no disponible', description: 'Ese ciclo ya no está en el proyecto.' }); return; }
+                  close();
+                  if (cycle.planId) setSelectedPlanId(String(cycle.planId));
+                  handleCycleSelect(cycle);
+                  setActiveTab('execution');
+                }}
+                onOpenBug={(key) => setSelectedBug({ key })}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // "Agregar a ciclo" from the 5.0 selection bar: adds the selected cases to the chosen cycle,
+  // one call per case (same resolver Planeación uses), then forgets that cycle's cached list.
+  const [repo5Adding, setRepo5Adding] = useState(null); // { done, total } while adding
+  const handleRepo5AddToCycle = async (cycleId) => {
+    const cycle = testCycles.find(c => String(c.id) === String(cycleId));
+    const ids = Array.from(selectedDesignTestIds);
+    if (!cycle || ids.length === 0) return;
+    const cases = ids.map(id => findTc(id)).filter(Boolean);
+    setRepo5Adding({ done: 0, total: cases.length });
+    let ok = 0;
+    for (let i = 0; i < cases.length; i++) {
+      try {
+        const res = await invoke('addTestToCycle', { cycleId: cycle.id, cycleKey: cycle.key || cycle.id, projectId: selectedProjectId, config: projectConfig, testCase: cases[i] });
+        if (res && !res.error) ok++;
+      } catch (_) { /* counted as not added */ }
+      setRepo5Adding({ done: i + 1, total: cases.length });
+    }
+    delete perCycleCacheRef.current[String(cycle.id)];
+    setRepo5Adding(null);
+    setSelectedDesignTestIds(new Set());
+    addNotification({
+      type: ok === cases.length ? 'success' : 'warning',
+      title: 'Casos agregados al ciclo',
+      description: `${ok} de ${cases.length} casos agregados a «${cycle.summary || cycle.key}».`
+    });
+  };
+  // Position of the floating case window (Flotante), moved by dragging its header.
+  const [repo5FloatPos, setRepo5FloatPos] = useState(() => ({ x: Math.max(16, Math.round((window.innerWidth - Math.min(1000, window.innerWidth * 0.94)) / 2)), y: 48 }));
+
+  // 5.0 wraps the same layout with the full-width page header of the design.
+  const renderDesignTab = () => (newDesign
+    ? <div className="tp5-repo">{renderRepo5Header()}{renderDesignLayout()}</div>
+    : renderDesignLayout());
+
+  const renderDesignLayout = () => (
     <div className="tab-layout">
+      {/* 5.0: folder panel of the approved design. */}
+      {newDesign && renderRepo5Folders()}
       {/* Sidebar Navigation (Folders) */}
-      {isFolderSidebarVisible && (
+      {!newDesign && isFolderSidebarVisible && (
         <>
           <aside className="sidebar glass" style={{ width: sidebarWidth, flexShrink: 0 }}>
             {/* Modern Folders & Suites Header */}
@@ -3158,6 +3589,7 @@ Then el sistema valida la identidad.
       </>
       )}
       <main className="main-content" style={{ padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', flex: 1, overflowY: 'auto' }}>
+        {!newDesign && (
         <div className="header" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -3230,6 +3662,7 @@ Then el sistema valida la identidad.
             </button>
           </div>
         </div>
+        )}
 
         {/* ===== PANEL DE CARGA MASIVA ===== */}
         {showBulkUpload && (
@@ -3530,6 +3963,8 @@ Then el sistema valida la identidad.
           </div>
         )}
 
+        {/* 5.0: toolbar, table and pagination from the approved design (renderRepoCases5). */}
+        {!newDesign ? (<>
         {/* Design Filter & Sort Toolbar */}
         <div style={{
           display: 'flex',
@@ -3959,6 +4394,7 @@ Then el sistema valida la identidad.
             </div>
           </div>
         )}
+        </>) : renderRepoCases5()}
       </main>
 
       {/* Floating Pointer Drag Ghost Badge */}
@@ -4179,6 +4615,9 @@ Then el sistema valida la identidad.
 
     const modalEpicReq = extractEpicAndRequirement(selectedTestCase, projectConfig, requirementsMap);
 
+    // 5.0 (v4.43.0): detail laid out as in the approved design.
+    if (newDesign) return renderRepo5CasePanel({ isAuto, priority, creatorName, currentFolder, testLevel, modalEpicReq });
+
     return (
       <div 
         style={getDockOverlayStyle(dockPosition, 1000)}
@@ -4333,7 +4772,7 @@ Then el sistema valida la identidad.
                   transition: 'color 0.15s'
                 }}
               >
-                <span>Detalles y Metadatos</span>
+                <span>{newDesign ? 'Detalle' : 'Detalles y Metadatos'}</span>
               </button>
 
               <button 
@@ -4353,7 +4792,7 @@ Then el sistema valida la identidad.
                   transition: 'color 0.15s'
                 }}
               >
-                <span>Historial de Ejecuciones</span>
+                <span>{newDesign ? 'Historial de ejecuciones' : 'Historial de Ejecuciones'}</span>
                 {testCaseHistory.length > 0 && (
                   <span style={{ fontSize: '10px', fontWeight: 700, background: '#F1F2F4', color: '#44546F', padding: '1px 6px', borderRadius: '10px' }}>
                     {testCaseHistory.length}
@@ -7704,7 +8143,9 @@ Then el sistema valida la identidad.
       endDate: sched.endDate || '',
       excludeWeekends: sched.excludeWeekends !== false,
       holidays: Array.isArray(sched.holidays) ? sched.holidays : [],
-      statusBadge: sched.statusBadge || 'ACTIVO'
+      statusBadge: sched.statusBadge || 'ACTIVO',
+      goLiveDate: sched.goLiveDate || '',
+      codeFreezeDate: sched.codeFreezeDate || ''
     });
     if (plan) {
       const hasSavedDates = Boolean(sched.startDate && sched.endDate);
@@ -7729,7 +8170,9 @@ Then el sistema valida la identidad.
       environment: sched.environment || cycleInList?.environment || selectedCycle?.environment || defaultEnvName,
       planningStatus: sched.planningStatus || 'EN CURSO',
       excludeWeekends: sched.excludeWeekends !== undefined ? sched.excludeWeekends !== false : (parentPlan?.schedule?.excludeWeekends !== false),
-      holidays: Array.isArray(sched.holidays) && sched.holidays.length > 0 ? sched.holidays : parentHolidays
+      holidays: Array.isArray(sched.holidays) && sched.holidays.length > 0 ? sched.holidays : parentHolidays,
+      // v4.43.0 (5.0): traffic-light thresholds of the cycle (defaults when never saved).
+      semaforo: sched.semaforo || { riskDays: 2, onTimeFailPct: 10, riskFailPct: 20 }
     });
   }, [selectedCycle?.id, testCycles, selectedPlanId, testPlans, availableEnvironments]);
 
@@ -8332,7 +8775,7 @@ Then el sistema valida la identidad.
 
   const renderPlanningTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Planning..." />}>
-      <PlanningView ctx={{ newDesign, activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, openRenameDialog, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
+      <PlanningView ctx={{ newDesign, setProjectConfig, activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, openRenameDialog, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 
@@ -8385,7 +8828,7 @@ Then el sistema valida la identidad.
   const renderLifecycleTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando ciclo de vida..." />}>
       {/* isActive (v4.30.2): the view is kept mounted, so it needs to know when it is shown again. */}
-      <LifecycleView ctx={{ addNotification, isAdmin, selectedProjectId, isActive: activeTab === 'lifecycle', refreshSignal: lifecycleRefreshSignal }} />
+      <LifecycleView ctx={{ newDesign, addNotification, isAdmin, selectedProjectId, isActive: activeTab === 'lifecycle', refreshSignal: lifecycleRefreshSignal }} />
     </Suspense>
   );
 

@@ -814,6 +814,9 @@ resolver.define('savePlanSchedule', async ({ payload }) => {
     naturalDays: Number(schedule.naturalDays) || 0,
     businessDays: Number(schedule.businessDays) || 0,
     statusBadge: schedule.statusBadge || 'ACTIVO',
+    // v4.43.0 (5.0 "Calendario y metas"): release date and code freeze of the plan.
+    goLiveDate: /^\d{4}-\d{2}-\d{2}$/.test(String(schedule.goLiveDate || '')) ? schedule.goLiveDate : '',
+    codeFreezeDate: /^\d{4}-\d{2}-\d{2}$/.test(String(schedule.codeFreezeDate || '')) ? schedule.codeFreezeDate : '',
     updatedAt: new Date().toISOString()
   };
   await api.asUser().requestJira(route`/rest/api/3/issue/${planId}/properties/testpulse-schedule`, {
@@ -860,6 +863,16 @@ resolver.define('saveCycleSchedule', async ({ payload }) => {
     holidays: Array.isArray(schedule.holidays) ? schedule.holidays : [],
     naturalDays: Number(schedule.naturalDays) || 0,
     businessDays: Number(schedule.businessDays) || 0,
+    // v4.43.0 (5.0 "Calendario y metas"): the cycle's traffic-light thresholds and whether it
+    // uses the plan's holidays. Missing values fall back to the defaults in cycleHealth.
+    ...(schedule.semaforo && typeof schedule.semaforo === 'object' ? {
+      semaforo: {
+        riskDays: Math.max(0, Math.min(30, Number(schedule.semaforo.riskDays) || 0)),
+        onTimeFailPct: Math.max(0, Math.min(100, Number(schedule.semaforo.onTimeFailPct) || 0)),
+        riskFailPct: Math.max(0, Math.min(100, Number(schedule.semaforo.riskFailPct) || 0))
+      }
+    } : {}),
+    ...(typeof schedule.usePlanHolidays === 'boolean' ? { usePlanHolidays: schedule.usePlanHolidays } : {}),
     updatedAt: new Date().toISOString()
   };
   await Promise.all([
@@ -4124,6 +4137,13 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     const historyMap = new Map(); // cycleId|runKey -> item
     const runTypeName = (config?.testRunType || 'Test Run').toLowerCase();
 
+    // Defects linked to a run (issue links whose other side is a defect type), key + done flag only.
+    const defectTypeNames = new Set([String(config?.defectType || 'Bug').toLowerCase(), 'bug', 'error', 'defecto', 'defect']);
+    const runBugLinks = (run) => (run.fields?.issuelinks || [])
+      .map(l => l.outwardIssue || l.inwardIssue)
+      .filter(i => i && defectTypeNames.has(String(i.fields?.issuetype?.name || '').toLowerCase()))
+      .map(i => ({ key: i.key, done: i.fields?.status?.statusCategory?.key === 'done' }));
+
     const toItem = (run, prop, cycle) => {
       const tpStatus = prop.status ? normalizeJiraStatus(prop.status) : null;
       const nativeStatus = normalizeJiraStatus(run.fields?.status?.name || 'Not Run');
@@ -4138,7 +4158,10 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
         executedBy: prop.executedBy || (run.fields?.assignee ? { displayName: run.fields.assignee.displayName, accountId: run.fields.assignee.accountId } : null),
         iterations: prop.iterations || [],
         comment: prop.comment || '',
-        executedAt: prop.executedAt || run.fields?.created
+        executedAt: prop.executedAt || run.fields?.created,
+        // v4.43.0 (5.0 history tab): defects linked to the run and how many evidence files it has.
+        bugs: runBugLinks(run),
+        evidenceCount: Array.isArray(run.fields?.attachment) ? run.fields.attachment.length : 0
       };
     };
 
@@ -4146,7 +4169,8 @@ resolver.define('getTestCaseHistory', async ({ payload }) => {
     try {
       const ref = tcKey || tcId;
       const jql = `issue in linkedIssues(${jqlQuote(ref)}) ORDER BY created DESC`;
-      const runs = await fetchAllIssues(jql, ['summary', 'status', 'assignee', 'issuelinks', 'created', 'issuetype'], null, ['testpulse-run-data'], 4);
+      // 'attachment' (v4.43.0) gives the evidence count shown in the 5.0 history tab.
+      const runs = await fetchAllIssues(jql, ['summary', 'status', 'assignee', 'issuelinks', 'created', 'issuetype', 'attachment'], null, ['testpulse-run-data'], 4);
       for (const run of runs) {
         const prop = run.properties?.['testpulse-run-data'] || {};
         const typeName = (run.fields?.issuetype?.name || '').toLowerCase();

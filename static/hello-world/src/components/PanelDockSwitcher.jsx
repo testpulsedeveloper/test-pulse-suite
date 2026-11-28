@@ -403,7 +403,44 @@ export function PanelResizeHandle({ dockPosition }) {
  * Componente visual de botones segmentados (Izquierda | Centro | Derecha)
  * para permitir al usuario elegir en cualquier momento cómo visualizar los paneles.
  */
+// Test Pulse 5.0 (v4.43.0): widths used by the "Lateral" and "Amplio" modes of the design.
+const V5_LATERAL_PX = 460;
+const V5_WIDE_RATIO = 0.62;
+
+/**
+ * 5.0 version of the switcher: Lateral | Amplio | Flotante, as in the approved design.
+ * It maps onto the same positions the app already supports: Lateral and Amplio are the right
+ * dock at two widths, Flotante is the centred window. Nothing new is stored.
+ */
+function PanelDockSwitcherV5({ dockPosition, onChange }) {
+  const [dockWidth, setDockWidth] = usePanelDockWidth();
+  const wideThreshold = (V5_LATERAL_PX + Math.round((typeof window !== 'undefined' ? window.innerWidth : 1440) * V5_WIDE_RATIO)) / 2;
+  const active = dockPosition === 'center' ? 'float' : (dockPosition === 'right' ? (dockWidth > wideThreshold ? 'wide' : 'side') : null);
+  const pick = (mode) => {
+    if (mode === 'float') { onChange('center'); return; }
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
+    setDockWidth(mode === 'side' ? V5_LATERAL_PX : Math.round(vw * V5_WIDE_RATIO));
+    onChange('right');
+  };
+  const modes = [
+    { id: 'side', label: 'Lateral', title: 'Panel angosto a la derecha: revisa varios casos sin perder la lista' },
+    { id: 'wide', label: 'Amplio', title: 'Panel ancho a la derecha: para pasos largos o evidencias' },
+    { id: 'float', label: 'Flotante', title: 'Ventana encima de la lista' }
+  ];
+  return (
+    <span role="group" aria-label="Vista del detalle" className="tp5-seg tp5-seg--sm" onClick={(e) => e.stopPropagation()}>
+      {modes.map(m => (
+        <button key={m.id} type="button" aria-pressed={active === m.id} className={active === m.id ? 'is-on' : undefined}
+          title={m.title} onClick={() => pick(m.id)}>{m.label}</button>
+      ))}
+    </span>
+  );
+}
+
 export default function PanelDockSwitcher({ dockPosition, onChange }) {
+  // The 5.0 design is active when the app root carries the `tp5` class (see App.js).
+  const isV5 = typeof document !== 'undefined' && Boolean(document.querySelector('.app-container.tp5'));
+  if (isV5) return <PanelDockSwitcherV5 dockPosition={dockPosition} onChange={onChange} />;
   const modes = [
     {
       id: 'left',

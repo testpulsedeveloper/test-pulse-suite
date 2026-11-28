@@ -331,6 +331,39 @@ export function registerConfigResolvers(resolver) {
     return { success: true, newDesignEnabled: next.newDesignEnabled };
   });
 
+  /**
+   * Project-wide view preferences of Test Pulse 5.0 (v4.43.0), e.g. which "Salud del ciclo"
+   * indicators or Calidad widgets everybody sees. Patches ONLY `uiPrefs[key]` in the project's
+   * `testops-config` property, so pending edits elsewhere are never saved by accident.
+   * Admin-only (project admins or Test Pulse superusers). Only known keys and small string
+   * lists are accepted, to keep the property tidy and far below Jira's size limit.
+   */
+  const UI_PREF_KEYS = new Set(['planningHealthHidden', 'qualityRunsHidden', 'qualityBugsHidden', 'qualityKpiWidgetsHidden', 'qualityKpis']);
+  resolver.define('setProjectUiPref', async ({ payload, context }) => {
+    const { projectId, key, value } = payload || {};
+    await requireProjectAdmin(projectId, context);
+    if (!UI_PREF_KEYS.has(key)) throw new Error('Preferencia no válida.');
+    const list = Array.isArray(value) ? value.map(v => String(v).slice(0, 40)).slice(0, 60) : [];
+    const propRoute = route`/rest/api/3/project/${projectId}/properties/testops-config`;
+    const current = await api.asApp().requestJira(propRoute);
+    let config = {};
+    if (current.ok) {
+      const data = await current.json();
+      config = (data?.value && typeof data.value === 'object') ? data.value : {};
+    } else if (current.status !== 404) {
+      throw new Error(`No se pudo leer la configuración del proyecto (HTTP ${current.status}).`);
+    }
+    const next = { ...config, uiPrefs: { ...(config.uiPrefs || {}), [key]: list } };
+    const res = await api.asApp().requestJira(propRoute, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(next)
+    });
+    if (!(res.status >= 200 && res.status < 300)) throw new Error(`No se pudo guardar la preferencia (HTTP ${res.status}).`);
+    console.log(`[setProjectUiPref] project=${projectId} key=${key} items=${list.length} by=${context?.accountId || 'unknown'}`);
+    return { success: true, uiPrefs: next.uiPrefs };
+  });
+
   // === Permissions ===
   resolver.define('checkAdminPermission', async ({ payload, context }) => {
     try {

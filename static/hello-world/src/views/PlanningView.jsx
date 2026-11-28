@@ -41,6 +41,7 @@ const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
 
 // Test Pulse 5.0 (v4.42.0): cycle health indicators.
 import CycleHealthCard from '../components/CycleHealthCard';
+import PlanningView5 from './PlanningView5';
 export default function PlanningView({ ctx }) {
   // Test Pulse 5.0 (v4.42.0): Spanish labels when the new design is on; classic text otherwise.
   const v5 = (classic, next) => (ctx.newDesign ? next : classic);
@@ -189,6 +190,139 @@ export default function PlanningView({ ctx }) {
     const selectedTestsSet = new Set((selectedTestsForCycle || []).map(id => String(id)));
     const validSelectedTests = availableFilteredTestCases.filter(tc => selectedTestsSet.has(String(tc.id)));
 
+    /**
+     * Adds cases to the selected cycle in chunks of 10 (v4.43.0: extracted from the "Añadir"
+     * button so the classic and the 5.0 layouts share exactly the same logic).
+     * @param {Array} testsToAdd test cases to add
+     */
+    const addCasesToSelectedCycle = async (testsToAdd) => {
+                          if (!selectedCycle || !testsToAdd || testsToAdd.length === 0) return;
+
+                          setIsAddingAll(true);
+                          setAddingProgress({ current: 0, total: testsToAdd.length });
+                          try {
+                            const cycleId = String(selectedCycle.id);
+                            testsToAdd.forEach(tc => {
+                              const idStr = String(tc.id);
+                              const keyStr = tc.key ? String(tc.key) : '';
+                              deletedIdsRef.current.delete(idStr);
+                              if (keyStr) deletedIdsRef.current.delete(keyStr);
+                              if (perCycleDeletedRef.current[cycleId]) {
+                                perCycleDeletedRef.current[cycleId].delete(idStr);
+                                if (keyStr) perCycleDeletedRef.current[cycleId].delete(keyStr);
+                              }
+                            });
+
+                            // 10 cases per call keeps each backend invocation well under
+                            // Forge's 25 s limit (25 per call was timing out).
+                            const CHUNK_SIZE = 10;
+                            let allAddedTests = [];
+                            for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
+                              const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
+                              let retries = 2;
+                              let bRes = null;
+                              while (retries >= 0) {
+                                try {
+                                  bRes = await invoke('addBulkTestsToCycle', {
+                                    cycleId: selectedCycle.id,
+                                    cycleKey: selectedCycle.key || selectedCycle.id,
+                                    projectId: selectedProjectId,
+                                    config: projectConfig,
+                                    testCases: chunk,
+                                    skipIndexWrite: true
+                                  });
+                                  break;
+                                } catch (errChunk) {
+                                  retries--;
+                                  if (retries < 0) {
+                                    console.warn('[addBulkTestsToCycle] Chunk error:', errChunk);
+                                  } else {
+                                    await new Promise(r => setTimeout(r, 600));
+                                  }
+                                }
+                              }
+                              if (bRes && bRes.addedTests) {
+                                allAddedTests = allAddedTests.concat(bRes.addedTests);
+                              }
+                              setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
+                            }
+
+                            if (allAddedTests.length > 0) {
+                              try {
+                                await invoke('syncCycleIndexWithRuns', {
+                                  cycleId: selectedCycle.id,
+                                  addedRuns: allAddedTests
+                                });
+                              } catch (errSync) {
+                                console.warn('[syncCycleIndexWithRuns] Index sync warning:', errSync);
+                              }
+                            }
+
+                            const locallyAdded = testsToAdd.map(tc => ({
+                              id: String(tc.id),
+                              testCaseId: String(tc.id),
+                              key: tc.key,
+                              testCaseKey: tc.key,
+                              summary: tc.summary,
+                              folderId: tc.folderId,
+                              executionType: tc.executionType || 'Manual',
+                              status: 'Not Run'
+                            }));
+
+                            const cycleIdStr = String(cycleId);
+                            const existingBase = perCycleCacheRef.current[cycleIdStr] || deduplicatedCycleTests || [];
+                            const newArr = [...existingBase];
+                            locallyAdded.forEach(lt => {
+                              let finalItem = lt;
+                              if (allAddedTests && allAddedTests.length > 0) {
+                                const matched = allAddedTests.find(t =>
+                                  String(t.id) === String(lt.id) ||
+                                  (lt.key && (t.key === lt.key || t.testCaseKey === lt.key))
+                                );
+                                if (matched) {
+                                  finalItem = { ...lt, ...matched };
+                                }
+                              }
+                              const alreadyExists = newArr.some(existing =>
+                                String(existing.id) === String(lt.id) ||
+                                (lt.key && (existing.key === lt.key || existing.testCaseKey === lt.key))
+                              );
+                              if (!alreadyExists) {
+                                newArr.push(finalItem);
+                              }
+                            });
+                            perCycleCacheRef.current[cycleIdStr] = newArr;
+                            setTestCycles(cycles => cycles.map(c => String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
+                            if (activeCycleIdRef.current === cycleIdStr) {
+                              setCycleTests(newArr);
+                              setSelectedCycle(c => (c && String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
+                            }
+
+                            setSelectedTestsForCycle([]);
+                            addNotification({
+                              type: 'success',
+                              title: `${testsToAdd.length} caso${testsToAdd.length !== 1 ? 's' : ''} añadido${testsToAdd.length !== 1 ? 's' : ''} al ciclo`,
+                              description: `Asignados a "${selectedCycle.name || selectedCycle.summary || selectedCycle.key}".`
+                            });
+
+                            setTimeout(async () => {
+                              const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
+                              if (finalExecution) {
+                                safeSetCycleTests(finalExecution, cycleId);
+                              }
+                            }, 2500);
+                          } catch (err) {
+                            console.error(err);
+                            addNotification({
+                              type: 'error',
+                              title: 'Error al añadir casos al ciclo',
+                              description: err.message || String(err)
+                            });
+                          }
+                          setIsAddingAll(false);
+                          setAddingProgress({ current: 0, total: 0 });
+    };
+
     // Filtered plans for Plan Selector dropdown
     const visiblePlans = testPlans.filter(p => {
       if (!planningPlanSearch.trim()) return true;
@@ -275,6 +409,42 @@ export default function PlanningView({ ctx }) {
       : [];
     const displayedSidebarCycles = (!selectedPlanId || planningShowAllCycles) ? filteredTestCycles : cyclesInCurrentPlan;
 
+
+    /** "Sincronizar con release" (v4.43.0: extracted so the 5.0 "Más acciones" menu reuses it). */
+    const syncWithRelease = async () => {
+                        if (planScheduleForm.startDate && planScheduleForm.endDate && (!cycleScheduleForm.startDate || !cycleScheduleForm.endDate)) {
+                          const syncedStart = cycleScheduleForm.startDate || planScheduleForm.startDate;
+                          const syncedEnd = cycleScheduleForm.endDate || planScheduleForm.endDate;
+                          setCycleScheduleForm(prev => ({
+                            ...prev,
+                            startDate: syncedStart,
+                            endDate: syncedEnd
+                          }));
+                          await handleSaveCycleSchedule({ startDate: syncedStart, endDate: syncedEnd });
+                        } else {
+                          clearPersistentCache();
+                          queryClient.invalidateQueries();
+                          if (selectedProjectId) {
+                            const [freshPlans, freshCycles] = await Promise.all([
+                              invoke('getTestPlans', { projectId: selectedProjectId, issueTypeId: projectConfig?.testPlanIssueTypeId }).catch(() => null),
+                              invoke('getTestCycles', { projectId: selectedProjectId, issueTypeId: projectConfig?.testCycleIssueTypeId }).catch(() => null)
+                            ]);
+                            if (Array.isArray(freshPlans)) setTestPlans(freshPlans);
+                            if (Array.isArray(freshCycles)) {
+                              setTestCycles(freshCycles);
+                              if (selectedCycle?.id) {
+                                const updated = freshCycles.find(c => String(c.id) === String(selectedCycle.id) || c.key === selectedCycle.key);
+                                if (updated) setSelectedCycle(updated);
+                              }
+                            }
+                          }
+                          addNotification({
+                            type: 'success',
+                            title: 'Sincronizado con Release',
+                            description: 'Planes y ciclos actualizados con la información más reciente de Jira.'
+                          });
+                        }
+    };
     // Export current cycle plan to CSV
     const handleExportCyclePlanCsv = () => {
       if (!selectedCycle) return;
@@ -298,6 +468,17 @@ export default function PlanningView({ ctx }) {
       link.click();
       document.body.removeChild(link);
     };
+
+    // Test Pulse 5.0 (v4.43.0): Planeación as in the approved design; same data and handlers.
+    if (ctx.newDesign) {
+      return (
+        <PlanningView5
+          ctx={ctx}
+          d={{ deduplicatedCycleTests, availableFilteredTestCases, validSelectedTests, addCasesToSelectedCycle, currentPlan,
+            cyclesInCurrentPlan, availableUnlinkedCycles, handleExportCyclePlanCsv, syncWithRelease }}
+        />
+      );
+    }
 
     return (
       <div className="tab-layout" style={{ height: '100%', overflow: 'hidden', background: '#FBFBFC', display: 'flex' }}>
@@ -955,40 +1136,7 @@ export default function PlanningView({ ctx }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
                     <button
                       type="button"
-                      onClick={async () => {
-                        if (planScheduleForm.startDate && planScheduleForm.endDate && (!cycleScheduleForm.startDate || !cycleScheduleForm.endDate)) {
-                          const syncedStart = cycleScheduleForm.startDate || planScheduleForm.startDate;
-                          const syncedEnd = cycleScheduleForm.endDate || planScheduleForm.endDate;
-                          setCycleScheduleForm(prev => ({
-                            ...prev,
-                            startDate: syncedStart,
-                            endDate: syncedEnd
-                          }));
-                          await handleSaveCycleSchedule({ startDate: syncedStart, endDate: syncedEnd });
-                        } else {
-                          clearPersistentCache();
-                          queryClient.invalidateQueries();
-                          if (selectedProjectId) {
-                            const [freshPlans, freshCycles] = await Promise.all([
-                              invoke('getTestPlans', { projectId: selectedProjectId, issueTypeId: projectConfig?.testPlanIssueTypeId }).catch(() => null),
-                              invoke('getTestCycles', { projectId: selectedProjectId, issueTypeId: projectConfig?.testCycleIssueTypeId }).catch(() => null)
-                            ]);
-                            if (Array.isArray(freshPlans)) setTestPlans(freshPlans);
-                            if (Array.isArray(freshCycles)) {
-                              setTestCycles(freshCycles);
-                              if (selectedCycle?.id) {
-                                const updated = freshCycles.find(c => String(c.id) === String(selectedCycle.id) || c.key === selectedCycle.key);
-                                if (updated) setSelectedCycle(updated);
-                              }
-                            }
-                          }
-                          addNotification({
-                            type: 'success',
-                            title: 'Sincronizado con Release',
-                            description: 'Planes y ciclos actualizados con la información más reciente de Jira.'
-                          });
-                        }
-                      }}
+                      onClick={syncWithRelease}
                       style={{
                         height: '32px',
                         padding: '0 12px',
@@ -1989,136 +2137,7 @@ export default function PlanningView({ ctx }) {
 
                       <button
                         type="button"
-                        onClick={async () => {
-                          const testsToAdd = validSelectedTests.length > 0
-                            ? validSelectedTests
-                            : availableFilteredTestCases;
-                          if (!selectedCycle || testsToAdd.length === 0) return;
-
-                          setIsAddingAll(true);
-                          setAddingProgress({ current: 0, total: testsToAdd.length });
-                          try {
-                            const cycleId = String(selectedCycle.id);
-                            testsToAdd.forEach(tc => {
-                              const idStr = String(tc.id);
-                              const keyStr = tc.key ? String(tc.key) : '';
-                              deletedIdsRef.current.delete(idStr);
-                              if (keyStr) deletedIdsRef.current.delete(keyStr);
-                              if (perCycleDeletedRef.current[cycleId]) {
-                                perCycleDeletedRef.current[cycleId].delete(idStr);
-                                if (keyStr) perCycleDeletedRef.current[cycleId].delete(keyStr);
-                              }
-                            });
-
-                            // 10 cases per call keeps each backend invocation well under
-                            // Forge's 25 s limit (25 per call was timing out).
-                            const CHUNK_SIZE = 10;
-                            let allAddedTests = [];
-                            for (let i = 0; i < testsToAdd.length; i += CHUNK_SIZE) {
-                              const chunk = testsToAdd.slice(i, i + CHUNK_SIZE);
-                              let retries = 2;
-                              let bRes = null;
-                              while (retries >= 0) {
-                                try {
-                                  bRes = await invoke('addBulkTestsToCycle', {
-                                    cycleId: selectedCycle.id,
-                                    cycleKey: selectedCycle.key || selectedCycle.id,
-                                    projectId: selectedProjectId,
-                                    config: projectConfig,
-                                    testCases: chunk,
-                                    skipIndexWrite: true
-                                  });
-                                  break;
-                                } catch (errChunk) {
-                                  retries--;
-                                  if (retries < 0) {
-                                    console.warn('[addBulkTestsToCycle] Chunk error:', errChunk);
-                                  } else {
-                                    await new Promise(r => setTimeout(r, 600));
-                                  }
-                                }
-                              }
-                              if (bRes && bRes.addedTests) {
-                                allAddedTests = allAddedTests.concat(bRes.addedTests);
-                              }
-                              setAddingProgress({ current: Math.min(i + CHUNK_SIZE, testsToAdd.length), total: testsToAdd.length });
-                            }
-
-                            if (allAddedTests.length > 0) {
-                              try {
-                                await invoke('syncCycleIndexWithRuns', {
-                                  cycleId: selectedCycle.id,
-                                  addedRuns: allAddedTests
-                                });
-                              } catch (errSync) {
-                                console.warn('[syncCycleIndexWithRuns] Index sync warning:', errSync);
-                              }
-                            }
-
-                            const locallyAdded = testsToAdd.map(tc => ({
-                              id: String(tc.id),
-                              testCaseId: String(tc.id),
-                              key: tc.key,
-                              testCaseKey: tc.key,
-                              summary: tc.summary,
-                              folderId: tc.folderId,
-                              executionType: tc.executionType || 'Manual',
-                              status: 'Not Run'
-                            }));
-
-                            const cycleIdStr = String(cycleId);
-                            const existingBase = perCycleCacheRef.current[cycleIdStr] || deduplicatedCycleTests || [];
-                            const newArr = [...existingBase];
-                            locallyAdded.forEach(lt => {
-                              let finalItem = lt;
-                              if (allAddedTests && allAddedTests.length > 0) {
-                                const matched = allAddedTests.find(t =>
-                                  String(t.id) === String(lt.id) ||
-                                  (lt.key && (t.key === lt.key || t.testCaseKey === lt.key))
-                                );
-                                if (matched) {
-                                  finalItem = { ...lt, ...matched };
-                                }
-                              }
-                              const alreadyExists = newArr.some(existing =>
-                                String(existing.id) === String(lt.id) ||
-                                (lt.key && (existing.key === lt.key || existing.testCaseKey === lt.key))
-                              );
-                              if (!alreadyExists) {
-                                newArr.push(finalItem);
-                              }
-                            });
-                            perCycleCacheRef.current[cycleIdStr] = newArr;
-                            setTestCycles(cycles => cycles.map(c => String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
-                            if (activeCycleIdRef.current === cycleIdStr) {
-                              setCycleTests(newArr);
-                              setSelectedCycle(c => (c && String(c.id) === cycleIdStr ? { ...c, testCount: newArr.length } : c));
-                            }
-
-                            setSelectedTestsForCycle([]);
-                            addNotification({
-                              type: 'success',
-                              title: `${testsToAdd.length} caso${testsToAdd.length !== 1 ? 's' : ''} añadido${testsToAdd.length !== 1 ? 's' : ''} al ciclo`,
-                              description: `Asignados a "${selectedCycle.name || selectedCycle.summary || selectedCycle.key}".`
-                            });
-
-                            setTimeout(async () => {
-                              const finalExecution = await invoke('getCycleExecutionSummary', { cycleId: selectedCycle.id });
-                              if (finalExecution) {
-                                safeSetCycleTests(finalExecution, cycleId);
-                              }
-                            }, 2500);
-                          } catch (err) {
-                            console.error(err);
-                            addNotification({
-                              type: 'error',
-                              title: 'Error al añadir casos al ciclo',
-                              description: err.message || String(err)
-                            });
-                          }
-                          setIsAddingAll(false);
-                          setAddingProgress({ current: 0, total: 0 });
-                        }}
+                        onClick={() => addCasesToSelectedCycle(validSelectedTests.length > 0 ? validSelectedTests : availableFilteredTestCases)}
                         disabled={loading || isAddingAll || availableFilteredTestCases.length === 0}
                         style={{
                           height: '32px',

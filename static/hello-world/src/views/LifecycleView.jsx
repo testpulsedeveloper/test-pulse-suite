@@ -24,6 +24,9 @@ import { invoke, invalidateResolverCache, subscribeToMutations } from '../utils/
 import { designTotals, designState, reportDocumentName } from '../utils/designTotals';
 
 // The five phases, in order. `auto` phases get their figures from Jira.
+// Test Pulse 5.0 (v4.43.0): Go / No-Go recommendation in 05 Liberar.
+import GoNoGoCard from '../components/GoNoGoCard';
+
 const PHASES = [
   { id: 'plan', number: '01', title: 'Planear', subtitle: 'Estrategia', deliverable: 'Plan de QA' },
   { id: 'design', number: '02', title: 'Diseñar', subtitle: 'Shift-Left', deliverable: 'Reportes de hallazgos' },
@@ -1418,6 +1421,24 @@ const LifecycleView = ({ ctx }) => {
             </button>
           )}
         </div>
+        {/* v4.43.0 (5.0): 05 Liberar shows the Go / No-Go recommendation computed from the
+            executions of phase 04 (its Test Plans' cycles, or the epics' executions). The bug
+            criterion is left out here because Ciclo de vida doesn't load bugs; Calidad has it. */}
+        {ctx.newDesign && phase.id === 'release' && (() => {
+          const runs = planTotals(progress) || progress?.runs;
+          if (!runs || !runs.total) return null;
+          return (
+            <GoNoGoCard
+              passed={runs.passed || 0}
+              failed={runs.failed || 0}
+              blocked={runs.blocked || 0}
+              notRun={(runs.notRun || 0) + (runs.other || 0)}
+              includeBugs={false}
+              scopeLabel={`${runs.total.toLocaleString('es-MX')} casos de la fase 04 Ejecutar`}
+              footnote="Revisa los defectos Crítico / Alto abiertos en Calidad antes de registrar el dictamen."
+            />
+          );
+        })()}
         {phase.auto
           ? renderAutoPhase(initiative, phase, progress)
           : (
