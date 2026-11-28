@@ -38,6 +38,7 @@ import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient'
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
 // Test Pulse 5.0 (v4.42.0): "Ambiente no disponible" bar.
 import EnvDowntimeBar from '../components/EnvDowntimeBar';
+import ExecutionView5 from './ExecutionView5';
 import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
 
 const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
@@ -455,6 +456,21 @@ export default function ExecutionView({ ctx }) {
     const isPulseWarning = !isPulseOptimal && rawSlackDays >= -1.5 && failRatio < 35;
     const pulseBadgeBg = isPulseOptimal ? '#059669' : (isPulseWarning ? '#D97706' : '#DC2626');
     const pulseStateText = isPulseOptimal ? 'Óptimo' : (isPulseWarning ? 'En Riesgo' : 'Atrasado');
+
+    // Test Pulse 5.0 (v4.44.0): Ejecución as in the approved design; same data and handlers.
+    if (ctx.newDesign) {
+      return (
+        <ExecutionView5
+          ctx={{ ...ctx, clearPersistentCache, queryClient }}
+          d={{
+            counts: { total: totalInCycle, passed: passedCount, failed: failedCount, blocked: blockedCount, inProgress: inProgressCount, notRun: notRunCount, executed: passedCount + failedCount + blockedCount },
+            deduplicatedCycleTests, filteredTests, paginatedTests, totalPages, safeCurrentPage, testerOptions, sidebarCycles,
+            cycleSched, cycleRemainingDays: Math.max(0, cycleTotalBizDays - cycleElapsedDays),
+            manualTotalCount, autoTotalCount, handleReprocessAutomation, reprocessingAutomation
+          }}
+        />
+      );
+    }
 
     return (
       <div className="tab-layout" style={{ height: '100%', overflow: 'hidden' }}>

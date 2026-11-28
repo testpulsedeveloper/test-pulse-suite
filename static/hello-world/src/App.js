@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.43.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.44.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -6063,6 +6063,31 @@ Then el sistema valida la identidad.
   // unit-tested; this alias keeps the existing prop name used by the views.
   const calculateIterationStatus = calculateOverallStatus;
 
+  /**
+   * Saves fields of a run that don't change its status (Test Pulse 5.0, v4.44.0): the result of
+   * each step (`stepResults`) and/or the execution comment. Updates the screen first and puts
+   * the previous values back if Jira rejects the save.
+   */
+  const handleSaveRunFields = async (test, fields) => {
+    if (!test || !selectedCycle) return;
+    const previous = { stepResults: test.stepResults, comment: test.comment };
+    applyTestPatch(test.id, () => ({ ...fields }));
+    try {
+      await invoke('updateTestStatus', {
+        projectId: selectedProjectId,
+        cycleId: selectedCycle.id,
+        testId: test.id,
+        testRunId: test.testRunId || test.testRunKey,
+        ...(fields.stepResults ? { stepResults: fields.stepResults } : {}),
+        ...(fields.comment !== undefined ? { comment: fields.comment } : {})
+      });
+    } catch (e) {
+      applyTestPatch(test.id, () => previous);
+      const msg = e?.message || String(e);
+      addNotification({ type: 'error', title: msg.includes('LOCKED') ? 'Ejecución protegida' : 'No se pudo guardar', description: msg.includes('LOCKED') ? 'Solo un administrador puede modificar esta ejecución.' : msg });
+    }
+  };
+
   const handleAddIteration = async (testIdOrObj) => {
     if (!selectedCycle) return;
     const cycleIdStr = String(selectedCycle.id);
@@ -8781,7 +8806,7 @@ Then el sistema valida la identidad.
 
   const renderExecutionTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Execution..." />}>
-      <ExecutionView ctx={{ newDesign, selectedProjectId, _uid, _uname, addNotification, availableEnvironments, bugKeyInput, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, doLinkBug, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateBug, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, linkingBugTestId, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, perCycleCacheRef, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setBugKeyInput, setCycleTests, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setLinkingBugTestId, setRefreshTrigger, setSelectedBug, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
+      <ExecutionView ctx={{ newDesign, selectedProjectId, handleSaveRunFields, handleCreateIssue, folders, testCases, _uid, _uname, addNotification, availableEnvironments, bugKeyInput, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, doLinkBug, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateBug, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, linkingBugTestId, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, perCycleCacheRef, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setBugKeyInput, setCycleTests, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setLinkingBugTestId, setRefreshTrigger, setSelectedBug, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 

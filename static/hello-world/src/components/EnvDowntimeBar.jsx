@@ -34,11 +34,18 @@ const openTicket = (ticket) => {
   router.open(target).catch(() => {});
 };
 
-export default function EnvDowntimeBar({ projectId, environments, cycle, addNotification }) {
+export default function EnvDowntimeBar({ projectId, environments, cycle, addNotification, variant, formOpen: formOpenProp, onFormOpenChange, onOpenEventsChange }) {
+  // v4.44.0: the 5.0 Ejecución header has its own "Ambiente no disponible" button, so the form
+  // can be controlled from outside (formOpen / onFormOpenChange) and the bar shows the yellow
+  // banner of the design (variant="v5").
+  const isV5 = variant === 'v5';
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [events, setEvents] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busyId, setBusyId] = useState(null);
-  const [formOpen, setFormOpen] = useState(false);
+  const [formOpenLocal, setFormOpenLocal] = useState(false);
+  const formOpen = formOpenProp !== undefined ? formOpenProp : formOpenLocal;
+  const setFormOpen = (v) => { if (onFormOpenChange) onFormOpenChange(v); else setFormOpenLocal(v); };
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ envId: '', scope: 'all', component: '', ticket: '', note: '' });
 
@@ -62,6 +69,13 @@ export default function EnvDowntimeBar({ projectId, environments, cycle, addNoti
   }, [load]);
 
   const open = useMemo(() => events.filter(e => !e.endedAt), [events]);
+  useEffect(() => { if (onOpenEventsChange) onOpenEventsChange(open); }, [open, onOpenEventsChange]);
+  const closedRecent = useMemo(() => events.filter(e => e.endedAt).slice(0, 10), [events]);
+  // When the form is opened from outside, start it with the cycle's environment.
+  useEffect(() => {
+    if (formOpen) setForm(f => (f.envId ? f : { envId: defaultEnvId, scope: 'all', component: '', ticket: '', note: '' }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formOpen]);
   const envList = Array.isArray(environments) ? environments : [];
   // Default the form to the cycle's environment when it is in the catalog.
   const defaultEnvId = useMemo(() => {
@@ -118,42 +132,8 @@ export default function EnvDowntimeBar({ projectId, environments, cycle, addNoti
     }
   };
 
-  return (
-    <div className="tp5-downtime">
-      <div className="tp5-downtime__row">
-        {open.length === 0 ? (
-          <span className="tp5-downtime__ok">
-            <span className="tp5-dot tp5-dot--ok" aria-hidden="true" />
-            {loaded ? 'Sin reportes de ambiente no disponible' : 'Consultando ambientes…'}
-          </span>
-        ) : (
-          <span className="tp5-downtime__title">
-            <span className="tp5-dot tp5-dot--bad" aria-hidden="true" />
-            {open.length === 1 ? '1 ambiente no disponible' : `${open.length} reportes de ambiente no disponible`}
-          </span>
-        )}
-        <button type="button" className="tp5-btn tp5-btn--danger-subtle" onClick={openForm} disabled={envList.length === 0}>
-          Ambiente no disponible
-        </button>
-      </div>
-
-      {open.map(ev => (
-        <div key={ev.id} className="tp5-downtime__event" role="status">
-          <span className="tp5-downtime__what">
-            <strong>{ev.envName}{ev.component ? ` · ${ev.component}` : ' · todo el ambiente'}</strong>
-            <span className="tp5-subtle tp5-small">Sin servicio desde hace {since(ev.startedAt)}{ev.note ? ` · ${ev.note}` : ''}</span>
-          </span>
-          {ev.ticket
-            ? <button type="button" className="tp5-link" onClick={() => openTicket(ev.ticket)}>Ticket {/^https:/i.test(ev.ticket) ? 'del incidente' : ev.ticket}</button>
-            : <span className="tp5-subtle tp5-small">Sin ticket</span>}
-          <button type="button" className="tp5-btn tp5-btn--secondary tp5-btn--sm" onClick={() => restore(ev.id)} disabled={busyId === ev.id}>
-            {busyId === ev.id ? 'Guardando…' : 'Marcar como restablecido'}
-          </button>
-        </div>
-      ))}
-
-      {formOpen && (
-        <div className="tp5-modal-backdrop" role="presentation" onClick={() => !saving && setFormOpen(false)}>
+  // The report form (shared by both variants).
+  const renderForm = () => (
           <form className="tp5-modal" role="dialog" aria-modal="true" aria-label="Reportar ambiente no disponible" onClick={e => e.stopPropagation()} onSubmit={submit}>
             <h2 className="tp5-h2">Ambiente no disponible</h2>
             <p className="tp5-subtle tp5-small" style={{ margin: 0 }}>
@@ -196,6 +176,82 @@ export default function EnvDowntimeBar({ projectId, environments, cycle, addNoti
               <button type="submit" className="tp5-btn tp5-btn--primary" disabled={saving || !selectedEnv}>{saving ? 'Reportando…' : 'Reportar'}</button>
             </div>
           </form>
+  );
+
+  const formModal = formOpen && (
+    <div className="tp5-modal-backdrop" role="presentation" onClick={() => !saving && setFormOpen(false)}>
+      {renderForm()}
+    </div>
+  );
+
+  if (isV5) {
+    return (
+      <>
+        {open.map(ev => (
+          <div key={ev.id} className="tp5-downbanner" role="status">
+            <span className="tp5-downbanner__icon" aria-hidden="true">⚠</span>
+            <p><strong>{ev.component || 'Todo el ambiente'}</strong> no disponible en <strong>{ev.envName}</strong> desde hace <strong>{since(ev.startedAt)}</strong>{ev.note ? ` · ${ev.note}` : ''}</p>
+            <div className="tp5-downbanner__row">
+              {ev.ticket ? <button type="button" className="tp5-ticketchip" onClick={() => openTicket(ev.ticket)}>{/^https:/i.test(ev.ticket) ? 'Ticket del incidente' : ev.ticket} ↗</button> : <span className="tp5-subtle tp5-small">Sin ticket</span>}
+              <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 10, alignItems: 'center' }}>
+                <button type="button" className="tp5-link" onClick={() => setHistoryOpen(o => !o)}>Historial</button>
+                <button type="button" className="tp5-btn tp5-btn--success-outline tp5-btn--sm" onClick={() => restore(ev.id)} disabled={busyId === ev.id}>{busyId === ev.id ? 'Guardando…' : 'Marcar como restablecido'}</button>
+              </span>
+            </div>
+          </div>
+        ))}
+        {historyOpen && (
+          <div className="tp5-card" style={{ padding: '12px 16px' }}>
+            <span className="tp5-eyebrow">Historial reciente</span>
+            {closedRecent.length === 0 ? <p className="tp5-subtle tp5-small" style={{ margin: '6px 0 0' }}>Sin caídas cerradas recientes.</p> : (
+              <ul className="tp5-histlist">
+                {closedRecent.map(ev => <li key={ev.id}>{ev.envName}{ev.component ? ` · ${ev.component}` : ''} — {new Date(ev.startedAt).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} ({since(ev.startedAt, new Date(ev.endedAt).getTime())}){ev.ticket ? ` · ${ev.ticket}` : ''}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+        {formModal}
+      </>
+    );
+  }
+
+  return (
+    <div className="tp5-downtime">
+      <div className="tp5-downtime__row">
+        {open.length === 0 ? (
+          <span className="tp5-downtime__ok">
+            <span className="tp5-dot tp5-dot--ok" aria-hidden="true" />
+            {loaded ? 'Sin reportes de ambiente no disponible' : 'Consultando ambientes…'}
+          </span>
+        ) : (
+          <span className="tp5-downtime__title">
+            <span className="tp5-dot tp5-dot--bad" aria-hidden="true" />
+            {open.length === 1 ? '1 ambiente no disponible' : `${open.length} reportes de ambiente no disponible`}
+          </span>
+        )}
+        <button type="button" className="tp5-btn tp5-btn--danger-subtle" onClick={openForm} disabled={envList.length === 0}>
+          Ambiente no disponible
+        </button>
+      </div>
+
+      {open.map(ev => (
+        <div key={ev.id} className="tp5-downtime__event" role="status">
+          <span className="tp5-downtime__what">
+            <strong>{ev.envName}{ev.component ? ` · ${ev.component}` : ' · todo el ambiente'}</strong>
+            <span className="tp5-subtle tp5-small">Sin servicio desde hace {since(ev.startedAt)}{ev.note ? ` · ${ev.note}` : ''}</span>
+          </span>
+          {ev.ticket
+            ? <button type="button" className="tp5-link" onClick={() => openTicket(ev.ticket)}>Ticket {/^https:/i.test(ev.ticket) ? 'del incidente' : ev.ticket}</button>
+            : <span className="tp5-subtle tp5-small">Sin ticket</span>}
+          <button type="button" className="tp5-btn tp5-btn--secondary tp5-btn--sm" onClick={() => restore(ev.id)} disabled={busyId === ev.id}>
+            {busyId === ev.id ? 'Guardando…' : 'Marcar como restablecido'}
+          </button>
+        </div>
+      ))}
+
+      {formOpen && (
+        <div className="tp5-modal-backdrop" role="presentation" onClick={() => !saving && setFormOpen(false)}>
+          {renderForm()}
         </div>
       )}
     </div>

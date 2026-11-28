@@ -3038,6 +3038,8 @@ resolver.define('getTestExecution', async ({ payload }) => {
           executedAt: prop.executedAt,
           // v4.39.0: first final result of the run (null for runs executed before it existed).
           firstResult: prop.firstResult || null,
+          // v4.44.0 (5.0): per-step results.
+          stepResults: Array.isArray(prop.stepResults) ? prop.stepResults : [],
           executionType: prop.executionType || 'Manual',
           description: runIssue.fields?.description || prop.snapshot?.testCaseDescription || null,
           linkedBugs: prop.linkedBugs || (runIssue.fields?.issuelinks || [])
@@ -3619,8 +3621,26 @@ export const cycleRemovalWorker = async (event) => {
 
 
 
+/**
+ * Step results of a run (Test Pulse 5.0, v4.44.0): [{ i, status, actual }] where `i` is the step
+ * number (1-based), `status` is Passed / Failed / Blocked or '' and `actual` the obtained result.
+ * Returns `previous` when `next` is not an array (field not sent). Capped at 200 steps and 1,000
+ * characters per result so the run property stays small.
+ */
+const STEP_STATUSES = new Set(['Passed', 'Failed', 'Blocked', '']);
+function sanitizeStepResults(next, previous) {
+  if (!Array.isArray(next)) return Array.isArray(previous) ? previous : undefined;
+  return next.slice(0, 200)
+    .map(r => ({
+      i: Math.max(1, Math.min(200, parseInt(r?.i, 10) || 0)),
+      status: STEP_STATUSES.has(r?.status) ? r.status : '',
+      actual: String(r?.actual ?? '').slice(0, 1000)
+    }))
+    .filter(r => r.i >= 1 && (r.status || r.actual));
+}
+
 resolver.define('updateTestStatus', async ({ payload, context }) => {
-  const { cycleId, testId, testRunId, status, comment, evidence, evidences, linkedBugs, steps, iterations, projectId, takeover } = payload;
+  const { cycleId, testId, testRunId, status, comment, evidence, evidences, linkedBugs, steps, iterations, projectId, takeover, stepResults } = payload;
 
   // Resolve target Test Run issue (native V2) and parallelize initial reads
   let targetRunId = testRunId;
@@ -3763,6 +3783,9 @@ resolver.define('updateTestStatus', async ({ payload, context }) => {
       evidences: newEvidences,
       linkedBugs: newLinkedBugs,
       lockedAt: newLockedAt,
+      // v4.44.0 (5.0): result of each step (Pass / Fail / Block + obtained result). Kept as is
+      // when the caller doesn't send it, so older screens never erase it.
+      stepResults: sanitizeStepResults(stepResults, currentProp.stepResults),
       _v2Clean: true
     });
     await api.asUser().requestJira(route`/rest/api/3/issue/${targetRunId}/properties/testpulse-run-data`, {
