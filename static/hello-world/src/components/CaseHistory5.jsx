@@ -57,7 +57,8 @@ export default function CaseHistory5({ history, cycles, plans, onOpenRun, onOpen
   // Summary over every execution (filters only affect the table).
   const executed = rows.filter(r => r.st !== 'Not Run');
   const passed = executed.filter(r => r.st === 'Passed').length;
-  const last = rows[0]; // the resolver returns newest first
+  // Newest execution WITH a result (a newer cycle may hold the case still unexecuted).
+  const last = rows.find(r => r.st !== 'Not Run') || rows[0]; // the resolver returns newest first
   const allBugs = new Map();
   rows.forEach(r => r.bugs.forEach(b => allBugs.set(b.key, b)));
   const openBugs = [...allBugs.values()].filter(b => !b.done);
@@ -118,7 +119,7 @@ export default function CaseHistory5({ history, cycles, plans, onOpenRun, onOpen
             {visible.map((r, idx) => (
               <tr key={`${r.cycleId || idx}-${r.testRunKey || idx}`}>
                 <td className="tp5-nowrap">{fmtDate(r.executedAt)}</td>
-                <td><span className="tp5-strong">{r.cycleSummary || r.cycleKey}</span><br /><span className="tp5-mono tp5-subtle">{r.cycleKey}</span></td>
+                <td>{r.cycleSummary ? <><span className="tp5-strong">{r.cycleSummary}</span><br /></> : null}<span className={r.cycleSummary ? 'tp5-mono tp5-subtle' : 'tp5-mono tp5-strong'}>{r.cycleKey}</span></td>
                 <td className="tp5-subtle-2">{r.planName}</td>
                 <td className="tp5-subtle-2">{r.env}</td>
                 <td className="tp5-subtle-2 tp5-nowrap">{r.tester}</td>

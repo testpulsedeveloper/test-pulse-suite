@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.47.1'}`;
+const APP_VERSION = `v${packageJson.version || '4.47.2'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -2946,12 +2946,15 @@ Then el sistema valida la identidad.
     const walk = (parentId, level) => {
       folders.filter(f => (f.parentId || null) === parentId && matches(f.id)).forEach(f => {
         const total = loadingCounts ? null : getFolderTotalCount(f.id);
+        // Same expand state as the classic tree (open unless closed); a search shows everything.
+        const hasChildren = folders.some(c => c.parentId === f.id && matches(c.id));
+        const isOpen = q ? true : expandedFolders[f.id] !== false;
         rows.push(
           <div key={f.id}
             data-folder-id={f.id}
             role="button" tabIndex={0}
             className={`tp5-folder${activeFolder === f.id ? ' is-active' : ''}${dragOverFolderId === f.id ? ' is-drop' : ''}`}
-            style={{ paddingLeft: 8 + level * 18 }}
+            style={{ paddingLeft: 2 + level * 18 }}
             onClick={() => setActiveFolder(f.id)}
             onKeyDown={(e) => { if (e.key === 'Enter') setActiveFolder(f.id); }}
             draggable
@@ -2959,6 +2962,12 @@ Then el sistema valida la identidad.
             onDragEnd={() => setDraggedFolderId(null)}
             title={total === null ? f.name : `${f.name} · ${total} con subcarpetas`}
             {...dropProps(f.id, `"${f.name}"`)}>
+            {hasChildren ? (
+              <button type="button" className="tp5-folder__chev" aria-expanded={isOpen} aria-label={isOpen ? `Contraer ${f.name}` : `Expandir ${f.name}`}
+                onClick={(e) => { e.stopPropagation(); setExpandedFolders(prev => ({ ...prev, [f.id]: !isOpen })); }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" style={{ transform: isOpen ? 'rotate(90deg)' : 'none' }}><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            ) : <span className="tp5-folder__chev" aria-hidden="true" />}
             <FolderIcon />
             <span className="tp5-folder__name">{f.name}</span>
             <span className="tp5-folder__actions">
@@ -2969,16 +2978,23 @@ Then el sistema valida la identidad.
             <span className="tp5-folder__count">{loadingCounts ? '…' : getFolderDirectCount(f.id)}</span>
           </div>
         );
-        walk(f.id, level + 1);
+        if (isOpen) walk(f.id, level + 1);
       });
     };
     walk(null, 0);
+    const allOpen = folders.every(f => expandedFolders[f.id] !== false);
     const rootCount = loadingCounts ? '…' : testCases.filter(t => !t.folderId).length;
     return (
       <aside className="tp5-folders" aria-label="Carpetas">
         <div className="tp5-folders__head">
           <span className="tp5-eyebrow">Carpetas</span>
-          <button type="button" className="tp5-iconbtn" aria-label="Nueva carpeta" title="Nueva carpeta" onClick={() => handleCreateFolder(null)}>
+          {folders.some(f => f.parentId) && (
+            <button type="button" className="tp5-link" style={{ marginLeft: 'auto', fontSize: 12 }}
+              onClick={() => { const next = {}; folders.forEach(f => { next[f.id] = !allOpen; }); setExpandedFolders(next); }}>
+              {allOpen ? 'Contraer todo' : 'Expandir todo'}
+            </button>
+          )}
+          <button type="button" className="tp5-iconbtn" style={{ marginLeft: folders.some(f => f.parentId) ? 6 : 'auto' }} aria-label="Nueva carpeta" title="Nueva carpeta" onClick={() => handleCreateFolder(null)}>
             <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
           </button>
         </div>
@@ -2996,10 +3012,11 @@ Then el sistema valida la identidad.
         <nav aria-label="Árbol de carpetas" className="tp5-folders__tree">
           <div data-folder-id="__ROOT__" role="button" tabIndex={0}
             className={`tp5-folder${activeFolder === null ? ' is-active' : ''}${dragOverFolderId === '__ROOT__' ? ' is-drop' : ''}`}
-            style={{ paddingLeft: 8 }}
+            style={{ paddingLeft: 2 }}
             onClick={() => setActiveFolder(null)}
             onKeyDown={(e) => { if (e.key === 'Enter') setActiveFolder(null); }}
             {...dropProps('__ROOT__', 'Sin carpeta')}>
+            <span className="tp5-folder__chev" aria-hidden="true" />
             <FolderIcon />
             <span className="tp5-folder__name">Sin carpeta</span>
             <span className="tp5-folder__count">{rootCount}</span>
@@ -3024,7 +3041,7 @@ Then el sistema valida la identidad.
         <div
           className={`tp5-casepanel${isFloat ? ' is-float' : ''}`}
           style={isFloat
-            ? { position: 'fixed', left: repo5FloatPos.x, top: repo5FloatPos.y, width: 'min(1000px, 94vw)', height: 'min(720px, 86vh)', background: '#FFFFFF', color: '#172B4D' }
+            ? { position: 'fixed', left: repo5FloatPos.x, top: repo5FloatPos.y, width: 'min(1360px, 96vw)', height: 'min(860px, 90vh)', background: '#FFFFFF', color: '#172B4D' }
             : { ...getDockContainerStyle(dockPosition, { drawerWidth: DOCK_SPLIT_WIDTH, dockWidthPx: dockWidth, isResizing: isResizingDock, drawerMinWidth: '380px', backgroundColor: '#FFFFFF' }), color: '#172B4D' }}
           onClick={e => e.stopPropagation()}
         >
@@ -3148,7 +3165,7 @@ Then el sistema valida la identidad.
     });
   };
   // Position of the floating case window (Flotante), moved by dragging its header.
-  const [repo5FloatPos, setRepo5FloatPos] = useState(() => ({ x: Math.max(16, Math.round((window.innerWidth - Math.min(1000, window.innerWidth * 0.94)) / 2)), y: 48 }));
+  const [repo5FloatPos, setRepo5FloatPos] = useState(() => ({ x: Math.max(8, Math.round((window.innerWidth - Math.min(1360, window.innerWidth * 0.96)) / 2)), y: 32 }));
 
   // 5.0 wraps the same layout with the full-width page header of the design.
   const renderDesignTab = () => (newDesign

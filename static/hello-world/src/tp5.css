@@ -330,7 +330,7 @@
 /* ── Repositorio 5.0: folder panel ─────────────────────────── */
 .tp5 .tp5-folders { flex: 0 0 280px; width: 280px; background: #FFFFFF; border-right: 1px solid var(--tp5-border); padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
 .tp5 .tp5-folders__head { display: flex; align-items: center; gap: 8px; }
-.tp5 .tp5-folders__head .tp5-iconbtn { margin-left: auto; }
+
 .tp5 .tp5-iconbtn { width: 28px; height: 28px; border: 1px solid var(--tp5-border); border-radius: 6px; background: #FFFFFF; color: var(--tp5-text-subtle); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .tp5 .tp5-iconbtn:hover { background: var(--tp5-bg); color: var(--tp5-text); }
 .tp5 .tp5-folders__tree { display: flex; flex-direction: column; gap: 2px; }
@@ -690,3 +690,7 @@
    Inicio row layout (.tp5-row, a flex container) never applies to a table row. */
 .tp5 .tp5-table tr.tp5-trow { cursor: pointer; }
 .tp5 .tp5-table tr.tp5-trow:hover td { background: var(--tp5-bg); }
+
+/* Folder tree expand/collapse (v4.47.2) */
+.tp5 .tp5-folder__chev { flex: 0 0 18px; width: 18px; height: 18px; border: 0; padding: 0; background: none; color: var(--tp5-text-subtle); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; }
+button.tp5-folder__chev:hover { background: rgba(9, 30, 66, .08); }
