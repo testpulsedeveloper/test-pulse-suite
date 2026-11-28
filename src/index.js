@@ -54,6 +54,8 @@ import {
 } from './utils/customFieldConfig.js';
 import { registerFolderResolvers } from './resolvers/folderResolvers.js';
 import { registerConfigResolvers } from './resolvers/configResolvers.js';
+// Test Pulse 5.0 (v4.42.0): "Ambiente no disponible" reports.
+import { registerEnvDowntimeResolvers } from './resolvers/envDowntimeResolvers.js';
 import { registerBugResolvers } from './resolvers/bugResolvers.js';
 import { registerLifecycleResolvers } from './resolvers/lifecycleResolvers.js';
 import { registerTestCaseResolvers } from './resolvers/testCaseResolvers.js';
@@ -479,6 +481,9 @@ registerFolderResolvers(resolver);
 
 // === Project Management, Configuration, Permissions, Bulk Mapping & Attachments ===
 registerConfigResolvers(resolver);
+
+// === Test Pulse 5.0: environment downtime reports (v4.42.0) ===
+registerEnvDowntimeResolvers(resolver);
 
 // === Ciclo de vida: initiatives, phases, deliverables and Confluence findings reports (v4.17.0) ===
 registerLifecycleResolvers(resolver);

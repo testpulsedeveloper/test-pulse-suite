@@ -39,7 +39,11 @@ import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
 
 const APP_VERSION = `v${packageJson.version || '4.3.0'}`;
 
+// Test Pulse 5.0 (v4.42.0): cycle health indicators.
+import CycleHealthCard from '../components/CycleHealthCard';
 export default function PlanningView({ ctx }) {
+  // Test Pulse 5.0 (v4.42.0): Spanish labels when the new design is on; classic text otherwise.
+  const v5 = (classic, next) => (ctx.newDesign ? next : classic);
   const {
     activeCycleIdRef,
     addNotification,
@@ -319,7 +323,7 @@ export default function PlanningView({ ctx }) {
                 <div style={{ padding: '12px', borderBottom: '1px solid #F1F5F9' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
                     <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
-                      Test Plan Activo
+                      {v5('Test Plan Activo', 'Plan activo')}
                     </span>
                     <button
                       type="button"
@@ -740,7 +744,7 @@ export default function PlanningView({ ctx }) {
                 <div style={{ padding: '12px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                     <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>
-                      Available Cycles
+                      {v5('Available Cycles', 'Ciclos disponibles')}
                     </span>
                     <span style={{ fontSize: '10px', color: '#94A3B8' }}>
                       {availableUnlinkedCycles.length} listos
@@ -832,7 +836,7 @@ export default function PlanningView({ ctx }) {
                   }}
                 >
                   <span style={{ fontSize: '15px', lineHeight: 1 }}>+</span>
-                  <span>New Cycle/Plan</span>
+                  <span>{v5('New Cycle/Plan', 'Nuevo ciclo o plan')}</span>
                 </button>
               </div>
             </aside>
@@ -1065,6 +1069,16 @@ export default function PlanningView({ ctx }) {
                   </div>
                 </div>
 
+                {/* v4.42.0 (5.0): "Salud del ciclo", eight indicators over the selected cycle. */}
+                {ctx.newDesign && (
+                  <CycleHealthCard
+                    projectId={ctx.selectedProjectId}
+                    cycle={selectedCycle}
+                    tests={cycleTests}
+                    schedule={{ ...(selectedCycle?.schedule || {}), ...cycleScheduleForm }}
+                    environments={ctx.availableEnvironments}
+                  />
+                )}
                 {/* CARD 1: CONFIGURACIÓN DE CALENDARIO Y FECHAS DEL CICLO (data-purpose="cycle-calendar-config-card") */}
                 <div style={{
                   background: '#FFFFFF',
@@ -1621,7 +1635,7 @@ export default function PlanningView({ ctx }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       {renderSectionChevron('planning-cycle')}
                       <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1E293B' }}>
-                        Tests in this Cycle ({inCycleCount})
+                        {v5('Tests in this Cycle', 'Casos del ciclo')} ({inCycleCount})
                       </h2>
                       {!isSectionCollapsed('planning-cycle') && deduplicatedCycleTests.length > 0 && renderGroupToolbar(`plan-cycle-${selectedCycle?.id || ''}`, filteredCycleTests)}
                     </div>
@@ -1883,7 +1897,7 @@ export default function PlanningView({ ctx }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       {renderSectionChevron('planning-available')}
                       <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1E293B' }}>
-                        Available Test Cases
+                        {v5('Available Test Cases', 'Casos disponibles')}
                       </h2>
                       <span style={{
                         padding: '2px 8px',
@@ -2347,7 +2361,7 @@ export default function PlanningView({ ctx }) {
                               }}
                             >
                               <span>+</span>
-                              <span>Add</span>
+                              <span>{v5('Add', 'Agregar')}</span>
                             </button>
                           </div>
                         );

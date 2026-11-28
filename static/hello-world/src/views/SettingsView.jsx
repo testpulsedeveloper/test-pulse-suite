@@ -149,6 +149,8 @@ export default function SettingsView({ ctx }) {
     const [savingDesignSwitch, setSavingDesignSwitch] = React.useState(false);
     // v4.41.0: selected section and index filter (5.0 design only).
     const [tp5Sec, setTp5Sec] = React.useState('acceso');
+    // v4.42.0: comma-separated components while an environment row is being edited.
+    const [editingEnvComponents, setEditingEnvComponents] = React.useState('');
     const [tp5SecQuery, setTp5SecQuery] = React.useState('');
     const [exitReportPlanId, setExitReportPlanId] = React.useState('ALL');
     const [exitReportCycleIds, setExitReportCycleIds] = React.useState([]);
@@ -1876,6 +1878,23 @@ export default function SettingsView({ ctx }) {
                               ) : (
                                 <span>{envItem.description || '—'}</span>
                               )}
+                              {/* v4.42.0 (5.0): components of the environment. */}
+                              {ctx.newDesign && (isEditingRow ? (
+                                <input
+                                  type="text"
+                                  value={editingEnvComponents}
+                                  onChange={(e) => setEditingEnvComponents(e.target.value)}
+                                  placeholder="Componentes, separados por coma (p. ej. Autorizador, OMS)"
+                                  aria-label="Componentes del ambiente"
+                                  style={{ width: '100%', marginTop: '6px', padding: '5px 8px', borderRadius: '4px', border: '1px solid #CBD5E1', fontSize: '0.8rem' }}
+                                />
+                              ) : (envItem.components || []).length > 0 && (
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                                  {envItem.components.map(c => (
+                                    <span key={c} style={{ padding: '1px 7px', borderRadius: '4px', background: '#F1F2F4', color: '#44546F', fontSize: '0.72rem', fontWeight: 600 }}>{c}</span>
+                                  ))}
+                                </div>
+                              ))}
                             </td>
                             <td style={{ padding: '10px 14px', textAlign: 'center', verticalAlign: 'middle' }}>
                               <span style={{
@@ -1900,7 +1919,15 @@ export default function SettingsView({ ctx }) {
                                       if (!cleanName) return;
                                       const nextList = availableEnvironments.map(item =>
                                         item.id === envItem.id
-                                          ? { ...item, name: cleanName, description: editingEnvDesc.trim() }
+                                          ? {
+                                            ...item,
+                                            name: cleanName,
+                                            description: editingEnvDesc.trim(),
+                                            // 5.0 edits the component list; the classic view keeps it as is.
+                                            components: ctx.newDesign
+                                              ? Array.from(new Set(editingEnvComponents.split(',').map(c => c.trim()).filter(Boolean)))
+                                              : (item.components || [])
+                                          }
                                           : item
                                       );
                                       setEditingEnvId(null);
@@ -1944,6 +1971,7 @@ export default function SettingsView({ ctx }) {
                                       setEditingEnvId(envItem.id);
                                       setEditingEnvName(envItem.name);
                                       setEditingEnvDesc(envItem.description || '');
+                                      setEditingEnvComponents((envItem.components || []).join(', '));
                                     }}
                                     style={{
                                       padding: '4px 9px',

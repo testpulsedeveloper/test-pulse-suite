@@ -36,6 +36,8 @@ import {
 } from '../components/CommonComponents';
 import { invoke, queryClient, clearPersistentCache } from '../utils/queryClient';
 import { extractEpicAndRequirement } from '../utils/traceabilityHelpers';
+// Test Pulse 5.0 (v4.42.0): "Ambiente no disponible" bar.
+import EnvDowntimeBar from '../components/EnvDowntimeBar';
 import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResizeHandle, getDockOverlayStyle, getDockContainerStyle, DOCK_SPLIT_WIDTH } from '../components/PanelDockSwitcher';
 
 const APP_VERSION = `v${packageJson.version || '4.5.1'}`;
@@ -140,6 +142,8 @@ export default function ExecutionView({ ctx }) {
   // "Reprocesar automatización": ingests automation result comments (any tool) posted on this cycle's
   // Test Runs before the automatic comment trigger existed (or while it failed).
   const [reprocessingAutomation, setReprocessingAutomation] = React.useState(false);
+  // v4.42.0 (5.0): the three sync actions live in one "Sincronizar" menu.
+  const [syncMenuOpen, setSyncMenuOpen] = React.useState(false);
   const handleReprocessAutomation = async () => {
     if (!selectedCycle?.id || reprocessingAutomation) return;
     setReprocessingAutomation(true);
@@ -907,6 +911,29 @@ export default function ExecutionView({ ctx }) {
 
                       {/* Header Actions */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                        {/* 5.0: one "Sincronizar" button opens a menu with the three sync actions.
+                            Classic: the wrapper uses display: contents, so the layout is unchanged. */}
+                        <div className={ctx.newDesign ? 'tp5-menu' : undefined} style={ctx.newDesign ? undefined : { display: 'contents' }}>
+                        {ctx.newDesign && (
+                          <button
+                            type="button"
+                            className="tp5-btn tp5-btn--secondary tp5-btn--sm"
+                            aria-haspopup="menu"
+                            aria-expanded={syncMenuOpen}
+                            onClick={() => setSyncMenuOpen(o => !o)}
+                          >
+                            Sincronizar
+                            <svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                          </button>
+                        )}
+                        {(!ctx.newDesign || syncMenuOpen) && (
+                        <div
+                          className={ctx.newDesign ? 'tp5-menu__panel' : undefined}
+                          role={ctx.newDesign ? 'menu' : undefined}
+                          style={ctx.newDesign ? undefined : { display: 'contents' }}
+                          onClickCapture={() => { if (ctx.newDesign) setTimeout(() => setSyncMenuOpen(false), 0); }}
+                          onMouseLeave={() => ctx.newDesign && setSyncMenuOpen(false)}
+                        >
                         <button
                           type="button"
                           onClick={() => {
@@ -998,6 +1025,9 @@ export default function ExecutionView({ ctx }) {
                           <span aria-hidden="true">🤖</span>
                           <span>{reprocessingAutomation ? 'Reprocesando…' : 'Reprocesar automatización'}</span>
                         </button>
+                        </div>
+                        )}
+                        </div>
 
                         <button
                           type="button"
@@ -1029,6 +1059,16 @@ export default function ExecutionView({ ctx }) {
                         </button>
                       </div>
                     </div>
+
+                    {/* v4.42.0 (5.0): open "Ambiente no disponible" reports + the button to report one. */}
+                    {ctx.newDesign && (
+                      <EnvDowntimeBar
+                        projectId={ctx.selectedProjectId}
+                        environments={availableEnvironments}
+                        cycle={selectedCycle}
+                        addNotification={addNotification}
+                      />
+                    )}
 
                     {/* SEMÁFORO DE RITMO & PULSO VITAL (2-Column Grid) */}
                     <div style={{
@@ -3429,13 +3469,13 @@ export default function ExecutionView({ ctx }) {
                           <>
                             <div style={{ fontSize: '1.75rem', marginBottom: '0.5rem' }}>📭</div>
                             <p style={{ fontWeight: 600, color: '#172B4D', margin: '0 0 0.5rem 0' }}>No hay casos asignados a este ciclo.</p>
-                            <p style={{ fontSize: '12px', margin: '0 0 1rem 0' }}>Ve a la pestaña de <strong>Planning</strong> para agregar casos de prueba a este ciclo.</p>
+                            <p style={{ fontSize: '12px', margin: '0 0 1rem 0' }}>Ve a la pestaña de <strong>{ctx.newDesign ? 'Planeación' : 'Planning'}</strong> para agregar casos de prueba a este ciclo.</p>
                             <button
                               className="btn-primary"
                               style={{ padding: '0.4rem 1rem', fontSize: '12px', fontWeight: 600 }}
                               onClick={() => setActiveTab('planning')}
                             >
-                              📋 Ir a Planning
+                              {ctx.newDesign ? 'Ir a Planeación' : '📋 Ir a Planning'}
                             </button>
                           </>
                         ) : (

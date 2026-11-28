@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.41.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.42.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -633,7 +633,9 @@ function App() {
         id: String(item?.id || `env-${idx}`),
         name: String(item?.name || item?.key || '').trim(),
         description: String(item?.description || '').trim(),
-        active: item?.active !== false
+        active: item?.active !== false,
+        // v4.42.0: optional components, for partial "Ambiente no disponible" reports.
+        components: Array.isArray(item?.components) ? item.components.map(c => String(c).trim()).filter(Boolean) : []
       };
     }).filter(e => Boolean(e.name));
   }, [projectConfig?.environments, DEFAULT_EXECUTION_ENVIRONMENTS]);
@@ -2728,7 +2730,7 @@ Then el sistema valida la identidad.
             {/* Modern Folders & Suites Header */}
             <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--jira-border, #DCDFE4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Folders &amp; Suites</span>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--jira-subtle, #626F86)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>{newDesign ? 'Carpetas' : 'Folders & Suites'}</span>
                 <span className="ads-lozenge ads-lozenge-subtle" style={{ borderRadius: '9999px', fontSize: '10px' }}>{folders.length + 1}</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -3138,7 +3140,7 @@ Then el sistema valida la identidad.
         <div style={{ padding: '0.75rem', borderTop: '1px solid var(--jira-border, #DCDFE4)', marginTop: 'auto' }}>
           <button className="btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.82rem', padding: '0.45rem' }} onClick={() => handleCreateFolder(null)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            <span>+ New Folder</span>
+            <span>{newDesign ? 'Nueva carpeta' : '+ New Folder'}</span>
           </button>
         </div>
       </aside>
@@ -3182,8 +3184,14 @@ Then el sistema valida la identidad.
                   <span>Carpetas</span>
                 </button>
               )}
-              <span style={{ fontSize: '18px', lineHeight: 1, flexShrink: 0 }}>📁</span>
-              <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
+              {/* 5.0 (v4.42.0): no emoji; an eyebrow with the repository total sits above the title. */}
+              {!newDesign && <span style={{ fontSize: '18px', lineHeight: 1, flexShrink: 0 }}>📁</span>}
+              {newDesign && (
+                <span className="tp5-eyebrow tp5-repo-eyebrow">
+                  Repositorio · {testCases.length.toLocaleString('es-MX')} casos
+                </span>
+              )}
+              <h1 className={newDesign ? 'tp5-page-title' : undefined} style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--jira-text, #172B4D)' }}>
                 {activeFolder === null ? 'Sin Carpeta (Raíz)' : (folders.find(f => f.id === activeFolder)?.name || 'Carpeta')}
               </h1>
               <span className="ads-lozenge ads-lozenge-subtle">
@@ -3196,14 +3204,16 @@ Then el sistema valida la identidad.
                 </span>
               )}
             </div>
-            <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', color: 'var(--jira-subtle, #626F86)' }}>
-              Explora, edita y organiza casos de prueba vinculados a la suite de regresión y diseño.
-            </p>
+            {!newDesign && (
+              <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', color: 'var(--jira-subtle, #626F86)' }}>
+                Explora, edita y organiza casos de prueba vinculados a la suite de regresión y diseño.
+              </p>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             <button className="btn-primary" onClick={() => setTestCaseEditor({ mode: 'create' })} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '0.45rem 0.85rem' }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              <span>Nuevo caso de prueba</span>
+              <span>{newDesign ? 'Nuevo caso' : 'Nuevo caso de prueba'}</span>
             </button>
             <button
               className="btn-secondary"
@@ -3216,7 +3226,7 @@ Then el sistema valida la identidad.
                 <line x1="12" y1="12" x2="12" y2="21"></line>
                 <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
               </svg>
-              <span>Carga Masiva CSV</span>
+              <span>{newDesign ? 'Importar CSV' : 'Carga Masiva CSV'}</span>
             </button>
           </div>
         </div>
@@ -8322,19 +8332,19 @@ Then el sistema valida la identidad.
 
   const renderPlanningTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Planning..." />}>
-      <PlanningView ctx={{ activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, openRenameDialog, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
+      <PlanningView ctx={{ newDesign, activeCycleIdRef, addNotification, addingProgress, availableEnvironments, calcScheduleDays, cycleScheduleForm, cycleTests, deferredSearchQuery, deletedIdsRef, filteredTestCycles, findTc, folderPaths, formatShortDateEs, getExecVal, groupByFolder, handleAddTestToCycle, handleCreateIssue, openRenameDialog, handleCycleSelect, handleLinkCycleToPlan, handleRemoveManyFromCycle, handleRemoveTestFromCycle, handleSaveCycleSchedule, handleSavePlanSchedule, handleUnlinkCycleFromPlan, handleDeleteCycle, canDeleteIssues, isAddingAll, isAdmin, isCycleInPlan, isCycleScheduleOpen, isFolderSidebarVisible, isLoadingCycleTests, isPlanCalendarOpen, isResizing, isSavingCycleSchedule, isSavingPlanSchedule, isSectionCollapsed, loading, newHolidayDate, newHolidayDesc, perCycleCacheRef, perCycleDeletedRef, planScheduleForm, planningAvailVisible, planningChecked, planningCycleSearch, planningCycleVisible, planningExecutionType, planningFolder, planningPlanSearch, planningPriority, planningShowAllCycles, projectConfig, renderGroupToolbar, renderGroupedList, renderSectionChevron, safeSetCycleTests, selectedCycle, selectedPlanId, selectedProjectId, selectedTestsForCycle, setActiveTab, setAddingProgress, setCycleScheduleForm, setCycleTests, setIsAddingAll, setIsCycleScheduleOpen, setIsPlanCalendarOpen, setIsResizing, setNewHolidayDate, setNewHolidayDesc, setPlanScheduleForm, setPlanningAvailVisible, setPlanningChecked, setPlanningCycleVisible, setPlanningExecutionType, setPlanningFolder, setPlanningPlanSearch, setPlanningPriority, setPlanningShowAllCycles, setSelectedCycle, setSelectedPlanId, setSelectedTestsForCycle, setTestCycles, setTestPlans, showConfirm, sidebarWidth, testCases, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 
   const renderExecutionTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando módulo de Execution..." />}>
-      <ExecutionView ctx={{ _uid, _uname, addNotification, availableEnvironments, bugKeyInput, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, doLinkBug, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateBug, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, linkingBugTestId, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, perCycleCacheRef, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setBugKeyInput, setCycleTests, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setLinkingBugTestId, setRefreshTrigger, setSelectedBug, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
+      <ExecutionView ctx={{ newDesign, selectedProjectId, _uid, _uname, addNotification, availableEnvironments, bugKeyInput, calcScheduleDays, cycleScheduleForm, cycleTests, deferredExecutionSearch, doLinkBug, execFolderFilter, execTesterFilter, execTesterFilterSource, executionChecked, executionCurrentPage, executionPageSize, executionSearchQuery, executionSortBy, executionStatusFilter, executionTestDetails, expandedExecutionTest, filteredTestCycles, findTc, folderPaths, formatScenarioHtml, formatShortDateEs, getExecVal, getStatusColor, getStatusTextColor, groupByFolder, groupToolBtnStyle, handleAddIteration, handleCaptureScreen, handleCreateBug, handleCreateIssue, handleCycleSelect, handleDeleteEvidence, handleDeleteIteration, handleIterationChange, handleOpenQrCapture, handlePreviewEvidence, handleRenameEvidence, handleRunTest, handleStopExecution, handleToggleExecutionTest, handleUpdateTestStatus, handleUploadEvidence, isAdmin, isCycleInPlan, isFolderSidebarVisible, isLoadingCycleTests, isResizing, isTestMine, isTestUnassigned, linkingBugTestId, matchesFolder, matchesTester, mergeIterationsPreservingLocal, myAccountId, openAssignModal, perCycleCacheRef, planCyclesSummary, planScheduleForm, renderGroupToolbar, renderGroupedList, runningTests, selectedCycle, selectedPlanId, setActiveTab, setBugKeyInput, setCycleTests, setExecFolderFilter, setExecTesterFilter, setExecTesterFilterSource, setExecutionChecked, setExecutionCurrentPage, setExecutionPageSize, setExecutionSearchQuery, setExecutionSortBy, setExecutionStatusFilter, setExpandedExecutionTest, setIsResizing, setLinkingBugTestId, setRefreshTrigger, setSelectedBug, setSelectedCycle, setSelectedPlanId, sidebarWidth, testCycles, testPlans, toggleFolderSidebar }} />
     </Suspense>
   );
 
   const renderReportsTab = () => (
     <Suspense fallback={<TestPulseLoader size={110} text="Cargando métricas y tableros de Reports..." />}>
-      <ReportsView ctx={{ addNotification, availableEnvironments, calcScheduleDays, circuitBreakerActive, context, dashboardBugSearch, dashboardCycleBugFilter, dashboardGeneralBugSearch, dashboardGeneralBugStatusTab, dashboardSubView, dashboardWidgets, draggedWidgetIndex, executiveReportBuild, executiveReportContainerRef, executiveReportModalOpen, executiveReportNotes, executiveReportSubject, findTc, folderPaths, folders, formatShortDateEs, getExecVal, handleAddWidget, handleConfirmLinkUnlinkedBug, handleDragOver, handleDragStart, handleDrop, handleMoveWidget, handleRemoveWidget, handleRemoveWidgetByType, handleResetDashboardLayout, handleSaveDashboardLayout, handleToggleWidgetWidth, isCustomizingDashboard, isCycleInPlan, isFolderSidebarVisible, isHydratingReport, isLinkingUnlinkedBugLoading, isRefreshingReport, isResizing, linkingUnlinkedBug, loadReportData, perCycleCacheRef, planScheduleForm, projectConfig, projects, reportAutomationConfig, reportData, reportLoading, reportSelectedCycles, reportSelectedPlans, reportSelectedVersions, requirementsMap, runsCycleCarouselRef, runsPlanDropdownOpen, selectedDashboardSeverityFilter, selectedPlanId, selectedProjectId, setDashboardBugSearch, setDashboardCycleBugFilter, setDashboardGeneralBugSearch, setDashboardGeneralBugStatusTab, setDashboardSubView, setExecutiveReportBuild, setExecutiveReportModalOpen, setExecutiveReportNotes, setExecutiveReportSubject, setIsCustomizingDashboard, setIsResizing, setLinkingUnlinkedBug, setReportAutomationLastDispatch, setReportAutomationTesting, setReportSelectedCycles, setReportSelectedPlans, setRunsPlanDropdownOpen, setSelectedBug, setSelectedDashboardSeverityFilter, setShowAddWidgetModal, setShowUnlinkedBugsModal, setTargetCycleForBug, setTargetTestForBug, showAddWidgetModal, showUnlinkedBugsModal, sidebarWidth, targetCycleForBug, targetTestForBug, testCases, testCycles, testPlans, toggleFolderSidebar, unlinkedBugs }} />
+      <ReportsView ctx={{ newDesign, addNotification, availableEnvironments, calcScheduleDays, circuitBreakerActive, context, dashboardBugSearch, dashboardCycleBugFilter, dashboardGeneralBugSearch, dashboardGeneralBugStatusTab, dashboardSubView, dashboardWidgets, draggedWidgetIndex, executiveReportBuild, executiveReportContainerRef, executiveReportModalOpen, executiveReportNotes, executiveReportSubject, findTc, folderPaths, folders, formatShortDateEs, getExecVal, handleAddWidget, handleConfirmLinkUnlinkedBug, handleDragOver, handleDragStart, handleDrop, handleMoveWidget, handleRemoveWidget, handleRemoveWidgetByType, handleResetDashboardLayout, handleSaveDashboardLayout, handleToggleWidgetWidth, isCustomizingDashboard, isCycleInPlan, isFolderSidebarVisible, isHydratingReport, isLinkingUnlinkedBugLoading, isRefreshingReport, isResizing, linkingUnlinkedBug, loadReportData, perCycleCacheRef, planScheduleForm, projectConfig, projects, reportAutomationConfig, reportData, reportLoading, reportSelectedCycles, reportSelectedPlans, reportSelectedVersions, requirementsMap, runsCycleCarouselRef, runsPlanDropdownOpen, selectedDashboardSeverityFilter, selectedPlanId, selectedProjectId, setDashboardBugSearch, setDashboardCycleBugFilter, setDashboardGeneralBugSearch, setDashboardGeneralBugStatusTab, setDashboardSubView, setExecutiveReportBuild, setExecutiveReportModalOpen, setExecutiveReportNotes, setExecutiveReportSubject, setIsCustomizingDashboard, setIsResizing, setLinkingUnlinkedBug, setReportAutomationLastDispatch, setReportAutomationTesting, setReportSelectedCycles, setReportSelectedPlans, setRunsPlanDropdownOpen, setSelectedBug, setSelectedDashboardSeverityFilter, setShowAddWidgetModal, setShowUnlinkedBugsModal, setTargetCycleForBug, setTargetTestForBug, showAddWidgetModal, showUnlinkedBugsModal, sidebarWidth, targetCycleForBug, targetTestForBug, testCases, testCycles, testPlans, toggleFolderSidebar, unlinkedBugs }} />
     </Suspense>
   );
 

@@ -42,7 +42,12 @@ const sanitizeEnvironmentsList = (envs) => {
       return {
         id: String(e.id || `env-${idx}-${String(e.name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
         name: String(e.name || '').trim(),
-        description: String(e.description || '').trim()
+        description: String(e.description || '').trim(),
+        // v4.42.0: components of the environment (e.g. "Autorizador B24", "OMS"), used by
+        // "Ambiente no disponible" to report a partial outage. Optional, max 30, unique.
+        components: Array.isArray(e.components)
+          ? Array.from(new Set(e.components.map(c => String(c || '').trim().slice(0, 80)).filter(Boolean))).slice(0, 30)
+          : []
       };
     })
     .filter(e => e.name.length > 0);
