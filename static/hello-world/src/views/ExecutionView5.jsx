@@ -39,7 +39,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
   const [linking, setLinking] = useState(false);
   const [bugKey, setBugKey] = useState('');
   const [comment, setComment] = useState(test.comment || '');
-  const [floatPos, setFloatPos] = useState(() => ({ x: Math.max(16, Math.round((window.innerWidth - Math.min(1100, window.innerWidth * 0.94)) / 2)), y: 40 }));
+  const [floatPos, setFloatPos] = useState(() => ({ x: Math.max(8, Math.round((window.innerWidth - Math.min(1360, window.innerWidth * 0.96)) / 2)), y: 32 }));
   const fileRef = useRef(null);
   useEffect(() => { setComment(test.comment || ''); }, [test.id, test.comment]);
 
@@ -156,7 +156,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
       {evidences.length > 0 && (
         <div className="tp5-evgrid">
           {evidences.map((e, i) => (
-            <button key={i} type="button" className="tp5-evthumb" onClick={() => handlePreviewEvidence && handlePreviewEvidence(e, test)} title={evName(e)}>
+            <button key={i} type="button" className="tp5-evthumb" onClick={() => handlePreviewEvidence && handlePreviewEvidence(e, evName(e))} title={evName(e)}>
               <span className="tp5-ellipsis">{/\.(mp4|webm|mov)$/i.test(evName(e)) ? '▶ ' : ''}{evName(e)}</span>
             </button>
           ))}
@@ -306,7 +306,7 @@ function ExecCasePanel5({ ctx, test, details, nav, onClose, downtimeForEnv }) {
     <div style={getDockOverlayStyle(dockPosition, 1200)} onClick={() => { if (isFloat) onClose(); }}>
       <div className={`tp5-casepanel${isFloat ? ' is-float' : ''}`}
         style={isFloat
-          ? { position: 'fixed', left: floatPos.x, top: floatPos.y, width: 'min(1100px, 94vw)', height: 'min(820px, 90vh)', background: '#FFFFFF', color: '#172B4D' }
+          ? { position: 'fixed', left: floatPos.x, top: floatPos.y, width: 'min(1360px, 96vw)', height: 'min(860px, 90vh)', background: '#FFFFFF', color: '#172B4D' }
           : { ...getDockContainerStyle(dockPosition, { drawerWidth: DOCK_SPLIT_WIDTH, dockWidthPx: dockWidth, isResizing, drawerMinWidth: '380px', backgroundColor: '#FFFFFF' }), color: '#172B4D' }}
         onClick={e => e.stopPropagation()}>
         {!isFloat && <PanelResizeHandle dockPosition={dockPosition} />}

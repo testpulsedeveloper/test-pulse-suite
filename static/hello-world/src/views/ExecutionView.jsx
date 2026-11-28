@@ -1930,7 +1930,7 @@ export default function ExecutionView({ ctx }) {
                           <div
                             onClick={(e) => e.stopPropagation()}
                             style={getDockContainerStyle(dockPosition, {
-                              centerMaxWidth: '980px',
+                              centerMaxWidth: '1380px',
                               centerWidth: '100%',
                               centerHeight: 'auto',
                               centerMinHeight: '420px',

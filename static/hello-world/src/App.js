@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.47.2'}`;
+const APP_VERSION = `v${packageJson.version || '4.47.3'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -6911,7 +6911,11 @@ Then el sistema valida la identidad.
     const id = typeof ev === 'object' ? (ev.id || ev.attachmentId) : ev;
     if (!id) return;
 
-    let filename = explicitFilename || (typeof ev === 'object' ? ev.filename : null) || `evidence_${id}`;
+    // Only a string can be a file name: callers sometimes pass other things as the second
+    // argument (e.g. the run object), which used to crash the preview modal on `.match`.
+    const explicitName = typeof explicitFilename === 'string' && explicitFilename.trim() ? explicitFilename : null;
+    const evName = typeof ev === 'object' && typeof ev.filename === 'string' ? ev.filename : null;
+    let filename = explicitName || evName || `evidence_${id}`;
     const note = (typeof ev === 'object' && ev.note) ? ev.note : null;
     const rawMime = (typeof ev === 'object' && ev.mimeType) ? String(ev.mimeType).toLowerCase() : '';
 
