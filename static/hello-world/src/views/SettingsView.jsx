@@ -54,17 +54,17 @@ const TP5_SETTINGS_GROUPS = [
     { id: 'tipos', label: 'Tipos de incidencia', hint: 'Casos, ciclos, planes, ejecuciones y defectos' }
   ] },
   { name: 'Ejecución', items: [
-    { id: 'ambientes', label: 'Ambientes', hint: 'Catálogo de ambientes de ejecución' },
+    { id: 'ambientes', label: 'Ambientes y componentes', hint: 'Ambientes, sus componentes y su disponibilidad', isNew: true },
     { id: 'vista', label: 'Vista por defecto', hint: 'Todos los casos o mis asignaciones' },
     { id: 'mantenimiento', label: 'Mantenimiento de Test Runs', hint: 'Copiar cambios de los casos a sus ejecuciones' }
   ] },
   { name: 'Trazabilidad y defectos', items: [
     { id: 'trazabilidad', label: 'Requerimientos y enlaces', hint: 'Tipos de requerimiento y enlace con los casos' },
-    { id: 'defectos', label: 'Defectos', hint: 'Qué cuenta como defecto' }
+    { id: 'defectos', label: 'Defectos y SLA', hint: 'Qué cuenta como defecto, el SLA de corrección por severidad y los campos para métricas avanzadas' }
   ] },
   { name: 'Calidad y reportes', items: [
-    { id: 'tableros', label: 'Tableros predeterminados', hint: 'Widgets del tablero del proyecto' },
-    { id: 'reportes', label: 'Reportes', hint: 'Envío programado y Testing Exit Report' }
+    { id: 'tableros', label: 'Tableros predeterminados', hint: 'Widgets del tablero del proyecto', isNew: true },
+    { id: 'reportes', label: 'Reportes automáticos', hint: 'Envío programado del reporte ejecutivo y Testing Exit Report' }
   ] },
   { name: 'Ciclo de vida', items: [
     { id: 'editores', label: 'Editores', hint: 'Quién edita iniciativas y entregables' },
@@ -151,6 +151,81 @@ export default function SettingsView({ ctx }) {
     const [tp5Sec, setTp5Sec] = React.useState('acceso');
     // v4.42.0: comma-separated components while an environment row is being edited.
     const [editingEnvComponents, setEditingEnvComponents] = React.useState('');
+    // v4.46.0 (5.0): values to restore with "Descartar", taken when the page opens and after each save.
+    const [tp5ConfigSnapshot, setTp5ConfigSnapshot] = React.useState(null);
+    React.useEffect(() => {
+      if (!isSavingConfig) setTp5ConfigSnapshot(projectConfig);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isSavingConfig, selectedProjectId]);
+    // Jira fields for "Campos para métricas avanzadas" (loaded only when that section is open).
+    const [tp5Fields, setTp5Fields] = React.useState(null);
+    React.useEffect(() => {
+      if (!ctx.newDesign || tp5Sec !== 'defectos' || tp5Fields) return;
+      invoke('getFields').then(list => setTp5Fields(Array.isArray(list) ? list : [])).catch(() => setTp5Fields([]));
+    }, [ctx.newDesign, tp5Sec, tp5Fields]);
+
+    /** 5.0 "Defectos y SLA": SLA per severity and the fields of the advanced metrics. */
+    const renderTp5DefectsSla = () => {
+      const t = projectConfig?.slaTargets || {};
+      const setT = (k, hours) => setProjectConfig(prev => ({ ...(prev || {}), slaTargets: { ...((prev || {}).slaTargets || {}), [k]: hours } }));
+      const rows = [
+        { k: 'critical', label: 'Bloqueante / Crítico', unit: 'h', def: 24, alert: (h) => `${Math.max(1, Math.round(h / 6))} h antes` },
+        { k: 'high', label: 'Alto / Mayor', unit: 'h', def: 48, alert: (h) => `${Math.max(1, Math.round(h / 6))} h antes` },
+        { k: 'medium', label: 'Medio / Menor', unit: 'días háb.', def: 50, alert: () => '1 día antes' }
+      ];
+      const fieldOpts = (tp5Fields || []).filter(f => f && f.id && (f.custom || String(f.id).startsWith('customfield_')));
+      const missing = [projectConfig?.originPhaseFieldId, projectConfig?.detectedEnvFieldId].filter(v => !v).length;
+      return (
+        <>
+          <div className="tp5-card tp5-qcard">
+            <div className="tp5-section__head" style={{ marginBottom: 0 }}>
+              <h3 className="tp5-h2">SLA de corrección por severidad</h3>
+              <span className="tp5-subtle tp5-small" style={{ marginLeft: 'auto' }}>Horas hábiles · 1 día = 10 h · usa los festivos del plan</span>
+            </div>
+            <table className="tp5-table" style={{ minWidth: 0 }}>
+              <thead><tr><th>Severidad en Jira</th><th>Meta de corrección</th><th>Alerta antes de vencer</th></tr></thead>
+              <tbody>
+                {rows.map(r => {
+                  const hours = Number(t[r.k]) || r.def;
+                  const shown = r.unit === 'h' ? hours : Math.round(hours / 10);
+                  return (
+                    <tr key={r.k}>
+                      <td className="tp5-strong">{r.label}</td>
+                      <td><span className="tp5-unitinput"><input type="number" min="1" max={r.unit === 'h' ? 240 : 30} value={shown} aria-label={`Meta de ${r.label}`}
+                        onChange={e => { const v = Math.max(1, Number(e.target.value) || 1); setT(r.k, r.unit === 'h' ? v : v * 10); }} /> {r.unit}</span></td>
+                      <td className="tp5-subtle-2">{r.alert(hours)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="tp5-subtle tp5-small" style={{ margin: 0 }}>Meta del proyecto: ≥ 90 % de bugs cerrados dentro de SLA (KPI CU-3). Se aplica en Calidad.</p>
+          </div>
+          <div className={`tp5-card tp5-qcard${missing ? ' tp5-card--warn' : ''}`}>
+            <div className="tp5-section__head" style={{ marginBottom: 0 }}>
+              <h3 className="tp5-h2">Campos para métricas avanzadas</h3>
+              {missing > 0 && <span className="tp5-loz tp5-loz--warning">{missing} SIN CONFIGURAR</span>}
+            </div>
+            <div className="tp5-grid2">
+              <label className="tp5-field"><span>Fase de origen del defecto</span>
+                <select value={projectConfig?.originPhaseFieldId || ''} onChange={e => setProjectConfig(prev => ({ ...(prev || {}), originPhaseFieldId: e.target.value }))}>
+                  <option value="">{tp5Fields ? 'Selecciona un campo de Jira…' : 'Cargando campos…'}</option>
+                  {fieldOpts.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+                <small>Activa el widget «Fase de origen» en Calidad › Defectos.</small>
+              </label>
+              <label className="tp5-field"><span>Ambiente donde se detectó</span>
+                <select value={projectConfig?.detectedEnvFieldId || ''} onChange={e => setProjectConfig(prev => ({ ...(prev || {}), detectedEnvFieldId: e.target.value }))}>
+                  <option value="">{tp5Fields ? 'Selecciona un campo de Jira…' : 'Cargando campos…'}</option>
+                  {fieldOpts.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+                <small>Activa DDP (KPI SC-1) y «Defectos escapados».</small>
+              </label>
+            </div>
+          </div>
+        </>
+      );
+    };
     const [tp5SecQuery, setTp5SecQuery] = React.useState('');
     const [exitReportPlanId, setExitReportPlanId] = React.useState('ALL');
     const [exitReportCycleIds, setExitReportCycleIds] = React.useState([]);
@@ -1308,6 +1383,18 @@ export default function SettingsView({ ctx }) {
         {/* v4.30.1: full width like the other modules (it used to stop at 1080px, centred). */}
         <main className="main-content" style={{ width: '100%' }}>
           
+          {/* v4.46.0 (5.0): page header of the approved design. */}
+          {ctx.newDesign && (
+            <header className="tp5-sethead">
+              <div>
+                <span className="tp5-eyebrow">Configuración · solo administradores del proyecto</span>
+                <h1 className="tp5-pagehead__title">Configuración del proyecto</h1>
+              </div>
+              {projectKey && <span className="tp5-sethead__project"><strong>Proyecto</strong><span className="tp5-select tp5-select--static">{projectKey} · {projectName}</span></span>}
+              <span className={`tp5-loz ${isProjectAllowed ? 'tp5-loz--success' : 'tp5-loz--neutral'}`}>{isProjectAllowed ? 'TEST PULSE ACTIVO EN ESTE PROYECTO' : 'TEST PULSE INACTIVO EN ESTE PROYECTO'}</span>
+            </header>
+          )}
+          {!ctx.newDesign && (<>
           {/* Header Banner */}
           <div style={{
             display: 'flex',
@@ -1405,6 +1492,7 @@ export default function SettingsView({ ctx }) {
             )}
           </div>
 
+          </>)}
           {!selectedProjectId ? (
             <div className="glass" style={{ padding: '3.5rem 2rem', textAlign: 'center', borderRadius: '12px', border: '1px dashed var(--ds-border, #30363d)' }}>
               <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>📂</div>
@@ -1420,7 +1508,7 @@ export default function SettingsView({ ctx }) {
                 <input
                   type="search"
                   className="tp5-settings__search"
-                  placeholder="Buscar sección…"
+                  placeholder="Buscar un ajuste…"
                   aria-label="Buscar sección de Configuración"
                   value={tp5SecQuery}
                   onChange={e => setTp5SecQuery(e.target.value)}
@@ -1441,7 +1529,9 @@ export default function SettingsView({ ctx }) {
                           onClick={() => setTp5Sec(it.id)}
                           title={it.hint}
                         >
-                          {it.label}
+                          <span>{it.label}</span>
+                          {it.isNew && <span className="tp5-loz tp5-loz--brand">NUEVO</span>}
+                          {it.id === 'defectos' && (!projectConfig?.originPhaseFieldId || !projectConfig?.detectedEnvFieldId) && <span className="tp5-dot tp5-dot--warn" title="Hay campos sin configurar" />}
                         </button>
                       ))}
                     </div>
@@ -1452,6 +1542,18 @@ export default function SettingsView({ ctx }) {
             <form onSubmit={handleSaveConfig} className={ctx.newDesign ? 'tp5-settings__body' : undefined} style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
               {/* 5.0: hide the cards of the other sections (they stay mounted). */}
               {ctx.newDesign && <style>{`.tp5-settings__body [data-tp5-sec]:not([data-tp5-sec="${tp5Sec}"]) { display: none !important; }`}</style>}
+              {ctx.newDesign && (() => {
+                const g = TP5_SETTINGS_GROUPS.find(gr => gr.items.some(it => it.id === tp5Sec));
+                const it = g?.items.find(x => x.id === tp5Sec);
+                return it ? (
+                  <div className="tp5-sechead">
+                    <span className="tp5-eyebrow">{g.name}</span>
+                    <h2 className="tp5-pagehead__title" style={{ fontSize: 22 }}>{it.label}</h2>
+                    <p>{it.hint}.</p>
+                  </div>
+                ) : null;
+              })()}
+              {ctx.newDesign && tp5Sec === 'defectos' && renderTp5DefectsSla()}
               
               {/* Card 1: Mapeo de Tipos de Incidencia */}
               <div className="glass" data-tp5-sec="tipos" style={{
@@ -3668,6 +3770,14 @@ export default function SettingsView({ ctx }) {
                 </div>
               )}
 
+              {/* v4.46.0 (5.0): dark save bar of the design. */}
+              {ctx.newDesign ? (
+                <div className="tp5-savebar">
+                  <span>Los cambios de esta sección se guardan al presionar Guardar.</span>
+                  <button type="button" className="tp5-btn tp5-savebar__discard" disabled={isSavingConfig} onClick={() => { if (tp5ConfigSnapshot) setProjectConfig(tp5ConfigSnapshot); }}>Descartar</button>
+                  <button type="submit" className="tp5-btn tp5-savebar__save" disabled={isSavingConfig}>{isSavingConfig ? 'Guardando…' : 'Guardar cambios'}</button>
+                </div>
+              ) : (<>
               {/* Bottom Action Bar */}
               <div style={{
                 display: 'flex',
@@ -3702,6 +3812,7 @@ export default function SettingsView({ ctx }) {
                 </button>
               </div>
 
+              </>)}
             </form>
             </div>
           )}

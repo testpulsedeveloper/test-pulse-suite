@@ -601,3 +601,64 @@
 .tp5 .tp5-optcard--row strong { flex: 1; }
 
 .tp5 .tp5-qhead__row--tabs > div:first-child { flex-direction: row; gap: 20px; }
+
+/* ── Ciclo de vida 5.0 (v4.46.0) ── */
+.tp5 .tp5-life { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--tp5-bg); }
+.tp5 .tp5-life .tp5-seg > button { height: 36px; padding: 0 16px; font-size: 14px; }
+.tp5 .tp5-life .tp5-seg > button.is-on { background: var(--tp5-primary); color: #FFFFFF; }
+.tp5 .tp5-phasebars { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin: 4px 0; }
+.tp5 .tp5-phasebars > span { height: 5px; border-radius: 999px; }
+.tp5 .tp5-stepper { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .tp5 .tp5-stepper { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.tp5 .tp5-stepcard { display: flex; gap: 12px; align-items: flex-start; padding: 14px; border: 1px solid var(--tp5-border); border-radius: 10px; background: #FFFFFF; text-align: left; cursor: pointer; font: 14px var(--tp5-font); color: var(--tp5-text); }
+.tp5 .tp5-stepcard:hover { border-color: #B7B9BE; }
+.tp5 .tp5-stepcard.is-on { border: 2px solid var(--tp5-primary); padding: 13px; }
+.tp5 .tp5-stepcard__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tp5 .tp5-stepicon { flex: 0 0 30px; width: 30px; height: 30px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; color: #FFFFFF; }
+.tp5 .tp5-stepicon--success { background: var(--tp5-success); }
+.tp5 .tp5-stepicon--warning { background: var(--tp5-warning); color: #172B4D; }
+.tp5 .tp5-stepicon--danger { background: var(--tp5-danger); }
+.tp5 .tp5-stepicon--info { background: var(--tp5-primary); }
+.tp5 .tp5-stepicon--neutral { background: #DCDFE4; color: var(--tp5-text-subtle); }
+.tp5 .tp5-life__phase > div:nth-child(2) { border-top: 0 !important; padding-top: 0 !important; }
+/* The phase panel already has its 5.0 title: hide the repeated classic title line (keep its buttons). */
+.tp5 .tp5-life__phase > div:nth-child(2) > div:first-child > strong,
+.tp5 .tp5-life__phase > div:nth-child(2) > div:first-child > span:not(:has(button)) { display: none; }
+
+/* ── Configuración 5.0 (v4.46.0) ── */
+.tp5 .tp5-sethead { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; background: #FFFFFF; border-bottom: 1px solid var(--tp5-border); margin: -1.5rem -2rem 1.5rem; padding: 18px 32px; }
+.tp5 .tp5-sethead > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.tp5 .tp5-sethead__project { display: inline-flex; align-items: center; gap: 10px; font-size: 14px; }
+.tp5 .tp5-select--static { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; font-size: 14px; }
+.tp5 .tp5-settings__item { display: flex; align-items: center; gap: 8px; }
+.tp5 .tp5-settings__item > span:first-child { flex: 1; }
+.tp5 .tp5-dot--warn { background: var(--tp5-warning); }
+.tp5 .tp5-sechead { display: flex; flex-direction: column; gap: 4px; }
+.tp5 .tp5-sechead p { margin: 0; font-size: 14px; color: var(--tp5-text-subtle); }
+.tp5 .tp5-settings__body .glass { background: #FFFFFF !important; border: 1px solid var(--tp5-border) !important; border-radius: 10px !important; box-shadow: none !important; }
+.tp5 .tp5-settings__body .glass h2 { color: var(--tp5-text) !important; }
+.tp5 .tp5-card--warn { border-color: #F8E6A0; background: #FFFDF5; }
+.tp5 .tp5-unitinput { display: inline-flex; align-items: center; gap: 6px; }
+.tp5 .tp5-unitinput input { width: 80px; height: 32px; padding: 0 8px; border: 1px solid var(--tp5-border); border-radius: 6px; font: 14px var(--tp5-font); }
+.tp5 .tp5-savebar { position: sticky; bottom: 12px; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 10px; background: #172B4D; color: #FFFFFF; font-size: 14px; }
+.tp5 .tp5-savebar > span { margin-right: auto; }
+.tp5 .tp5-savebar__discard { background: transparent; color: #FFFFFF; border-color: rgba(255, 255, 255, .5); }
+.tp5 .tp5-savebar__save { background: #579DFF; color: #172B4D; }
+.tp5 .tab-layout:has(.tp5-settings) { background: var(--tp5-bg) !important; }
+
+/* ── Top bar as in the 5.0 boards (v4.46.0) ── */
+.tp5 .top-nav { height: 60px !important; padding: 0 24px !important; }
+.tp5 .nav-tab .ads-lozenge, .tp5 .nav-tab .live-dot { display: none !important; }
+.tp5 .nav-tab { color: var(--tp5-text-subtle) !important; font-weight: 500 !important; }
+.tp5 .nav-tab.active { color: var(--tp5-primary) !important; font-weight: 600 !important; }
+.tp5 .nav-brand > div > div:first-child { width: 32px !important; height: 32px !important; border-radius: 8px !important; background: #5E4DB2 !important; }
+.tp5 .nav-brand span[style*="font-weight: 800"] span { color: inherit !important; }
+.tp5 .nav-brand span[style*="font-weight: 800"] { font-weight: 700 !important; font-size: 17px !important; letter-spacing: 0 !important; color: var(--tp5-text) !important; }
+.tp5 .nav-actions > div[style*="width: 220px"] { width: 280px !important; }
+/* The gear (Configuración) sits at the far right, as in the design. */
+.tp5 .nav-tabs > button:last-child[title="Configuraciones de Test Pulse"] { order: 99; margin-left: auto; }
+
+/* Inicio · Iniciativas en curso */
+.tp5 .tp5-inits { overflow-x: auto; display: flex; flex-direction: column; gap: 10px; }
+.tp5 .tp5-inits__row { display: grid; grid-template-columns: 240px repeat(5, minmax(120px, 1fr)); gap: 8px; align-items: center; min-width: 820px; }
+.tp5 .tp5-initcell { height: 28px; border-radius: 6px; font-size: 12px; font-weight: 600; display: flex; align-items: center; padding: 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

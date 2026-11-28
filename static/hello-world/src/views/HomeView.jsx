@@ -21,6 +21,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { requestJira } from '@forge/bridge';
 import { buildHomeSummary, greetingFor } from '../utils/homeSummary';
 import { LIVERPOOL_LOGO_WHITE_B64 } from '../assets/liverpool-logo-b64';
+import { invoke } from '../utils/queryClient';
+import { summarizeInitiative, PHASE_IDS, PHASE_NAMES } from '../utils/initiativeSummary';
 
 // Lozenge colours per cycle health, same palette as the rest of 5.0.
 const HEALTH_TONE = {
@@ -112,6 +114,32 @@ export default function HomeView({ ctx }) {
     // activeIdsKey stands for activeCycleIds (stable string instead of a new array each time).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, project?.key, projectConfig?.testRunType, projectConfig?.defectType, activeIdsKey]);
+
+  // ── Iniciativas en curso (v4.46.0): up to 4 initiatives with their phase status ──
+  // One read of the initiatives plus one progress read per initiative (the server keeps both
+  // for 60 s), only while Inicio is open.
+  const [inits, setInits] = useState({ loading: true, rows: [] });
+  useEffect(() => {
+    if (!isActive || !selectedProjectId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await invoke('getLifecycle', { projectId: selectedProjectId });
+        const list = (res?.initiatives || []).slice(0, 4);
+        const rows = await Promise.all(list.map(async (i) => {
+          const hasKeys = (i.epicKeys || []).length || (i.storyKeys || []).length || (i.planKeys || []).length;
+          const progress = hasKeys
+            ? await invoke('getLifecycleProgress', { projectId: selectedProjectId, epicKeys: i.epicKeys || [], storyKeys: i.storyKeys || [], planKeys: i.planKeys || [] }).catch(() => ({}))
+            : {};
+          return { id: i.id, name: i.name, phases: summarizeInitiative(i, progress || {}) };
+        }));
+        if (!cancelled) setInits({ loading: false, rows });
+      } catch (_) {
+        if (!cancelled) setInits({ loading: false, rows: [] });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isActive, selectedProjectId]);
 
   // Plan names, to show which release each cycle belongs to.
   const planById = useMemo(() => {
@@ -247,9 +275,29 @@ export default function HomeView({ ctx }) {
                 </span>
               </button>
             ))}
-            <button type="button" className="tp5-link tp5-todo__more" onClick={() => onNavigate('lifecycle')}>Ver iniciativas en Ciclo de vida</button>
           </section>
         </div>
+
+        {/* ── Iniciativas en curso ── */}
+        <section className="tp5-card tp5-section" aria-label="Iniciativas">
+          <div className="tp5-section__head">
+            <h2 className="tp5-h2">Iniciativas en curso</h2>
+            <button type="button" className="tp5-link" onClick={() => onNavigate('lifecycle')}>Ver ciclo de vida</button>
+          </div>
+          {inits.loading ? <span className="tp5-subtle tp5-small">Cargando iniciativas…</span> : inits.rows.length === 0 ? (
+            <div className="tp5-empty"><strong>Aún no hay iniciativas</strong><span>Registra una en Ciclo de vida para seguir sus fases aquí.</span></div>
+          ) : (
+            <div className="tp5-inits">
+              <div className="tp5-inits__row tp5-eyebrow"><span>Iniciativa</span>{PHASE_IDS.map(id => <span key={id}>{PHASE_NAMES[id]}</span>)}</div>
+              {inits.rows.map(r => (
+                <div key={r.id} className="tp5-inits__row">
+                  <span className="tp5-strong tp5-ellipsis">{r.name}</span>
+                  {r.phases.map(p => <span key={p.id} className={`tp5-initcell tp5-loz--${p.tone}`}>{p.label}</span>)}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </main>
     </div>
   );

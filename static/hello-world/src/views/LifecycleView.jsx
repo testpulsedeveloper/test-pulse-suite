@@ -26,6 +26,7 @@ import { designTotals, designState, reportDocumentName } from '../utils/designTo
 // The five phases, in order. `auto` phases get their figures from Jira.
 // Test Pulse 5.0 (v4.43.0): Go / No-Go recommendation in 05 Liberar.
 import GoNoGoCard from '../components/GoNoGoCard';
+import { summarizeInitiative } from '../utils/initiativeSummary';
 
 const PHASES = [
   { id: 'plan', number: '01', title: 'Planear', subtitle: 'Estrategia', deliverable: 'Plan de QA' },
@@ -472,6 +473,14 @@ const LifecycleView = ({ ctx }) => {
   // Picker of epics / Test Plans (v4.22.0): { initiativeId, phaseId, loading, error, items, selected, search }
   const [picker, setPicker] = useState(null);
   const [openRows, setOpenRows] = useState({});              // "initiativeId:KEY" → expanded?
+  // v4.46.0 (5.0): selected phase, initiative search and the ⋯ menu.
+  const [v5Phase, setV5Phase] = useState(null);
+  const [v5Search, setV5Search] = useState('');
+  const [v5Menu, setV5Menu] = useState(false);
+  // 5.0 shows one initiative at a time: open the first one when none is selected.
+  useEffect(() => {
+    if (ctx.newDesign && !expandedId && initiatives.length > 0) setExpandedId(initiatives[0].id);
+  }, [ctx.newDesign, expandedId, initiatives]);
   const progressTokenRef = useRef({});                       // initiativeId → latest request of Jira figures
   const refreshedRef = useRef(new Set());                    // initiatives auto-refreshed in this visit
 
@@ -1641,7 +1650,129 @@ const LifecycleView = ({ ctx }) => {
     );
   };
 
+  // ─── Test Pulse 5.0 (v4.46.0): layout of the approved board "Ciclo de vida" ───
+  // Initiatives on the left (bars per phase), the selected initiative with a five-card phase
+  // stepper, and the selected phase's content below. The content of each phase is the same
+  // renderPhase used by the classic view, so every action (add deliverables, plans, epics,
+  // re-read reports…) works exactly as before.
+  const V5_TONE_COLOR = { success: '#1F845A', warning: '#E2B203', danger: '#C9372C', info: '#0C66E4', neutral: '#DCDFE4' };
+  const renderV5 = () => {
+    const q = v5Search.trim().toLowerCase();
+    const list = initiatives.filter(i => !q || (i.name || '').toLowerCase().includes(q));
+    const current = initiatives.find(i => i.id === expandedId) || null;
+    const progress = current ? progressById[current.id] : null;
+    const summary = current ? summarizeInitiative(current, progress || null) : [];
+    const phaseId = v5Phase || (summary.find(p => p.tone !== 'success')?.id) || 'plan';
+    const phase = PHASES.find(p => p.id === phaseId) || PHASES[0];
+    const sumOf = (id) => summary.find(p => p.id === id) || { tone: 'neutral', label: '' };
+    const icon = (tone, n) => (tone === 'success' ? '✓' : tone === 'warning' || tone === 'danger' ? '!' : tone === 'info' ? '•' : n);
+    return (
+      <div className="tp5-life">
+        <header className="tp5-qhead" style={{ paddingBottom: 16 }}>
+          <div className="tp5-qhead__row">
+            <div>
+              <span className="tp5-eyebrow">Ciclo de vida de QA</span>
+              <h1 className="tp5-pagehead__title">Fases y entregables por iniciativa</h1>
+            </div>
+            <div role="group" aria-label="Vista" className="tp5-seg" style={{ marginLeft: 24 }}>
+              <button type="button" className={!generalTimeline.open ? 'is-on' : undefined} aria-pressed={!generalTimeline.open} onClick={() => { if (generalTimeline.open) toggleGeneralTimeline(); }}>Iniciativa</button>
+              <button type="button" className={generalTimeline.open ? 'is-on' : undefined} aria-pressed={generalTimeline.open} onClick={() => { if (!generalTimeline.open) toggleGeneralTimeline(); }}>Cronograma general</button>
+            </div>
+            <div className="tp5-pagehead__actions">
+              {!loadError && <span className={`tp5-loz ${canEdit ? 'tp5-loz--success' : 'tp5-loz--neutral'}`} title={canEdit ? '' : 'Un administrador del proyecto define quién edita en Configuración › Editores.'}>{canEdit ? 'PUEDES EDITAR' : 'SOLO LECTURA'}</span>}
+              <button type="button" className="tp5-btn tp5-btn--secondary" onClick={reloadAll} disabled={loading}>↻ Actualizar</button>
+            </div>
+          </div>
+        </header>
+        <div className="tp5-plan" style={{ height: 'auto', flex: 1, minHeight: 0 }}>
+          <aside className="tp5-plan__aside" aria-label="Iniciativas">
+            <div className="tp5-folders__head">
+              <span className="tp5-eyebrow">Iniciativas · {initiatives.length}</span>
+              {canEdit && <button type="button" className="tp5-btn tp5-btn--primary tp5-btn--sm" style={{ marginLeft: 'auto' }} onClick={() => setInitiativeForm({ name: '', description: '' })}>+ Nueva</button>}
+            </div>
+            <input type="search" className="tp5-select" placeholder="Buscar iniciativa…" aria-label="Buscar iniciativa" value={v5Search} onChange={e => setV5Search(e.target.value)} />
+            <div className="tp5-cyclelist">
+              {list.map(i => {
+                const sm = summarizeInitiative(i, progressById[i.id] || null);
+                const cur = sm.find(p => p.tone !== 'success') || sm[sm.length - 1];
+                return (
+                  <button key={i.id} type="button" className={`tp5-cyclecard${current && current.id === i.id ? ' is-on' : ''}`} onClick={() => { setExpandedId(i.id); setV5Phase(null); }}>
+                    <span className="tp5-strong">{i.name}</span>
+                    <span className="tp5-phasebars">{sm.map(p => <span key={p.id} style={{ background: V5_TONE_COLOR[p.tone] }} title={`${p.name}: ${p.label}`} />)}</span>
+                    <span className="tp5-subtle tp5-small">{cur.name} · {cur.label}</span>
+                  </button>
+                );
+              })}
+              {list.length === 0 && <span className="tp5-subtle tp5-small">{initiatives.length ? 'Ninguna coincide con la búsqueda.' : 'Aún no hay iniciativas.'}</span>}
+            </div>
+            <p className="tp5-folders__note" style={{ marginTop: 'auto' }}>Cada barra es una fase: verde completa, amarilla con pendientes, roja con hallazgo crítico abierto, azul en curso, gris sin iniciar.</p>
+          </aside>
+          <section className="tp5-plan__main">
+            {loadError && <div className="tp5-card" style={{ padding: 12, color: '#AE2A19' }}>No se pudo cargar el ciclo de vida: {loadError}</div>}
+            {initiativeForm && renderInitiativeForm()}
+            {generalTimeline.open ? renderGeneralTimeline() : !current ? (
+              <div className="tp5-card tp5-empty" style={{ padding: 24 }}><strong>{initiatives.length ? 'Elige una iniciativa' : 'Aún no hay iniciativas en este proyecto'}</strong><span>{initiatives.length ? 'Selecciónala a la izquierda para ver sus fases y entregables.' : 'Crea una iniciativa para registrar sus entregables desde la fase de planeación y Shift-Left.'}</span></div>
+            ) : (
+              <>
+                <header className="tp5-plan__head">
+                  <div>
+                    <span className="tp5-eyebrow">Iniciativa</span>
+                    <h1 className="tp5-pagehead__title">{current.name}</h1>
+                    {current.description && <span className="tp5-subtle-2">{current.description}</span>}
+                  </div>
+                  <div className="tp5-pagehead__actions">
+                    {canEdit && <button type="button" className="tp5-btn tp5-btn--secondary" onClick={() => setInitiativeForm({ id: current.id, name: current.name, description: current.description || '' })}>Editar iniciativa</button>}
+                    {isAdmin && (
+                      <span className="tp5-menu">
+                        <button type="button" className="tp5-iconbtn" style={{ width: 36, height: 36 }} aria-label="Más acciones" onClick={() => setV5Menu(o => !o)}>⋯</button>
+                        {v5Menu && (
+                          <div className="tp5-menu__panel" role="menu" onMouseLeave={() => { setV5Menu(false); setConfirmDeleteId(null); }}>
+                            {confirmDeleteId === current.id ? (
+                              <>
+                                <span className="tp5-small" style={{ padding: '6px 12px' }}>¿Eliminar la iniciativa y sus entregables registrados?</span>
+                                <button type="button" role="menuitem" className="tp5-menu__item is-danger" disabled={!!busy} onClick={() => { handleDeleteInitiative(current.id); setV5Menu(false); }}>Sí, eliminar</button>
+                                <button type="button" role="menuitem" className="tp5-menu__item" onClick={() => setConfirmDeleteId(null)}>No</button>
+                              </>
+                            ) : <button type="button" role="menuitem" className="tp5-menu__item is-danger" onClick={() => setConfirmDeleteId(current.id)}>Eliminar iniciativa</button>}
+                          </div>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </header>
+                <div className="tp5-stepper">
+                  {PHASES.map((p, idx) => {
+                    const sm = sumOf(p.id);
+                    return (
+                      <button key={p.id} type="button" className={`tp5-stepcard${p.id === phase.id ? ' is-on' : ''}`} aria-pressed={p.id === phase.id} onClick={() => setV5Phase(p.id)}>
+                        <span className={`tp5-stepicon tp5-stepicon--${sm.tone}`} aria-hidden="true">{icon(sm.tone, idx + 1)}</span>
+                        <span className="tp5-stepcard__text">
+                          <strong>{p.number} {p.title}</strong>
+                          <span className="tp5-subtle tp5-small">{p.deliverable}</span>
+                          <span className={`tp5-loz tp5-loz--${sm.tone === 'neutral' ? 'neutral' : sm.tone}`} style={{ alignSelf: 'flex-start', marginTop: 4 }}>{sm.label}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <section className="tp5-card tp5-qcard tp5-life__phase">
+                  <div className="tp5-section__head" style={{ marginBottom: 0 }}>
+                    <h2 className="tp5-h2">{phase.number} {phase.title} · {phase.deliverable}</h2>
+                    <span className="tp5-subtle tp5-small">{phase.subtitle}{phase.id === 'design' ? ': hallazgos en documentos antes de construir' : ''}</span>
+                  </div>
+                  {renderPhase(current, phase, progress)}
+                </section>
+              </>
+            )}
+          </section>
+        </div>
+      </div>
+    );
+  };
+
   if (loading) return <TestPulseLoader size={110} text="Cargando ciclo de vida..." />;
+
+  if (ctx.newDesign) return renderV5();
 
   return (
     // The app shell hides overflow, so this view scrolls by itself.

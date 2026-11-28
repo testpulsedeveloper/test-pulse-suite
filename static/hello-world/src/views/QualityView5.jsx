@@ -11,7 +11,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '../utils/queryClient';
-import { MTTR_GROUPS, mttrBySeverity, slaCompliance, firstPassYield, severityGroup, formatBusinessDuration } from '../utils/qaKpis';
+import { mttrGroupsWith, mttrBySeverity, slaCompliance, firstPassYield, severityGroup, formatBusinessDuration } from '../utils/qaKpis';
 import { flattenExecutions, progressSeries, riskCoverage, impediments, automation, perCycle, defectMetrics, KPI_CATALOG, KPI_DEFAULTS, kpiValues, planGoNoGo } from '../utils/qualityData';
 
 // ── Widget catalogues per tab (id, name, description, on by default) ──
@@ -142,7 +142,7 @@ export default function QualityView5({ ctx, d }) {
   // Same rule as the rest of the app (labels, execution type field…), via getExecVal.
   const isAuto = (e) => e.isAutomated === true || String(ctx.getExecVal ? ctx.getExecVal({ ...tcOf(e), ...e, id: e.id }) : '').includes('auto');
   const progress = useMemo(() => progressSeries(execs, planSchedule), [execs, planSchedule]);
-  const mttr = useMemo(() => mttrBySeverity((cycleBugs || []).map(b => ({ severity: b.severity, isDone: Boolean(b.isDone), hours: cachedBugBusinessHours(b) }))), [cycleBugs, cachedBugBusinessHours]);
+  const mttr = useMemo(() => mttrBySeverity((cycleBugs || []).map(b => ({ severity: b.severity, isDone: Boolean(b.isDone), hours: cachedBugBusinessHours(b) })), projectConfig?.slaTargets), [cycleBugs, cachedBugBusinessHours, projectConfig?.slaTargets]);
   const sla = slaCompliance(mttr);
   const slaPct = sla && sla.closed ? Math.round(sla.pct) : null;
   const fpy = firstPassYield(firstPassRuns || []);
@@ -168,7 +168,10 @@ export default function QualityView5({ ctx, d }) {
     return { label: mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h${mins % 60 ? ` ${mins % 60} min` : ''}`, mins, top };
   }, [downtime, planSchedule.startDate]);
 
-  // Defects (plan-wide on the Defectos tab, as in the design).
+  // Defects (plan-wide on the Defectos tab, as in the design). SLA targets come from
+  // Configuración › Defectos y SLA when the project defined them.
+  const slaTargets = projectConfig?.slaTargets || null;
+  const MTTR_GROUPS = mttrGroupsWith(slaTargets);
   const slaHoursOf = (b) => MTTR_GROUPS.find(g => g.key === severityGroup(b.severity))?.targetHours ?? null;
   const bugsForTab = (planBugs || []).filter(b => sevFilter === 'ALL' || severityGroup(b.severity) === sevFilter);
   const defects = useMemo(() => defectMetrics({ bugs: bugsForTab, totalCases: execs.length, slaHoursOf, hoursOf: cachedBugBusinessHours }),
@@ -403,7 +406,7 @@ export default function QualityView5({ ctx, d }) {
   );
 
   // ── Defectos ──
-  const mttrPlan = useMemo(() => mttrBySeverity(bugsForTab.map(b => ({ severity: b.severity, isDone: Boolean(b.isDone), hours: cachedBugBusinessHours(b) }))), [bugsForTab, cachedBugBusinessHours]);
+  const mttrPlan = useMemo(() => mttrBySeverity(bugsForTab.map(b => ({ severity: b.severity, isDone: Boolean(b.isDone), hours: cachedBugBusinessHours(b) })), projectConfig?.slaTargets), [bugsForTab, cachedBugBusinessHours, projectConfig?.slaTargets]);
   const slaPlan = slaCompliance(mttrPlan);
   const sevTone = (s) => { const g = severityGroup(s); return g === 'critical' ? 'danger' : g === 'high' ? 'orange' : g === 'medium' ? 'warning' : 'neutral'; };
   const sevLabel = (s) => { const g = severityGroup(s); return g === 'critical' ? 'CRÍTICO' : g === 'high' ? 'ALTO' : g === 'medium' ? 'MEDIO' : String(s || 'SIN SEVERIDAD').toUpperCase(); };

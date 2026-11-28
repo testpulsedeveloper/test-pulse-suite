@@ -49,7 +49,7 @@ import PanelDockSwitcher, { usePanelDockPosition, usePanelDockWidth, PanelResize
 
 export { normalizeUiStatus };
 
-const APP_VERSION = `v${packageJson.version || '4.45.0'}`;
+const APP_VERSION = `v${packageJson.version || '4.46.0'}`;
 
 // Stage 1B: Lazy-loaded Views & Slide Panels (Code-Splitting)
 const BugSlidePanel = React.lazy(() => import('./components/BugSlidePanel'));
@@ -2241,13 +2241,18 @@ Then el sistema valida la identidad.
               <span style={{ fontWeight: 800, fontSize: '1.15rem', color: 'var(--jira-navy, #091E42)', letterSpacing: '-0.02em' }}>
                 Test <span style={{ color: '#6554C0' }}>Pulse</span>
               </span>
-              <span className="ads-lozenge ads-lozenge-purple" style={{ borderRadius: '9999px', padding: '1px 6px', fontSize: '9px' }}>
-                SUITE
-              </span>
+              {/* 5.0 (v4.46.0): the design shows just "Test Pulse" next to the icon. */}
+              {!newDesign && (
+                <span className="ads-lozenge ads-lozenge-purple" style={{ borderRadius: '9999px', padding: '1px 6px', fontSize: '9px' }}>
+                  SUITE
+                </span>
+              )}
             </div>
-            <span style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500, lineHeight: 1 }}>
-              Automated &amp; Manual QA Engine for Forge
-            </span>
+            {!newDesign && (
+              <span style={{ fontSize: '10px', color: 'var(--jira-subtle, #626F86)', fontWeight: 500, lineHeight: 1 }}>
+                Automated &amp; Manual QA Engine for Forge
+              </span>
+            )}
           </div>
         </div>
 
@@ -2508,7 +2513,7 @@ Then el sistema valida la identidad.
               <input 
                 ref={searchInputRef}
                 type="text" 
-                placeholder="Buscar Test..."
+                placeholder={newDesign ? "Buscar casos, ciclos, bugs…" : "Buscar Test..."}
                 title="Presiona Cmd+K o Ctrl+K para buscar"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}

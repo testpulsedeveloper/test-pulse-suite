@@ -96,15 +96,29 @@ export function severityGroup(severity) {
  *        openOverdue   - open bugs that have already exceeded the target
  *        level         - 'empty' | 'ok' | 'breach' | 'neutral' (neutral = group without SLA)
  */
-export function mttrBySeverity(bugs) {
+/**
+ * SLA groups with the project's own targets (v4.46.0, Configuración › Defectos y SLA).
+ * `targets` = { critical, high, medium } in business hours; missing values keep the defaults.
+ */
+export function mttrGroupsWith(targets) {
+  if (!targets || typeof targets !== 'object') return MTTR_GROUPS;
+  const fmt = (h) => (h % BUSINESS_HOURS_PER_DAY === 0 && h >= BUSINESS_HOURS_PER_DAY * 2 ? `≤ ${h / BUSINESS_HOURS_PER_DAY} días háb.` : `≤ ${h} h`);
+  return MTTR_GROUPS.map(g => {
+    const h = Number(targets[g.key]);
+    return g.targetHours !== null && Number.isFinite(h) && h > 0 ? { ...g, targetHours: h, targetLabel: fmt(h) } : g;
+  });
+}
+
+export function mttrBySeverity(bugs, targets = null) {
+  const GROUPS = mttrGroupsWith(targets);
   const acc = {};
-  MTTR_GROUPS.forEach(g => {
+  GROUPS.forEach(g => {
     acc[g.key] = { closed: 0, sumHours: 0, withinSla: 0, open: 0, openOverdue: 0 };
   });
 
   (Array.isArray(bugs) ? bugs : []).forEach(bug => {
     if (!bug) return;
-    const group = MTTR_GROUPS.find(g => g.key === severityGroup(bug.severity));
+    const group = GROUPS.find(g => g.key === severityGroup(bug.severity));
     const bucket = acc[group.key];
     const hours = Number(bug.hours);
     const hasHours = Number.isFinite(hours) && hours > 0;
@@ -121,7 +135,7 @@ export function mttrBySeverity(bugs) {
     }
   });
 
-  return MTTR_GROUPS.map(group => {
+  return GROUPS.map(group => {
     const b = acc[group.key];
     const avgHours = b.closed > 0 ? b.sumHours / b.closed : null;
     const compliancePct = group.targetHours !== null && b.closed > 0 ? (b.withinSla / b.closed) * 100 : null;
