@@ -81,6 +81,8 @@ function cachedBugBusinessHours(bug) {
 
 // Test Pulse 5.0 (v4.43.0): release exit criteria card.
 import GoNoGoCard from '../components/GoNoGoCard';
+// Test Pulse 5.0 (v4.45.0): Calidad rebuilt from the approved boards.
+import QualityView5 from './QualityView5';
 export default function ReportsView({ ctx }) {
   const {
     addNotification,
@@ -2408,6 +2410,37 @@ export default function ReportsView({ ctx }) {
 
     const handleCopyReportToClipboard = handleOpenExecutiveReportModal;
 
+    /** "Guardar snapshot" (v4.45.0: extracted so the 5.0 Calidad header reuses it). */
+    const handleSaveSnapshot = () => {
+                    if (reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0) {
+                      try {
+                        const snapshotKey = `tp_report_snapshot_${selectedProjectId}`;
+                        localStorage.setItem(snapshotKey, JSON.stringify({
+                          reportData: { cycles: reportData.cycles, bugMap: reportData.bugMap || {}, totalCycles: reportData.totalCycles || reportData.cycles.length },
+                          allCycleSummaries: testCycles || [],
+                          timestamp: Date.now()
+                        }));
+                        addNotification({
+                          type: 'success',
+                          title: '📸 Snapshot Guardado',
+                          description: 'Corte de métricas guardado exitosamente. La app estará protegida ante bloqueos de Jira durante las sesiones de estatus.'
+                        });
+                      } catch (e) {
+                        addNotification({
+                          type: 'error',
+                          title: 'Error al guardar snapshot',
+                          description: e.message
+                        });
+                      }
+                    } else {
+                      addNotification({
+                        type: 'warning',
+                        title: 'Sin datos para snapshot',
+                        description: 'Espera a que carguen las métricas antes de guardar el snapshot.'
+                      });
+                    }
+    };
+
     const handleTestAutomatedReportDispatch = async () => {
       if (!reportAutomationConfig.webhookUrl || !reportAutomationConfig.webhookUrl.startsWith('http')) {
         addNotification({
@@ -2876,6 +2909,21 @@ export default function ReportsView({ ctx }) {
       );
     };
 
+    // Test Pulse 5.0 (v4.45.0): Calidad as in the approved design; same data and handlers.
+    if (ctx.newDesign) {
+      return (
+        <QualityView5
+          ctx={ctx}
+          d={{
+            scopeCycles: activeCyclesForVersions, allPlanCycles: planCycles, cycleBugs: cycleAllBugsList, planBugs: planGeneralBugsList,
+            firstPassRuns, availableVersions: availableDashboardVersions, cachedBugBusinessHours,
+            handleOpenExecutiveReportModal, handleSaveSnapshot, handlePrintPdf,
+            modals: <>{renderExecutiveReportModal()}</>
+          }}
+        />
+      );
+    }
+
     return (
       <div className="tab-layout" style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', display: 'flex', flex: 1 }}>
         {/* ─── Dashboard Sidebar: Runs and Bugs (Traceability moved to Lifecycle in v4.28.0) ─── */}
@@ -3158,35 +3206,7 @@ export default function ReportsView({ ctx }) {
 
                 <button 
                   className="btn-secondary" 
-                  onClick={() => {
-                    if (reportData && Array.isArray(reportData.cycles) && reportData.cycles.length > 0) {
-                      try {
-                        const snapshotKey = `tp_report_snapshot_${selectedProjectId}`;
-                        localStorage.setItem(snapshotKey, JSON.stringify({
-                          reportData: { cycles: reportData.cycles, bugMap: reportData.bugMap || {}, totalCycles: reportData.totalCycles || reportData.cycles.length },
-                          allCycleSummaries: testCycles || [],
-                          timestamp: Date.now()
-                        }));
-                        addNotification({
-                          type: 'success',
-                          title: '📸 Snapshot Guardado',
-                          description: 'Corte de métricas guardado exitosamente. La app estará protegida ante bloqueos de Jira durante las sesiones de estatus.'
-                        });
-                      } catch (e) {
-                        addNotification({
-                          type: 'error',
-                          title: 'Error al guardar snapshot',
-                          description: e.message
-                        });
-                      }
-                    } else {
-                      addNotification({
-                        type: 'warning',
-                        title: 'Sin datos para snapshot',
-                        description: 'Espera a que carguen las métricas antes de guardar el snapshot.'
-                      });
-                    }
-                  }}
+                  onClick={handleSaveSnapshot}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
